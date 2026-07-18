@@ -6,7 +6,7 @@ use omnifs_api::events::{InspectorEvent, InspectorLine, InspectorRecord, TraceId
 
 use super::filter::{FilterMode, ViewFilter};
 use super::metrics::MountWindow;
-use super::sandbox::MountSandbox;
+use super::sandbox::{self, MountSandbox, PortId};
 use super::source::SourceMessage;
 use super::timeline::Timeline;
 use super::trace_state::{MAX_RECENT_TRACES, MountPalette, Operation, TraceReducer};
@@ -18,6 +18,25 @@ const EVENT_WINDOW: usize = 128;
 pub enum ConnectionMode {
     Inspector,
     Replay,
+}
+
+/// Which full-screen view the TUI is showing. `v` toggles between them
+/// in either direction; both views share the header, the connection
+/// state, and every scrub/filter control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppView {
+    #[default]
+    Activity,
+    Sandbox,
+}
+
+impl AppView {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Activity => Self::Sandbox,
+            Self::Sandbox => Self::Activity,
+        }
+    }
 }
 
 pub struct App {
@@ -33,6 +52,17 @@ pub struct App {
     pub filter: ViewFilter,
     pub focus: PaneFocus,
     pub tree_cursor: Option<TreeCursor>,
+    /// Which full-screen view is active. Toggled by `v`.
+    pub view: AppView,
+    /// Sandbox view: the mount whose rails are shown. `None` means "let
+    /// [`App::sandbox_active_mount`] pick the most active one"; `m`
+    /// cycles this explicitly.
+    pub active_mount: Option<String>,
+    /// Sandbox view: the port the ↑/↓ cursor is on.
+    pub port_cursor: Option<PortId>,
+    /// Sandbox view: whether `port_cursor`'s detail is pinned to the
+    /// footer line.
+    pub port_pinned: bool,
     pub now_mono: u64,
     pub quit: bool,
     pub dropped_events: u64,
@@ -205,6 +235,10 @@ impl App {
             filter: ViewFilter::default(),
             focus: PaneFocus::default(),
             tree_cursor: None,
+            view: AppView::default(),
+            active_mount: None,
+            port_cursor: None,
+            port_pinned: false,
             now_mono: 0,
             quit: false,
             dropped_events: 0,
@@ -275,6 +309,35 @@ impl App {
     /// Mounts with any sandbox activity, most recent first.
     pub fn sandbox_mounts_by_activity(&self) -> Vec<&str> {
         self.view_reducer().sandbox_mounts_by_activity()
+    }
+
+    /// The mount the sandbox map renders this frame: `active_mount` if
+    /// it still shows sandbox activity, otherwise the most recently
+    /// active mount, otherwise `None` when nothing has any sandbox
+    /// activity yet. Recomputed every frame rather than cached, so a
+    /// mount going quiet (its traces evicted) can't leave the view
+    /// stuck pointing at a mount that has vanished from the list.
+    pub fn sandbox_active_mount(&self) -> Option<String> {
+        let mounts = self.sandbox_mounts_by_activity();
+        if let Some(active) = self.active_mount.as_deref()
+            && mounts.contains(&active)
+        {
+            return Some(active.to_string());
+        }
+        mounts.first().map(|m| (*m).to_string())
+    }
+
+    /// Number of records currently retained in the timeline ring: what
+    /// scrubbing can actually reach, as opposed to `end()`'s raw
+    /// arrival ordinal which also counts records already evicted.
+    pub fn timeline_retained_count(&self) -> u64 {
+        self.timeline.end().saturating_sub(self.timeline.evicted())
+    }
+
+    /// The oldest retained record's clock, if the timeline has anything
+    /// at all.
+    pub fn timeline_oldest_mono_us(&self) -> Option<u64> {
+        self.timeline.oldest_mono_us()
     }
 
     pub fn ordered_mounts_for_strip(&self, cap: usize) -> Vec<String> {
@@ -393,15 +456,9 @@ impl App {
             {
                 self.quit = true;
             },
-            KeyCode::Tab => self.focus = self.focus.cycle(),
+            // Global keys: identical in both views.
+            KeyCode::Char('v') => self.view = self.view.toggle(),
             KeyCode::Char(' ') => self.toggle_pause(),
-            KeyCode::Up => self.move_focus_cursor(-1),
-            KeyCode::Down => self.move_focus_cursor(1),
-            KeyCode::Enter if self.focus == PaneFocus::Tree => {
-                self.toggle_tree_cursor_collapse();
-            },
-            KeyCode::Char('j' | 'n') => self.select_next(),
-            KeyCode::Char('k' | 'p') => self.select_prev(),
             KeyCode::Char('e') => {
                 self.filter.mode = match self.filter.mode {
                     FilterMode::ErrorsOnly => FilterMode::All,
@@ -429,6 +486,23 @@ impl App {
             },
             KeyCode::Left if self.scrub.is_some() => self.step_scrub_backward(),
             KeyCode::Right if self.scrub.is_some() => self.step_scrub_forward(),
+
+            // Activity-only: tree/log focus, cursor movement, selection.
+            KeyCode::Tab if self.view == AppView::Activity => self.focus = self.focus.cycle(),
+            KeyCode::Up if self.view == AppView::Activity => self.move_focus_cursor(-1),
+            KeyCode::Down if self.view == AppView::Activity => self.move_focus_cursor(1),
+            KeyCode::Enter if self.view == AppView::Activity && self.focus == PaneFocus::Tree => {
+                self.toggle_tree_cursor_collapse();
+            },
+            KeyCode::Char('j' | 'n') if self.view == AppView::Activity => self.select_next(),
+            KeyCode::Char('k' | 'p') if self.view == AppView::Activity => self.select_prev(),
+
+            // Sandbox-only: port cursor movement, pin, mount cycling.
+            KeyCode::Up if self.view == AppView::Sandbox => self.move_port_cursor(-1),
+            KeyCode::Down if self.view == AppView::Sandbox => self.move_port_cursor(1),
+            KeyCode::Enter if self.view == AppView::Sandbox => self.toggle_port_pin(),
+            KeyCode::Char('m') if self.view == AppView::Sandbox => self.cycle_active_mount(),
+
             _ => {},
         }
     }
@@ -511,6 +585,56 @@ impl App {
             path: row.path.clone(),
         });
         self.sync_selection_to_tree_cursor();
+    }
+
+    /// `m`: advance `active_mount` to the next entry in
+    /// [`Self::sandbox_mounts_by_activity`], wrapping from the last back
+    /// to the first. Resolves the current position through
+    /// [`Self::sandbox_active_mount`] so pressing `m` from an unset or
+    /// stale selection lands on the mount right after whatever is
+    /// currently displayed, matching what the user sees before the
+    /// keypress.
+    fn cycle_active_mount(&mut self) {
+        let mounts = self.sandbox_mounts_by_activity();
+        if mounts.is_empty() {
+            self.active_mount = None;
+            return;
+        }
+        let current = self.sandbox_active_mount();
+        let idx = current
+            .as_deref()
+            .and_then(|cur| mounts.iter().position(|m| *m == cur))
+            .map_or(0, |i| (i + 1) % mounts.len());
+        self.active_mount = Some(mounts[idx].to_string());
+    }
+
+    /// ↑/↓ in the sandbox view: move the port cursor through the
+    /// combined export-then-import list for the currently displayed
+    /// mount, clamping at both ends (no wrap, unlike mount cycling).
+    fn move_port_cursor(&mut self, delta: isize) {
+        let mount = self.sandbox_active_mount();
+        let sandbox = mount.as_deref().and_then(|m| self.mount_sandbox(m));
+        let ports = sandbox::all_port_ids(sandbox);
+        if ports.is_empty() {
+            self.port_cursor = None;
+            return;
+        }
+        let last = ports.len() - 1;
+        let idx = match &self.port_cursor {
+            Some(cursor) => {
+                let current = ports.iter().position(|p| p == cursor).unwrap_or(0);
+                step_clamped(current, delta, last)
+            },
+            None if delta < 0 => last,
+            None => 0,
+        };
+        self.port_cursor = Some(ports[idx].clone());
+    }
+
+    fn toggle_port_pin(&mut self) {
+        if self.port_cursor.is_some() {
+            self.port_pinned = !self.port_pinned;
+        }
     }
 
     fn sync_selection_to_tree_cursor(&mut self) {
@@ -681,6 +805,32 @@ mod tests {
         )
     }
 
+    /// A `provider.start` record: the minimal event that gives a mount
+    /// sandbox activity (`ProviderStart` carries its own `mount`, so
+    /// unlike callouts it doesn't need a matching `fuse.start` first).
+    fn provider_start(
+        trace_id: TraceId,
+        mono_us: u64,
+        mount: &str,
+        method: &str,
+    ) -> InspectorRecord {
+        record(
+            trace_id,
+            mono_us,
+            InspectorEvent::ProviderStart {
+                operation_id: trace_id,
+                mount: mount.into(),
+                provider: mount.into(),
+                method: method.into(),
+                path: "/x".into(),
+            },
+        )
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    }
+
     #[test]
     fn pause_is_lossless_new_records_land_live_but_not_in_the_frozen_view() {
         let mut app = App::new(ConnectionMode::Replay, "test", None);
@@ -756,5 +906,64 @@ mod tests {
         scrub.step_forward(&timeline);
         assert_eq!(scrub.cursor, 4);
         assert!(scrub.reducer.operation(3).is_none());
+    }
+
+    #[test]
+    fn v_toggles_between_activity_and_sandbox_views() {
+        let mut app = App::new(ConnectionMode::Replay, "test", None);
+        assert_eq!(app.view, AppView::Activity);
+        app.handle_key(key(crossterm::event::KeyCode::Char('v')));
+        assert_eq!(app.view, AppView::Sandbox);
+        app.handle_key(key(crossterm::event::KeyCode::Char('v')));
+        assert_eq!(app.view, AppView::Activity);
+    }
+
+    #[test]
+    fn port_cursor_moves_through_exports_then_imports_and_clamps_at_both_ends() {
+        use crossterm::event::KeyCode;
+
+        let mut app = App::new(ConnectionMode::Replay, "test", None);
+        app.apply_record(provider_start(1, 10, "github", "lookup_child"));
+        app.view = AppView::Sandbox;
+
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            app.port_cursor,
+            Some(PortId::Export(sandbox::EXPORT_PORTS[0].to_string()))
+        );
+
+        // Up from the first row must clamp, not go negative or wrap.
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            app.port_cursor,
+            Some(PortId::Export(sandbox::EXPORT_PORTS[0].to_string()))
+        );
+
+        // Walking past the end of the combined list must clamp on Log,
+        // the last row, rather than panicking or wrapping.
+        let total = sandbox::all_port_ids(app.mount_sandbox("github")).len();
+        for _ in 0..total + 3 {
+            app.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(app.port_cursor, Some(PortId::Log));
+    }
+
+    #[test]
+    fn m_cycles_active_mount_through_sandbox_activity_order() {
+        use crossterm::event::KeyCode;
+
+        let mut app = App::new(ConnectionMode::Replay, "test", None);
+        app.apply_record(provider_start(1, 10, "github", "lookup_child"));
+        app.apply_record(provider_start(2, 20, "gitlab", "lookup_child"));
+        app.view = AppView::Sandbox;
+
+        // Most-recently-active mount first, with nothing pinned yet.
+        assert_eq!(app.sandbox_active_mount().as_deref(), Some("gitlab"));
+
+        app.handle_key(key(KeyCode::Char('m')));
+        assert_eq!(app.active_mount.as_deref(), Some("github"));
+
+        app.handle_key(key(KeyCode::Char('m')));
+        assert_eq!(app.active_mount.as_deref(), Some("gitlab"));
     }
 }

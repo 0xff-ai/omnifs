@@ -10,20 +10,26 @@ use ratatui::{
 
 use omnifs_api::events::InspectorOutcome;
 
-use super::app::{App, ConnectionMode, PaneFocus};
+use super::app::{App, AppView, ConnectionMode, PaneFocus};
 use super::filter::FilterMode;
 use super::format;
 use super::metrics::{MountWindow, render_sparkline};
 use super::trace_state::{Operation, OperationStatus, Stage, StageKind};
 use super::tree::{ACTIVE_FOCUS_WINDOW_US, NodeStatus, RenderRow};
 
-const CURSOR_BG: Color = Color::Rgb(40, 50, 60);
+// Shared with `sandbox_ui`: both full-screen views highlight a cursor
+// row the same way.
+pub(super) const CURSOR_BG: Color = Color::Rgb(40, 50, 60);
 
 const SPARK_BUCKETS: usize = 12;
 const SPARK_MOUNT_CAP: usize = 8;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    if app.view == AppView::Sandbox {
+        super::sandbox_ui::render(frame, app, area);
+        return;
+    }
     if format::compact_mode(area.width, area.height) {
         render_compact(frame, app, area);
         return;
@@ -52,7 +58,10 @@ fn render_compact(frame: &mut Frame, app: &App, area: Rect) {
     render_operations_log(frame, app, chunks[1]);
 }
 
-fn render_header(frame: &mut Frame, app: &App, area: Rect) {
+/// Shared by both full-screen views: `sandbox_ui::render` calls this
+/// too so the two views agree on connection state, pause state, and
+/// filter status, differing only in the view name and key hints.
+pub(super) fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let source = match app.mode {
         ConnectionMode::Inspector => {
             // When disconnected, surface the address we're failing to
@@ -82,11 +91,22 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         String::new()
     };
+    let view_name = match app.view {
+        AppView::Activity => "recent activity",
+        AppView::Sandbox => "sandbox map",
+    };
     let title = format!(
-        " omnifs inspect · recent activity │ {source}{pause} │ {:.1} evt/s │ dropped {} ",
+        " omnifs inspect · {view_name} │ {source}{pause} │ {:.1} evt/s │ dropped {} ",
         app.events_per_sec, app.dropped_events
     );
-    let keys = " q quit  tab focus  ↑/↓ navigate  ↵ collapse  space pause  e errors  i idle  / filter  r reset ";
+    let keys = match app.view {
+        AppView::Activity => {
+            " q quit  v view  tab focus  ↑/↓ navigate  ↵ collapse  space pause  e errors  i idle  / filter  r reset "
+        },
+        AppView::Sandbox => {
+            " q quit  v view  ↑/↓ port  ↵ pin  m mount  space pause  ←/→ step  g live "
+        },
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))

@@ -4,6 +4,7 @@ mod format;
 mod metrics;
 mod run;
 mod sandbox;
+mod sandbox_ui;
 mod source;
 mod timeline;
 mod trace_state;

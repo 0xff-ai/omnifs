@@ -37,6 +37,69 @@ pub const EXPORT_PORTS: [&str; 8] = [
 /// that's simply untraced is a port that's never called.
 pub const UNTRACED_EXPORTS: [&str; 2] = ["initialize", "close_file"];
 
+/// The three WIT-imported callout kinds, in the fixed order the
+/// sandbox map renders them (right column, top to bottom) before the
+/// always-last Log pseudo-port.
+pub const IMPORT_PORTS: [CalloutKind; 3] = [
+    CalloutKind::Fetch,
+    CalloutKind::FetchBlob,
+    CalloutKind::GitOpenRepo,
+];
+
+/// One row in the sandbox map's port rails: an exported method, an
+/// imported callout kind, or the always-last Log pseudo-port. `Log`
+/// carries no port stats (provider log lines never open a start/end
+/// pair) so the map renders it as a permanently untraced label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortId {
+    Export(String),
+    Import(CalloutKind),
+    Log,
+}
+
+/// Export rows for one mount's rail: [`EXPORT_PORTS`] in its fixed
+/// order, then any method the provider actually called that isn't in
+/// that static list. The static list is the known WIT surface; the
+/// fallback exists so a newly added export method still shows up on
+/// the map instead of silently vanishing when the SDK grows one.
+pub fn export_port_ids(sandbox: Option<&MountSandbox>) -> Vec<PortId> {
+    let mut methods: Vec<String> = EXPORT_PORTS.iter().map(|&m| m.to_string()).collect();
+    if let Some(sandbox) = sandbox {
+        for method in sandbox.known_export_methods() {
+            if !methods.iter().any(|m| m == method) {
+                methods.push(method.to_string());
+            }
+        }
+    }
+    methods.into_iter().map(PortId::Export).collect()
+}
+
+/// Import rows for one mount's rail: [`IMPORT_PORTS`] in its fixed
+/// order, then any kind the provider actually fired that isn't in that
+/// static list, then the always-last Log pseudo-port.
+pub fn import_port_ids(sandbox: Option<&MountSandbox>) -> Vec<PortId> {
+    let mut kinds: Vec<CalloutKind> = IMPORT_PORTS.to_vec();
+    if let Some(sandbox) = sandbox {
+        for kind in sandbox.known_import_kinds() {
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+    }
+    let mut ports: Vec<PortId> = kinds.into_iter().map(PortId::Import).collect();
+    ports.push(PortId::Log);
+    ports
+}
+
+/// The full cursor-navigable port list for one mount: every export
+/// row top to bottom, then every import row top to bottom (`Log`
+/// included, always last).
+pub fn all_port_ids(sandbox: Option<&MountSandbox>) -> Vec<PortId> {
+    let mut ports = export_port_ids(sandbox);
+    ports.extend(import_port_ids(sandbox));
+    ports
+}
+
 /// One in-flight exported-method call, keyed by `(trace_id,
 /// operation_id)` in [`MountSandbox::open_exports`].
 #[derive(Debug, Clone)]
@@ -286,5 +349,55 @@ impl SandboxStats {
                 .open_imports
                 .retain(|(tid, _, _), _| *tid != trace_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_ports_follow_the_fixed_order_with_drift_appended() {
+        let mut stats = SandboxStats::default();
+        // A method outside the static EXPORT_PORTS list: SDK drift, an
+        // export the map has never seen a name for before. Completing
+        // the call (not just starting it) is what makes it "known":
+        // `known_export_methods` reads the completed-call window map,
+        // populated by `on_provider_end`.
+        stats.on_provider_start("github", 1, 1, "github", "custom_method", 10);
+        stats.on_provider_end("github", 1, 1, 5, InspectorOutcome::Ok, 20);
+        let ports = export_port_ids(stats.mount("github"));
+        let names: Vec<&str> = ports
+            .iter()
+            .map(|p| match p {
+                PortId::Export(m) => m.as_str(),
+                _ => unreachable!("export_port_ids only ever yields Export rows"),
+            })
+            .collect();
+        assert_eq!(&names[..EXPORT_PORTS.len()], &EXPORT_PORTS);
+        assert_eq!(names.last(), Some(&"custom_method"));
+    }
+
+    #[test]
+    fn log_pseudo_port_is_always_last_in_the_import_list() {
+        let ports = import_port_ids(None);
+        assert_eq!(ports.last(), Some(&PortId::Log));
+        // Base kinds keep their fixed order ahead of Log.
+        assert_eq!(
+            ports[..IMPORT_PORTS.len()],
+            [
+                PortId::Import(CalloutKind::Fetch),
+                PortId::Import(CalloutKind::FetchBlob),
+                PortId::Import(CalloutKind::GitOpenRepo),
+            ]
+        );
+    }
+
+    #[test]
+    fn all_port_ids_is_exports_then_imports() {
+        let ports = all_port_ids(None);
+        assert_eq!(ports.len(), EXPORT_PORTS.len() + IMPORT_PORTS.len() + 1);
+        assert_eq!(ports[0], PortId::Export(EXPORT_PORTS[0].to_string()));
+        assert_eq!(ports.last(), Some(&PortId::Log));
     }
 }
