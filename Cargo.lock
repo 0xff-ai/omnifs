@@ -2216,6 +2216,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2765,6 +2775,7 @@ dependencies = [
  "omnifs-auth",
  "omnifs-engine",
  "omnifs-itest",
+ "omnifs-libkrun",
  "omnifs-mtab",
  "omnifs-nfs",
  "omnifs-vfs-wire",
@@ -2880,6 +2891,16 @@ dependencies = [
  "time",
  "tokio",
  "wasmtime",
+]
+
+[[package]]
+name = "omnifs-libkrun"
+version = "0.2.1"
+dependencies = [
+ "libc",
+ "libloading",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4598,7 +4619,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

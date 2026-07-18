@@ -6,14 +6,14 @@
 //! State lives under `<config_dir>/libkrun/`: a persistent per-workspace ed25519
 //! keypair (survives across launches, since it authenticates guest ssh access
 //! independent of any one VM instance) plus per-launch artifacts (a writable
-//! root disk, pidfile, seed ISO, the three unix sockets libkrun bridges vsock
-//! onto, and the serial log). Every path lives under the workspace config dir,
+//! root disk, pidfile, seed ISO, the helper-owned attach bridge, the readiness,
+//! SSH, and control sockets, and the serial log). Every path lives under the workspace config dir,
 //! never a system temp dir, so `omnifs down`/`frontend disable` can find and
 //! remove exactly what this runner owns. The resolved guest image is an
 //! immutable base artifact and is only the source for that launch-local root.
 //!
-//! Three vsock devices bridge the guest to the host, each on its own
-//! `virtio-vsock` device (libkrun multiplexes by port, not by socket):
+//! One explicit no-TSI vsock device bridges the guest to the host, with three
+//! fixed port mappings:
 //! - port 1024 (attach): guest-initiated (`,listen`) onto the daemon's own
 //!   vsock-attach unix socket (returned by the `AttachVsock` control operation;
 //!   this runner never creates or removes that socket).
@@ -29,21 +29,24 @@
 //!   (`ListenStream=vsock::22` in the guest image). `omnifs frontend shell` dials it
 //!   through `ssh -o ProxyCommand='socat - UNIX-CONNECT:<path>'`.
 //!
-//! No `virtio-net` device is ever configured: the frontend carries no
-//! credentials and needs no egress, so it gets no network authority at all.
-//! [`assert_libkrun_locked_down`] verifies this against the live process's
-//! argv immediately after spawn, mirroring the Docker runner's
-//! `assert_locked_down`.
+//! No network or GPU configuration exists in the helper's typed launch shape.
+//! The helper disables libkrun's implicit TSI vsock before adding the explicit
+//! device, so the guest gets neither ordinary network egress nor TSI socket
+//! hijacking.
 
 use std::future::Future;
-use std::io::Write as _;
-use std::os::unix::fs::PermissionsExt as _;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
+use omnifs_libkrun::{
+    ATTACH_BRIDGE_SOCKET_NAME, CONTROL_SOCKET_NAME, ControlSocket, DIAGNOSTIC_LOG_NAME,
+    Installation, PID_FILE_NAME, READY_SOCKET_NAME, ROOT_DISK_NAME, SEED_DISK_NAME,
+    SERIAL_LOG_NAME, SSH_SOCKET_NAME,
+};
 use tokio::io::AsyncReadExt as _;
 
 use crate::commands::frontend::GUEST_MOUNT;
@@ -53,23 +56,14 @@ use crate::ui::output::Output;
 use omnifs_workspace::config::Config;
 
 const SSH_KEY_NAME: &str = "id_ed25519";
-const PIDFILE_NAME: &str = "libkrun.pid";
-const ROOT_RAW_NAME: &str = "root.raw";
 const ROOT_RAW_PART_PREFIX: &str = "root.raw.part.";
-const SEED_ISO_NAME: &str = "seed.iso";
 const SEED_STAGING_NAME: &str = "seed-staging";
-const SSH_SOCK_NAME: &str = "ssh.sock";
-const READY_SOCK_NAME: &str = "ready.sock";
-const RESTFUL_SOCK_NAME: &str = "restful.sock";
-const SERIAL_LOG_NAME: &str = "serial.log";
 
 /// Guest vsock port the daemon's attach listener is proxied onto.
 const ATTACH_VSOCK_PORT: u32 = 1024;
 /// Guest vsock port used by the readiness beacon in `omnifs-vfs-wire`.
 /// dials once the FUSE mount is serving.
 const READY_VSOCK_PORT: u32 = 1025;
-/// Guest vsock port the image's socket-activated dropbear listens on.
-const SSH_VSOCK_PORT: u32 = 22;
 
 /// A placeholder hostname for the ssh command line. `ProxyCommand` replaces
 /// the transport entirely, so this name is never resolved or dialed.
@@ -103,10 +97,6 @@ const SEED_CONF_KEYS: [&str; 4] = [
     "OMNIFS_SSH_PUBKEY",
 ];
 
-/// `--device` count a correctly locked-down libkrun process must carry:
-/// root disk, seed disk, attach vsock, ready vsock, ssh vsock, serial log.
-const EXPECTED_DEVICE_COUNT: usize = 6;
-
 /// Conservative `sockaddr_un.sun_path` byte budget, mirroring
 /// The daemon's `check_uds_path_length` (kept as its own copy here: the
 /// CLI and daemon do not share a path-validation crate, and this check is
@@ -136,23 +126,6 @@ pub(crate) const fn default_guest_image_for(channel: BuildChannel) -> &'static s
     }
 }
 
-/// A truthful, actionable error naming the install command, rather than a
-/// bare "command not found" surfaced from the failed spawn.
-fn ensure_libkrun_available() -> Result<()> {
-    match Command::new("krunkit")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    {
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
-            "the krunkit executable is not installed; install it with `brew tap slp/krun && brew install krunkit`"
-        ),
-        Err(error) => Err(error).context("probe for the krunkit executable on PATH"),
-    }
-}
-
 /// `omnifs frontend shell`'s libkrun dispatch calls this before building the ssh
 /// command: `shell_command` itself stays pure construction (no I/O), so the
 /// probe belongs at the one call site that is about to actually run it.
@@ -179,7 +152,8 @@ pub(crate) struct LibkrunRunner {
 
 impl LibkrunRunner {
     pub(crate) fn probe() -> Result<()> {
-        ensure_libkrun_available()
+        Installation::current()?.probe()?;
+        Ok(())
     }
 
     pub(crate) fn new(dir: PathBuf) -> Self {
@@ -199,15 +173,15 @@ impl LibkrunRunner {
     }
 
     fn pidfile(&self) -> PathBuf {
-        self.dir().join(PIDFILE_NAME)
+        self.dir().join(PID_FILE_NAME)
     }
 
     fn root_raw(&self) -> PathBuf {
-        self.dir().join(ROOT_RAW_NAME)
+        self.dir().join(ROOT_DISK_NAME)
     }
 
     fn seed_iso(&self) -> PathBuf {
-        self.dir().join(SEED_ISO_NAME)
+        self.dir().join(SEED_DISK_NAME)
     }
 
     fn seed_staging(&self) -> PathBuf {
@@ -215,19 +189,27 @@ impl LibkrunRunner {
     }
 
     fn ssh_socket(&self) -> PathBuf {
-        self.dir().join(SSH_SOCK_NAME)
+        self.dir().join(SSH_SOCKET_NAME)
     }
 
     fn ready_socket(&self) -> PathBuf {
-        self.dir().join(READY_SOCK_NAME)
+        self.dir().join(READY_SOCKET_NAME)
     }
 
-    fn restful_socket(&self) -> PathBuf {
-        self.dir().join(RESTFUL_SOCK_NAME)
+    fn control_socket(&self) -> PathBuf {
+        self.dir().join(CONTROL_SOCKET_NAME)
+    }
+
+    fn attach_bridge_socket(&self) -> PathBuf {
+        self.dir().join(ATTACH_BRIDGE_SOCKET_NAME)
     }
 
     fn serial_log(&self) -> PathBuf {
         self.dir().join(SERIAL_LOG_NAME)
+    }
+
+    fn diagnostic_log(&self) -> PathBuf {
+        self.dir().join(DIAGNOSTIC_LOG_NAME)
     }
 
     fn root_raw_parts(&self) -> Vec<PathBuf> {
@@ -338,46 +320,27 @@ impl LibkrunRunner {
         }
     }
 
-    /// Read back the live process's argv via `ps` (macOS has no `/proc`) and
-    /// assert it against the exact device set `launch` demands. Kills and
-    /// cleans up on violation rather than reporting success.
-    fn probe_argv(pid: u32) -> Result<String> {
-        let output = Command::new("ps")
-            .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
-            .output()
-            .context("probe live libkrun argv via ps")?;
-        anyhow::ensure!(
-            output.status.success() && !output.stdout.is_empty(),
-            "ps could not find libkrun pid {pid} right after spawn"
-        );
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    }
+    fn diagnostic_tail(&self) -> String {
+        const MAX_BYTES: usize = 32 * 1024;
 
-    /// Best-effort restful shutdown request. Failures (unreachable socket,
-    /// unexpected response) are swallowed: `tear_down` falls through to
-    /// SIGTERM/SIGKILL regardless, and the exact restful shutdown API shape
-    /// is not independently confirmed in this build (see the libkrun
-    /// contract note in `docs/contracts/40-frontends.md`).
-    fn try_restful_shutdown(&self) {
-        let Ok(mut stream) = UnixStream::connect(self.restful_socket()) else {
-            return;
+        let path = self.diagnostic_log();
+        let Ok(bytes) = std::fs::read(&path) else {
+            return format!("helper log: {}", path.display());
         };
-        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-        let body = br#"{"state":"Stop"}"#;
-        let request = format!(
-            "POST /vm/state HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
-        let _ = stream.write_all(request.as_bytes());
-        let _ = stream.write_all(body);
+        let start = bytes.len().saturating_sub(MAX_BYTES);
+        let text = String::from_utf8_lossy(&bytes[start..]);
+        let detail = text.trim();
+        if detail.is_empty() {
+            format!("helper log is empty: {}", path.display())
+        } else {
+            format!("helper log {}:\n{detail}", path.display())
+        }
     }
 }
 
 /// Bounds the seed staging dir to exactly the expected `KEY=VALUE` lines
 /// before it is burned into an ISO the guest can read: one file, the exact
-/// key set, no duplicates. This is the seed half of the launch-time lockdown
-/// audit; [`assert_libkrun_locked_down`] is the device-set half.
+/// key set, no duplicates.
 fn audit_seed_staging(staging: &Path) -> Result<(), String> {
     let entries: Vec<_> = std::fs::read_dir(staging)
         .map_err(|error| format!("read seed staging dir: {error}"))?
@@ -415,70 +378,6 @@ fn audit_seed_staging(staging: &Path) -> Result<(), String> {
         if !seen.contains(expected) {
             return Err(format!("seed is missing required key `{expected}`"));
         }
-    }
-    Ok(())
-}
-
-/// Assert the live libkrun process's argv carries exactly the device set the
-/// spec demands: no `virtio-net`, exactly two `virtio-blk` (root + seed), the
-/// three expected `virtio-vsock` devices at their expected socket paths, the
-/// serial log, `--restful-uri`, and `--pidfile`. A pure function of the argv
-/// string so it is unit-testable without spawning a real libkrun process.
-fn assert_libkrun_locked_down(
-    argv: &str,
-    attach_socket: &Path,
-    ready_socket: &Path,
-    ssh_socket: &Path,
-) -> Result<(), String> {
-    if argv.contains("virtio-net") {
-        return Err(
-            "the process carries a virtio-net device; the frontend must have no network authority"
-                .to_string(),
-        );
-    }
-    let device_count = argv.matches("--device").count();
-    if device_count != EXPECTED_DEVICE_COUNT {
-        return Err(format!(
-            "the process has {}, expected exactly {EXPECTED_DEVICE_COUNT} (root disk, seed \
-             disk, attach/ready/ssh vsock, serial log)",
-            crate::ui::render::count(device_count, "--device flag")
-        ));
-    }
-    let blk_count = argv.matches("virtio-blk,path=").count();
-    if blk_count != 2 {
-        return Err(format!(
-            "expected exactly 2 virtio-blk devices (root + seed), found {blk_count}"
-        ));
-    }
-    let expected_attach = format!(
-        "virtio-vsock,port={ATTACH_VSOCK_PORT},socketURL={},listen",
-        attach_socket.display()
-    );
-    if !argv.contains(&expected_attach) {
-        return Err("missing the expected attach vsock device".to_string());
-    }
-    let expected_ready = format!(
-        "virtio-vsock,port={READY_VSOCK_PORT},socketURL={},listen",
-        ready_socket.display()
-    );
-    if !argv.contains(&expected_ready) {
-        return Err("missing the expected readiness vsock device".to_string());
-    }
-    let expected_ssh = format!(
-        "virtio-vsock,port={SSH_VSOCK_PORT},socketURL={},connect",
-        ssh_socket.display()
-    );
-    if !argv.contains(&expected_ssh) {
-        return Err("missing the expected ssh vsock device".to_string());
-    }
-    if !argv.contains("virtio-serial,logFilePath=") {
-        return Err("missing the expected virtio-serial log device".to_string());
-    }
-    if !argv.contains("--restful-uri") {
-        return Err("missing --restful-uri".to_string());
-    }
-    if !argv.contains("--pidfile") {
-        return Err("missing --pidfile".to_string());
     }
     Ok(())
 }
@@ -605,7 +504,8 @@ impl<'a> LibkrunLaunchLease<'a> {
     }
 
     async fn run_to_publish(&mut self, attached: impl Future<Output = Result<()>>) -> Result<()> {
-        ensure_libkrun_available()?;
+        let installation = Installation::current()?;
+        installation.probe()?;
         self.replace_stale().await?;
 
         let dir = self.runner.dir();
@@ -615,9 +515,10 @@ impl<'a> LibkrunLaunchLease<'a> {
 
         for path in [
             self.daemon_attach_socket.as_path(),
+            self.runner.attach_bridge_socket().as_path(),
             self.runner.ready_socket().as_path(),
             self.runner.ssh_socket().as_path(),
-            self.runner.restful_socket().as_path(),
+            self.runner.control_socket().as_path(),
         ] {
             check_uds_path_length(path)?;
         }
@@ -628,47 +529,27 @@ impl<'a> LibkrunLaunchLease<'a> {
             .write_seed_iso(&self.attach_token, &ssh_pubkey)?;
         self.ready_listener = Some(self.bind_ready_listener()?);
         let _ = std::fs::remove_file(self.runner.ssh_socket());
+        let _ = std::fs::remove_file(self.runner.control_socket());
 
-        let pidfile = self.runner.pidfile();
-        let devices = [
-            format!(
-                "virtio-blk,path={},format=raw",
-                self.runner.root_raw().display()
-            ),
-            format!(
-                "virtio-blk,path={},format=raw",
-                self.runner.seed_iso().display()
-            ),
-            format!(
-                "virtio-vsock,port={ATTACH_VSOCK_PORT},socketURL={},listen",
-                self.daemon_attach_socket.display()
-            ),
-            format!(
-                "virtio-vsock,port={READY_VSOCK_PORT},socketURL={},listen",
-                self.runner.ready_socket().display()
-            ),
-            format!(
-                "virtio-vsock,port={SSH_VSOCK_PORT},socketURL={},connect",
-                self.runner.ssh_socket().display()
-            ),
-            format!(
-                "virtio-serial,logFilePath={}",
-                self.runner.serial_log().display()
-            ),
-        ];
-        let mut command = Command::new("krunkit");
-        command.args(["--cpus", "2", "--memory", "2048"]);
-        for device in devices {
-            command.arg("--device").arg(device);
-        }
+        let helper_config =
+            omnifs_libkrun::Config::omnifs(dir, &self.daemon_attach_socket, &installation)?;
+        let diagnostic_path = helper_config.diagnostic_log();
+        let diagnostic = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(diagnostic_path)
+            .with_context(|| format!("open helper log {}", diagnostic_path.display()))?;
+        let diagnostic_stderr = diagnostic
+            .try_clone()
+            .with_context(|| format!("clone helper log {}", diagnostic_path.display()))?;
+        let mut command = Command::new(installation.helper());
+        helper_config.apply_to(&mut command);
         command
-            .arg("--restful-uri")
-            .arg(format!("unix://{}", self.runner.restful_socket().display()))
-            .arg("--pidfile")
-            .arg(&pidfile)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(Stdio::from(diagnostic))
+            .stderr(Stdio::from(diagnostic_stderr));
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt as _;
@@ -678,7 +559,12 @@ impl<'a> LibkrunLaunchLease<'a> {
         // Detached: the VM outlives this CLI invocation. The lease retains
         // the pid until readiness publishes, while explicit teardown later
         // rediscovers it from the durable pidfile.
-        self.child = Some(command.spawn().context("spawn krunkit")?);
+        self.child = Some(command.spawn().with_context(|| {
+            format!(
+                "spawn packaged libkrun helper {}",
+                installation.helper().display()
+            )
+        })?);
 
         let pid = self.wait_for_pidfile().await?;
         let child_pid = self
@@ -690,14 +576,6 @@ impl<'a> LibkrunLaunchLease<'a> {
             child_pid == pid,
             "libkrun pidfile named pid {pid}, but the spawned process is {child_pid}"
         );
-        let argv = LibkrunRunner::probe_argv(pid)?;
-        assert_libkrun_locked_down(
-            &argv,
-            &self.daemon_attach_socket,
-            &self.runner.ready_socket(),
-            &self.runner.ssh_socket(),
-        )
-        .map_err(|violation| anyhow::anyhow!("refusing to run the libkrun VM: {violation}"))?;
 
         let mount = self.mount.clone();
         self.wait_for_ready(mount.as_deref(), self.timeout).await?;
@@ -760,7 +638,7 @@ impl<'a> LibkrunLaunchLease<'a> {
             .context("adopt the readiness listener into the async runtime")
     }
 
-    async fn wait_for_pidfile(&self) -> Result<u32> {
+    async fn wait_for_pidfile(&mut self) -> Result<u32> {
         let pidfile = self.runner.pidfile();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -769,10 +647,24 @@ impl<'a> LibkrunLaunchLease<'a> {
             {
                 return Ok(pid);
             }
+            if let Some(status) = self
+                .child
+                .as_mut()
+                .context("libkrun helper identity was lost before pidfile publication")?
+                .try_wait()
+                .context("poll libkrun helper before pidfile publication")?
+            {
+                anyhow::bail!(
+                    "omnifs-libkrun exited with {status} before publishing {};\n{}",
+                    pidfile.display(),
+                    self.runner.diagnostic_tail()
+                );
+            }
             anyhow::ensure!(
                 tokio::time::Instant::now() < deadline,
-                "libkrun did not write its pidfile at {} within 5s",
-                pidfile.display()
+                "omnifs-libkrun did not publish {} within 5s;\n{}",
+                pidfile.display(),
+                self.runner.diagnostic_tail()
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -785,11 +677,29 @@ impl<'a> LibkrunLaunchLease<'a> {
             .context("libkrun readiness listener was not prepared")?;
         let wait = async {
             loop {
-                let (mut stream, _) = listener.accept().await?;
-                let mut buf = [0_u8; 64];
-                let n = stream.read(&mut buf).await?;
-                if buf[..n].starts_with(b"ready") {
-                    return Ok::<(), std::io::Error>(());
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (mut stream, _) = accepted?;
+                        let mut buf = [0_u8; 64];
+                        let n = stream.read(&mut buf).await?;
+                        if buf[..n].starts_with(b"ready") {
+                            return Ok::<(), anyhow::Error>(());
+                        }
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(100)) => {
+                        if let Some(status) = self
+                            .child
+                            .as_mut()
+                            .context("libkrun helper identity was lost while waiting for readiness")?
+                            .try_wait()
+                            .context("poll libkrun helper while waiting for readiness")?
+                        {
+                            anyhow::bail!(
+                                "omnifs-libkrun exited with {status} before guest readiness;\n{}",
+                                self.runner.diagnostic_tail()
+                            );
+                        }
+                    }
                 }
             }
         };
@@ -817,7 +727,8 @@ impl<'a> LibkrunLaunchLease<'a> {
             },
         };
         if let Some(pid) = pid.filter(|pid| process_alive(*pid)) {
-            self.runner.try_restful_shutdown();
+            let _ = ControlSocket::new(self.runner.control_socket())
+                .and_then(|control| control.request_shutdown());
             if !self
                 .wait_for_process_exit(pid, Duration::from_secs(5))
                 .await?
@@ -887,9 +798,9 @@ impl<'a> LibkrunLaunchLease<'a> {
         }
     }
 
-    /// Remove only launch artifacts. The attach listener, verified guest
-    /// image, and persistent SSH key are owned elsewhere and never appear in
-    /// this set.
+    /// Remove only launch artifacts. The daemon attach listener, verified
+    /// guest image, and persistent SSH key are owned elsewhere and never
+    /// appear in this set.
     fn remove_owned_artifacts(&self) {
         for path in [
             self.runner.pidfile(),
@@ -897,8 +808,10 @@ impl<'a> LibkrunLaunchLease<'a> {
             self.runner.seed_iso(),
             self.runner.ssh_socket(),
             self.runner.ready_socket(),
-            self.runner.restful_socket(),
+            self.runner.control_socket(),
+            self.runner.attach_bridge_socket(),
             self.runner.serial_log(),
+            self.runner.diagnostic_log(),
         ] {
             let _ = std::fs::remove_file(path);
         }
@@ -1030,12 +943,14 @@ mod tests {
         let root_part = dir.join(format!("{ROOT_RAW_PART_PREFIX}fixture"));
         std::fs::write(&root_part, b"partial root").unwrap();
         for name in [
-            PIDFILE_NAME,
-            SEED_ISO_NAME,
-            SSH_SOCK_NAME,
-            READY_SOCK_NAME,
-            RESTFUL_SOCK_NAME,
+            PID_FILE_NAME,
+            SEED_DISK_NAME,
+            SSH_SOCKET_NAME,
+            READY_SOCKET_NAME,
+            CONTROL_SOCKET_NAME,
+            ATTACH_BRIDGE_SOCKET_NAME,
             SERIAL_LOG_NAME,
+            DIAGNOSTIC_LOG_NAME,
         ] {
             std::fs::write(dir.join(name), b"launch-owned").unwrap();
         }
@@ -1071,10 +986,10 @@ mod tests {
                 & 0o777,
             0o444
         );
-        assert!(!dir.join(PIDFILE_NAME).exists());
-        assert!(!dir.join(ROOT_RAW_NAME).exists());
+        assert!(!dir.join(PID_FILE_NAME).exists());
+        assert!(!dir.join(ROOT_DISK_NAME).exists());
         assert!(!root_part.exists());
-        assert!(!dir.join(SEED_ISO_NAME).exists());
+        assert!(!dir.join(SEED_DISK_NAME).exists());
         assert!(!dir.join(SEED_STAGING_NAME).exists());
     }
 
@@ -1092,69 +1007,6 @@ mod tests {
             default_guest_image_for(BuildChannel::Release)
                 .starts_with("ghcr.io/0xff-ai/omnifs-guest:")
         );
-    }
-
-    fn sample_argv() -> &'static str {
-        "krunkit --cpus 2 --memory 2048 \
-         --device virtio-blk,path=/img/root.raw,format=raw \
-         --device virtio-blk,path=/img/seed.iso,format=raw \
-         --device virtio-vsock,port=1024,socketURL=/h/attach.sock,listen \
-         --device virtio-vsock,port=1025,socketURL=/h/ready.sock,listen \
-         --device virtio-vsock,port=22,socketURL=/h/ssh.sock,connect \
-         --device virtio-serial,logFilePath=/h/serial.log \
-         --restful-uri unix:///h/restful.sock --pidfile /h/libkrun.pid"
-    }
-
-    #[test]
-    fn lockdown_accepts_the_exact_expected_device_set() {
-        assert_libkrun_locked_down(
-            sample_argv(),
-            Path::new("/h/attach.sock"),
-            Path::new("/h/ready.sock"),
-            Path::new("/h/ssh.sock"),
-        )
-        .expect("the exact expected device set must pass");
-    }
-
-    #[test]
-    fn lockdown_rejects_a_virtio_net_device() {
-        let argv = format!(
-            "{} --device virtio-net,unixSocketPath=/h/net.sock",
-            sample_argv()
-        );
-        let err = assert_libkrun_locked_down(
-            &argv,
-            Path::new("/h/attach.sock"),
-            Path::new("/h/ready.sock"),
-            Path::new("/h/ssh.sock"),
-        )
-        .unwrap_err();
-        assert!(err.contains("virtio-net"));
-    }
-
-    #[test]
-    fn lockdown_rejects_an_unexpected_attach_socket() {
-        let err = assert_libkrun_locked_down(
-            sample_argv(),
-            Path::new("/h/wrong-attach.sock"),
-            Path::new("/h/ready.sock"),
-            Path::new("/h/ssh.sock"),
-        )
-        .unwrap_err();
-        assert!(err.contains("attach"));
-    }
-
-    #[test]
-    fn lockdown_rejects_a_missing_device() {
-        let argv = sample_argv().replace("--device virtio-serial,logFilePath=/h/serial.log", "");
-        let err = assert_libkrun_locked_down(
-            &argv,
-            Path::new("/h/attach.sock"),
-            Path::new("/h/ready.sock"),
-            Path::new("/h/ssh.sock"),
-        )
-        .unwrap_err();
-        assert!(err.contains("--device flag"));
     }
 
     #[test]

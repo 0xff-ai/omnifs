@@ -21,18 +21,15 @@ impl FrontendFilesystem {
     /// (`commands::setup`, a sibling of `commands::frontend`) reads this to
     /// pre-check the platform's recommended default alongside every other
     /// caller inside `commands::frontend` itself.
-    pub(crate) const fn default_runtime(self) -> FrontendRuntime {
-        match self {
-            Self::Fuse if cfg!(target_os = "macos") => FrontendRuntime::Libkrun,
-            Self::Fuse | Self::Nfs => FrontendRuntime::Host,
-        }
+    pub(crate) fn default_runtime(self) -> Option<FrontendRuntime> {
+        Platform::current().default_runtime(self)
     }
 }
 
 impl FrontendRuntime {
     const ALL: [Self; 3] = [Self::Host, Self::Docker, Self::Libkrun];
 
-    pub(super) fn supports(self, filesystem: FrontendFilesystem) -> bool {
+    pub(crate) fn supports(self, filesystem: FrontendFilesystem) -> bool {
         Platform::current().supports(filesystem, self)
     }
 
@@ -77,19 +74,27 @@ impl Platform {
     }
 
     fn supports(self, filesystem: FrontendFilesystem, runtime: FrontendRuntime) -> bool {
-        matches!(
-            (self.os, filesystem, runtime),
-            (
-                "macos",
+        match (self.os, filesystem, runtime) {
+            ("macos", FrontendFilesystem::Fuse, FrontendRuntime::Libkrun) => self.arch == "aarch64",
+            ("macos", FrontendFilesystem::Fuse, FrontendRuntime::Docker)
+            | ("macos", FrontendFilesystem::Nfs, FrontendRuntime::Host)
+            | (
+                "linux",
                 FrontendFilesystem::Fuse,
-                FrontendRuntime::Docker | FrontendRuntime::Libkrun
-            ) | ("macos", FrontendFilesystem::Nfs, FrontendRuntime::Host)
-                | (
-                    "linux",
-                    FrontendFilesystem::Fuse,
-                    FrontendRuntime::Host | FrontendRuntime::Docker
-                )
-        )
+                FrontendRuntime::Host | FrontendRuntime::Docker,
+            ) => true,
+            _ => false,
+        }
+    }
+
+    fn default_runtime(self, filesystem: FrontendFilesystem) -> Option<FrontendRuntime> {
+        match (self.os, self.arch, filesystem) {
+            ("macos", "aarch64", FrontendFilesystem::Fuse) => Some(FrontendRuntime::Libkrun),
+            ("macos", _, FrontendFilesystem::Nfs) | ("linux", _, FrontendFilesystem::Fuse) => {
+                Some(FrontendRuntime::Host)
+            },
+            _ => None,
+        }
     }
 
     fn label(self) -> String {
@@ -130,7 +135,7 @@ struct FrontendSupport {
 
 impl FrontendSupport {
     async fn inspect(filesystem: FrontendFilesystem, runtime: FrontendRuntime) -> Self {
-        let default = filesystem.default_runtime() == runtime;
+        let default = filesystem.default_runtime() == Some(runtime);
         let readiness = match runtime {
             FrontendRuntime::Host => HostRunner::probe(match filesystem {
                 FrontendFilesystem::Fuse => LocalProtocol::Fuse,
@@ -269,6 +274,18 @@ mod tests {
         assert!(macos.supports(FrontendFilesystem::Fuse, FrontendRuntime::Docker));
         assert!(macos.supports(FrontendFilesystem::Nfs, FrontendRuntime::Host));
         assert!(!macos.supports(FrontendFilesystem::Fuse, FrontendRuntime::Host));
+        assert_eq!(
+            macos.default_runtime(FrontendFilesystem::Fuse),
+            Some(FrontendRuntime::Libkrun)
+        );
+
+        let intel_macos = Platform {
+            os: "macos",
+            arch: "x86_64",
+        };
+        assert!(!intel_macos.supports(FrontendFilesystem::Fuse, FrontendRuntime::Libkrun));
+        assert!(intel_macos.supports(FrontendFilesystem::Fuse, FrontendRuntime::Docker));
+        assert_eq!(intel_macos.default_runtime(FrontendFilesystem::Fuse), None);
 
         let linux = Platform {
             os: "linux",
@@ -280,14 +297,20 @@ mod tests {
 
         assert_eq!(
             FrontendFilesystem::Nfs.default_runtime(),
-            FrontendRuntime::Host
+            if cfg!(target_os = "macos") {
+                Some(FrontendRuntime::Host)
+            } else {
+                None
+            }
         );
         assert_eq!(
             FrontendFilesystem::Fuse.default_runtime(),
-            if cfg!(target_os = "macos") {
-                FrontendRuntime::Libkrun
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                Some(FrontendRuntime::Libkrun)
+            } else if cfg!(target_os = "linux") {
+                Some(FrontendRuntime::Host)
             } else {
-                FrontendRuntime::Host
+                None
             }
         );
     }
