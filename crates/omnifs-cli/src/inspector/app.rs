@@ -200,8 +200,17 @@ impl App {
         &self.active().forest
     }
 
-    fn forest_mut(&mut self) -> &mut MountForest {
-        &mut Self::active_mut(&mut self.traces, &mut self.frozen).forest
+    /// Project whatever the active view (frozen while paused, live
+    /// otherwise) just settled on as selected onto the live reducer too.
+    /// Without this, a selection change made while paused only lands on
+    /// the frozen snapshot, and resuming (which drops the snapshot)
+    /// silently reverts it back to whatever the live reducer picked on
+    /// its own while catching up in the background. The live reducer's
+    /// own `ensure_selected_visible` calls (in `apply_record`) then keep
+    /// covering the case where the projected trace later gets evicted.
+    fn sync_selected_to_live(&mut self) {
+        let target = self.active().selected();
+        self.traces.set_selected(target);
     }
 
     pub fn palette(&self) -> &MountPalette {
@@ -371,14 +380,25 @@ impl App {
         };
         Self::active_mut(&mut self.traces, &mut self.frozen)
             .select_latest_for_path(&cursor.mount, &cursor.path);
+        self.sync_selected_to_live();
     }
 
     fn toggle_tree_cursor_collapse(&mut self) {
         let Some(cursor) = self.tree_cursor.clone() else {
             return;
         };
-        self.forest_mut()
+        let new_state = Self::active_mut(&mut self.traces, &mut self.frozen)
+            .forest
             .toggle_collapsed(&cursor.mount, &cursor.path);
+        // Project the resulting flag onto the live forest too (mirrors
+        // `sync_selected_to_live`), so a collapse made while paused
+        // survives resume instead of reverting to the live forest's
+        // untouched state.
+        if let Some(collapsed) = new_state {
+            self.traces
+                .forest
+                .set_collapsed(&cursor.mount, &cursor.path, collapsed);
+        }
     }
 
     fn handle_filter_key(&mut self, code: KeyCode) {
@@ -422,15 +442,26 @@ impl App {
     }
 
     fn reset_recent(&mut self) {
-        Self::active_mut(&mut self.traces, &mut self.frozen).reset_recent(&self.filter);
+        // Reset discards retained completed operations from whichever
+        // reducer holds them, not just a rendering choice, so — unlike
+        // selection/collapse — there's no single "current" identity to
+        // compute once and project. Applying it to both independently
+        // keeps pause-time reset consistent with live reset: either way,
+        // completed ops are gone for good, not resurrected on resume.
+        self.traces.reset_recent(&self.filter);
+        if let Some(frozen) = &mut self.frozen {
+            frozen.traces.reset_recent(&self.filter);
+        }
     }
 
     fn select_next(&mut self) {
         Self::active_mut(&mut self.traces, &mut self.frozen).select_next(&self.filter);
+        self.sync_selected_to_live();
     }
 
     fn select_prev(&mut self) {
         Self::active_mut(&mut self.traces, &mut self.frozen).select_prev(&self.filter);
+        self.sync_selected_to_live();
     }
 
     fn toggle_errors_only(&mut self) {
@@ -439,6 +470,7 @@ impl App {
             FilterMode::All => FilterMode::ErrorsOnly,
         };
         Self::active_mut(&mut self.traces, &mut self.frozen).ensure_selected_visible(&self.filter);
+        self.sync_selected_to_live();
     }
 
     fn toggle_idle(&mut self) {
@@ -772,6 +804,151 @@ mod tests {
             "resume must render the caught-up state"
         );
         assert_eq!(app.buffered_since_pause(), 0);
+    }
+
+    #[test]
+    fn pause_time_selection_and_collapse_survive_resume() {
+        use omnifs_api::events::InspectorEvent;
+
+        fn record(trace_id: TraceId, mono_us: u64, path: &str) -> InspectorRecord {
+            InspectorRecord::new(
+                "2026-05-23T00:00:00Z",
+                mono_us,
+                trace_id,
+                InspectorEvent::FuseStart {
+                    op: "lookup".into(),
+                    mount: "github".into(),
+                    path: path.into(),
+                },
+            )
+        }
+
+        let mut app = App::new(
+            ConnectionMode::Replay,
+            "test",
+            None,
+            "~/omnifs/dns/example.com/A",
+        );
+        // Two ops under the same subtree so the ops log has a second
+        // entry to select and the tree root has children to hide behind
+        // a collapse summary.
+        app.apply_record(&record(1, 10, "/dir/one"));
+        app.apply_record(&record(2, 20, "/dir/two"));
+        // `on_fuse_start` auto-selects the first-ever op.
+        assert_eq!(app.selected_trace(), Some(1));
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert!(app.paused);
+
+        // While paused: move the ops-log selection off the pre-pause
+        // default, and collapse the mount root so its children fold
+        // into a single summary row.
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(
+            app.selected_trace(),
+            Some(2),
+            "selection change must apply to the paused view immediately"
+        );
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        let rows_while_paused = app.visible_tree_rows();
+        assert!(
+            rows_while_paused.iter().any(|row| row
+                .path
+                .ends_with(super::super::tree::COLLAPSED_SUMMARY_SUFFIX)),
+            "collapse must apply to the paused view immediately: {rows_while_paused:?}"
+        );
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert!(!app.paused);
+
+        assert_eq!(
+            app.selected_trace(),
+            Some(2),
+            "selection made while paused must survive resume, not revert to the \
+             live reducer's own pre-pause choice"
+        );
+        let rows_after_resume = app.visible_tree_rows();
+        assert!(
+            rows_after_resume.iter().any(|row| row
+                .path
+                .ends_with(super::super::tree::COLLAPSED_SUMMARY_SUFFIX)),
+            "collapse made while paused must survive resume: {rows_after_resume:?}"
+        );
+    }
+
+    #[test]
+    fn pause_time_reset_evicts_from_live_and_falls_back_selection_on_disappearance() {
+        use omnifs_api::events::{InspectorEvent, OpEnd, OutcomeFields};
+
+        fn start(trace_id: TraceId, mono_us: u64, path: &str) -> InspectorRecord {
+            InspectorRecord::new(
+                "2026-05-23T00:00:00Z",
+                mono_us,
+                trace_id,
+                InspectorEvent::FuseStart {
+                    op: "lookup".into(),
+                    mount: "github".into(),
+                    path: path.into(),
+                },
+            )
+        }
+
+        fn finish(trace_id: TraceId, mono_us: u64) -> InspectorRecord {
+            InspectorRecord::new(
+                "2026-05-23T00:00:00Z",
+                mono_us,
+                trace_id,
+                InspectorEvent::FuseEnd {
+                    op: "lookup".into(),
+                    end: OpEnd {
+                        elapsed_us: 10,
+                        result: OutcomeFields::ok(),
+                    },
+                },
+            )
+        }
+
+        let mut app = App::new(
+            ConnectionMode::Replay,
+            "test",
+            None,
+            "~/omnifs/dns/example.com/A",
+        );
+        // Trace 1 stays running (reset must keep it); trace 2 completes
+        // (reset must evict it), matching what `r` already does live.
+        app.apply_record(&start(1, 10, "/one"));
+        app.apply_record(&start(2, 20, "/two"));
+        app.apply_record(&finish(2, 30));
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert!(app.paused);
+
+        // Select the op that reset is about to evict.
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(app.selected_trace(), Some(2));
+
+        app.handle_key(key(KeyCode::Char('r')));
+        // Reset must actually evict the completed op from the live
+        // reducer too, not just the paused view — otherwise resuming
+        // would resurrect it, which is exactly the bug this fixes.
+        assert_eq!(
+            app.traces.retained_trace_count(),
+            1,
+            "reset while paused must evict completed ops from the live reducer"
+        );
+        // Its disappearance must trigger the same fallback that already
+        // covers a selected row vanishing outside of pause (fall back to
+        // the first visible trace), not a new bespoke policy.
+        assert_eq!(
+            app.selected_trace(),
+            Some(1),
+            "selection must fall back once its target is evicted by reset"
+        );
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert!(!app.paused);
+        assert_eq!(app.selected_trace(), Some(1));
     }
 
     #[test]

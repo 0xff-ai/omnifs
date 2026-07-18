@@ -115,25 +115,12 @@ pub(crate) fn show_browse_line(daemon_state: crate::inventory::DaemonState) -> b
 /// else the guest shell command, else the enable nudge. Never a bare path
 /// claim when nothing is observed. Names whichever mount sorts first, since
 /// no single mount is more relevant than another to a whole-workspace
-/// summary; a caller that already knows which mount it cares about should use
-/// [`browse_command_for`] instead.
+/// summary.
 pub(crate) fn browse_command(inventory: &Inventory) -> String {
     match primary_host_location(inventory) {
         Some(location) => {
             browse_from_location(location, inventory.mounts.first().map(|m| m.name.as_str()))
         },
-        None => browse_or_guest_fallback(inventory),
-    }
-}
-
-/// The browse action for one specific mount, by name: the same host-vs-guest
-/// precedence as [`browse_command`], but never deferring to
-/// `inventory.mounts.first()`. `mount add`'s single closing line (spec 3.3)
-/// needs the mount it just created, not whichever mount happens to sort
-/// first in the whole workspace.
-pub(crate) fn browse_command_for(inventory: &Inventory, mount: &str) -> String {
-    match primary_host_location(inventory) {
-        Some(location) => browse_from_location(location, Some(mount)),
         None => browse_or_guest_fallback(inventory),
     }
 }
@@ -292,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn browse_command_for_names_the_requested_mount_not_the_first_one() {
+    fn browse_command_defers_to_the_first_mount() {
         let inventory = Inventory::test(
             DaemonState::Running,
             vec![frontend(
@@ -303,30 +290,8 @@ mod tests {
             vec![mount("aaa-sorts-first"), mount("github")],
         );
         assert_eq!(
-            browse_command_for(&inventory, "github"),
-            "ls /mnt/omnifs-test-home/omnifs/github"
-        );
-        // The whole-workspace summary still defers to the first mount.
-        assert_eq!(
             browse_command(&inventory),
             "ls /mnt/omnifs-test-home/omnifs/aaa-sorts-first"
-        );
-    }
-
-    #[test]
-    fn browse_command_for_falls_back_to_the_guest_shell_without_a_host_frontend() {
-        let inventory = Inventory::test(
-            DaemonState::Running,
-            vec![frontend(
-                Runtime::Libkrun,
-                Some("/omnifs"),
-                FrontendState::Attached,
-            )],
-            vec![mount("github")],
-        );
-        assert_eq!(
-            browse_command_for(&inventory, "github"),
-            "omnifs frontend shell fuse --runtime libkrun"
         );
     }
 

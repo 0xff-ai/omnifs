@@ -313,6 +313,14 @@ impl Output {
     }
 }
 
+/// A caller-supplied destination for narration/progress text that this
+/// invocation would otherwise print itself. Boxed as a trait object (rather
+/// than a generic parameter) because [`Output`] is cloned freely through
+/// short-lived progress handles and command call chains, and every clone
+/// must carry the same concrete sink without infecting `Output`'s own type
+/// with a caller's closure type.
+type NarrationSink = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Output policy owned by one CLI invocation. Commands clone this handle and
 /// pass it through short-lived progress handles instead of consulting
 /// process-global switches.
@@ -325,6 +333,7 @@ pub(crate) struct Output {
     command: &'static str,
     state: Arc<Mutex<OutputState>>,
     stdout: Arc<Mutex<OutputWriter>>,
+    narration_sink: Option<NarrationSink>,
 }
 
 impl std::fmt::Debug for Output {
@@ -350,7 +359,34 @@ impl Output {
             command: "invocation",
             state: Arc::new(Mutex::new(OutputState::default())),
             stdout: Arc::new(Mutex::new(Box::new(io::stdout()))),
+            narration_sink: None,
         }
+    }
+
+    /// Redirect this invocation's narration and progress text into `sink`
+    /// instead of printing it. A caller that runs several operations whose
+    /// narration would otherwise each print their own rows (each one
+    /// fighting a shared live region's own redraw) instead folds every one
+    /// of those rows into whatever single visible line it owns (spec 3.2's
+    /// setup, which aggregates each frontend enable's narration into its
+    /// `frontends n/m attaching…` region row). This is an `Output`-owned
+    /// capability rather than a caller-side workaround so every existing
+    /// `narrate`/`note`/`ledger_row`/progress call site is redirected
+    /// automatically, with no changes needed at those call sites.
+    pub(crate) fn with_narration_sink(
+        mut self,
+        sink: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        self.narration_sink = Some(Arc::new(sink));
+        self
+    }
+
+    /// The sink this invocation's narration is redirected into, if any.
+    /// `Spinner`/`LiveRegion` read this directly (rather than going through
+    /// `narrate`/`ledger_row`) because their transient draw/erase mechanics
+    /// have no equivalent of those two methods to redirect through.
+    pub(crate) fn narration_sink(&self) -> Option<&NarrationSink> {
+        self.narration_sink.as_ref()
     }
 
     #[cfg(test)]
@@ -393,12 +429,18 @@ impl Output {
     /// A flat, ungated line: no gutter, no step marker, nothing that repeats
     /// once the terminal scrolls it away.
     pub(crate) fn narrate(&self, line: impl std::fmt::Display) {
-        if self.mode == OutputMode::Human && !self.quiet {
-            crate::ui::eprint_raw(&format!(
-                "{}\n",
-                crate::ui::style::accentuate(&line.to_string(), crate::ui::style::Stream::Stderr)
-            ));
+        if self.mode != OutputMode::Human || self.quiet {
+            return;
         }
+        let text = line.to_string();
+        if let Some(sink) = &self.narration_sink {
+            sink(&text);
+            return;
+        }
+        crate::ui::eprint_raw(&format!(
+            "{}\n",
+            crate::ui::style::accentuate(&text, crate::ui::style::Stream::Stderr)
+        ));
     }
 
     pub(crate) fn note(&self, line: impl std::fmt::Display) {
@@ -447,13 +489,18 @@ impl Output {
     /// as async work settles still reads as one aligned unit rather than
     /// each row sizing its own key column.
     pub(crate) fn ledger_row(&self, row: &super::render::LedgerRow, key_width: usize) {
-        if self.mode == OutputMode::Human {
-            let caps = stderr_capabilities(self.quiet);
-            crate::ui::eprint_raw(&format!(
-                "{}\n",
-                super::render::ledger_row_line(row, key_width, caps)
-            ));
+        if self.mode != OutputMode::Human {
+            return;
         }
+        if let Some(sink) = &self.narration_sink {
+            sink(&row.value);
+            return;
+        }
+        let caps = stderr_capabilities(self.quiet);
+        crate::ui::eprint_raw(&format!(
+            "{}\n",
+            super::render::ledger_row_line(row, key_width, caps)
+        ));
     }
 
     /// The consent plan preview (spec 2.7): a headline sentence naming the
@@ -647,6 +694,62 @@ impl From<crate::inventory::Verdict> for ResultVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- narration sink: setup's per-enable suppression mechanism -----------
+
+    #[test]
+    fn narrate_redirects_into_a_narration_sink_instead_of_printing() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let output = Output::new(OutputMode::Human, false)
+            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
+        output.narrate("Connecting to Docker");
+        assert_eq!(*seen.lock().unwrap(), ["Connecting to Docker".to_owned()]);
+    }
+
+    #[test]
+    fn quiet_suppresses_narration_even_with_a_sink_set() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let output = Output::new(OutputMode::Human, true)
+            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
+        output.narrate("should never appear");
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ledger_row_redirects_its_value_into_a_narration_sink_instead_of_printing() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let output = Output::new(OutputMode::Human, false)
+            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
+        let row = crate::ui::render::LedgerRow::new(
+            crate::ui::style::Glyph::Done,
+            "frontend image",
+            "ghcr.io/omnifs:latest ready",
+        );
+        output.ledger_row(&row, 9);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["ghcr.io/omnifs:latest ready".to_owned()]
+        );
+    }
+
+    #[test]
+    fn structured_output_never_reads_a_narration_sink() {
+        // The sink is a human-narration substitution; a structured
+        // invocation's `ledger_row` stays a no-op regardless of whether a
+        // sink happens to be set, the same as it already was without one.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        let output = Output::new(OutputMode::Json, false)
+            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
+        output.ledger_row(
+            &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "k", "v"),
+            1,
+        );
+        assert!(seen.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn invocation_policy_is_cloneable_and_explicit() {

@@ -260,6 +260,15 @@ impl TraceReducer {
         self.selected
     }
 
+    /// Force the selection to an exact identity, bypassing the usual
+    /// next/prev/visibility computation. Lets a choice made against one
+    /// reducer instance (e.g. the paused snapshot) be projected onto
+    /// another (the live reducer) at the same trace identity, so the two
+    /// don't drift apart while the view is frozen.
+    pub fn set_selected(&mut self, trace_id: Option<TraceId>) {
+        self.selected = trace_id;
+    }
+
     /// Durable session counters. Unlike every other accessor here, callers
     /// needing the quit receipt should read this off the live reducer, not
     /// a paused snapshot: pausing must not make the receipt undercount.

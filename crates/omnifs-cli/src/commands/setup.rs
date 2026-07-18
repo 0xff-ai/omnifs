@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -216,6 +217,19 @@ impl SetupArgs {
     /// because it runs these enables itself, so this reuses
     /// `FrontendEnableArgs::enable` directly rather than `Launcher`'s
     /// reattachment wait.
+    ///
+    /// Each `enable` call narrates its own progress (a Docker image pull
+    /// spinner, container lifecycle lines) through `Output`, and left alone
+    /// those rows would print into scrollback while the aggregate region
+    /// above is still drawn, so every redraw of one fights the other's
+    /// cursor math. Instead, each `enable` gets an `Output` clone whose
+    /// narration is redirected (`Output::with_narration_sink`) into this
+    /// region's one `frontends` line, combined with the running
+    /// `n/m attaching…` counter, so a slow image pull still reads as live
+    /// text instead of vanishing into a suppressed row. The region is
+    /// shared behind a `Mutex` because the sink closure and this loop both
+    /// need to drive it: the closure updates it live while `enable` runs,
+    /// and the loop updates it between calls as each result lands.
     async fn enable_frontends(
         workspace: &Workspace,
         output: &Output,
@@ -223,23 +237,34 @@ impl SetupArgs {
     ) -> Result<Vec<FrontendResult>> {
         let total = frontends.len();
         let key_width = Output::ledger_block_width(&["frontends"]);
-        let mut region = LiveRegion::new(output.clone(), ["frontends"]);
-        region.update("frontends", format!("0/{total} attaching…"));
+        let region = Arc::new(Mutex::new(LiveRegion::new(output.clone(), ["frontends"])));
+        update_region(&region, format!("0/{total} attaching…"));
         let mut results = Vec::with_capacity(total);
         for (filesystem, runtime) in frontends {
+            let attached_so_far = results
+                .iter()
+                .filter(|result: &&FrontendResult| result.state == FrontendResultState::Attached)
+                .count();
+            let sink_region = Arc::clone(&region);
+            let enable_output = output.clone().with_narration_sink(move |line| {
+                update_region(
+                    &sink_region,
+                    format!("{attached_so_far}/{total} attaching… {line}"),
+                );
+            });
             let result = FrontendEnableArgs {
                 filesystem: *filesystem,
                 runtime: Some(*runtime),
                 location: None,
             }
-            .enable(workspace, output.clone())
+            .enable(workspace, enable_output)
             .await?;
             results.push(result);
             let attached = results
                 .iter()
                 .filter(|result| result.state == FrontendResultState::Attached)
                 .count();
-            region.update("frontends", format!("{attached}/{total} attaching…"));
+            update_region(&region, format!("{attached}/{total} attaching…"));
         }
         let attached = results
             .iter()
@@ -250,6 +275,16 @@ impl SetupArgs {
         } else {
             Glyph::Warn
         };
+        // Every sink clone above is scoped to one loop iteration's `enable`
+        // call and is dropped when that call returns, so by the time the
+        // loop exits this is the only remaining handle: safe to reclaim the
+        // region out of the `Arc<Mutex<_>>` and call the consuming
+        // `finish`.
+        let region = Arc::try_unwrap(region)
+            .ok()
+            .expect("no enable() call outlives its own loop iteration")
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner);
         region.finish(
             glyph,
             "frontends",
@@ -280,6 +315,17 @@ impl SetupArgs {
         }
         output.outro(block.closing_sentence);
     }
+}
+
+/// Update the shared aggregate region from either the loop in
+/// [`SetupArgs::enable_frontends`] or one of its per-enable narration sink
+/// closures. A tiny free function rather than inlining the lock at each call
+/// site, since both callers need the exact same poisoning behavior.
+fn update_region(region: &Arc<Mutex<LiveRegion>>, text: String) {
+    region
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .update("frontends", text);
 }
 
 /// Split `requested` provider names (the explicit `--providers` path) into

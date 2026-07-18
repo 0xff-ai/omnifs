@@ -75,6 +75,12 @@ pub(crate) struct Spinner {
     frame: usize,
     next_update: Instant,
     drawn: bool,
+    /// Physical rows the last real draw occupied (0 when nothing has been
+    /// drawn on the real terminal yet, including every draw redirected
+    /// through a narration sink instead). A spinner line can wrap past one
+    /// column just like a multi-line frame, so the next draw must move up
+    /// past every wrapped row, not just one, before overwriting it.
+    drawn_rows: usize,
 }
 
 impl Spinner {
@@ -88,6 +94,7 @@ impl Spinner {
             frame: 0,
             next_update: Instant::now(),
             drawn: false,
+            drawn_rows: 0,
         }
     }
 
@@ -104,20 +111,35 @@ impl Spinner {
             return;
         }
         self.next_update = now + UPDATE_INTERVAL;
+        // Setup folds several concurrent enables' narration into one
+        // aggregate live region instead of letting each print its own row
+        // (spec 3.2); redirecting here rather than drawing keeps this
+        // spinner's row suppressed the same way `Output::narrate` and
+        // `Output::ledger_row` already redirect for the same sink.
+        if let Some(sink) = self.output.narration_sink() {
+            sink(text);
+            self.drawn = true;
+            return;
+        }
         if !self.tty || self.started.elapsed() < APPEARANCE_DELAY {
             return;
         }
         self.frame = (self.frame + 1) % SPINNER_FRAMES.len();
+        let line = spinner_line(SPINNER_FRAMES[self.frame], &self.key, text, self.key_width);
         let mut err = std::io::stderr();
+        // Move up over every row the previous draw wrapped onto (not just
+        // one) before clearing: a spinner line can exceed the terminal
+        // width just like a multi-line frame, and `\r` alone only returns
+        // to column 0 of whatever row auto-wrap left the cursor on.
+        if self.drawn_rows > 1 {
+            let _ = queue!(err, cursor::MoveUp(rows(self.drawn_rows - 1)));
+        }
         let _ = write!(err, "\r");
-        let _ = queue!(err, Clear(ClearType::CurrentLine));
-        let _ = write!(
-            err,
-            "{}",
-            spinner_line(SPINNER_FRAMES[self.frame], &self.key, text, self.key_width)
-        );
+        let _ = queue!(err, Clear(ClearType::FromCursorDown));
+        let _ = write!(err, "{line}");
         let _ = err.flush();
         self.drawn = true;
+        self.drawn_rows = render::physical_rows(&line, render::terminal_width());
     }
 
     pub(crate) fn update_bytes_with(
@@ -149,10 +171,18 @@ impl Spinner {
         if !self.output.show_progress() {
             return;
         }
-        if self.drawn {
+        // A sink-redirected spinner never drew its own line on the real
+        // terminal (`update` returned early into the sink instead), so
+        // there is nothing here to clear; issuing a raw cursor move/clear
+        // anyway would corrupt whatever the sink's owner has since drawn at
+        // the real cursor position (setup's aggregate live region).
+        if self.drawn && self.output.narration_sink().is_none() {
             let mut err = std::io::stderr();
+            if self.drawn_rows > 1 {
+                let _ = queue!(err, cursor::MoveUp(rows(self.drawn_rows - 1)));
+            }
             let _ = write!(err, "\r");
-            let _ = queue!(err, Clear(ClearType::CurrentLine));
+            let _ = queue!(err, Clear(ClearType::FromCursorDown));
             let _ = err.flush();
         }
         let value = value.to_string();
@@ -288,32 +318,50 @@ impl LiveRegion {
         self.draw();
     }
 
+    /// `drawn_lines` tracks physical terminal rows, not logical region
+    /// lines: a unit's text wider than the terminal wraps onto more than one
+    /// row, and the `MoveUp` above moves by rows, so counting logical lines
+    /// would undercount and leave stale rows from the previous draw on
+    /// screen. A single `Clear(FromCursorDown)` replaces the previous
+    /// per-line `Clear(CurrentLine)` loop for the same reason: a unit's
+    /// wrapped row count can shrink between draws (a spinner settling to
+    /// shorter text), and clearing only the rows the *new* frame occupies
+    /// would leave that now-unused wrapped remnant on screen. Terminal width
+    /// is sampled fresh per draw (see `render::terminal_width`'s why-comment
+    /// on why a cached width would corrupt tracking across a mid-session
+    /// resize).
     fn draw(&mut self) {
         let mut err = std::io::stderr();
         if self.drawn_lines > 0 {
             let _ = queue!(err, cursor::MoveUp(rows(self.drawn_lines)));
         }
-        for line in region_frame(&self.units, SPINNER_FRAMES[self.frame]) {
-            let _ = queue!(err, Clear(ClearType::CurrentLine));
+        let _ = queue!(err, Clear(ClearType::FromCursorDown));
+        let frame = region_frame(&self.units, SPINNER_FRAMES[self.frame]);
+        for line in &frame {
             let _ = write!(err, "{line}\r\n");
         }
-        self.drawn_lines = self.units.len();
+        let width = render::terminal_width();
+        self.drawn_lines = frame
+            .iter()
+            .map(|line| render::physical_rows(line, width))
+            .sum();
         let _ = err.flush();
     }
 
     /// Erase every drawn region line, leaving the cursor where the region
     /// started. A no-op when nothing was ever drawn (non-TTY, quiet, or a
-    /// group that settled before its appearance delay elapsed).
+    /// group that settled before its appearance delay elapsed). One
+    /// `Clear(FromCursorDown)` after the `MoveUp` covers every wrapped row
+    /// the last draw occupied, whatever `drawn_lines`' physical-row count
+    /// happens to be, rather than looping a fixed `MoveDown(1)` per logical
+    /// line, which assumed one row per line.
     fn erase(&mut self) {
         if !self.tty || self.drawn_lines == 0 {
             return;
         }
         let mut err = std::io::stderr();
         let _ = queue!(err, cursor::MoveUp(rows(self.drawn_lines)));
-        for _ in 0..self.drawn_lines {
-            let _ = queue!(err, Clear(ClearType::CurrentLine), cursor::MoveDown(1));
-        }
-        let _ = queue!(err, cursor::MoveUp(rows(self.drawn_lines)));
+        let _ = queue!(err, Clear(ClearType::FromCursorDown));
         let _ = err.flush();
         self.drawn_lines = 0;
     }
@@ -449,5 +497,36 @@ mod tests {
         region.update("missing", "ignored");
         region.settle("missing", Glyph::Done, "ignored");
         assert!(region.units.iter().all(|unit| unit.text.is_empty()));
+    }
+
+    // -- Spinner narration-sink redirection (setup's per-enable suppression) -
+
+    #[test]
+    fn spinner_update_redirects_into_a_narration_sink_instead_of_drawing() {
+        // The sink path runs before the real-TTY check, so it is
+        // deterministically testable even though this test binary's stderr
+        // is not a terminal (`Spinner::tty` would otherwise gate the draw
+        // out entirely).
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_seen = std::sync::Arc::clone(&seen);
+        let output = Output::new(super::super::output::OutputMode::Human, false)
+            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
+        let mut spinner = Spinner::new(output, "frontend image", 9);
+        spinner.update("pulling layer 1/3");
+        assert_eq!(*seen.lock().unwrap(), ["pulling layer 1/3".to_owned()]);
+    }
+
+    #[test]
+    fn spinner_settle_redirects_the_final_value_into_a_narration_sink() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_seen = std::sync::Arc::clone(&seen);
+        let output = Output::new(super::super::output::OutputMode::Human, false)
+            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
+        let mut spinner = Spinner::new(output, "frontend image", 9);
+        spinner.update("pulling");
+        spinner.settle_ok("ghcr.io/omnifs:latest ready");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen[1].contains("ghcr.io/omnifs:latest ready"), "{seen:?}");
     }
 }

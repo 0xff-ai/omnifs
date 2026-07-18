@@ -57,6 +57,41 @@ pub(crate) fn display_width(text: &str) -> usize {
         .sum()
 }
 
+/// The terminal's current column width, sampled fresh on every call rather
+/// than cached. Callers here are raw-mode frame drawers (`ui/prompt.rs`,
+/// `ui/live.rs`) that redraw repeatedly over one interactive session, and a
+/// mid-session resize must be picked up by the very next frame instead of
+/// silently wrapping against a stale width. `80` is the same conservative
+/// fallback `stdout_capabilities`/`stderr_capabilities` fall back to when
+/// `crossterm::terminal::size` itself errors; unlike those two, this probe
+/// never substitutes the wider piped-output default, since every caller here
+/// has already confirmed a live TTY (raw mode requires one to enter at all).
+pub(crate) fn terminal_width() -> usize {
+    crossterm::terminal::size().map_or(80, |(columns, _rows)| usize::from(columns))
+}
+
+/// The number of physical terminal rows one logical `line` occupies once the
+/// terminal wraps it: `ceil(display_width / width)`. `width == 0` (no
+/// terminal size available) disables wrapping, so the line always occupies
+/// exactly one row; an empty line also occupies exactly one row rather than
+/// zero, since a drawn blank line still consumes a row on screen. A line
+/// whose width is an exact multiple of `width` fills those rows completely
+/// and never spills an extra blank row underneath: a terminal only wraps
+/// once content actually exceeds the column, never on a line that lands
+/// exactly at the edge.
+///
+/// The one owner of this math: every raw-mode frame drawer that tracks drawn
+/// rows (`ui/prompt.rs`'s `redraw`/`erase`, `ui/live.rs`'s
+/// `LiveRegion::draw`/`erase` and `Spinner`) computes through this function
+/// instead of re-deriving the ceiling division locally, so a `MoveUp` always
+/// targets the row a previous frame actually wrapped onto.
+pub(crate) fn physical_rows(line: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    display_width(line).div_ceil(width).max(1)
+}
+
 /// Greedy word-wrap to `width` columns. `width == 0` disables wrapping
 /// (returns the text as one line) rather than producing an infinite column of
 /// single characters.
@@ -586,6 +621,37 @@ mod tests {
         for text in [count(0, "mount"), count(1, "mount"), count(2, "mount")] {
             assert!(!text.contains("(s)"), "{text:?}");
         }
+    }
+
+    // -- physical_rows: the one owner of wrap-aware row counting ------------
+
+    #[test]
+    fn physical_rows_is_one_for_a_line_exactly_at_the_width() {
+        assert_eq!(physical_rows(&"x".repeat(80), 80), 1);
+    }
+
+    #[test]
+    fn physical_rows_wraps_a_line_one_column_over_the_width() {
+        assert_eq!(physical_rows(&"x".repeat(81), 80), 2);
+    }
+
+    #[test]
+    fn physical_rows_measures_display_width_not_byte_length_through_ansi() {
+        // An 81-column line still wraps to 2 rows once colored, because the
+        // ANSI escapes it gained are stripped before measuring, the same way
+        // `display_width` already treats them as zero-width.
+        let colored = style::accent("x".repeat(81), true);
+        assert_eq!(physical_rows(&colored, 80), 2);
+    }
+
+    #[test]
+    fn physical_rows_never_wraps_when_the_terminal_width_is_unknown() {
+        assert_eq!(physical_rows(&"x".repeat(500), 0), 1);
+    }
+
+    #[test]
+    fn physical_rows_is_one_for_an_empty_line() {
+        assert_eq!(physical_rows("", 80), 1);
     }
 
     #[test]

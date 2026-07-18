@@ -132,6 +132,19 @@ fn next_key_press() -> io::Result<Option<KeyEvent>> {
 /// clear everything below the cursor, then print the new lines with explicit
 /// line breaks (raw mode disables the terminal's own CR-on-LF translation).
 /// Shared with `splash.rs`, the other raw-mode frame drawer.
+///
+/// `*drawn` is a count of physical terminal rows, not logical `lines`: a line
+/// wider than the terminal wraps onto more than one row, and `MoveUp` moves
+/// by rows, so undercounting by logical line count would move up too little
+/// and leave stale frame lines from the previous draw on screen (visible as
+/// duplicated/garbled frames once a drawn line is wide enough to wrap, e.g. a
+/// long pasted token in the masked `Password` prompt). Terminal width is
+/// sampled fresh here (never cached across calls) via
+/// `render::terminal_width`, so a resize mid-prompt only affects the next
+/// frame's own row count going forward; the previous frame's row count
+/// (already resolved into physical rows by the prior call) stays correct for
+/// this call's `MoveUp` regardless, since a terminal does not retroactively
+/// reflow rows it already committed to the screen.
 pub(crate) fn redraw(drawn: &mut usize, lines: &[String]) -> io::Result<()> {
     let mut out = io::stderr();
     if *drawn > 0 {
@@ -143,12 +156,19 @@ pub(crate) fn redraw(drawn: &mut usize, lines: &[String]) -> io::Result<()> {
         queue!(out, MoveToNextLine(1))?;
     }
     out.flush()?;
-    *drawn = lines.len();
+    let width = super::render::terminal_width();
+    *drawn = lines
+        .iter()
+        .map(|line| super::render::physical_rows(line, width))
+        .sum();
     Ok(())
 }
 
 /// Erase a drawn frame and leave the cursor where the frame started, so the
 /// durable echo prints immediately below whatever preceded the prompt.
+/// `drawn` must already be a physical row count (as [`redraw`] produces),
+/// not a logical line count; this function has no line text to measure, so
+/// it trusts the caller's count rather than re-deriving it.
 pub(crate) fn erase(drawn: usize) -> io::Result<()> {
     let mut out = io::stderr();
     if drawn > 0 {

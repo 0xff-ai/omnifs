@@ -7,7 +7,9 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{install_test_provider, omnifs_bin, release_wasm_dir};
+use common::{
+    free_port, install_fixture_provider, install_test_provider, omnifs_bin, release_wasm_dir,
+};
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
 use omnifs_workspace::mounts::Repository;
@@ -74,6 +76,42 @@ fn install_web_provider(fixture: &Fixture) {
             .expect("validate web provider");
     let store = omnifs_workspace::provider::ProviderStore::new(&providers_dir);
     store.retain(&artifact).expect("retain web provider");
+}
+
+/// A fixture provider manifest with one static-token scheme whose validation
+/// probe targets `port`, for tests that need a deterministic auth failure
+/// without a real upstream. Pointing the probe at a bound-then-dropped
+/// ephemeral port makes the connection refuse immediately rather than time
+/// out, so the failure is fast and reliable.
+fn static_token_manifest(id: &str, port: u16) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "displayName": id,
+        "provider": format!("omnifs_provider_{id}.wasm"),
+        "defaultMount": id,
+        "refreshIntervalSecs": 0,
+        "capabilities": [
+            { "kind": "domain", "value": "127.0.0.1", "why": "validate the static token" }
+        ],
+        "auth": {
+            "default": "pat",
+            "schemes": [
+                {
+                    "staticToken": {
+                        "key": "pat",
+                        "valuePrefix": "",
+                        "description": "test token",
+                        "injectDomains": ["127.0.0.1"],
+                        "validation": {
+                            "method": "GET",
+                            "url": format!("http://127.0.0.1:{port}/"),
+                            "expectStatus": 200
+                        }
+                    }
+                }
+            ]
+        }
+    })
 }
 
 fn exit_code(output: &Output) -> i32 {
@@ -534,6 +572,62 @@ fn mount_add_json_receipt_names_the_mount() {
             Some("ready" | "sign_in_declined")
         ),
         "unexpected status: {json}"
+    );
+}
+
+/// A failed static-token validation must abort before `persist_mount_spec`
+/// runs (`stages.rs::MountInitPlan::authenticate`'s `?` propagates the error
+/// straight out of `configure_mount`), so nothing is ever written and the
+/// `✓ mount ... created` row never prints for a mount that does not exist.
+#[test]
+fn mount_add_auth_failure_writes_no_spec_and_prints_no_created_row() {
+    let fixture = Fixture::new();
+    let providers_dir = fixture.home_path().join("providers");
+
+    // Bind then immediately drop an ephemeral port: nothing else claims it in
+    // the meantime, so a connection to it refuses instantly instead of
+    // hanging for the validator's 15s timeout.
+    let port = free_port();
+    let manifest = static_token_manifest("authfail", port);
+    let provider_id = install_fixture_provider(&providers_dir, &manifest).to_string();
+
+    let output = Command::new(omnifs_bin())
+        .args([
+            "mount",
+            "add",
+            &provider_id,
+            "--no-input",
+            "--yes",
+            "--token-env",
+            "AUTHFAIL_TOKEN",
+        ])
+        .env("OMNIFS_HOME", fixture.home_path())
+        .env("OMNIFS_MOUNT_POINT", &fixture.mount_point)
+        .env("AUTHFAIL_TOKEN", "bogus-token")
+        .env("NO_COLOR", "1")
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|error| panic!("spawn omnifs mount add: {error}"));
+
+    assert_ne!(
+        exit_code(&output),
+        0,
+        "an unreachable validation endpoint must fail the add\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("created"),
+        "the mount row must never claim creation when nothing was persisted: {stderr}"
+    );
+    assert!(
+        stderr.contains("validat"),
+        "the real validation failure should still surface: {stderr}"
+    );
+    assert!(
+        !fixture.home_path().join("mounts/authfail.json").exists(),
+        "a failed auth flow must not write a mount spec"
     );
 }
 

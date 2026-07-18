@@ -83,27 +83,16 @@ impl AddArgs {
         .await?;
         match outcome.status {
             crate::stages::MountInitStatus::Ready => {
-                // The single closing line (spec 3.3) depends on whether
-                // anything is already serving this mount: a running daemon
-                // gets the concrete browse action for the mount just added,
-                // never `omnifs up` (a no-op there); a stopped daemon gets
-                // the `up` hint instead, exactly once.
-                let running = crate::client::DaemonClient::for_workspace(workspace)
-                    .ready()
-                    .await;
-                if running {
-                    let inventory = crate::inventory::Inventory::collect(workspace).await?;
-                    output.outro(format!(
-                        "Mounted `{}`. Already serving: `{}`",
-                        outcome.mount_name,
-                        crate::ui::access::browse_command_for(&inventory, &outcome.mount_name)
-                    ));
-                } else {
-                    output.outro(format!(
-                        "Mounted `{0}` at /{0}. Serve it: `omnifs up`",
-                        outcome.mount_name
-                    ));
-                }
+                // `mount add` only ever commits a new desired revision; a
+                // daemon (if one happens to be running) still serves whatever
+                // revision it applied at its own last start, so the mount
+                // just added is never already serving. The `omnifs up` hint
+                // is the only honest closing line here, exactly once,
+                // regardless of daemon liveness (spec 3.3).
+                output.outro(format!(
+                    "Mounted `{0}` at /{0}. Serve it: `omnifs up`",
+                    outcome.mount_name
+                ));
             },
             crate::stages::MountInitStatus::SignInDeclined => {
                 output.outro(format!(
