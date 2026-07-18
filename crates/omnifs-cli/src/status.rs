@@ -2,6 +2,7 @@
 
 use crate::error::ExitCode;
 use crate::inventory::{DaemonState, FrontendStatus, Inventory, MountStatus, Severity};
+use crate::ui::render::count;
 use crate::ui::table::{
     Action as TableAction, Block as TableBlock, Cell as TableCell, Column as TableColumn,
     ContextStrip as TableContext, Meta as TableMeta, Priority as TablePriority,
@@ -49,17 +50,23 @@ impl InventoryReport {
             DaemonState::Unreachable => TableState::failure("unreachable"),
             DaemonState::Failed => TableState::failure("failed"),
         };
-        let mut metadata = vec![
-            TableMeta::new(
-                "Daemon",
-                self.inventory
-                    .daemon
-                    .pid()
-                    .map_or_else(|| "stopped".to_owned(), |pid| pid.to_string()),
-            ),
-            TableMeta::new("namespace", "/"),
-        ];
-        if let Some(warmup) = &self.inventory.warmup {
+        let mut metadata = match self.inventory.daemon.pid() {
+            Some(pid) => vec![
+                TableMeta::new("daemon", format!("pid {pid}")),
+                TableMeta::new("serving", count(self.inventory.mounts.len(), "mount")),
+                TableMeta::new(
+                    "",
+                    count(attached_frontend_count(&self.inventory), "frontend"),
+                ),
+            ],
+            None => vec![TableMeta::new(
+                "",
+                format!("{} configured", count(self.inventory.mounts.len(), "mount")),
+            )],
+        };
+        if let Some(warmup) = &self.inventory.warmup
+            && !warmup.is_complete()
+        {
             metadata.push(TableMeta::new("provider warmup", warmup.summary()));
         }
         let mut context = TableContext::new(
@@ -68,14 +75,8 @@ impl InventoryReport {
             context_state,
         )
         .with_metadata(metadata);
-        match daemon_state {
-            DaemonState::Stopped => {
-                context = context.with_action(TableAction::fix("omnifs up"));
-            },
-            DaemonState::Failed | DaemonState::Unreachable => {
-                context = context.with_action(TableAction::fix("omnifs logs"));
-            },
-            DaemonState::Starting | DaemonState::Running | DaemonState::Degraded => {},
+        if let Some(fix) = daemon_state.context_fix() {
+            context = context.with_action(TableAction::fix(fix));
         }
         report.push(TableBlock::Context(context));
 
@@ -87,6 +88,14 @@ impl InventoryReport {
 
         report
     }
+}
+
+fn attached_frontend_count(inventory: &Inventory) -> usize {
+    inventory
+        .frontends
+        .iter()
+        .filter(|frontend| frontend.state.provides_access())
+        .count()
 }
 
 fn provider_label(mount: &MountStatus) -> String {
@@ -122,7 +131,7 @@ pub(crate) fn frontend_table(frontends: &[FrontendStatus]) -> TableResources {
                         .as_deref()
                         .map_or_else(|| "/omnifs".into(), |path| path.display().to_string()),
                 ),
-                TableCell::new(format!("all {} mounts", frontend.mount_count)),
+                TableCell::new(format!("all {}", count(frontend.mount_count, "mount"))),
                 TableCell::state(table_state(
                     frontend.state.severity(),
                     frontend.state.label(),
@@ -160,7 +169,7 @@ pub(crate) fn mount_table(mounts: &[MountStatus]) -> TableResources {
                 TableCell::new(if mount.access_count == 0 {
                     "none".into()
                 } else {
-                    format!("{} frontends", mount.access_count)
+                    count(mount.access_count, "frontend")
                 }),
             ],
             mount_row_state(mount),
@@ -173,25 +182,24 @@ pub(crate) fn mount_table(mounts: &[MountStatus]) -> TableResources {
     table
 }
 
-fn mount_row_state(mount: &MountStatus) -> TableState {
-    let severity = [
-        mount.provider.state.severity(),
-        mount.auth.severity(),
-        mount.serving.severity(),
-    ]
-    .into_iter()
-    .max_by_key(|severity| severity.rank())
-    .unwrap_or(Severity::Neutral);
-    let label = if mount.provider.state.severity().rank() >= mount.auth.severity().rank()
-        && mount.provider.state.severity().rank() >= mount.serving.severity().rank()
-    {
-        mount.provider.state.label()
-    } else if mount.auth.severity().rank() >= mount.serving.severity().rank() {
-        mount.auth.label()
-    } else {
-        mount.serving.label()
-    };
-    table_state(severity, label)
+/// One honest headline label per explicit precedence: a provider pin
+/// needing attention or failing outranks an auth needing attention, which
+/// outranks the serving state itself (healthy or not). This is a fixed
+/// priority order, never a generic "most severe of three" tie-break: a
+/// merely-informational `Severity` (auth `not needed` is `Neutral`, the
+/// same rank as `stopped`) must never beat a genuinely live mount's serving
+/// state just because it sorts alongside a higher-severity row elsewhere.
+pub(crate) fn mount_row_state(mount: &MountStatus) -> TableState {
+    if mount.provider.state.severity() >= Severity::Attention {
+        return table_state(
+            mount.provider.state.severity(),
+            mount.provider.state.label(),
+        );
+    }
+    if mount.auth.severity() >= Severity::Attention {
+        return table_state(mount.auth.severity(), mount.auth.label());
+    }
+    table_state(mount.serving.severity(), mount.serving.label())
 }
 
 fn table_state(severity: Severity, label: impl Into<String>) -> TableState {
@@ -222,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn context_metadata_uses_namespace_identity() {
+    fn stopped_context_metadata_names_configured_mounts_not_a_stale_pid() {
         let rendered =
             report(DaemonState::Stopped)
                 .render()
@@ -230,9 +238,125 @@ mod tests {
                     width: 120,
                     color: false,
                 });
-        assert!(rendered.contains("Daemon stopped · namespace /"));
-        assert!(!rendered.contains("Namespace namespace"));
-        assert!(rendered.contains("Fix  omnifs up"));
+        assert!(rendered.contains("0 mounts configured"), "{rendered}");
+        assert!(rendered.contains("fix:  omnifs up"));
+    }
+
+    #[test]
+    fn running_context_metadata_reports_pid_mounts_and_frontends_as_one_sentence() {
+        let inventory = Inventory::test(
+            DaemonState::Running,
+            vec![crate::inventory::FrontendStatus {
+                filesystem: crate::commands::frontend::FrontendFilesystem::Nfs,
+                runtime: crate::commands::frontend::FrontendRuntime::Host,
+                location: Some("/Users/raul/omnifs".into()),
+                state: crate::inventory::FrontendState::Attached,
+                scope: "all",
+                mount_count: 1,
+                fix: None,
+            }],
+            Vec::new(),
+        );
+        let rendered =
+            InventoryReport { inventory }
+                .render()
+                .render_with(crate::ui::table::RenderOptions {
+                    width: 120,
+                    color: false,
+                });
+        assert!(
+            rendered.contains("daemon pid 1, serving 0 mounts, 1 frontend"),
+            "{rendered}"
+        );
+    }
+
+    /// the full shape: context line, `Frontends` and `Mounts`
+    /// sections, and a degraded mount row carrying its `fix:` line on the
+    /// following line, full width, never truncated. (`Inventory::test`
+    /// fixes the daemon pid at 1 rather than the illustrative
+    /// 31114; the row shapes below are asserted structurally, not against
+    /// that placeholder digit.)
+    #[test]
+    fn status_report_matches_the_documented_shape_with_a_degraded_row() {
+        let inventory = Inventory::test(
+            DaemonState::Running,
+            vec![crate::inventory::FrontendStatus {
+                filesystem: crate::commands::frontend::FrontendFilesystem::Nfs,
+                runtime: crate::commands::frontend::FrontendRuntime::Host,
+                location: Some("/Users/raul/omnifs".into()),
+                state: crate::inventory::FrontendState::Attached,
+                scope: "all",
+                mount_count: 2,
+                fix: None,
+            }],
+            vec![
+                MountStatus {
+                    name: "github".into(),
+                    root: "/github".into(),
+                    provider: crate::inventory::ProviderPin {
+                        name: "github".into(),
+                        version: Some("0.3.2".into()),
+                        artifact: "a".repeat(64),
+                        state: crate::inventory::ProviderPinState::Available,
+                    },
+                    auth: crate::inventory::AuthState::Ready,
+                    serving: crate::inventory::ServingState::Live,
+                    access_count: 1,
+                    fix: None,
+                },
+                MountStatus {
+                    name: "linear".into(),
+                    root: "/linear".into(),
+                    provider: crate::inventory::ProviderPin {
+                        name: "linear".into(),
+                        version: Some("0.4.0".into()),
+                        artifact: "b".repeat(64),
+                        state: crate::inventory::ProviderPinState::Available,
+                    },
+                    auth: crate::inventory::AuthState::Expired {
+                        command: "omnifs mount reauth linear".into(),
+                    },
+                    serving: crate::inventory::ServingState::Live,
+                    access_count: 1,
+                    fix: Some("omnifs mount reauth linear".into()),
+                },
+            ],
+        );
+        let rendered =
+            InventoryReport { inventory }
+                .render()
+                .render_with(crate::ui::table::RenderOptions {
+                    width: 120,
+                    color: false,
+                });
+
+        let lines = rendered.lines().collect::<Vec<_>>();
+        assert!(lines[0].starts_with("omnifs  "), "{rendered}");
+        // The `linear` mount's expired auth makes this inventory genuinely
+        // degraded, so the header state honestly reflects that rather than
+        // the illustrative all-clear `● healthy`.
+        assert!(lines[0].trim_end().ends_with("▲ degraded"), "{rendered}");
+        assert!(
+            lines[1].contains("daemon pid 1, serving 2 mounts, 1 frontend"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Frontends"), "{rendered}");
+        assert!(rendered.contains("Mounts"), "{rendered}");
+        assert!(rendered.contains("github"), "{rendered}");
+        assert!(rendered.contains("● live"), "{rendered}");
+
+        // The degraded `linear` row headlines its own auth state and carries
+        // its fix on the following line.
+        let linear_index = lines
+            .iter()
+            .position(|line| line.contains("linear"))
+            .expect("linear row");
+        assert!(lines[linear_index].contains("▲ expired"), "{rendered}");
+        assert_eq!(
+            lines[linear_index + 1].trim(),
+            "fix:  omnifs mount reauth linear",
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -244,7 +368,7 @@ mod tests {
                 width: 120,
                 color: false,
             });
-        assert!(!healthy_text.contains("Fix  omnifs"));
+        assert!(!healthy_text.contains("fix:  omnifs"));
 
         let unreachable = report(DaemonState::Unreachable).render().render_with(
             crate::ui::table::RenderOptions {
@@ -253,6 +377,76 @@ mod tests {
             },
         );
         assert!(unreachable.contains("× unreachable"));
-        assert!(unreachable.contains("Fix  omnifs logs"));
+        assert!(unreachable.contains("fix:  omnifs logs"));
+    }
+
+    /// Regression for the footgun this slice fixes: a live mount whose auth
+    /// needs none (`Severity::Neutral`, same rank as `Serving::Stopped`)
+    /// must headline as `live`, never lose to the merely-informational
+    /// `not needed` auth label through a generic "most severe" tie-break.
+    #[test]
+    fn live_mount_headlines_serving_state_not_a_neutral_auth_label() {
+        let mount = MountStatus {
+            name: "dns".into(),
+            root: "/dns".into(),
+            provider: crate::inventory::ProviderPin {
+                name: "dns".into(),
+                version: Some("0.2.1".into()),
+                artifact: "a".repeat(64),
+                state: crate::inventory::ProviderPinState::Available,
+            },
+            auth: crate::inventory::AuthState::NotNeeded,
+            serving: crate::inventory::ServingState::Live,
+            access_count: 0,
+            fix: None,
+        };
+        let state = mount_row_state(&mount);
+        let rendered = format!("{state:?}");
+        assert!(rendered.contains("live"), "{rendered}");
+        assert!(!rendered.contains("not needed"), "{rendered}");
+    }
+
+    #[test]
+    fn provider_error_outranks_a_live_serving_state() {
+        let mount = MountStatus {
+            name: "github".into(),
+            root: "/github".into(),
+            provider: crate::inventory::ProviderPin {
+                name: "github".into(),
+                version: None,
+                artifact: "a".repeat(64),
+                state: crate::inventory::ProviderPinState::Corrupt {
+                    message: "digest mismatch".into(),
+                },
+            },
+            auth: crate::inventory::AuthState::Ready,
+            serving: crate::inventory::ServingState::Live,
+            access_count: 0,
+            fix: None,
+        };
+        let rendered = format!("{:?}", mount_row_state(&mount));
+        assert!(rendered.contains("corrupt"), "{rendered}");
+    }
+
+    #[test]
+    fn auth_needing_attention_outranks_a_stopped_serving_state() {
+        let mount = MountStatus {
+            name: "github".into(),
+            root: "/github".into(),
+            provider: crate::inventory::ProviderPin {
+                name: "github".into(),
+                version: None,
+                artifact: "a".repeat(64),
+                state: crate::inventory::ProviderPinState::Available,
+            },
+            auth: crate::inventory::AuthState::Expired {
+                command: "omnifs mount reauth github".into(),
+            },
+            serving: crate::inventory::ServingState::Stopped,
+            access_count: 0,
+            fix: None,
+        };
+        let rendered = format!("{:?}", mount_row_state(&mount));
+        assert!(rendered.contains("expired"), "{rendered}");
     }
 }

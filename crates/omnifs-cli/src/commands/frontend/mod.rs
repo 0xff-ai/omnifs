@@ -47,6 +47,7 @@ impl FrontendArgs {
     }
 }
 
+pub(crate) use discovery::available_frontends;
 pub(crate) use lifecycle::{
     FrontendEnableArgs, FrontendFilesystem, FrontendId, FrontendResult, FrontendResultState,
     FrontendRuntime,

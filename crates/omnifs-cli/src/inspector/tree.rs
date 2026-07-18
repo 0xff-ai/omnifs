@@ -323,6 +323,21 @@ impl MountForest {
         node.manually_collapsed = !node.manually_collapsed;
         Some(node.manually_collapsed)
     }
+
+    /// Set the manual collapse flag on `(mount, path)` to an exact value
+    /// rather than toggling it. Lets a collapse choice made against one
+    /// forest instance (e.g. the paused snapshot) be projected onto
+    /// another (the live forest) at the same node identity. A missing
+    /// node is a silent no-op: the node can only be missing from the live
+    /// forest if it was never touched before the pause, in which case it
+    /// was never rendered for the user to collapse in the first place.
+    pub fn set_collapsed(&mut self, mount: &str, path: &str, collapsed: bool) {
+        if let Some(tree) = self.mounts.get_mut(mount)
+            && let Some(node) = tree.root.lookup_mut(path)
+        {
+            node.manually_collapsed = collapsed;
+        }
+    }
 }
 
 impl MountForest {

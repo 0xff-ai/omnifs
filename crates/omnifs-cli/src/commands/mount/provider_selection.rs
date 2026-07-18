@@ -50,6 +50,7 @@ impl<'a> ProviderSelection<'a> {
         interactive: bool,
         yes: bool,
         output: &crate::ui::output::Output,
+        key_width: usize,
     ) -> anyhow::Result<MountName> {
         let proposed = explicit_name.map_or_else(|| default_mount.to_owned(), str::to_owned);
         let proposed_name = MountName::new(proposed.as_str())?;
@@ -62,7 +63,7 @@ impl<'a> ProviderSelection<'a> {
             return Ok(proposed_name);
         }
 
-        let name = self.ensure_unique_name(proposed_name, interactive, yes, output)?;
+        let name = self.ensure_unique_name(proposed_name, interactive, yes, output, key_width)?;
         Ok(name)
     }
 
@@ -72,6 +73,7 @@ impl<'a> ProviderSelection<'a> {
         interactive: bool,
         yes: bool,
         output: &crate::ui::output::Output,
+        key_width: usize,
     ) -> anyhow::Result<MountName> {
         if !mount_exists(self.mounts, &proposed) {
             return Ok(proposed);
@@ -80,11 +82,14 @@ impl<'a> ProviderSelection<'a> {
         // `--yes` accepts the auto-suggested name on collision, even
         // non-interactively (it never overwrites the existing mount).
         if yes {
-            output.row(&crate::ui::report::Row::new(
-                crate::ui::style::Glyph::Warn,
-                "mount name",
-                format!("{proposed} taken, using {suggestion}"),
-            ));
+            output.ledger_row(
+                &crate::ui::render::LedgerRow::new(
+                    crate::ui::style::Glyph::Warn,
+                    "mount name",
+                    format!("{proposed} taken, using {suggestion}"),
+                ),
+                key_width,
+            );
             return Ok(suggestion);
         }
         if !interactive {

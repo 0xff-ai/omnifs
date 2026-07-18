@@ -2,6 +2,7 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
+use std::fmt::Write as _;
 
 use crate::commands;
 use crate::commands::doctor::DoctorVerdict;
@@ -319,11 +320,12 @@ where
     }
 }
 
-/// Bare `omnifs` adapts to the workspace: an unconfigured workspace points at
-/// `mount add`; a configured-but-stopped daemon shows the status report plus an
-/// `up` hint; a healthy daemon shows the full status report plus two next-step
-/// hints. It is a thin dispatcher over the shared status/report code, so it
-/// never drifts from `omnifs status`.
+/// Bare `omnifs` adapts to the workspace: a fresh workspace with
+/// no mounts at all shows a dedicated short screen instead of an empty
+/// status report; a configured workspace shows the shared status report
+/// (`InventoryReport`, so this never drifts from `omnifs status`) closed by
+/// the single next actionable step, `Start serving:  omnifs up` when
+/// stopped or the derived browse action when running.
 async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
     let workspace = Workspace::resolve()?;
     let inventory = crate::inventory::Inventory::collect(&workspace).await?;
@@ -331,36 +333,145 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
         crate::inventory::Verdict::Ok => ExitCode::Success,
         crate::inventory::Verdict::Degraded => ExitCode::Degraded,
     };
-    let running = inventory.daemon_state() == crate::inventory::DaemonState::Running;
     if output.is_structured() {
         output.emit_result(inventory.verdict(), inventory)?;
         return Ok(exit_code);
     }
+
+    if inventory.mounts.is_empty() {
+        crate::ui::print_raw(&format!(
+            "{}\n",
+            fresh_workspace_screen(&inventory, crate::ui::render::stdout_capabilities())
+        ));
+        return Ok(exit_code);
+    }
+
+    let running = inventory.daemon_state() == crate::inventory::DaemonState::Running;
     let report = crate::status::InventoryReport { inventory };
     report.render().print();
-
-    // The status report is the record (stdout); these next-step hints are
-    // conversational, so `-q` drops them.
-    if report.inventory.mounts.is_empty() {
-        output.narrate(crate::ui::hint(
-            "omnifs mount add <provider>",
-            "configure your first mount",
-        ));
-    } else if running {
-        output.narrate("");
-        output.narrate(crate::ui::hint(
-            "omnifs frontend shell fuse --runtime docker",
-            "open a shell at the tree",
-        ));
-        output.narrate(crate::ui::hint(
-            "omnifs mount add <provider>",
-            "add another mount",
+    output.narrate("");
+    if running {
+        output.narrate(format!(
+            "Browse:  `{}`",
+            crate::ui::access::browse_command(&report.inventory)
         ));
     } else {
-        output.narrate("");
-        output.narrate(crate::ui::hint("omnifs up", "start the daemon"));
+        output.narrate("Start serving:  `omnifs up`");
     }
     Ok(exit_code)
+}
+
+/// A label column width fitting both "Get started:" (12) and "or piecewise:"
+/// (13), the two rows `fresh_workspace_block` prints.
+const FRESH_LABEL_WIDTH: usize = 14;
+/// A command column width fitting both "omnifs setup" (12) and "omnifs mount
+/// add" (16) with a 4-column gap before the description.
+const FRESH_CMD_WIDTH: usize = 20;
+
+/// One `<label> <accent(cmd)> <dim(desc)>` row of `fresh_workspace_block`,
+/// column-aligned against its sibling row rather than against the general
+/// ledger primitives.
+fn fresh_workspace_row(
+    label: &str,
+    cmd: &str,
+    desc: &str,
+    caps: crate::ui::render::Capabilities,
+) -> String {
+    let label_pad = FRESH_LABEL_WIDTH.saturating_sub(label.chars().count());
+    let cmd_pad = FRESH_CMD_WIDTH.saturating_sub(cmd.chars().count());
+    format!(
+        "{label}{}{}{}{}",
+        " ".repeat(label_pad),
+        crate::ui::style::accent(cmd, caps.color),
+        " ".repeat(cmd_pad),
+        crate::ui::style::dim(desc, caps.color)
+    )
+}
+
+/// Bare `omnifs` on a workspace with no mounts at all: no status
+/// probe, no empty report, just the two ways to get started.
+fn fresh_workspace_block(caps: crate::ui::render::Capabilities) -> String {
+    let intro = crate::ui::render::sentence(
+        "No mounts yet. omnifs projects external services as files.",
+        caps,
+    );
+    let get_started = fresh_workspace_row(
+        "Get started:",
+        "omnifs setup",
+        "pick services, sign in, mount",
+        caps,
+    );
+    let piecewise = fresh_workspace_row(
+        "or piecewise:",
+        "omnifs mount add",
+        "configure one mount",
+        caps,
+    );
+    format!("{intro}\n\n{get_started}\n{piecewise}")
+}
+
+/// The full bare-`omnifs` screen for a mount-less workspace: the get-started
+/// block, plus (when the inventory verdict is degraded) the one fact behind
+/// exit 5, so the exit code is never unexplained even though this screen
+/// skips the status report entirely.
+fn fresh_workspace_screen(
+    inventory: &crate::inventory::Inventory,
+    caps: crate::ui::render::Capabilities,
+) -> String {
+    let mut screen = fresh_workspace_block(caps);
+    if let Some((what, fix)) = fresh_workspace_degradation(inventory) {
+        let _ = write!(screen, "\n\n{what}:  `{fix}`");
+    }
+    screen
+}
+
+/// The one actionable fact behind a `Degraded` verdict on a mount-less
+/// workspace, if any: `Inventory::verdict` (inventory.rs) has two disjuncts
+/// that can still fire when `mounts` is empty (a daemon that failed or went
+/// unreachable, or a frontend severe enough to flip the verdict while the
+/// daemon is otherwise up), and the mount-related disjuncts are moot on an
+/// empty mount list. Returns the label to show and the fix command to run;
+/// the fix command is always `DaemonState::context_fix` or the frontend's
+/// own `fix` field, never re-derived here.
+fn fresh_workspace_degradation(
+    inventory: &crate::inventory::Inventory,
+) -> Option<(String, String)> {
+    let daemon_state = inventory.daemon_state();
+    let daemon_label = match daemon_state {
+        crate::inventory::DaemonState::Failed => Some("Daemon is unhealthy"),
+        crate::inventory::DaemonState::Unreachable => Some("Daemon is unreachable"),
+        _ => None,
+    };
+    if let Some(label) = daemon_label
+        && let Some(fix) = daemon_state.context_fix()
+    {
+        return Some((label.to_owned(), fix.to_owned()));
+    }
+
+    let daemon_up = matches!(
+        daemon_state,
+        crate::inventory::DaemonState::Running
+            | crate::inventory::DaemonState::Starting
+            | crate::inventory::DaemonState::Degraded
+    );
+    if !daemon_up {
+        return None;
+    }
+    inventory.frontends.iter().find_map(|frontend| {
+        if frontend.state.severity() < crate::inventory::Severity::Attention {
+            return None;
+        }
+        let fix = frontend.fix.clone()?;
+        Some((
+            format!(
+                "{} ({}) frontend is {}",
+                frontend.filesystem.label(),
+                frontend.runtime.label(),
+                frontend.state.label()
+            ),
+            fix,
+        ))
+    })
 }
 
 fn exit_for_verdict(verdict: DoctorVerdict) -> ExitCode {
@@ -375,10 +486,129 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use std::ffi::OsString;
 
-    use super::{Cli, Commands, raw_command_path, raw_output_mode};
+    use super::{Cli, Commands, fresh_workspace_block, raw_command_path, raw_output_mode};
 
     fn argv(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
+    }
+
+    fn caps(color: bool) -> crate::ui::render::Capabilities {
+        crate::ui::render::Capabilities {
+            width: 120,
+            is_tty: color,
+            color,
+            quiet: false,
+        }
+    }
+
+    /// The fresh-workspace screen:
+    /// ```text
+    /// No mounts yet. omnifs projects external services as files.
+    ///
+    /// Get started:  omnifs setup        pick services, sign in, mount
+    /// or piecewise: omnifs mount add    configure one mount
+    /// ```
+    #[test]
+    fn fresh_workspace_block_matches_the_documented_shape() {
+        assert_eq!(
+            fresh_workspace_block(caps(false)),
+            "No mounts yet. omnifs projects external services as files.\n\
+             \n\
+             Get started:  omnifs setup        pick services, sign in, mount\n\
+             or piecewise: omnifs mount add    configure one mount"
+        );
+    }
+
+    #[test]
+    fn fresh_workspace_block_accents_only_the_commands() {
+        let rendered = fresh_workspace_block(caps(true));
+        let plain = crate::ui::strip_ansi(&rendered);
+        assert_eq!(plain, fresh_workspace_block(caps(false)));
+        assert!(rendered.contains(&crate::ui::style::accent("omnifs setup", true)));
+        assert!(rendered.contains(&crate::ui::style::accent("omnifs mount add", true)));
+    }
+
+    /// A genuinely clean fresh workspace (no mounts, nothing degraded) keeps
+    /// the plain get-started screen and exits 0 (the bug this guards against:
+    /// a mount-less workspace with a degraded inventory used to exit 5 while
+    /// showing this same clean screen with no fact explaining the code).
+    #[test]
+    fn fresh_workspace_screen_stays_plain_and_ok_when_nothing_is_degraded() {
+        let inventory = crate::inventory::Inventory::test(
+            crate::inventory::DaemonState::Stopped,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(inventory.verdict(), crate::inventory::Verdict::Ok);
+        assert_eq!(super::fresh_workspace_degradation(&inventory), None);
+        assert_eq!(
+            super::fresh_workspace_screen(&inventory, caps(false)),
+            fresh_workspace_block(caps(false))
+        );
+    }
+
+    /// An unreachable daemon flips the verdict to `Degraded` (exit 5) even
+    /// with zero mounts; the screen must name it and reuse
+    /// `DaemonState::context_fix` verbatim rather than re-deriving the fix.
+    #[test]
+    fn fresh_workspace_screen_names_an_unreachable_daemon() {
+        let inventory = crate::inventory::Inventory::test(
+            crate::inventory::DaemonState::Unreachable,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(inventory.verdict(), crate::inventory::Verdict::Degraded);
+        assert_eq!(
+            super::fresh_workspace_degradation(&inventory),
+            Some((
+                "Daemon is unreachable".to_owned(),
+                crate::inventory::DaemonState::Unreachable
+                    .context_fix()
+                    .unwrap()
+                    .to_owned()
+            ))
+        );
+        let screen = super::fresh_workspace_screen(&inventory, caps(false));
+        assert!(screen.starts_with(&fresh_workspace_block(caps(false))));
+        assert!(
+            screen.contains("Daemon is unreachable:  `omnifs logs`"),
+            "{screen}"
+        );
+    }
+
+    /// A leftover failed frontend observation (e.g. a stale entry under
+    /// `cache/frontends`) can flip the verdict to `Degraded` while the daemon
+    /// is otherwise running and there are still zero mounts; the screen must
+    /// name that frontend and reuse its own `fix` field verbatim.
+    #[test]
+    fn fresh_workspace_screen_names_a_failed_frontend_while_daemon_is_up() {
+        let frontend = crate::inventory::FrontendStatus {
+            filesystem: crate::commands::frontend::FrontendFilesystem::Fuse,
+            runtime: crate::commands::frontend::FrontendRuntime::Docker,
+            location: None,
+            state: crate::inventory::FrontendState::Failed,
+            scope: "all",
+            mount_count: 0,
+            fix: Some("omnifs logs (container exited)".to_owned()),
+        };
+        let inventory = crate::inventory::Inventory::test(
+            crate::inventory::DaemonState::Running,
+            vec![frontend],
+            Vec::new(),
+        );
+        assert_eq!(inventory.verdict(), crate::inventory::Verdict::Degraded);
+        assert_eq!(
+            super::fresh_workspace_degradation(&inventory),
+            Some((
+                "fuse (docker) frontend is failed".to_owned(),
+                "omnifs logs (container exited)".to_owned()
+            ))
+        );
+        let screen = super::fresh_workspace_screen(&inventory, caps(false));
+        assert!(
+            screen.contains("fuse (docker) frontend is failed:  `omnifs logs (container exited)`"),
+            "{screen}"
+        );
     }
 
     #[test]

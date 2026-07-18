@@ -1,5 +1,11 @@
-//! `omnifs doctor` — runtime + auth diagnostics. No auto-fix.
+//! `omnifs doctor` — runtime + auth diagnostics, presented as a grouped
+//! checklist. The only remediation doctor can execute itself is a
+//! mount reauth, spawned as a fresh `omnifs mount reauth <name>` subprocess
+//! (mirroring how `daemon_launch.rs` spawns the daemon) rather than calling
+//! into `commands::mount`'s internal API, so this module never couples to
+//! that module's Rust shape.
 
+use anyhow::Context as _;
 use clap::Args;
 use serde::Serialize;
 use std::path::Path;
@@ -10,14 +16,11 @@ use crate::docker::DockerClient;
 use crate::docker::DockerTarget;
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::image::{ImageRef, names_registry};
-use crate::inventory::{Inventory, Severity};
-use crate::status::InventoryReport;
+use crate::inventory::{AuthState, DaemonState, Inventory, MountStatus, Severity};
 use crate::ui::output::{Output, ResultVerdict};
-use crate::ui::table::{
-    Action as TableAction, Block as TableBlock, Cell as TableCell, Column as TableColumn,
-    Priority as TablePriority, ResourceRow as TableRow, ResourceTable as TableResources,
-    StateToken as TableState, WidthPolicy as TableWidth,
-};
+use crate::ui::prompt::Confirm;
+use crate::ui::render::{self, Capabilities, LedgerRow};
+use crate::ui::style::{self, Glyph};
 use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -70,13 +73,62 @@ struct Doctor<'a> {
     output: Output,
 }
 
+/// Which group of the checklist a finding belongs to. A closed enum
+/// rather than matching on the `check` string, so grouping cannot drift from
+/// spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Environment,
+    Workspace,
+}
+
+/// A remediation doctor knows how to execute itself. Today the only one is
+/// re-running the exact `omnifs mount reauth <name>` command already
+/// surfaced as a credentials finding's `fix` line.
+#[derive(Debug, Clone)]
+enum Remediation {
+    MountReauth(String),
+}
+
+impl Remediation {
+    fn command_line(&self) -> String {
+        match self {
+            Self::MountReauth(name) => format!("omnifs mount reauth {name}"),
+        }
+    }
+
+    /// Spawn the fresh subprocess and require it to exit successfully. Array
+    /// arguments only, never a shell string: the mount name came from the
+    /// already-collected inventory, not from re-parsing the advisory `fix`
+    /// text.
+    fn apply(&self) -> anyhow::Result<()> {
+        let binary = std::env::current_exe().context("resolve the omnifs executable")?;
+        let status = match self {
+            Self::MountReauth(name) => std::process::Command::new(&binary)
+                .args(["mount", "reauth", name])
+                .status()
+                .with_context(|| format!("run `{}`", self.command_line()))?,
+        };
+        anyhow::ensure!(
+            status.success(),
+            "`{}` exited with {status}",
+            self.command_line()
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct Finding {
+    #[serde(skip)]
+    section: Section,
     check: String,
     target: Option<String>,
     severity: Severity,
     message: String,
     fix: Option<String>,
+    #[serde(skip)]
+    remediation: Option<Remediation>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,67 +158,42 @@ impl DoctorResult {
 }
 
 impl Finding {
-    fn from_probe(check: impl Into<String>, target: Option<String>, result: ProbeResult) -> Self {
+    fn from_probe(
+        section: Section,
+        check: impl Into<String>,
+        target: Option<String>,
+        result: ProbeResult,
+    ) -> Self {
         let (severity, message) = result.into_parts();
         Self {
+            section,
             check: check.into(),
             target,
             severity,
             message,
             fix: None,
+            remediation: None,
         }
     }
-}
 
-fn findings_table(findings: &[Finding]) -> TableResources {
-    let mut table = TableResources::new(
-        "Findings",
-        findings.len().max(1),
-        vec![
-            TableColumn::new("Check", TablePriority::Identity, TableWidth::Auto),
-            TableColumn::new("Target", TablePriority::Secondary, TableWidth::Auto),
-            TableColumn::new("Details", TablePriority::Essential, TableWidth::Auto),
-            TableColumn::new("Severity", TablePriority::Essential, TableWidth::Auto),
-        ],
-    );
-    if findings.is_empty() {
-        let state = TableState::positive("clean");
-        table.push(TableRow::new(
-            [
-                TableCell::new("all checks"),
-                TableCell::new("-"),
-                TableCell::new("no findings"),
-                TableCell::state(state.clone()),
-            ],
-            state,
-        ));
-    } else {
-        for finding in findings {
-            let state = table_state(finding.severity);
-            let mut row = TableRow::new(
-                [
-                    TableCell::new(finding.check.clone()),
-                    TableCell::new(finding.target.as_deref().unwrap_or("-")),
-                    TableCell::new(finding.message.clone()),
-                    TableCell::state(state.clone()),
-                ],
-                state,
-            );
-            if let Some(fix) = &finding.fix {
-                row = row.with_action(TableAction::fix(fix.clone()));
-            }
-            table.push(row);
-        }
-    }
-    table
-}
-
-fn table_state(severity: Severity) -> TableState {
-    match severity {
-        Severity::Positive => TableState::positive("ok"),
-        Severity::Neutral => TableState::neutral("skipped"),
-        Severity::Attention => TableState::attention("warn"),
-        Severity::Error => TableState::failure("err"),
+    /// One finding per mount whose credential needs attention, built entirely from data `Inventory`
+    /// already collected: doctor invents no new auth check here.
+    fn mount_auth(mount: &MountStatus) -> Option<Self> {
+        let (message, command) = match &mount.auth {
+            AuthState::Missing { command } => ("credential missing".to_owned(), command.clone()),
+            AuthState::Expired { command } => ("token expired".to_owned(), command.clone()),
+            AuthState::Error { message, command } => (message.clone(), command.clone()),
+            AuthState::NotNeeded | AuthState::Ready => return None,
+        };
+        Some(Self {
+            section: Section::Workspace,
+            check: "credentials".to_owned(),
+            target: Some(mount.name.clone()),
+            severity: mount.auth.severity(),
+            message,
+            fix: Some(command),
+            remediation: Some(Remediation::MountReauth(mount.name.clone())),
+        })
     }
 }
 
@@ -189,15 +216,305 @@ impl ProbeResult {
     }
 }
 
+/// One rendered checklist row: a finding or the synthesized daemon row,
+/// stripped down to exactly what presentation needs.
+struct Row {
+    severity: Severity,
+    key: String,
+    value: String,
+    fix: Option<String>,
+}
+
+impl Row {
+    fn glyph(&self) -> Glyph {
+        match self.severity {
+            Severity::Positive => Glyph::Done,
+            Severity::Neutral => Glyph::Skip,
+            Severity::Attention => Glyph::Warn,
+            Severity::Error => Glyph::Fail,
+        }
+    }
+
+    fn ledger_row(&self) -> LedgerRow {
+        LedgerRow::new(self.glyph(), self.key.clone(), self.value.clone())
+    }
+}
+
+impl From<&Finding> for Row {
+    fn from(finding: &Finding) -> Self {
+        Self {
+            severity: finding.severity,
+            key: finding.check.clone(),
+            value: finding.target.as_deref().map_or_else(
+                || finding.message.clone(),
+                |target| format!("{target} {}", finding.message),
+            ),
+            fix: finding.fix.clone(),
+        }
+    }
+}
+
+/// Split findings into the Environment/Workspace groups; the
+/// Daemon group's single row comes from `daemon_row`, not from `findings`.
+fn build_rows(findings: &[Finding]) -> (Vec<Row>, Vec<Row>) {
+    let mut environment = Vec::new();
+    let mut workspace = Vec::new();
+    for finding in findings {
+        match finding.section {
+            Section::Environment => environment.push(Row::from(finding)),
+            Section::Workspace => workspace.push(Row::from(finding)),
+        }
+    }
+    (environment, workspace)
+}
+
+fn daemon_row(inventory: &Inventory) -> Row {
+    match inventory.daemon.state() {
+        DaemonState::Running => Row {
+            severity: Severity::Positive,
+            key: "running".to_owned(),
+            value: daemon_running_value(inventory),
+            fix: None,
+        },
+        DaemonState::Starting => Row {
+            severity: Severity::Attention,
+            key: "starting".to_owned(),
+            value: "daemon is still coming up".to_owned(),
+            fix: None,
+        },
+        DaemonState::Degraded => Row {
+            severity: Severity::Attention,
+            key: "degraded".to_owned(),
+            value: "daemon reports a degraded subsystem".to_owned(),
+            fix: Some("omnifs status".to_owned()),
+        },
+        DaemonState::Stopped => Row {
+            severity: Severity::Neutral,
+            key: "stopped".to_owned(),
+            value: "daemon is not running".to_owned(),
+            fix: Some("omnifs up".to_owned()),
+        },
+        DaemonState::Failed => Row {
+            severity: Severity::Error,
+            key: "failed".to_owned(),
+            value: "daemon is unhealthy".to_owned(),
+            fix: Some("omnifs logs".to_owned()),
+        },
+        DaemonState::Unreachable => Row {
+            severity: Severity::Error,
+            key: "unreachable".to_owned(),
+            value: "daemon record exists but the control socket did not answer".to_owned(),
+            fix: Some("omnifs logs".to_owned()),
+        },
+    }
+}
+
+/// The running daemon's value cell. Each part degrades independently: a fact `Inventory`
+/// did not collect is omitted rather than faked.
+fn daemon_running_value(inventory: &Inventory) -> String {
+    let mut parts = Vec::new();
+    if let Some(pid) = inventory.daemon.pid() {
+        parts.push(format!("pid {pid}"));
+    }
+    if let Some(revision) = &inventory.mount_revision {
+        parts.push(format!("revision {revision}"));
+    }
+    if let Some(uptime) = daemon_uptime(inventory) {
+        parts.push(format!("up {uptime}"));
+    }
+    if parts.is_empty() {
+        "running".to_owned()
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn daemon_uptime(inventory: &Inventory) -> Option<String> {
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    let record = inventory.daemon.runtime.as_ref()?;
+    let started = OffsetDateTime::parse(&record.started_at, &Rfc3339).ok()?;
+    let secs = (OffsetDateTime::now_utc() - started).whole_seconds();
+    (secs >= 0).then(|| crate::docker::duration_words(secs))
+}
+
+/// Render one group: a bold heading, then each row indented two spaces
+/// under it with its own `fix:` continuation line when it carries one
+/// Key sizing is per group, matching the register's per-block
+/// rule (2.1).
+fn render_group(heading: &str, rows: &[Row], caps: Capabilities) -> String {
+    let mut out = String::new();
+    out.push_str(&render::heading(heading, caps));
+    out.push('\n');
+    let ledger_rows: Vec<LedgerRow> = rows.iter().map(Row::ledger_row).collect();
+    let key_width = render::ledger_key_width(&ledger_rows);
+    for (row, ledger_row) in rows.iter().zip(ledger_rows.iter()) {
+        out.push_str("  ");
+        out.push_str(&render::ledger_row_line(ledger_row, key_width, caps));
+        out.push('\n');
+        if let Some(fix) = &row.fix {
+            let pad = 2 + render::ledger_value_column(key_width);
+            out.push_str(&" ".repeat(pad));
+            out.push_str("fix:  ");
+            out.push_str(&style::accent(fix, caps.color));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The verdict line: a plain "Everything checks out." when clean,
+/// otherwise a failure/warning count plus the single actionable fix when
+/// every problem row shares one.
+fn verdict_line(rows: &[&Row], verdict: DoctorVerdict, caps: Capabilities) -> String {
+    if verdict == DoctorVerdict::Clean {
+        return render::sentence("Everything checks out.", caps);
+    }
+    let failures = rows
+        .iter()
+        .filter(|row| row.severity == Severity::Error)
+        .count();
+    let warnings = rows
+        .iter()
+        .filter(|row| row.severity == Severity::Attention)
+        .count();
+    let mut parts = Vec::new();
+    if failures > 0 {
+        parts.push(render::count(failures, "failure"));
+    }
+    if warnings > 0 {
+        parts.push(render::count(warnings, "warning"));
+    }
+    let summary = if parts.is_empty() {
+        // The daemon/inventory verdict is degraded for a reason this
+        // group's rows don't individually carry (e.g. a frontend-only
+        // degradation); name it honestly rather than claiming zero issues.
+        "needs attention".to_owned()
+    } else {
+        parts.join(", ")
+    };
+    let fixable: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.severity >= Severity::Attention)
+        .filter_map(|row| row.fix.as_deref())
+        .collect();
+    match fixable[..] {
+        [only] => format!("{summary}. Fix it:  {}", style::accent(only, caps.color)),
+        _ => format!("{summary}."),
+    }
+}
+
+/// Assemble the complete human checklist: Environment, Workspace,
+/// and Daemon groups, each separated by one blank line, then the verdict
+/// line.
+fn render_report(
+    findings: &[Finding],
+    inventory: &Inventory,
+    verdict: DoctorVerdict,
+    caps: Capabilities,
+) -> String {
+    let (environment, workspace) = build_rows(findings);
+    let daemon = vec![daemon_row(inventory)];
+    let mut out = String::new();
+    out.push_str(&render_group("Environment", &environment, caps));
+    out.push('\n');
+    out.push_str(&render_group("Workspace", &workspace, caps));
+    out.push('\n');
+    out.push_str(&render_group("Daemon", &daemon, caps));
+    out.push('\n');
+    let all_rows: Vec<&Row> = environment
+        .iter()
+        .chain(workspace.iter())
+        .chain(daemon.iter())
+        .collect();
+    out.push_str(&verdict_line(&all_rows, verdict, caps));
+    out.push('\n');
+    out
+}
+
+/// The remediations doctor is willing to offer to run, or `None` when the
+/// warnings/failures on this run are not all fixable through a known,
+/// doctor-owned remediation.
+fn remediable_fixes(findings: &[Finding]) -> Option<Vec<&Remediation>> {
+    let actionable: Vec<&Finding> = findings
+        .iter()
+        .filter(|finding| finding.severity >= Severity::Attention)
+        .collect();
+    if actionable.is_empty() {
+        return None;
+    }
+    let remediations: Vec<&Remediation> = actionable
+        .iter()
+        .filter_map(|finding| finding.remediation.as_ref())
+        .collect();
+    (remediations.len() == actionable.len()).then_some(remediations)
+}
+
+/// Offer to apply every remediable fix. `--no-input`, structured
+/// modes, and a non-interactive session all degrade to report-only, matching
+/// the rest of the CLI's prompt policy rather than inventing a doctor-local
+/// rule.
+fn offer_fix(output: &Output, findings: &[Finding]) -> anyhow::Result<()> {
+    let Some(remediations) = remediable_fixes(findings) else {
+        return Ok(());
+    };
+    let apply = if output.yes() {
+        true
+    } else if output.ensure_prompt_allowed().is_err() || !crate::ui::prompt::is_terminal() {
+        false
+    } else {
+        let question = if remediations.len() == 1 {
+            "Apply 1 fix now?".to_owned()
+        } else {
+            format!("Apply {} fixes now?", remediations.len())
+        };
+        Confirm::new(question).ask_with_output(output)?
+    };
+    if !apply {
+        return Ok(());
+    }
+    let caps = render::stdout_capabilities();
+    let ledger_rows: Vec<LedgerRow> = remediations
+        .iter()
+        .map(|remediation| LedgerRow::new(Glyph::Done, "fix", remediation.command_line()))
+        .collect();
+    let key_width = render::ledger_key_width(&ledger_rows);
+    for (remediation, mut ledger_row) in remediations.into_iter().zip(ledger_rows) {
+        let outcome = remediation.apply();
+        ledger_row.glyph = if outcome.is_ok() {
+            Glyph::Done
+        } else {
+            Glyph::Fail
+        };
+        crate::ui::print_raw(&format!(
+            "{}\n",
+            render::ledger_row_line(&ledger_row, key_width, caps)
+        ));
+        outcome?;
+    }
+    Ok(())
+}
+
 impl Doctor<'_> {
     async fn run(self) -> anyhow::Result<DoctorVerdict> {
         let mut findings = Vec::new();
 
         let (runtime, docker_result) = self.probe_docker_reachable().await;
         let docker_ok = matches!(docker_result, ProbeResult::Ok(_));
-        findings.push(Finding::from_probe("docker reachable", None, docker_result));
+        findings.push(Finding::from_probe(
+            Section::Environment,
+            "docker",
+            None,
+            docker_result,
+        ));
 
-        findings.push(Finding::from_probe("fuse", None, self.probe_fuse()));
+        findings.push(Finding::from_probe(
+            Section::Environment,
+            "fuse",
+            None,
+            self.probe_fuse(),
+        ));
 
         let image_result = match (
             docker_ok,
@@ -209,29 +526,40 @@ impl Doctor<'_> {
             },
             _ => ProbeResult::Skipped("docker unreachable"),
         };
-        findings.push(Finding::from_probe("image cached", None, image_result));
+        findings.push(Finding::from_probe(
+            Section::Environment,
+            "image",
+            None,
+            image_result,
+        ));
 
         findings.push(Finding::from_probe(
+            Section::Workspace,
             "credential store",
             None,
             self.probe_credential_store(),
         ));
         findings.push(Finding::from_probe(
+            Section::Workspace,
             "ssh-agent",
             None,
             self.probe_ssh_agent(),
         ));
         findings.push(Finding::from_probe(
-            "config file",
+            Section::Workspace,
+            "config",
             None,
             self.probe_config_file(),
         ));
 
         findings.push(Finding::from_probe(
+            Section::Environment,
             "network",
             None,
             self.probe_network().await,
         ));
+
+        findings.extend(self.inventory.mounts.iter().filter_map(Finding::mount_auth));
 
         let result = DoctorResult {
             inventory: self.inventory,
@@ -247,12 +575,14 @@ impl Doctor<'_> {
                 result,
             )?;
         } else {
-            let mut report = InventoryReport {
-                inventory: result.inventory,
-            }
-            .render();
-            report.push(TableBlock::Resources(findings_table(&result.findings)));
-            report.print();
+            let caps = render::stdout_capabilities();
+            crate::ui::print_raw(&render_report(
+                &result.findings,
+                &result.inventory,
+                verdict,
+                caps,
+            ));
+            offer_fix(&self.output, &result.findings)?;
         }
         Ok(verdict)
     }
@@ -335,8 +665,8 @@ impl Doctor<'_> {
         } else {
             match self.workspace.credentials().list() {
                 Ok(Some(keys)) => ProbeResult::Ok(format!(
-                    "{} credential(s) in {}",
-                    keys.len(),
+                    "{} in {}",
+                    crate::ui::render::count(keys.len(), "credential"),
                     diagnostic.display
                 )),
                 Ok(None) => ProbeResult::Ok(format!(
@@ -367,7 +697,7 @@ impl Doctor<'_> {
         if diagnostic.exists {
             ProbeResult::Ok(diagnostic.display)
         } else {
-            ProbeResult::Ok(format!("(default; {} absent)", diagnostic.display))
+            ProbeResult::Ok(format!("defaults ({} absent)", diagnostic.display))
         }
     }
 
@@ -390,60 +720,108 @@ impl Doctor<'_> {
 mod golden {
     use super::*;
     use crate::test_support::fixture_workspace;
-    use crate::ui::strip_ansi;
-    use crate::ui::table::Report as TableReport;
     use tempfile::TempDir;
 
     fn probes() -> Vec<Finding> {
         vec![
             Finding::from_probe(
-                "docker reachable",
+                Section::Environment,
+                "docker",
                 None,
                 ProbeResult::Ok("docker daemon responds".to_string()),
             ),
             Finding::from_probe(
+                Section::Environment,
                 "fuse",
                 None,
                 ProbeResult::Skipped("macOS: native mount is NFS loopback"),
             ),
             Finding::from_probe(
-                "config identity",
-                None,
-                ProbeResult::Ok("workspace paths agree".to_string()),
-            ),
-            Finding::from_probe(
-                "credential store",
-                None,
-                ProbeResult::Warn("directory will be created on first write".to_string()),
-            ),
-            Finding::from_probe(
+                Section::Environment,
                 "network",
                 None,
-                ProbeResult::Err("ghcr.io unreachable".to_string()),
+                ProbeResult::Ok("ghcr.io reachable".to_string()),
+            ),
+            Finding::from_probe(
+                Section::Workspace,
+                "config",
+                None,
+                ProbeResult::Ok("defaults (~/.omnifs/config.toml absent)".to_string()),
             ),
         ]
     }
 
     fn targeted_finding() -> Finding {
         Finding {
-            check: "credential target".to_string(),
-            target: Some("linear".to_string()),
+            section: Section::Workspace,
+            check: "credentials".to_string(),
+            target: Some("github".to_string()),
             severity: Severity::Attention,
-            message: "credential `linear:oauth:default` is expired".to_string(),
-            fix: Some("omnifs mount reauth linear".to_string()),
+            message: "token expired".to_string(),
+            fix: Some("omnifs mount reauth github".to_string()),
+            remediation: Some(Remediation::MountReauth("github".to_string())),
         }
     }
 
+    fn caps(color: bool) -> Capabilities {
+        Capabilities {
+            width: 120,
+            is_tty: color,
+            color,
+            quiet: false,
+        }
+    }
+
+    fn running_inventory() -> Inventory {
+        Inventory::test(DaemonState::Running, Vec::new(), Vec::new())
+    }
+
     #[test]
-    fn doctor_grid() {
-        let probes = probes();
-        let mut findings = probes;
+    fn healthy_checklist_ends_with_everything_checks_out() {
+        let findings = probes();
+        let inventory = running_inventory();
+        let rendered = render_report(&findings, &inventory, DoctorVerdict::Clean, caps(false));
+        assert!(rendered.contains("Environment"), "{rendered}");
+        assert!(rendered.contains("Workspace"), "{rendered}");
+        assert!(rendered.contains("Daemon"), "{rendered}");
+        assert!(
+            rendered.trim_end().ends_with("Everything checks out."),
+            "{rendered}"
+        );
+        // Groups are separated by a blank line, not
+        // run together.
+        assert!(rendered.contains("\n\nWorkspace\n"), "{rendered}");
+        assert!(rendered.contains("\n\nDaemon\n"), "{rendered}");
+    }
+
+    #[test]
+    fn grouped_checklist_matches_the_documented_shape_with_a_warning_row() {
+        let mut findings = probes();
         findings.push(targeted_finding());
-        let mut report = TableReport::new();
-        report.push(TableBlock::Resources(findings_table(&findings)));
-        let rendered = strip_ansi(&report.render());
-        assert!(rendered.contains("Findings  6"));
-        assert!(rendered.contains("Fix  omnifs mount reauth linear"));
+        let inventory = running_inventory();
+        let rendered = render_report(&findings, &inventory, DoctorVerdict::Warnings, caps(false));
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        let credentials_index = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("! credentials"))
+            .expect("credentials warning row");
+        assert!(
+            lines[credentials_index].contains("github token expired"),
+            "{rendered}"
+        );
+        assert_eq!(
+            lines[credentials_index + 1].trim(),
+            "fix:  omnifs mount reauth github",
+            "{rendered}"
+        );
+
+        assert!(rendered.contains("  ✓ docker"), "{rendered}");
+        assert!(rendered.contains("  • fuse"), "{rendered}");
+        assert!(rendered.contains("  ✓ running"), "{rendered}");
+
+        let verdict = lines.last().copied().unwrap_or_default();
+        assert_eq!(verdict, "1 warning. Fix it:  omnifs mount reauth github");
     }
 
     #[test]
@@ -474,17 +852,19 @@ mod golden {
 
         let mut failures = warnings;
         failures.findings.push(Finding {
+            section: Section::Environment,
             check: "broken".to_owned(),
             target: None,
             severity: Severity::Error,
             message: "failed to load".to_owned(),
             fix: Some("omnifs logs".to_owned()),
+            remediation: None,
         });
         assert_eq!(failures.verdict(), DoctorVerdict::Failures);
     }
 
     #[test]
-    fn doctor_json_preserves_inventory_and_findings() {
+    fn doctor_json_preserves_inventory_and_findings_and_skips_presentation_only_fields() {
         let payload = DoctorResult {
             inventory: Inventory::test(
                 crate::inventory::DaemonState::Stopped,
@@ -496,10 +876,36 @@ mod golden {
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string_pretty(&payload).unwrap()).unwrap();
         assert!(value.get("inventory").is_some());
-        assert_eq!(value["findings"][0]["check"], "credential target");
-        assert_eq!(value["findings"][0]["target"], "linear");
+        assert_eq!(value["findings"][0]["check"], "credentials");
+        assert_eq!(value["findings"][0]["target"], "github");
         assert_eq!(value["findings"][0]["severity"], "attention");
-        assert_eq!(value["findings"][0]["fix"], "omnifs mount reauth linear");
+        assert_eq!(value["findings"][0]["fix"], "omnifs mount reauth github");
+        // `section` and `remediation` are presentation/execution-only and
+        // must not grow the machine contract.
+        assert!(value["findings"][0].get("section").is_none());
+        assert!(value["findings"][0].get("remediation").is_none());
+    }
+
+    #[test]
+    fn remediable_fixes_requires_every_warning_to_carry_a_known_remediation() {
+        let all_remediable = vec![targeted_finding()];
+        assert!(remediable_fixes(&all_remediable).is_some());
+
+        let mixed = vec![
+            targeted_finding(),
+            Finding {
+                section: Section::Environment,
+                check: "network".to_owned(),
+                target: None,
+                severity: Severity::Attention,
+                message: "ghcr.io unreachable".to_owned(),
+                fix: None,
+                remediation: None,
+            },
+        ];
+        assert!(remediable_fixes(&mixed).is_none());
+
+        assert!(remediable_fixes(&probes()).is_none());
     }
 
     fn probe_credential_result(root: &std::path::Path) -> ProbeResult {
@@ -531,7 +937,7 @@ mod golden {
         std::fs::write(&valid_path, r#"{"version":1,"entries":{}}"#).unwrap();
         let result = probe_credential_result(valid.path());
         assert!(
-            matches!(result, ProbeResult::Ok(message) if message.contains("0 credential(s)") && message.contains("credentials.json"))
+            matches!(result, ProbeResult::Ok(message) if message.contains("0 credentials") && message.contains("credentials.json"))
         );
 
         let invalid = TempDir::new().unwrap();

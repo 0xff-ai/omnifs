@@ -159,3 +159,54 @@ pub fn install_test_provider(providers_dir: &Path) -> omnifs_workspace::ids::Pro
 pub fn test_mount_spec(id: &omnifs_workspace::ids::ProviderId) -> String {
     format!(r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"test"}}"#)
 }
+
+/// Install a synthetic fixture provider carrying only a
+/// `omnifs.provider-metadata.v1` custom section built from `manifest` (no
+/// real wasm component), returning its content id. `mount add` resolves auth
+/// and config from this section alone, so a fixture never needs a real
+/// provider crate to exercise auth-flow behavior. Duplicated from
+/// `omnifs-cli`'s own private `test_support::wasm_with_provider_metadata`:
+/// integration tests build as a separate crate and cannot reach `#[cfg(test)]`
+/// items inside the library.
+pub fn install_fixture_provider(
+    providers_dir: &Path,
+    manifest: &serde_json::Value,
+) -> omnifs_workspace::ids::ProviderId {
+    let id = manifest["id"].as_str().expect("manifest carries an id");
+    let file = format!("omnifs_provider_{id}.wasm");
+    let wasm = wasm_with_provider_metadata(manifest);
+    let artifact = omnifs_workspace::provider::Artifact::from_bytes(file, wasm)
+        .expect("parse fixture provider");
+    let content_id = artifact.id();
+    let store = omnifs_workspace::provider::ProviderStore::new(providers_dir);
+    store.retain(&artifact).expect("retain fixture provider");
+    content_id
+}
+
+fn wasm_with_provider_metadata(manifest: &serde_json::Value) -> Vec<u8> {
+    let data = serde_json::to_vec(manifest).expect("serialize fixture manifest");
+    let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+    let mut section = Vec::new();
+    let section_name = omnifs_workspace::provider::PROVIDER_METADATA_SECTION_NAME;
+    push_uleb(section_name.len(), &mut section);
+    section.extend_from_slice(section_name.as_bytes());
+    section.extend_from_slice(&data);
+    wasm.push(0);
+    push_uleb(section.len(), &mut wasm);
+    wasm.extend(section);
+    wasm
+}
+
+fn push_uleb(mut value: usize, out: &mut Vec<u8>) {
+    loop {
+        let mut byte = u8::try_from(value & 0x7f).unwrap();
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}

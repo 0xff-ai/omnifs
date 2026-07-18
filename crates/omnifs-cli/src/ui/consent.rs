@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::output::Output;
-use super::report;
+use super::render::LedgerRow;
 use super::style::Glyph;
 use crate::stages::PromptMode;
 
@@ -52,8 +52,16 @@ impl Row {
         }
     }
 
-    pub(crate) fn render_plan(&self) -> report::Row {
-        report::Row::new(Glyph::Plan, self.key.clone(), self.value.clone())
+    /// Render as one ledger row: `-` for a planned removal, `=` for a planned
+    /// keep. This is the only consumer of
+    /// [`Glyph::Keep`]; a plan row that survives is stated, never omitted.
+    pub(crate) fn ledger_row(&self) -> LedgerRow {
+        let glyph = if self.remove {
+            Glyph::Plan
+        } else {
+            Glyph::Keep
+        };
+        LedgerRow::new(glyph, self.key.clone(), self.value.clone())
     }
 }
 
@@ -84,9 +92,13 @@ impl Plan {
         self.rows.len().saturating_sub(self.remove_count())
     }
 
-    pub(crate) fn summary(&self) -> String {
+    /// Past-tense counts for the closing sentence once a plan has settled
+    /// Kept rows are stated
+    /// here rather than in the plan preview, since a plan preview already
+    /// marks each row `-`/`=` individually.
+    pub(crate) fn settled_summary(&self) -> String {
         format!(
-            "{} to remove, {} kept",
+            "{} removed, {} kept",
             self.remove_count(),
             self.keep_count()
         )
@@ -130,10 +142,13 @@ pub(crate) enum Decision {
 impl Decision {
     /// Resolve through the shared [`PromptMode`] policy. In particular, a
     /// non-TTY prints its plan first and then receives the standard actionable
-    /// flag hint from `PromptMode::resolve`.
+    /// flag hint from `PromptMode::resolve`. `question` is the confirm
+    /// prompt's verb (`"Remove?"`), so the transcript names the actual
+    /// operation rather than a generic "Proceed?".
     pub(crate) fn resolve(
         mode: PromptMode,
         dry_run: bool,
+        question: &str,
         flag_hint: &str,
         output: &Output,
     ) -> anyhow::Result<Self> {
@@ -145,21 +160,24 @@ impl Decision {
             || true,
             flag_hint,
             || {
-                super::prompt::Confirm::new("Proceed?")
+                super::prompt::Confirm::new(question)
                     .with_default(false)
                     .ask_with_output(output)
             },
         )?;
-        Self::from_confirmation(proceed)
+        Self::from_confirmation(proceed, output)
     }
 
     /// A negative confirmation is cancellation, not successful application.
     /// Returning the shared marker keeps exit-code and JSON handling at the
-    /// top-level CLI boundary for every consent-driven command.
-    fn from_confirmation(proceed: bool) -> anyhow::Result<Self> {
+    /// top-level CLI boundary for every consent-driven command. An interactive
+    /// decline prints the closing line itself since the caller never regains control after the `?`
+    /// propagates the cancellation.
+    fn from_confirmation(proceed: bool, output: &Output) -> anyhow::Result<Self> {
         if proceed {
             Ok(Self::Apply)
         } else {
+            output.outro("Kept everything as it was.");
             Err(super::prompt::Canceled.into())
         }
     }
@@ -233,19 +251,26 @@ impl Outcome {
         self.state.glyph()
     }
 
-    pub(crate) fn render_receipt(&self) -> report::Row {
-        let value = if self.details.is_empty() {
-            self.value.clone()
-        } else {
-            let details = self
-                .details
-                .iter()
-                .map(|detail| detail.value.as_str())
-                .collect::<Vec<_>>()
-                .join("; ");
-            format!("{}; {details}", self.value)
-        };
-        report::Row::new(self.glyph(), self.key.clone(), value)
+    /// The value column, with any sub-outcomes (`details`) folded in as a
+    /// `;`-joined trailer. Shared by both receipt renderers so a credential
+    /// revocation's sub-outcome never has to be reformatted twice.
+    fn settled_value(&self) -> String {
+        if self.details.is_empty() {
+            return self.value.clone();
+        }
+        let details = self
+            .details
+            .iter()
+            .map(|detail| detail.value.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("{}; {details}", self.value)
+    }
+
+    /// Render as one v2-register ledger row: `✓`/`✗`/`•` per
+    /// [`OutcomeState`], never `-`/`=` (those are plan-preview-only glyphs).
+    pub(crate) fn ledger_row(&self) -> LedgerRow {
+        LedgerRow::new(self.glyph(), self.key.clone(), self.settled_value())
     }
 }
 
@@ -296,6 +321,7 @@ mod tests {
             Decision::resolve(
                 mode,
                 true,
+                "Remove?",
                 "-y",
                 &Output::new(crate::ui::output::OutputMode::Human, false)
             )
@@ -305,6 +331,7 @@ mod tests {
         let error = Decision::resolve(
             mode,
             false,
+            "Remove?",
             "-y",
             &Output::new(crate::ui::output::OutputMode::Human, false),
         )
@@ -314,8 +341,40 @@ mod tests {
 
     #[test]
     fn declined_confirmation_is_cancellation() {
-        let error = Decision::from_confirmation(false).unwrap_err();
+        let output = Output::new(crate::ui::output::OutputMode::Human, false);
+        let error = Decision::from_confirmation(false, &output).unwrap_err();
         assert!(super::super::prompt::is_canceled(&error));
-        assert_eq!(Decision::from_confirmation(true).unwrap(), Decision::Apply);
+        assert_eq!(
+            Decision::from_confirmation(true, &output).unwrap(),
+            Decision::Apply
+        );
+    }
+
+    #[test]
+    fn ledger_row_uses_the_minus_glyph_for_removal_and_equals_for_keep() {
+        let remove = Row::remove("mount", "mount", "/github").ledger_row();
+        assert_eq!(remove.glyph, Glyph::Plan);
+        let keep = Row::keep("provider", "provider", "artifact kept in store").ledger_row();
+        assert_eq!(keep.glyph, Glyph::Keep);
+    }
+
+    #[test]
+    fn settled_summary_reports_removed_and_kept_counts() {
+        let mut plan = Plan::new("Removing mount `github`");
+        plan.push(Row::remove("mount", "mount", "/github"));
+        plan.push(Row::remove("credential", "credential", "github oauth"));
+        plan.push(Row::keep("provider", "provider", "artifact kept in store"));
+        assert_eq!(plan.settled_summary(), "2 removed, 1 kept");
+    }
+
+    #[test]
+    fn receipt_ledger_row_folds_details_into_the_value_trailer() {
+        let mut outcome = Outcome::done("credential", "revoked").with_key("credential");
+        outcome
+            .details
+            .push(Outcome::done("upstream", "revoked upstream"));
+        let row = outcome.ledger_row();
+        assert_eq!(row.value, "revoked; revoked upstream");
+        assert_eq!(row.glyph, Glyph::Done);
     }
 }

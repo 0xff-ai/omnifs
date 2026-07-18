@@ -7,7 +7,9 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{install_test_provider, omnifs_bin, release_wasm_dir};
+use common::{
+    free_port, install_fixture_provider, install_test_provider, omnifs_bin, release_wasm_dir,
+};
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
 use omnifs_workspace::mounts::Repository;
@@ -74,6 +76,42 @@ fn install_web_provider(fixture: &Fixture) {
             .expect("validate web provider");
     let store = omnifs_workspace::provider::ProviderStore::new(&providers_dir);
     store.retain(&artifact).expect("retain web provider");
+}
+
+/// A fixture provider manifest with one static-token scheme whose validation
+/// probe targets `port`, for tests that need a deterministic auth failure
+/// without a real upstream. Pointing the probe at a bound-then-dropped
+/// ephemeral port makes the connection refuse immediately rather than time
+/// out, so the failure is fast and reliable.
+fn static_token_manifest(id: &str, port: u16) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "displayName": id,
+        "provider": format!("omnifs_provider_{id}.wasm"),
+        "defaultMount": id,
+        "refreshIntervalSecs": 0,
+        "capabilities": [
+            { "kind": "domain", "value": "127.0.0.1", "why": "validate the static token" }
+        ],
+        "auth": {
+            "default": "pat",
+            "schemes": [
+                {
+                    "staticToken": {
+                        "key": "pat",
+                        "valuePrefix": "",
+                        "description": "test token",
+                        "injectDomains": ["127.0.0.1"],
+                        "validation": {
+                            "method": "GET",
+                            "url": format!("http://127.0.0.1:{port}/"),
+                            "expectStatus": 200
+                        }
+                    }
+                }
+            ]
+        }
+    })
 }
 
 fn exit_code(output: &Output) -> i32 {
@@ -537,6 +575,62 @@ fn mount_add_json_receipt_names_the_mount() {
     );
 }
 
+/// A failed static-token validation must abort before `persist_mount_spec`
+/// runs (`stages.rs::MountInitPlan::authenticate`'s `?` propagates the error
+/// straight out of `configure_mount`), so nothing is ever written and the
+/// `✓ mount ... created` row never prints for a mount that does not exist.
+#[test]
+fn mount_add_auth_failure_writes_no_spec_and_prints_no_created_row() {
+    let fixture = Fixture::new();
+    let providers_dir = fixture.home_path().join("providers");
+
+    // Bind then immediately drop an ephemeral port: nothing else claims it in
+    // the meantime, so a connection to it refuses instantly instead of
+    // hanging for the validator's 15s timeout.
+    let port = free_port();
+    let manifest = static_token_manifest("authfail", port);
+    let provider_id = install_fixture_provider(&providers_dir, &manifest).to_string();
+
+    let output = Command::new(omnifs_bin())
+        .args([
+            "mount",
+            "add",
+            &provider_id,
+            "--no-input",
+            "--yes",
+            "--token-env",
+            "AUTHFAIL_TOKEN",
+        ])
+        .env("OMNIFS_HOME", fixture.home_path())
+        .env("OMNIFS_MOUNT_POINT", &fixture.mount_point)
+        .env("AUTHFAIL_TOKEN", "bogus-token")
+        .env("NO_COLOR", "1")
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|error| panic!("spawn omnifs mount add: {error}"));
+
+    assert_ne!(
+        exit_code(&output),
+        0,
+        "an unreachable validation endpoint must fail the add\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("created"),
+        "the mount row must never claim creation when nothing was persisted: {stderr}"
+    );
+    assert!(
+        stderr.contains("validat"),
+        "the real validation failure should still surface: {stderr}"
+    );
+    assert!(
+        !fixture.home_path().join("mounts/authfail.json").exists(),
+        "a failed auth flow must not write a mount spec"
+    );
+}
+
 /// A structured command that fails before its final document emits exactly one JSON
 /// error document on stdout carrying the stable `id`, not the human block.
 #[test]
@@ -595,14 +689,19 @@ fn every_json_command_keeps_its_error_contract_before_workspace_resolution() {
 
 #[test]
 fn bare_invocation_without_mounts_points_to_mount_add() {
+    // The a workspace with no mounts at all skips the status report
+    // entirely (there is nothing to report) and shows the dedicated
+    // fresh-workspace screen instead, closing on both ways to get started.
     let fixture = Fixture::new();
     let output = fixture.run(&[]);
 
     assert_eq!(exit_code(&output), 0);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Frontends  "));
-    assert!(stdout.contains("Mounts  0"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("omnifs mount add <provider>"));
+    assert!(!stdout.contains("Frontends  "), "{stdout}");
+    assert!(!stdout.contains("Mounts  "), "{stdout}");
+    assert!(stdout.contains("No mounts yet."), "{stdout}");
+    assert!(stdout.contains("omnifs setup"), "{stdout}");
+    assert!(stdout.contains("omnifs mount add"), "{stdout}");
 }
 
 #[test]
@@ -643,12 +742,24 @@ fn mount_add_collision_renames_with_yes() {
     );
     assert!(second.stdout.is_empty(), "session prose belongs on stderr");
     let stderr = String::from_utf8_lossy(&second.stderr);
-    assert!(stderr.contains("┌ omnifs mount add"), "{stderr}");
+    // The v2 register never repeats the command the user just typed, so
+    // there is no `┌ omnifs mount add` frame opener to assert on.
     assert!(
         stderr.contains("mount name") && stderr.contains("test taken, using test-2"),
         "--yes collision rename must stay visible: {stderr}"
     );
-    assert!(stderr.contains("└ Mounted `test-2`."), "{stderr}");
+    // The outro is a flat sentence with no `└` frame closer, and its inline
+    // `` `test-2` `` span has its backticks stripped by the renderer. No
+    // daemon is running in this fixture, so the closing line names `up`
+    // rather than a browse action.
+    assert!(
+        stderr.contains("Mounted test-2 at /test-2. Serve it: omnifs up"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains('`'),
+        "backticks must never reach the terminal: {stderr}"
+    );
     assert!(
         fixture.home_path().join("mounts/test.json").is_file(),
         "first mount add must write the test mount spec"

@@ -69,9 +69,13 @@ pub(crate) async fn launch(
         loop {
             if let Some(status) = child.try_wait().context("poll daemon child status")? {
                 let cause = log_cause_suffix(&log_path);
-                anyhow::bail!(
-                    "omnifs daemon exited before the mount became ready ({status}){cause}; run `omnifs logs` for the full daemon log"
-                );
+                // Daemon-shaped so the top-level human error block
+                // quotes the log tail inline instead of only pointing at
+                // `omnifs logs`; this message no longer repeats that pointer.
+                return Err(anyhow::anyhow!(
+                    "omnifs daemon exited before the mount became ready ({status}){cause}"
+                ))
+                .with_exit_code(ExitCode::DaemonUnavailable);
             }
             if daemon.ready().await
                 && let Ok(status) = daemon.status().await
@@ -108,7 +112,7 @@ pub(crate) async fn launch(
             let cause = log_cause_suffix(&log_path);
             let _ = child.kill().await;
             Err(anyhow::anyhow!(
-                "omnifs daemon did not become ready within {}s{cause}; run `omnifs logs` for the full daemon log",
+                "omnifs daemon did not become ready within {}s{cause}",
                 readiness_timeout.as_secs()
             ))
             .with_exit_code(ExitCode::DaemonUnavailable)

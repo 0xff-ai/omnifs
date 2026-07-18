@@ -141,6 +141,42 @@ impl Stage {
     }
 }
 
+/// Durable per-session counters, untouched by `reset_recent` or pause: the
+/// quit receipt needs "what happened this whole session," not "what's
+/// currently retained in the waterfall."
+#[derive(Debug, Default, Clone)]
+pub struct SessionStats {
+    pub events: u64,
+    completions: u64,
+    pub errors: u64,
+    cache_hits: u64,
+    pub slowest: Option<SlowOp>,
+}
+
+/// The single slowest completed FUSE operation seen this session.
+#[derive(Debug, Clone)]
+pub struct SlowOp {
+    pub mount: String,
+    pub path: String,
+    pub op: String,
+    pub elapsed_us: u64,
+}
+
+impl SessionStats {
+    /// Fraction of completions served from cache. Mirrors
+    /// [`MountWindow::cache_hit_ratio`]'s hit/(hit+completion) definition so
+    /// the quit receipt's number means the same thing the live sparkline's
+    /// per-mount number does; `None` when nothing completed yet.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn cache_hit_ratio(&self) -> Option<f64> {
+        let total = self.cache_hits + self.completions;
+        if total == 0 {
+            return None;
+        }
+        Some(self.cache_hits as f64 / total as f64)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Operation {
     pub trace_id: TraceId,
@@ -208,7 +244,7 @@ impl Operation {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct TraceReducer {
     pub forest: MountForest,
     pub palette: MountPalette,
@@ -216,11 +252,28 @@ pub struct TraceReducer {
     operations: HashMap<TraceId, Operation>,
     trace_order: VecDeque<TraceId>,
     mount_windows: HashMap<String, MountWindow>,
+    session: SessionStats,
 }
 
 impl TraceReducer {
     pub fn selected(&self) -> Option<TraceId> {
         self.selected
+    }
+
+    /// Force the selection to an exact identity, bypassing the usual
+    /// next/prev/visibility computation. Lets a choice made against one
+    /// reducer instance (e.g. the paused snapshot) be projected onto
+    /// another (the live reducer) at the same trace identity, so the two
+    /// don't drift apart while the view is frozen.
+    pub fn set_selected(&mut self, trace_id: Option<TraceId>) {
+        self.selected = trace_id;
+    }
+
+    /// Durable session counters. Unlike every other accessor here, callers
+    /// needing the quit receipt should read this off the live reducer, not
+    /// a paused snapshot: pausing must not make the receipt undercount.
+    pub fn session(&self) -> &SessionStats {
+        &self.session
     }
 
     pub fn mount_window(&self, mount: &str) -> Option<&MountWindow> {
@@ -256,6 +309,7 @@ impl TraceReducer {
     }
 
     pub fn apply_record(&mut self, record: &InspectorRecord) {
+        self.session.events += 1;
         let trace_id = record.trace_id;
         match &record.event {
             InspectorEvent::FuseStart { op, mount, path } => {
@@ -416,6 +470,23 @@ impl TraceReducer {
             .entry(mount.clone())
             .or_default()
             .record_completion(mono_us, elapsed_us, outcome);
+        self.session.completions += 1;
+        if outcome_status(outcome) == OperationStatus::Error {
+            self.session.errors += 1;
+        }
+        if self
+            .session
+            .slowest
+            .as_ref()
+            .is_none_or(|prev| elapsed_us > prev.elapsed_us)
+        {
+            self.session.slowest = Some(SlowOp {
+                mount: mount.clone(),
+                path: path.clone(),
+                op: op.to_string(),
+                elapsed_us,
+            });
+        }
         // A negative lookup is expected while browsing a projected namespace;
         // keep it in the operation log, but don't make the path look like a
         // permanent hard failure in the activity tree.
@@ -536,6 +607,7 @@ impl TraceReducer {
             self.forest
                 .mount_tree_mut(mount)
                 .cache_hit(&normalized_path, mono_us);
+            self.session.cache_hits += 1;
         }
     }
 
