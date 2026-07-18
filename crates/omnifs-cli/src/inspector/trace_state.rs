@@ -310,7 +310,6 @@ impl TraceReducer {
 
     pub fn apply_record(&mut self, record: &InspectorRecord) {
         self.session.events = self.session.events.saturating_add(1);
-        self.sandbox.touch_trace(record.trace_id, MAX_RECENT_TRACES);
         let trace_id = record.trace_id;
         match &record.event {
             InspectorEvent::FuseStart { op, mount, path } => {
@@ -701,7 +700,7 @@ impl TraceReducer {
 
     fn evict_trace(&mut self, trace_id: TraceId) {
         self.operations.remove(&trace_id);
-        self.sandbox.evict_trace(trace_id);
+        self.sandbox.remove_trace(trace_id);
     }
 
     fn trace_visible(&self, trace_id: TraceId, filter: &ViewFilter) -> bool {
@@ -724,11 +723,39 @@ fn outcome_status(outcome: InspectorOutcome) -> OperationStatus {
 mod tests {
     use std::collections::HashSet;
 
+    use super::super::sandbox::PortId;
     use super::*;
     use omnifs_api::events::{OpEnd, OutcomeFields};
 
     fn record(trace_id: TraceId, mono_us: u64, event: InspectorEvent) -> InspectorRecord {
         InspectorRecord::new("2026-05-23T12:00:00Z", mono_us, trace_id, event)
+    }
+
+    fn ok_end(elapsed_us: u64) -> OpEnd {
+        OpEnd {
+            elapsed_us,
+            result: OutcomeFields::ok(),
+        }
+    }
+
+    fn provider_start(
+        trace_id: TraceId,
+        mono_us: u64,
+        operation_id: u64,
+        mount: &str,
+        method: &str,
+    ) -> InspectorRecord {
+        record(
+            trace_id,
+            mono_us,
+            InspectorEvent::ProviderStart {
+                operation_id,
+                mount: mount.into(),
+                provider: mount.into(),
+                method: method.into(),
+                path: "/x".into(),
+            },
+        )
     }
 
     #[test]
@@ -744,17 +771,7 @@ mod tests {
                     path: "/raulk/omnifs".into(),
                 },
             ),
-            record(
-                7,
-                20,
-                InspectorEvent::ProviderStart {
-                    operation_id: 42,
-                    mount: "github".into(),
-                    provider: "github".into(),
-                    method: "lookup_child".into(),
-                    path: "/raulk/omnifs".into(),
-                },
-            ),
+            provider_start(7, 20, 42, "github", "lookup_child"),
             record(
                 7,
                 30,
@@ -771,10 +788,7 @@ mod tests {
                 InspectorEvent::CalloutEnd {
                     operation_id: 42,
                     callout_index: 0,
-                    end: OpEnd {
-                        elapsed_us: 1_200,
-                        result: OutcomeFields::ok(),
-                    },
+                    end: ok_end(1_200),
                 },
             ),
             record(
@@ -793,10 +807,7 @@ mod tests {
                 60,
                 InspectorEvent::ProviderEnd {
                     operation_id: 42,
-                    end: OpEnd {
-                        elapsed_us: 2_500,
-                        result: OutcomeFields::ok(),
-                    },
+                    end: ok_end(2_500),
                 },
             ),
             record(
@@ -804,10 +815,7 @@ mod tests {
                 70,
                 InspectorEvent::FuseEnd {
                     op: "lookup".into(),
-                    end: OpEnd {
-                        elapsed_us: 3_000,
-                        result: OutcomeFields::ok(),
-                    },
+                    end: ok_end(3_000),
                 },
             ),
         ];
@@ -893,196 +901,92 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
-    fn sandbox_stats_track_open_calls_lifetime_counts_and_windows() {
+    fn sandbox_stats_track_lifecycle_activity_and_eviction() {
         let mut traces = TraceReducer::default();
-        traces.apply_record(&record(
-            11,
-            10,
-            InspectorEvent::FuseStart {
-                op: "lookup".into(),
-                mount: "github".into(),
-                path: "/raulk/omnifs".into(),
-            },
-        ));
-        traces.apply_record(&record(
-            11,
-            20,
-            InspectorEvent::ProviderStart {
-                operation_id: 55,
-                mount: "github".into(),
-                provider: "github".into(),
-                method: "lookup_child".into(),
-                path: "/raulk/omnifs".into(),
-            },
-        ));
-        traces.apply_record(&record(
-            11,
-            30,
-            InspectorEvent::CalloutStart {
-                operation_id: 55,
-                callout_index: 0,
-                kind: CalloutKind::Fetch,
-                summary: "GET api.github.com/repos/raulk/omnifs".into(),
-            },
-        ));
+        let export = PortId::Export("lookup_child".into());
+        let import = PortId::Import(CalloutKind::Fetch);
+        for event in [
+            record(
+                11,
+                10,
+                InspectorEvent::FuseStart {
+                    op: "lookup".into(),
+                    mount: "github".into(),
+                    path: "/raulk/omnifs".into(),
+                },
+            ),
+            provider_start(11, 20, 55, "github", "lookup_child"),
+            record(
+                11,
+                30,
+                InspectorEvent::CalloutStart {
+                    operation_id: 55,
+                    callout_index: 0,
+                    kind: CalloutKind::Fetch,
+                    summary: "GET api.github.com/repos/raulk/omnifs".into(),
+                },
+            ),
+        ] {
+            traces.apply_record(&event);
+        }
 
-        // Mid-trace: one export call and one import call are in flight,
-        // and nothing else on either port.
         let sandbox = traces.mount_sandbox("github").expect("mount sandbox");
+        assert_eq!(sandbox.open_count(&export), 1);
+        assert_eq!(sandbox.open_count(&import), 1);
         assert_eq!(
-            sandbox.open_count(&super::super::sandbox::PortId::Export(
-                "lookup_child".into()
-            )),
-            1
+            (sandbox.total_open_exports(), sandbox.total_open_imports()),
+            (1, 1)
         );
-        assert_eq!(
-            sandbox.open_count(&super::super::sandbox::PortId::Import(CalloutKind::Fetch)),
-            1
-        );
-        assert_eq!(sandbox.total_open_exports(), 1);
-        assert_eq!(sandbox.total_open_imports(), 1);
 
-        traces.apply_record(&record(
-            11,
-            40,
-            InspectorEvent::CalloutEnd {
-                operation_id: 55,
-                callout_index: 0,
-                end: OpEnd {
-                    elapsed_us: 1_200,
-                    result: OutcomeFields::ok(),
+        for event in [
+            record(
+                11,
+                40,
+                InspectorEvent::CalloutEnd {
+                    operation_id: 55,
+                    callout_index: 0,
+                    end: ok_end(1_200),
                 },
-            },
-        ));
-        traces.apply_record(&record(
-            11,
-            50,
-            InspectorEvent::ProviderEnd {
-                operation_id: 55,
-                end: OpEnd {
-                    elapsed_us: 2_000,
-                    result: OutcomeFields::ok(),
+            ),
+            record(
+                11,
+                50,
+                InspectorEvent::ProviderEnd {
+                    operation_id: 55,
+                    end: ok_end(2_000),
                 },
-            },
-        ));
-        traces.apply_record(&record(
-            11,
-            60,
-            InspectorEvent::FuseEnd {
-                op: "lookup".into(),
-                end: OpEnd {
-                    elapsed_us: 2_500,
-                    result: OutcomeFields::ok(),
-                },
-            },
-        ));
+            ),
+        ] {
+            traces.apply_record(&event);
+        }
 
         let sandbox = traces.mount_sandbox("github").expect("mount sandbox");
         assert_eq!(
-            sandbox.open_count(&super::super::sandbox::PortId::Export(
-                "lookup_child".into()
-            )),
-            0
+            (sandbox.total_open_exports(), sandbox.total_open_imports()),
+            (0, 0)
         );
-        assert_eq!(
-            sandbox.open_count(&super::super::sandbox::PortId::Import(CalloutKind::Fetch)),
-            0
-        );
-        assert_eq!(sandbox.total_open_exports(), 0);
-        assert_eq!(sandbox.total_open_imports(), 0);
-        assert!(
-            !sandbox
-                .port_stats(&super::super::sandbox::PortId::Export(
-                    "lookup_child".into()
-                ))
-                .expect("export window")
-                .window
-                .is_empty()
-        );
-        assert!(
-            !sandbox
-                .port_stats(&super::super::sandbox::PortId::Import(CalloutKind::Fetch))
-                .expect("import window")
-                .window
-                .is_empty()
-        );
-        assert_eq!(
-            sandbox
-                .port_stats(&super::super::sandbox::PortId::Export(
-                    "lookup_child".into()
-                ))
-                .unwrap()
-                .lifetime,
-            1
-        );
-        assert_eq!(
-            sandbox
-                .port_stats(&super::super::sandbox::PortId::Import(CalloutKind::Fetch))
-                .unwrap()
-                .lifetime,
-            1
-        );
-    }
+        for port in [&export, &import] {
+            let stats = sandbox.port_stats(port).expect("port stats");
+            assert_eq!(stats.lifetime, 1);
+            assert!(!stats.window.is_empty());
+        }
 
-    #[test]
-    fn callout_for_unknown_trace_is_skipped_without_panicking_or_state() {
-        let mut traces = TraceReducer::default();
-        traces.apply_record(&record(
-            99,
-            10,
-            InspectorEvent::CalloutStart {
-                operation_id: 1,
-                callout_index: 0,
-                kind: CalloutKind::Fetch,
-                summary: "GET nowhere".into(),
-            },
-        ));
-        traces.apply_record(&record(
-            99,
-            20,
-            InspectorEvent::CalloutEnd {
-                operation_id: 1,
-                callout_index: 0,
-                end: OpEnd {
-                    elapsed_us: 100,
-                    result: OutcomeFields::ok(),
-                },
-            },
-        ));
-        // No fuse.start ever named a mount for trace 99, so there's
-        // nothing to resolve the callout against; it must be dropped
-        // silently rather than creating a phantom mount.
-        assert!(traces.sandbox_mounts_by_activity().is_empty());
-    }
-
-    #[test]
-    fn evict_trace_sweeps_open_sandbox_entries() {
-        let mut traces = TraceReducer::default();
-        traces.apply_record(&record(
-            12,
-            10,
-            InspectorEvent::ProviderStart {
-                operation_id: 7,
-                mount: "github".into(),
-                provider: "github".into(),
-                method: "lookup_child".into(),
-                path: "/raulk/omnifs".into(),
-            },
-        ));
+        traces.apply_record(&provider_start(12, 70, 7, "scratch", "read_file"));
+        assert_eq!(
+            traces.sandbox_mounts_by_activity(),
+            vec!["scratch", "github"]
+        );
         assert_eq!(
             traces
-                .mount_sandbox("github")
+                .mount_sandbox("scratch")
                 .expect("mount sandbox")
                 .total_open_exports(),
             1
         );
-
         traces.evict_trace(12);
-
         assert_eq!(
             traces
-                .mount_sandbox("github")
+                .mount_sandbox("scratch")
                 .expect("mount sandbox")
                 .total_open_exports(),
             0
@@ -1092,68 +996,22 @@ mod tests {
     #[test]
     fn completion_settles_sandbox_after_operation_eviction() {
         let mut traces = TraceReducer::default();
-        traces.apply_record(&record(
-            120,
-            10,
-            InspectorEvent::ProviderStart {
-                operation_id: 7,
-                mount: "github".into(),
-                provider: "github".into(),
-                method: "lookup_child".into(),
-                path: "/a".into(),
-            },
-        ));
+        traces.apply_record(&provider_start(120, 10, 7, "github", "lookup_child"));
         traces.operations.remove(&120);
         traces.apply_record(&record(
             120,
             20,
             InspectorEvent::ProviderEnd {
                 operation_id: 7,
-                end: OpEnd {
-                    elapsed_us: 10,
-                    result: OutcomeFields::ok(),
-                },
+                end: ok_end(10),
             },
         ));
         let sandbox = traces.mount_sandbox("github").expect("sandbox");
         assert_eq!(sandbox.total_open_exports(), 0);
         let stats = sandbox
-            .port_stats(&super::super::sandbox::PortId::Export(
-                "lookup_child".into(),
-            ))
+            .port_stats(&PortId::Export("lookup_child".into()))
             .unwrap();
         assert_eq!(stats.lifetime, 1);
         assert!(!stats.window.is_empty());
-    }
-
-    #[test]
-    fn sandbox_mounts_by_activity_orders_by_recency() {
-        let mut traces = TraceReducer::default();
-        traces.apply_record(&record(
-            13,
-            10,
-            InspectorEvent::ProviderStart {
-                operation_id: 1,
-                mount: "github".into(),
-                provider: "github".into(),
-                method: "lookup_child".into(),
-                path: "/a".into(),
-            },
-        ));
-        traces.apply_record(&record(
-            14,
-            20,
-            InspectorEvent::ProviderStart {
-                operation_id: 2,
-                mount: "scratch".into(),
-                provider: "scratch".into(),
-                method: "read_file".into(),
-                path: "/b".into(),
-            },
-        ));
-        assert_eq!(
-            traces.sandbox_mounts_by_activity(),
-            vec!["scratch", "github"]
-        );
     }
 }

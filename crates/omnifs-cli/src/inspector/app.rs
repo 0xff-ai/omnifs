@@ -7,7 +7,7 @@ use omnifs_api::events::{InspectorEvent, InspectorLine, InspectorRecord, TraceId
 
 use super::filter::{FilterMode, ViewFilter};
 use super::metrics::MountWindow;
-use super::sandbox::{self, MountSandboxView, PortId};
+use super::sandbox::{MountSandboxView, PortId};
 use super::source::SourceMessage;
 use super::timeline::Timeline;
 use super::trace_state::{MAX_RECENT_TRACES, MountPalette, Operation, SessionStats, TraceReducer};
@@ -43,13 +43,7 @@ impl AppView {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SandboxMapState {
     pub active_mount: Option<String>,
-    pub selection: Option<PortSelection>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PortSelection {
-    pub port: PortId,
-    pub pinned: bool,
+    pub selection: Option<PortId>,
 }
 
 // This is a UI-state struct whose bools are independent toggles
@@ -355,19 +349,6 @@ impl App {
             .sandbox_active_mount(self.sandbox.active_mount.as_deref())
     }
 
-    /// Number of records currently retained in the timeline ring: what
-    /// scrubbing can actually reach, as opposed to `end()`'s raw
-    /// arrival ordinal which also counts records already evicted.
-    pub fn timeline_retained_count(&self) -> u64 {
-        self.timeline.end().saturating_sub(self.timeline.evicted())
-    }
-
-    /// The oldest retained record's clock, if the timeline has anything
-    /// at all.
-    pub fn timeline_oldest_mono_us(&self) -> Option<u64> {
-        self.timeline.oldest_mono_us()
-    }
-
     pub fn ordered_mounts_for_strip(&self, cap: usize) -> Vec<String> {
         let mounts = self.view_reducer().ordered_mounts_for_strip(cap);
         if self.hide_idle {
@@ -628,9 +609,7 @@ impl App {
     /// combined export-then-import list for the currently displayed
     /// mount, clamping at both ends (no wrap, unlike mount cycling).
     fn move_port_cursor(&mut self, delta: isize) {
-        let mount = self.sandbox_active_mount();
-        let sandbox = mount.and_then(|m| self.mount_sandbox(m));
-        let ports = sandbox::all_port_ids(sandbox.as_ref());
+        let ports = PortId::all();
         if ports.is_empty() {
             self.sandbox.selection = None;
             return;
@@ -638,23 +617,13 @@ impl App {
         let last = ports.len() - 1;
         let idx = match &self.sandbox.selection {
             Some(selection) => {
-                let current = ports.iter().position(|p| *p == selection.port).unwrap_or(0);
+                let current = ports.iter().position(|p| p == selection).unwrap_or(0);
                 step_clamped(current, delta, last)
             },
             None if delta < 0 => last,
             None => 0,
         };
-        let pinned = self.sandbox.selection.as_ref().is_some_and(|s| s.pinned);
-        self.sandbox.selection = Some(PortSelection {
-            port: ports[idx].clone(),
-            pinned,
-        });
-    }
-
-    fn toggle_port_pin(&mut self) {
-        if let Some(selection) = &mut self.sandbox.selection {
-            selection.pinned = !selection.pinned;
-        }
+        self.sandbox.selection = Some(ports[idx].clone());
     }
 
     fn sync_selection_to_tree_cursor(&mut self) {
@@ -884,13 +853,10 @@ impl Command {
                     AppView::Sandbox => app.move_port_cursor(delta),
                 }
             },
-            Self::Activate => match app.view {
-                AppView::Activity if app.focus == PaneFocus::Tree => {
-                    app.toggle_tree_cursor_collapse();
-                },
-                AppView::Sandbox => app.toggle_port_pin(),
-                AppView::Activity => {},
+            Self::Activate if app.focus == PaneFocus::Tree => {
+                app.toggle_tree_cursor_collapse();
             },
+            Self::Activate => {},
             Self::SelectNext => app.select_next(),
             Self::SelectPrev => app.select_prev(),
             Self::ToggleErrors => app.toggle_errors_only(),
@@ -922,131 +888,68 @@ struct KeyBinding {
 }
 
 impl KeyBinding {
+    const fn visible(
+        scope: BindingScope,
+        command: Command,
+        label: &'static str,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            scope,
+            command,
+            label,
+            description,
+            hidden: false,
+        }
+    }
+
+    const fn hidden(
+        scope: BindingScope,
+        command: Command,
+        label: &'static str,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            scope,
+            command,
+            label,
+            description,
+            hidden: true,
+        }
+    }
+
     fn handles(&self, app: &App, key: &KeyEvent) -> bool {
         self.scope.active(app) && self.command.matches(key)
     }
 }
 
 const KEYMAP: &[KeyBinding] = &[
-    KeyBinding {
-        scope: BindingScope::Global,
-        command: Command::Quit,
-        label: "q",
-        description: "quit",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Global,
-        command: Command::ToggleView,
-        label: "v",
-        description: "view",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Activity,
-        command: Command::CycleFocus,
-        label: "tab",
-        description: "focus",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Activity,
-        command: Command::Navigate,
-        label: "↑/↓",
-        description: "navigate",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Activity,
-        command: Command::Activate,
-        label: "↵",
-        description: "collapse",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Activity,
-        command: Command::SelectNext,
-        label: "j/n",
-        description: "next op",
-        hidden: true,
-    },
-    KeyBinding {
-        scope: BindingScope::Activity,
-        command: Command::SelectPrev,
-        label: "k/p",
-        description: "prev op",
-        hidden: true,
-    },
-    KeyBinding {
-        scope: BindingScope::Sandbox,
-        command: Command::Navigate,
-        label: "↑/↓",
-        description: "port",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Sandbox,
-        command: Command::Activate,
-        label: "↵",
-        description: "pin",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Sandbox,
-        command: Command::CycleMount,
-        label: "m",
-        description: "mount",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Global,
-        command: Command::TogglePause,
-        label: "space",
-        description: "pause",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Global,
-        command: Command::ToggleErrors,
-        label: "e",
-        description: "errors",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Global,
-        command: Command::ToggleIdle,
-        label: "i",
-        description: "idle",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Global,
-        command: Command::EditFilter,
-        label: "/",
-        description: "filter",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Global,
-        command: Command::Reset,
-        label: "r",
-        description: "reset",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Paused,
-        command: Command::StepScrub,
-        label: "←/→",
-        description: "step",
-        hidden: false,
-    },
-    KeyBinding {
-        scope: BindingScope::Paused,
-        command: Command::GoLive,
-        label: "g",
-        description: "live",
-        hidden: false,
-    },
+    KeyBinding::visible(BindingScope::Global, Command::Quit, "q", "quit"),
+    KeyBinding::visible(BindingScope::Global, Command::ToggleView, "v", "view"),
+    KeyBinding::visible(BindingScope::Activity, Command::CycleFocus, "tab", "focus"),
+    KeyBinding::visible(BindingScope::Activity, Command::Navigate, "↑/↓", "navigate"),
+    KeyBinding::visible(BindingScope::Activity, Command::Activate, "↵", "collapse"),
+    KeyBinding::hidden(
+        BindingScope::Activity,
+        Command::SelectNext,
+        "j/n",
+        "next op",
+    ),
+    KeyBinding::hidden(
+        BindingScope::Activity,
+        Command::SelectPrev,
+        "k/p",
+        "prev op",
+    ),
+    KeyBinding::visible(BindingScope::Sandbox, Command::Navigate, "↑/↓", "port"),
+    KeyBinding::visible(BindingScope::Sandbox, Command::CycleMount, "m", "mount"),
+    KeyBinding::visible(BindingScope::Global, Command::TogglePause, "space", "pause"),
+    KeyBinding::visible(BindingScope::Global, Command::ToggleErrors, "e", "errors"),
+    KeyBinding::visible(BindingScope::Global, Command::ToggleIdle, "i", "idle"),
+    KeyBinding::visible(BindingScope::Global, Command::EditFilter, "/", "filter"),
+    KeyBinding::visible(BindingScope::Global, Command::Reset, "r", "reset"),
+    KeyBinding::visible(BindingScope::Paused, Command::StepScrub, "←/→", "step"),
+    KeyBinding::visible(BindingScope::Paused, Command::GoLive, "g", "live"),
 ];
 
 /// Context-sensitive footer text generated from the same bindings that
@@ -1164,17 +1067,17 @@ mod tests {
         app.apply_source_message(SourceMessage::Connected {
             epoch: "one".into(),
         });
-        assert_eq!(app.timeline_retained_count(), 1);
+        assert_eq!(app.timeline.end() - app.timeline.evicted(), 1);
 
         app.apply_source_message(SourceMessage::Connected {
             epoch: "two".into(),
         });
-        assert_eq!(app.timeline_retained_count(), 0);
+        assert_eq!(app.timeline.end() - app.timeline.evicted(), 0);
         assert_eq!(app.now_mono, 0);
         app.apply_source_message(SourceMessage::Line(InspectorLine::Record(
             fuse_start(2, 3, "github", "/b").with_seq(1),
         )));
-        assert_eq!(app.timeline_oldest_mono_us(), Some(3));
+        assert_eq!(app.timeline.oldest_mono_us(), Some(3));
         assert_eq!(app.selected_trace(), Some(2));
     }
 
@@ -1251,36 +1154,23 @@ mod tests {
         app.view = AppView::Sandbox;
 
         app.handle_key(key(KeyCode::Down));
-        assert_eq!(
-            app.sandbox
-                .selection
-                .as_ref()
-                .map(|selection| &selection.port),
-            Some(&PortId::Export(sandbox::EXPORT_PORTS[0].to_string()))
-        );
+        assert_eq!(app.sandbox.selection.as_ref(), PortId::exports().first());
 
         // Up from the first row must clamp, not go negative or wrap.
         app.handle_key(key(KeyCode::Up));
-        assert_eq!(
-            app.sandbox
-                .selection
-                .as_ref()
-                .map(|selection| &selection.port),
-            Some(&PortId::Export(sandbox::EXPORT_PORTS[0].to_string()))
-        );
+        assert_eq!(app.sandbox.selection.as_ref(), PortId::exports().first());
 
-        // Walking past the end of the combined list must clamp on Log,
-        // the last row, rather than panicking or wrapping.
-        let total = sandbox::all_port_ids(app.mount_sandbox("github").as_ref()).len();
+        // Walking past the end of the combined list must clamp on the
+        // last static row, rather than panicking or wrapping.
+        let total = PortId::all().len();
         for _ in 0..total + 3 {
             app.handle_key(key(KeyCode::Down));
         }
         assert_eq!(
-            app.sandbox
-                .selection
-                .as_ref()
-                .map(|selection| &selection.port),
-            Some(&PortId::Log)
+            app.sandbox.selection.as_ref(),
+            Some(&PortId::Import(
+                omnifs_api::events::CalloutKind::GitOpenRepo
+            ))
         );
     }
 
@@ -1293,7 +1183,7 @@ mod tests {
         app.apply_record(provider_start(2, 20, "gitlab", "lookup_child"));
         app.view = AppView::Sandbox;
 
-        // Most-recently-active mount first, with nothing pinned yet.
+        // Most-recently-active mount first, with no explicit mount yet.
         assert_eq!(app.sandbox_active_mount(), Some("gitlab"));
 
         app.handle_key(key(KeyCode::Char('m')));
@@ -1343,7 +1233,7 @@ mod tests {
         let sandbox_footer = footer_text(&app);
         assert!(sandbox_footer.contains("m mount"));
         assert!(!sandbox_footer.contains("tab focus"));
-        for code in [KeyCode::Up, KeyCode::Enter, KeyCode::Char('m')] {
+        for code in [KeyCode::Up, KeyCode::Char('m')] {
             let event = key(code);
             assert_eq!(
                 KEYMAP

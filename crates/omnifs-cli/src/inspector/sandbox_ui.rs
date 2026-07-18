@@ -1,11 +1,6 @@
 //! The sandbox map ("patch bay") view: one mount's exported ports (host
 //! invokes guest) and imported ports (guest awaits host) rendered
-//! either side of its wasm sandbox box, plus a scrub bar mirroring the
-//! activity view's time travel.
-//!
-//! Like the activity view, every stat here reads through [`App`]'s
-//! view accessors (`mount_sandbox`, `view_now_mono`, ...), so pausing
-//! and scrubbing cover the sandbox map for free.
+//! either side of its wasm sandbox box.
 
 use ratatui::{
     Frame,
@@ -18,7 +13,7 @@ use ratatui::{
 use super::app::App;
 use super::format;
 use super::metrics::{MountWindow, render_sparkline};
-use super::sandbox::{self, MountSandboxView, PortId};
+use super::sandbox::{MountSandboxView, PortId};
 use super::ui;
 
 /// 12-bucket sparkline per port row, matching the activity view's
@@ -40,16 +35,12 @@ const LABEL_WIDTH: usize = 14;
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(6)]).split(area);
     ui::render_header(frame, app, chunks[0]);
-    render_body(frame, app, chunks[1]);
+    render_map(frame, app, chunks[1]);
 }
 
-fn render_body(frame: &mut Frame, app: &App, area: Rect) {
-    render_map_body(frame, app, area);
-}
-
-fn render_map_body(frame: &mut Frame, app: &App, area: Rect) {
+fn render_map(frame: &mut Frame, app: &App, area: Rect) {
     let Some(mount) = app.sandbox_active_mount() else {
-        render_empty_state(frame, app, area);
+        render_empty_state(frame, area);
         return;
     };
     let sandbox = app.mount_sandbox(mount);
@@ -57,24 +48,20 @@ fn render_map_body(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // mount strip
         Constraint::Min(5),    // rails + box
-        Constraint::Length(1), // pinned footer
-        Constraint::Length(1), // scrub bar
+        Constraint::Length(1), // selected-port detail
     ])
     .split(area);
 
     render_mount_strip(frame, app, chunks[0], mount);
     render_rails(frame, app, chunks[1], mount, sandbox.as_ref());
-    render_pinned_footer(frame, app, chunks[2], sandbox.as_ref());
-    render_scrub_bar(frame, app, chunks[3]);
+    render_selected_footer(frame, app, chunks[2], sandbox.as_ref());
 }
 
-fn render_empty_state(frame: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(area);
+fn render_empty_state(frame: &mut Frame, area: Rect) {
     let msg = Paragraph::new("no provider activity yet")
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
-    frame.render_widget(msg, chunks[0]);
-    render_scrub_bar(frame, app, chunks[1]);
+    frame.render_widget(msg, area);
 }
 
 /// One line above the rails listing sandbox mounts by activity, active
@@ -111,8 +98,8 @@ fn render_rails(
     mount: &str,
     sandbox: Option<&MountSandboxView<'_>>,
 ) {
-    let exports = sandbox::export_port_ids(sandbox);
-    let imports = sandbox::import_port_ids(sandbox);
+    let exports = PortId::exports();
+    let imports = PortId::imports();
     let show_sparkline = area.width >= NARROW_WIDTH;
 
     if area.width < STACK_WIDTH {
@@ -124,25 +111,9 @@ fn render_rails(
             Constraint::Length(import_h),
         ])
         .split(area);
-        render_port_column(
-            frame,
-            app,
-            chunks[0],
-            sandbox,
-            &exports,
-            PortDirection::Export,
-            show_sparkline,
-        );
+        render_port_column(frame, app, chunks[0], sandbox, &exports, show_sparkline);
         render_box(frame, app, chunks[1], mount, sandbox);
-        render_port_column(
-            frame,
-            app,
-            chunks[2],
-            sandbox,
-            &imports,
-            PortDirection::Import,
-            show_sparkline,
-        );
+        render_port_column(frame, app, chunks[2], sandbox, &imports, show_sparkline);
         return;
     }
 
@@ -153,41 +124,24 @@ fn render_rails(
         Constraint::Min(0),
     ])
     .split(area);
-    render_port_column(
-        frame,
-        app,
-        chunks[0],
-        sandbox,
-        &exports,
-        PortDirection::Export,
-        show_sparkline,
-    );
+    render_port_column(frame, app, chunks[0], sandbox, &exports, show_sparkline);
     render_box(frame, app, chunks[1], mount, sandbox);
-    render_port_column(
-        frame,
-        app,
-        chunks[2],
-        sandbox,
-        &imports,
-        PortDirection::Import,
-        show_sparkline,
-    );
+    render_port_column(frame, app, chunks[2], sandbox, &imports, show_sparkline);
 }
 
-/// One column of port rows, oriented by `direction`: exports point into
-/// the box, imports point out of it.
+/// One column of port rows. Export wires point into the box; import
+/// wires point out of it.
 fn render_port_column(
     frame: &mut Frame,
     app: &App,
     area: Rect,
     sandbox: Option<&MountSandboxView<'_>>,
     ports: &[PortId],
-    direction: PortDirection,
     show_sparkline: bool,
 ) {
     let lines: Vec<Line<'static>> = ports
         .iter()
-        .map(|port| port_row_line(app, sandbox, port, direction, show_sparkline))
+        .map(|port| port_row_line(app, sandbox, port, show_sparkline))
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -245,7 +199,7 @@ fn render_box(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_pinned_footer(
+fn render_selected_footer(
     frame: &mut Frame,
     app: &App,
     area: Rect,
@@ -254,48 +208,36 @@ fn render_pinned_footer(
     let Some(selection) = app.sandbox.selection.as_ref() else {
         return;
     };
-    if !selection.pinned {
-        return;
-    }
-    let port = &selection.port;
+    let port = selection;
     let line = Line::from(vec![
         Span::styled(
-            "▸ pinned: ",
+            "▸ selected: ",
             Style::default()
                 .fg(Color::LightYellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(port_label(port)),
+        Span::raw(port.label()),
         Span::raw("   "),
         Span::styled(
-            pinned_detail(app, sandbox, port),
+            selected_detail(app, sandbox, port),
             Style::default().fg(Color::DarkGray),
         ),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn port_label(port: &PortId) -> String {
-    match port {
-        PortId::Export(method) => dashed(method),
-        PortId::Import(kind) => dashed(kind.as_str()),
-        PortId::Log => "log".to_string(),
-    }
-}
-
-/// The pinned footer's detail text: for an export, an in-flight call's
+/// The selected footer's detail text: for an export, an in-flight call's
 /// running elapsed if one is open, else the newest matching operation's
 /// path/outcome/elapsed; for an import, an in-flight callout's live
 /// summary if one is open, else the port's lifetime count and p95
 /// (there's no per-kind "last completed" detail to show, since callouts
-/// aren't retained past their own operation); for Log, there's nothing
-/// to show at all.
-fn pinned_detail(app: &App, sandbox: Option<&MountSandboxView<'_>>, port: &PortId) -> String {
+/// aren't retained past their own operation).
+fn selected_detail(app: &App, sandbox: Option<&MountSandboxView<'_>>, port: &PortId) -> String {
     match port {
         PortId::Export(method) => {
             if let Some(start_mono) = sandbox
                 .and_then(|s| s.open_call(port))
-                .map(|call| call.start_mono)
+                .map(|(start_mono, _)| start_mono)
             {
                 let elapsed = app.view_now_mono().saturating_sub(start_mono);
                 return format!("running {}", format::format_latency_us(elapsed));
@@ -323,9 +265,9 @@ fn pinned_detail(app: &App, sandbox: Option<&MountSandboxView<'_>>, port: &PortI
             let Some(sandbox) = sandbox else {
                 return "no activity".to_string();
             };
-            if let Some(call) = sandbox.open_call(port) {
-                let elapsed = app.view_now_mono().saturating_sub(call.start_mono);
-                let summary = call.summary.unwrap_or("callout");
+            if let Some((start_mono, summary)) = sandbox.open_call(port) {
+                let elapsed = app.view_now_mono().saturating_sub(start_mono);
+                let summary = summary.unwrap_or("callout");
                 format!("{summary}  running {}", format::format_latency_us(elapsed))
             } else {
                 let p95 = sandbox
@@ -337,49 +279,6 @@ fn pinned_detail(app: &App, sandbox: Option<&MountSandboxView<'_>>, port: &PortI
                 format!("{count} calls  p95 {p95}")
             }
         },
-        PortId::Log => "untraced".to_string(),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PortDirection {
-    Export,
-    Import,
-}
-
-/// WIT-style dashed display name from a wire method/kind string, e.g.
-/// `lookup_child` -> `lookup-child`. One mapping so every port label
-/// (export methods and import kinds alike) uses the same rule.
-fn dashed(wire: &str) -> String {
-    wire.replace('_', "-")
-}
-
-/// Per-port fields the row renderer needs, resolved once per row so
-/// the rendering match arms don't each re-derive them.
-struct PortStats<'a> {
-    label: String,
-    window: Option<&'a MountWindow>,
-    open_now: bool,
-    lifetime: u64,
-    untraced: bool,
-}
-
-fn port_stats<'a>(sandbox: Option<&'a MountSandboxView<'a>>, port: &PortId) -> PortStats<'a> {
-    let (label, untraced) = match port {
-        PortId::Export(method) => (
-            dashed(method),
-            sandbox::UNTRACED_EXPORTS.contains(&method.as_str()),
-        ),
-        PortId::Import(kind) => (dashed(kind.as_str()), false),
-        PortId::Log => ("log".to_string(), true),
-    };
-    let stats = sandbox.and_then(|sandbox| sandbox.port_stats(port));
-    PortStats {
-        label,
-        window: stats.map(|stats| &stats.window),
-        open_now: sandbox.is_some_and(|sandbox| sandbox.open_count(port) > 0),
-        lifetime: stats.map_or(0, |stats| stats.lifetime),
-        untraced,
     }
 }
 
@@ -388,29 +287,30 @@ fn port_stats<'a>(sandbox: Option<&'a MountSandboxView<'a>>, port: &PortId) -> P
 /// it. One function producing both orientations so the four tiers
 /// (hot / warm / idle / untraced) are only ever defined in one place.
 fn wire_glyph(
-    direction: PortDirection,
+    port: &PortId,
     open_now: bool,
     has_samples: bool,
     lifetime_count: u64,
-    untraced: bool,
 ) -> (&'static str, Color) {
-    if untraced {
+    if port.is_untraced() {
         return ("····", Color::DarkGray);
     }
     if open_now {
         return (
-            match direction {
-                PortDirection::Export => "●══▶",
-                PortDirection::Import => "══▶●",
+            if port.is_export() {
+                "●══▶"
+            } else {
+                "══▶●"
             },
             Color::LightGreen,
         );
     }
     if has_samples {
         return (
-            match direction {
-                PortDirection::Export => "○──▶",
-                PortDirection::Import => "──▶○",
+            if port.is_export() {
+                "○──▶"
+            } else {
+                "──▶○"
             },
             Color::Cyan,
         );
@@ -425,7 +325,6 @@ fn port_row_line(
     app: &App,
     sandbox: Option<&MountSandboxView<'_>>,
     port: &PortId,
-    direction: PortDirection,
     show_sparkline: bool,
 ) -> Line<'static> {
     let now_mono = app.view_now_mono();
@@ -433,51 +332,44 @@ fn port_row_line(
         .sandbox
         .selection
         .as_ref()
-        .is_some_and(|selection| selection.port == *port);
-    let stats = port_stats(sandbox, port);
-    let has_samples = stats.window.is_some_and(|w| !w.is_empty());
-    let (wire, wire_color) = wire_glyph(
-        direction,
-        stats.open_now,
-        has_samples,
-        stats.lifetime,
-        stats.untraced,
-    );
+        .is_some_and(|selection| selection == port);
+    let stats = sandbox.and_then(|sandbox| sandbox.port_stats(port));
+    let window = stats.map(|stats| &stats.window);
+    let open_now = sandbox.is_some_and(|sandbox| sandbox.open_count(port) > 0);
+    let lifetime = stats.map_or(0, |stats| stats.lifetime);
+    let has_samples = window.is_some_and(|w| !w.is_empty());
+    let untraced = port.is_untraced();
+    let export = port.is_export();
+    let (wire, wire_color) = wire_glyph(port, open_now, has_samples, lifetime);
     let text_color = if wire_color == Color::DarkGray {
         Color::DarkGray
     } else {
         Color::White
     };
     let label_span = Span::styled(
-        format!("{:<LABEL_WIDTH$}", stats.label),
+        format!("{:<LABEL_WIDTH$}", port.label()),
         Style::default().fg(text_color),
     );
     let wire_span = Span::styled(wire, Style::default().fg(wire_color));
 
     let mut spans = Vec::new();
-    if stats.untraced {
+    if untraced {
         let tag = Span::styled("untraced", Style::default().fg(Color::DarkGray));
-        match direction {
-            PortDirection::Export => {
-                spans.extend([label_span, Span::raw("  "), tag, Span::raw("  "), wire_span]);
-            },
-            PortDirection::Import => {
-                spans.extend([wire_span, Span::raw("  "), label_span, Span::raw("  "), tag]);
-            },
+        if export {
+            spans.extend([label_span, Span::raw("  "), tag, Span::raw("  "), wire_span]);
+        } else {
+            spans.extend([wire_span, Span::raw("  "), label_span, Span::raw("  "), tag]);
         }
     } else {
-        let count = Span::raw(format!("{:>5}", stats.lifetime));
-        let p95_text = stats
-            .window
+        let count = Span::raw(format!("{lifetime:>5}"));
+        let p95_text = window
             .and_then(MountWindow::p95_latency_us)
             .map_or_else(|| "—".to_string(), format::format_latency_us);
         let p95 = Span::raw(format!("{p95_text:>7}"));
         let bars = if show_sparkline {
             if has_samples {
                 render_sparkline(
-                    &stats
-                        .window
-                        .map_or_else(Vec::new, |w| w.sparkline(now_mono, SPARK_BUCKETS)),
+                    &window.map_or_else(Vec::new, |w| w.sparkline(now_mono, SPARK_BUCKETS)),
                 )
             } else {
                 " ".repeat(SPARK_BUCKETS)
@@ -486,33 +378,30 @@ fn port_row_line(
             String::new()
         };
         let bars_span = Span::styled(bars, Style::default().fg(wire_color));
-        match direction {
-            PortDirection::Export => {
-                spans.push(label_span);
-                if show_sparkline {
-                    spans.push(Span::raw("  "));
-                    spans.push(bars_span);
-                }
+        if export {
+            spans.push(label_span);
+            if show_sparkline {
                 spans.push(Span::raw("  "));
-                spans.push(count);
+                spans.push(bars_span);
+            }
+            spans.push(Span::raw("  "));
+            spans.push(count);
+            spans.push(Span::raw("  "));
+            spans.push(p95);
+            spans.push(Span::raw("  "));
+            spans.push(wire_span);
+        } else {
+            spans.push(wire_span);
+            spans.push(Span::raw("  "));
+            spans.push(label_span);
+            spans.push(Span::raw("  "));
+            spans.push(count);
+            spans.push(Span::raw("  "));
+            spans.push(p95);
+            if show_sparkline {
                 spans.push(Span::raw("  "));
-                spans.push(p95);
-                spans.push(Span::raw("  "));
-                spans.push(wire_span);
-            },
-            PortDirection::Import => {
-                spans.push(wire_span);
-                spans.push(Span::raw("  "));
-                spans.push(label_span);
-                spans.push(Span::raw("  "));
-                spans.push(count);
-                spans.push(Span::raw("  "));
-                spans.push(p95);
-                if show_sparkline {
-                    spans.push(Span::raw("  "));
-                    spans.push(bars_span);
-                }
-            },
+                spans.push(bars_span);
+            }
         }
     }
 
@@ -521,91 +410,6 @@ fn port_row_line(
         line = line.patch_style(Style::default().bg(ui::CURSOR_BG));
     }
     line
-}
-
-/// Live/paused scrub bar, bottom line of the sandbox map. Mirrors the
-/// activity view's pause affordance so the same mental model (space to
-/// pause, ←/→ to step, g to go live) applies to both screens.
-fn render_scrub_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let line = if app.paused() {
-        paused_scrub_line(app)
-    } else {
-        live_scrub_line(app)
-    };
-    frame.render_widget(Paragraph::new(line), area);
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn format_span_us(us: u64) -> String {
-    let secs = us as f64 / 1_000_000.0;
-    if secs >= 60.0 {
-        let mins = (secs / 60.0).floor();
-        let rem = secs - mins * 60.0;
-        format!("{mins:.0}m{rem:02.0}s")
-    } else {
-        format!("{secs:.1}s")
-    }
-}
-
-fn live_scrub_line(app: &App) -> Line<'static> {
-    let retained = app.timeline_retained_count();
-    let span_text = app.timeline_oldest_mono_us().map_or_else(
-        || "0s".to_string(),
-        |oldest| format_span_us(app.now_mono.saturating_sub(oldest)),
-    );
-    Line::from(vec![
-        Span::styled("  ● live", Style::default().fg(Color::LightGreen)),
-        Span::raw(format!("  buffered {span_text}  {retained} records")),
-        Span::styled(
-            "   space pause  ←/→ step  g live",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ])
-}
-
-fn paused_scrub_line(app: &App) -> Line<'static> {
-    let delta_text = format_span_us(app.now_mono.saturating_sub(app.view_now_mono()));
-    let oldest = app
-        .timeline_oldest_mono_us()
-        .unwrap_or_else(|| app.view_now_mono());
-    let track = scrub_track(oldest, app.now_mono, app.view_now_mono(), 20);
-    Line::from(vec![
-        Span::styled("  ⏸ paused", Style::default().fg(Color::LightYellow)),
-        Span::raw(format!(" at −{delta_text}  [{track}]")),
-        Span::styled(
-            "  space resume  ←/→ step  g live",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ])
-}
-
-/// Fraction (0.0-1.0) of the way `cursor` sits between `oldest` and
-/// `now`, clamped to that range. Pulled out as its own function so the
-/// scrub math is unit-testable independent of rendering.
-#[allow(clippy::cast_precision_loss)]
-fn scrub_fraction(oldest: u64, now: u64, cursor: u64) -> f64 {
-    if now <= oldest {
-        return 0.0;
-    }
-    let span = (now - oldest) as f64;
-    let pos = cursor.saturating_sub(oldest) as f64;
-    (pos / span).clamp(0.0, 1.0)
-}
-
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
-fn scrub_track(oldest: u64, now: u64, cursor: u64, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-    let fraction = scrub_fraction(oldest, now, cursor);
-    let marker = ((fraction * (width - 1) as f64).round() as usize).min(width - 1);
-    (0..width)
-        .map(|i| if i == marker { '▓' } else { '░' })
-        .collect()
 }
 
 #[cfg(test)]
@@ -648,7 +452,6 @@ mod tests {
             &app,
             sandbox.as_ref(),
             &PortId::Export("lookup_child".to_string()),
-            PortDirection::Export,
             true,
         );
         let text = line.to_string();
@@ -666,34 +469,9 @@ mod tests {
     #[test]
     fn untraced_port_renders_the_untraced_tag_and_dotted_wire() {
         let app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
-        let line = port_row_line(
-            &app,
-            None,
-            &PortId::Export("initialize".to_string()),
-            PortDirection::Export,
-            true,
-        );
+        let line = port_row_line(&app, None, &PortId::Export("initialize".to_string()), true);
         let text = line.to_string();
         assert!(text.contains("untraced"));
         assert!(text.contains("····"));
-    }
-
-    #[test]
-    fn log_pseudo_port_is_always_untraced() {
-        let app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
-        let line = port_row_line(&app, None, &PortId::Log, PortDirection::Import, true);
-        let text = line.to_string();
-        assert!(text.contains("untraced"));
-        assert!(text.contains("log"));
-    }
-
-    #[test]
-    fn scrub_fraction_reflects_cursor_position_between_oldest_and_now() {
-        assert!((scrub_fraction(0, 100, 50) - 0.5).abs() < 1e-9);
-        assert!((scrub_fraction(0, 100, 0) - 0.0).abs() < 1e-9);
-        assert!((scrub_fraction(0, 100, 100) - 1.0).abs() < 1e-9);
-        // Degenerate range (nothing retained yet, or now hasn't moved
-        // past oldest): never divide by zero or go negative.
-        assert!((scrub_fraction(50, 50, 25) - 0.0).abs() < 1e-9);
     }
 }

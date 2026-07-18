@@ -1,12 +1,14 @@
 //! Per-mount sandbox port statistics.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 
 use omnifs_api::events::{CalloutKind, InspectorOutcome, TraceId};
 
 use super::metrics::MountWindow;
 
-pub const EXPORT_PORTS: [&str; 8] = [
+const MAX_OPEN_CALLS: usize = 8_192;
+
+const EXPORT_PORTS: [&str; 8] = [
     "initialize",
     "lookup_child",
     "list_children",
@@ -16,8 +18,8 @@ pub const EXPORT_PORTS: [&str; 8] = [
     "close_file",
     "on_event",
 ];
-pub const UNTRACED_EXPORTS: [&str; 2] = ["initialize", "close_file"];
-pub const IMPORT_PORTS: [CalloutKind; 3] = [
+const UNTRACED_EXPORTS: [&str; 2] = ["initialize", "close_file"];
+const IMPORT_PORTS: [CalloutKind; 3] = [
     CalloutKind::Fetch,
     CalloutKind::FetchBlob,
     CalloutKind::GitOpenRepo,
@@ -27,41 +29,40 @@ pub const IMPORT_PORTS: [CalloutKind; 3] = [
 pub enum PortId {
     Export(String),
     Import(CalloutKind),
-    Log,
 }
 
-pub fn export_port_ids(sandbox: Option<&MountSandboxView<'_>>) -> Vec<PortId> {
-    let mut methods: Vec<String> = EXPORT_PORTS.iter().map(|&m| m.to_string()).collect();
-    if let Some(sandbox) = sandbox {
-        let mut extras: Vec<_> = sandbox.known_export_methods().map(str::to_string).collect();
-        extras.sort();
-        for method in extras {
-            if !methods.iter().any(|m| m == &method) {
-                methods.push(method);
-            }
+impl PortId {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Export(method) => method.replace('_', "-"),
+            Self::Import(kind) => kind.as_str().replace('_', "-"),
         }
     }
-    methods.into_iter().map(PortId::Export).collect()
-}
 
-pub fn import_port_ids(sandbox: Option<&MountSandboxView<'_>>) -> Vec<PortId> {
-    let mut kinds = IMPORT_PORTS.to_vec();
-    if let Some(sandbox) = sandbox {
-        for kind in sandbox.known_import_kinds() {
-            if !kinds.contains(&kind) {
-                kinds.push(kind);
-            }
-        }
+    pub fn is_untraced(&self) -> bool {
+        matches!(self, Self::Export(method) if UNTRACED_EXPORTS.contains(&method.as_str()))
     }
-    let mut ports: Vec<PortId> = kinds.into_iter().map(PortId::Import).collect();
-    ports.push(PortId::Log);
-    ports
-}
 
-pub fn all_port_ids(sandbox: Option<&MountSandboxView<'_>>) -> Vec<PortId> {
-    let mut ports = export_port_ids(sandbox);
-    ports.extend(import_port_ids(sandbox));
-    ports
+    pub const fn is_export(&self) -> bool {
+        matches!(self, Self::Export(_))
+    }
+
+    pub fn exports() -> Vec<Self> {
+        EXPORT_PORTS
+            .iter()
+            .map(|method| Self::Export((*method).to_string()))
+            .collect()
+    }
+
+    pub fn imports() -> Vec<Self> {
+        IMPORT_PORTS.iter().copied().map(Self::Import).collect()
+    }
+
+    pub fn all() -> Vec<Self> {
+        let mut ports = Self::exports();
+        ports.extend(Self::imports());
+        ports
+    }
 }
 
 #[derive(Debug, Default)]
@@ -78,103 +79,22 @@ struct OpenCall {
     start_mono: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum OpenCallKey {
-    Export {
-        trace_id: TraceId,
-        operation_id: u64,
-    },
-    Import {
-        trace_id: TraceId,
-        operation_id: u64,
-        callout_index: u32,
-    },
-}
-
-#[derive(Debug, Default)]
-struct OpenCalls {
-    entries: HashMap<OpenCallKey, OpenCall>,
-}
-
-impl OpenCalls {
-    fn insert_export(&mut self, trace_id: TraceId, operation_id: u64, call: OpenCall) {
-        self.entries.insert(
-            OpenCallKey::Export {
-                trace_id,
-                operation_id,
-            },
-            call,
-        );
-    }
-
-    fn insert_import(
-        &mut self,
-        trace_id: TraceId,
-        operation_id: u64,
-        callout_index: u32,
-        call: OpenCall,
-    ) {
-        self.entries.insert(
-            OpenCallKey::Import {
-                trace_id,
-                operation_id,
-                callout_index,
-            },
-            call,
-        );
-    }
-
-    fn remove_export(&mut self, trace_id: TraceId, operation_id: u64) -> Option<OpenCall> {
-        self.entries.remove(&OpenCallKey::Export {
-            trace_id,
-            operation_id,
-        })
-    }
-
-    fn remove_import(
-        &mut self,
-        trace_id: TraceId,
-        operation_id: u64,
-        callout_index: u32,
-    ) -> Option<OpenCall> {
-        self.entries.remove(&OpenCallKey::Import {
-            trace_id,
-            operation_id,
-            callout_index,
-        })
-    }
-
-    fn remove_trace(&mut self, trace_id: TraceId) {
-        self.entries.retain(|key, _| match key {
-            OpenCallKey::Export { trace_id: id, .. } | OpenCallKey::Import { trace_id: id, .. } => {
-                *id != trace_id
-            },
-        });
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct MountSandbox {
-    pub provider: String,
+    provider: String,
     stats: HashMap<PortId, PortStats>,
-    pub last_activity_mono: u64,
+    last_activity_mono: u64,
 }
 
 pub struct MountSandboxView<'a> {
     mount: &'a str,
     sandbox: &'a MountSandbox,
-    open_calls: &'a OpenCalls,
-}
-
-pub struct OpenCallView<'a> {
-    pub start_mono: u64,
-    pub summary: Option<&'a str>,
+    open_calls: &'a HashMap<(TraceId, u64, Option<u32>), OpenCall>,
 }
 
 impl<'a> MountSandboxView<'a> {
     fn calls(&self) -> impl Iterator<Item = &'a OpenCall> + '_ {
         self.open_calls
-            .entries
             .values()
             .filter(move |call| call.mount == self.mount)
     }
@@ -199,27 +119,10 @@ impl<'a> MountSandboxView<'a> {
             .count()
     }
 
-    pub fn open_call(&self, port: &PortId) -> Option<OpenCallView<'_>> {
+    pub fn open_call(&self, port: &PortId) -> Option<(u64, Option<&str>)> {
         self.calls()
             .find(|call| &call.port == port)
-            .map(|call| OpenCallView {
-                start_mono: call.start_mono,
-                summary: call.summary.as_deref(),
-            })
-    }
-
-    pub fn known_export_methods(&self) -> impl Iterator<Item = &str> + '_ {
-        self.sandbox.stats.keys().filter_map(|port| match port {
-            PortId::Export(method) => Some(method.as_str()),
-            _ => None,
-        })
-    }
-
-    pub fn known_import_kinds(&self) -> impl Iterator<Item = CalloutKind> + '_ {
-        self.sandbox.stats.keys().filter_map(|port| match port {
-            PortId::Import(kind) => Some(*kind),
-            _ => None,
-        })
+            .map(|call| (call.start_mono, call.summary.as_deref()))
     }
 
     pub fn provider(&self) -> &str {
@@ -248,12 +151,23 @@ impl MountSandbox {
 #[derive(Debug, Default)]
 pub struct SandboxStats {
     mounts: HashMap<String, MountSandbox>,
-    open_calls: OpenCalls,
-    trace_order: VecDeque<TraceId>,
-    seen_traces: HashSet<TraceId>,
+    open_calls: HashMap<(TraceId, u64, Option<u32>), OpenCall>,
 }
 
 impl SandboxStats {
+    fn insert_open_call(&mut self, key: (TraceId, u64, Option<u32>), call: OpenCall) {
+        self.open_calls.insert(key, call);
+        if self.open_calls.len() > MAX_OPEN_CALLS
+            && let Some(key) = self
+                .open_calls
+                .iter()
+                .min_by_key(|(_, call)| call.start_mono)
+                .map(|(key, _)| *key)
+        {
+            self.open_calls.remove(&key);
+        }
+    }
+
     fn mount_mut(&mut self, mount: &str) -> &mut MountSandbox {
         self.mounts.entry(mount.to_string()).or_default()
     }
@@ -291,18 +205,6 @@ impl SandboxStats {
             .map(|(mount, _)| mount.as_str())
     }
 
-    pub fn touch_trace(&mut self, trace_id: TraceId, cap: usize) {
-        if self.seen_traces.insert(trace_id) {
-            self.trace_order.push_back(trace_id);
-        }
-        while self.trace_order.len() > cap {
-            if let Some(evicted) = self.trace_order.pop_front() {
-                self.seen_traces.remove(&evicted);
-                self.evict_trace(evicted);
-            }
-        }
-    }
-
     pub fn on_provider_start(
         &mut self,
         mount: &str,
@@ -321,9 +223,8 @@ impl SandboxStats {
             stats.lifetime = stats.lifetime.saturating_add(1);
             sandbox.note_activity(mono_us);
         }
-        self.open_calls.insert_export(
-            trace_id,
-            operation_id,
+        self.insert_open_call(
+            (trace_id, operation_id, None),
             OpenCall {
                 mount: mount_name,
                 port,
@@ -341,7 +242,7 @@ impl SandboxStats {
         outcome: InspectorOutcome,
         mono_us: u64,
     ) {
-        if let Some(call) = self.open_calls.remove_export(trace_id, operation_id)
+        if let Some(call) = self.open_calls.remove(&(trace_id, operation_id, None))
             && let Some(sandbox) = self.mounts.get_mut(&call.mount)
         {
             sandbox.complete(call, mono_us, elapsed_us, outcome);
@@ -367,10 +268,8 @@ impl SandboxStats {
             stats.lifetime = stats.lifetime.saturating_add(1);
             sandbox.note_activity(mono_us);
         }
-        self.open_calls.insert_import(
-            trace_id,
-            operation_id,
-            callout_index,
+        self.insert_open_call(
+            (trace_id, operation_id, Some(callout_index)),
             OpenCall {
                 mount: mount_name,
                 port,
@@ -391,14 +290,14 @@ impl SandboxStats {
     ) {
         if let Some(call) = self
             .open_calls
-            .remove_import(trace_id, operation_id, callout_index)
+            .remove(&(trace_id, operation_id, Some(callout_index)))
             && let Some(sandbox) = self.mounts.get_mut(&call.mount)
         {
             sandbox.complete(call, mono_us, elapsed_us, outcome);
         }
     }
 
-    pub fn evict_trace(&mut self, trace_id: TraceId) {
-        self.open_calls.remove_trace(trace_id);
+    pub fn remove_trace(&mut self, trace_id: TraceId) {
+        self.open_calls.retain(|(id, _, _), _| *id != trace_id);
     }
 }

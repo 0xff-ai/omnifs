@@ -96,224 +96,26 @@ impl Default for Timeline {
 
 #[cfg(test)]
 mod tests {
-    use omnifs_api::events::{
-        CacheKind, CalloutKind, InspectorEvent, InspectorOutcome, InspectorRecord, OpEnd,
-        OutcomeFields, TraceId,
-    };
+    use omnifs_api::events::{InspectorEvent, InspectorRecord, TraceId};
 
     use super::*;
-    use crate::inspector::filter::ViewFilter;
-    use crate::inspector::trace_state::TraceReducer;
 
     fn record(trace_id: TraceId, mono_us: u64, event: InspectorEvent) -> InspectorRecord {
         InspectorRecord::new("2026-05-23T12:00:00Z", mono_us, trace_id, event)
     }
 
-    /// ~20 records across 3 traces covering fuse, provider, callout,
-    /// cache, subtree, and clone events, arrival-ordered with monotone
-    /// `mono_us` as a single daemon would emit them. Long because it's
-    /// flat literal test data, not control flow.
-    #[allow(clippy::too_many_lines)]
-    fn synthetic_records() -> Vec<InspectorRecord> {
-        let mut mono = 0_u64;
-        let mut next = |event: InspectorEvent, trace_id: TraceId| -> InspectorRecord {
-            mono += 10;
-            record(trace_id, mono, event)
-        };
-
-        vec![
-            next(
+    fn synthetic_records() -> impl Iterator<Item = InspectorRecord> {
+        (1_u64..=4).map(|trace_id| {
+            record(
+                trace_id,
+                trace_id * 10,
                 InspectorEvent::FuseStart {
                     op: "lookup".into(),
                     mount: "github".into(),
-                    path: "/raulk/omnifs".into(),
+                    path: format!("/{trace_id}"),
                 },
-                1,
-            ),
-            next(
-                InspectorEvent::FuseStart {
-                    op: "write".into(),
-                    mount: "scratch".into(),
-                    path: "/notes".into(),
-                },
-                2,
-            ),
-            next(
-                InspectorEvent::ProviderStart {
-                    operation_id: 100,
-                    mount: "github".into(),
-                    provider: "github".into(),
-                    method: "lookup_child".into(),
-                    path: "/raulk/omnifs".into(),
-                },
-                1,
-            ),
-            next(
-                InspectorEvent::ProviderStart {
-                    operation_id: 200,
-                    mount: "scratch".into(),
-                    provider: "scratch".into(),
-                    method: "write_file".into(),
-                    path: "/notes".into(),
-                },
-                2,
-            ),
-            next(
-                InspectorEvent::CalloutStart {
-                    operation_id: 100,
-                    callout_index: 0,
-                    kind: CalloutKind::Fetch,
-                    summary: "GET api.github.com/repos/raulk/omnifs".into(),
-                },
-                1,
-            ),
-            next(
-                InspectorEvent::CalloutStart {
-                    operation_id: 200,
-                    callout_index: 0,
-                    kind: CalloutKind::FetchBlob,
-                    summary: "PUT blob".into(),
-                },
-                2,
-            ),
-            next(
-                InspectorEvent::CalloutEnd {
-                    operation_id: 100,
-                    callout_index: 0,
-                    end: OpEnd {
-                        elapsed_us: 1_200,
-                        result: OutcomeFields::ok(),
-                    },
-                },
-                1,
-            ),
-            next(
-                InspectorEvent::CalloutEnd {
-                    operation_id: 200,
-                    callout_index: 0,
-                    end: OpEnd {
-                        elapsed_us: 900,
-                        result: OutcomeFields::ok(),
-                    },
-                },
-                2,
-            ),
-            next(
-                InspectorEvent::CacheEvent {
-                    operation_id: Some(100),
-                    mount: "github".into(),
-                    path: "/raulk/omnifs".into(),
-                    kind: CacheKind::BrowseHit,
-                    elapsed_us: None,
-                },
-                1,
-            ),
-            next(
-                InspectorEvent::CacheEvent {
-                    operation_id: Some(200),
-                    mount: "scratch".into(),
-                    path: "/notes".into(),
-                    kind: CacheKind::FileMiss,
-                    elapsed_us: None,
-                },
-                2,
-            ),
-            next(
-                InspectorEvent::ProviderEnd {
-                    operation_id: 100,
-                    end: OpEnd {
-                        elapsed_us: 2_500,
-                        result: OutcomeFields::ok(),
-                    },
-                },
-                1,
-            ),
-            next(
-                InspectorEvent::ProviderEnd {
-                    operation_id: 200,
-                    end: OpEnd {
-                        elapsed_us: 1_800,
-                        result: OutcomeFields::ok(),
-                    },
-                },
-                2,
-            ),
-            next(
-                InspectorEvent::FuseEnd {
-                    op: "lookup".into(),
-                    end: OpEnd {
-                        elapsed_us: 3_000,
-                        result: OutcomeFields::ok(),
-                    },
-                },
-                1,
-            ),
-            next(
-                InspectorEvent::FuseEnd {
-                    op: "write".into(),
-                    end: OpEnd {
-                        elapsed_us: 2_200,
-                        result: OutcomeFields::ok(),
-                    },
-                },
-                2,
-            ),
-            next(
-                InspectorEvent::FuseStart {
-                    op: "lookup".into(),
-                    mount: "github".into(),
-                    path: "/raulk/omnifs2".into(),
-                },
-                3,
-            ),
-            next(
-                InspectorEvent::SubtreeStart {
-                    operation_id: 300,
-                    tree_ref: "sub-1".into(),
-                },
-                3,
-            ),
-            next(
-                InspectorEvent::SubtreeEnd {
-                    operation_id: 300,
-                    tree_ref: "sub-1".into(),
-                    end: OpEnd {
-                        elapsed_us: 400,
-                        result: OutcomeFields::ok(),
-                    },
-                },
-                3,
-            ),
-            next(
-                InspectorEvent::CloneStart {
-                    operation_id: 300,
-                    cache_key: "abc123".into(),
-                    remote: "https://github.com/raulk/omnifs".into(),
-                },
-                3,
-            ),
-            next(
-                InspectorEvent::CloneEnd {
-                    operation_id: 300,
-                    cache_key: "abc123".into(),
-                    end: OpEnd {
-                        elapsed_us: 5_000,
-                        result: OutcomeFields::ok(),
-                    },
-                },
-                3,
-            ),
-            next(
-                InspectorEvent::FuseEnd {
-                    op: "lookup".into(),
-                    end: OpEnd {
-                        elapsed_us: 6_000,
-                        result: OutcomeFields::with_outcome(InspectorOutcome::NotFound),
-                    },
-                },
-                3,
-            ),
-        ]
+            )
+        })
     }
 
     #[test]
@@ -324,26 +126,26 @@ mod tests {
         for record in synthetic_records() {
             timeline.push(record);
         }
-        assert_eq!(timeline.end(), 20);
+        assert_eq!(timeline.end(), 4);
         assert_eq!(timeline.evicted(), 0);
         assert_eq!(timeline.get(0).map(|r| r.trace_id), Some(1));
-        assert_eq!(timeline.get(19).map(|r| r.trace_id), Some(3));
-        assert!(timeline.get(20).is_none());
+        assert_eq!(timeline.get(3).map(|r| r.trace_id), Some(4));
+        assert!(timeline.get(4).is_none());
     }
 
     #[test]
     fn eviction_advances_horizon_and_absolute_ordinals() {
-        let mut timeline = Timeline::with_capacity(4);
+        let mut timeline = Timeline::with_capacity(2);
         for record in synthetic_records() {
             timeline.push(record);
         }
-        // 20 pushes into a cap-4 ring: only the last 4 remain (end -
-        // evicted == 4), and the horizon reports exactly how many were
+        // Four pushes into a cap-2 ring: only the last 2 remain (end -
+        // evicted == 2), and the horizon reports exactly how many were
         // evicted.
-        assert_eq!(timeline.evicted(), 16);
-        assert_eq!(timeline.end(), 20);
-        assert!(timeline.get(15).is_none());
-        assert!(timeline.get(16).is_some());
+        assert_eq!(timeline.evicted(), 2);
+        assert_eq!(timeline.end(), 4);
+        assert!(timeline.get(1).is_none());
+        assert!(timeline.get(2).is_some());
     }
 
     #[test]
@@ -352,86 +154,15 @@ mod tests {
         for record in synthetic_records() {
             timeline.push(record);
         }
-        // Ordinal 4 (0-based) carries mono_us 50 in the synthetic stream.
-        let ordinal = timeline.ordinal_at_or_after(50);
-        assert_eq!(timeline.get(ordinal).map(|r| r.mono_us), Some(50));
+        let ordinal = timeline.ordinal_at_or_after(30);
+        assert_eq!(timeline.get(ordinal).map(|r| r.mono_us), Some(30));
         // A target past the newest record clamps to `end`.
         assert_eq!(timeline.ordinal_at_or_after(u64::MAX), timeline.end());
     }
 
-    /// Determinism: folding the whole stream at once must land on the
-    /// same observable projections as folding a prefix, then folding the
-    /// rest. This is the property the scrub cursor's incremental step and
-    /// full-rebuild code paths both rely on being equivalent.
-    #[test]
-    fn refolding_a_prefix_then_the_rest_matches_folding_all_at_once() {
-        let mut timeline = Timeline::new();
-        for record in synthetic_records() {
-            timeline.push(record);
-        }
-
-        let mut full = TraceReducer::default();
-        for ordinal in 0..timeline.end() {
-            full.apply_record(timeline.get(ordinal).expect("retained"));
-        }
-
-        let split = timeline.end() / 2;
-        let mut incremental = TraceReducer::default();
-        for ordinal in 0..split {
-            incremental.apply_record(timeline.get(ordinal).expect("retained"));
-        }
-        for ordinal in split..timeline.end() {
-            incremental.apply_record(timeline.get(ordinal).expect("retained"));
-        }
-
-        let filter = ViewFilter::default();
-        assert_eq!(
-            full.visible_trace_ids(&filter),
-            incremental.visible_trace_ids(&filter)
-        );
-        assert_eq!(
-            full.retained_trace_count(),
-            incremental.retained_trace_count()
-        );
-
-        let labels = |reducer: &TraceReducer| -> Vec<String> {
-            reducer
-                .operation(1)
-                .expect("trace 1")
-                .stages
-                .iter()
-                .map(|stage| stage.kind.display_label().into_owned())
-                .collect()
-        };
-        assert_eq!(labels(&full), labels(&incremental));
-
-        // Same determinism property, projected through the sandbox fold:
-        // trace 1's provider.start/end pair on github's lookup_child
-        // export completes fully in the synthetic stream, so both the
-        // lifetime counter and the open-call count must agree between
-        // the whole-stream fold and the split-then-resumed fold.
-        let export_lifetime = |reducer: &TraceReducer| -> u64 {
-            reducer.mount_sandbox("github").map_or(0, |sandbox| {
-                sandbox
-                    .port_stats(&crate::inspector::sandbox::PortId::Export(
-                        "lookup_child".into(),
-                    ))
-                    .map_or(0, |stats| stats.lifetime)
-            })
-        };
-        assert_eq!(export_lifetime(&full), export_lifetime(&incremental));
-
-        let open_exports = |reducer: &TraceReducer| -> usize {
-            reducer
-                .mount_sandbox("github")
-                .map_or(0, |sandbox| sandbox.total_open_exports())
-        };
-        assert_eq!(open_exports(&full), open_exports(&incremental));
-    }
-
     #[test]
     fn horizon_clamp_never_panics_when_target_ordinal_is_evicted() {
-        let mut timeline = Timeline::with_capacity(4);
+        let mut timeline = Timeline::with_capacity(2);
         for record in synthetic_records() {
             timeline.push(record);
         }
