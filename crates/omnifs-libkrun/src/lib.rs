@@ -7,7 +7,7 @@
 mod api;
 mod launch;
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -161,6 +161,7 @@ fn is_executable_file(path: &Path) -> bool {
 /// The only VM shape the helper accepts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
+    state_dir: PathBuf,
     root_disk: PathBuf,
     seed_disk: PathBuf,
     serial_log: PathBuf,
@@ -188,6 +189,7 @@ impl Config {
     ) -> Result<Self, Error> {
         let state_dir = state_dir.as_ref();
         let config = Self {
+            state_dir: state_dir.to_path_buf(),
             root_disk: state_dir.join(ROOT_DISK_NAME),
             seed_disk: state_dir.join(SEED_DISK_NAME),
             serial_log: state_dir.join(SERIAL_LOG_NAME),
@@ -217,66 +219,41 @@ impl Config {
     }
 
     pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Self, Error> {
-        Parser::new(arguments.into_iter()).parse()
+        let arguments = arguments.into_iter().collect::<Vec<_>>();
+        let [state_flag, state_dir, attach_flag, attach_socket] = arguments.as_slice() else {
+            return Err(Error::Arguments(
+                "expected `--state-dir PATH --attach-socket PATH`".to_owned(),
+            ));
+        };
+        if state_flag != "--state-dir" || attach_flag != "--attach-socket" {
+            return Err(Error::Arguments(
+                "expected `--state-dir PATH --attach-socket PATH`".to_owned(),
+            ));
+        }
+        Self::omnifs(
+            PathBuf::from(state_dir),
+            PathBuf::from(attach_socket),
+            &Installation::current()?,
+        )
     }
 
     pub fn diagnostic_log(&self) -> &Path {
         &self.diagnostic_log
     }
 
-    pub fn pid_file(&self) -> &Path {
-        &self.pid_file
-    }
-
-    pub fn control_socket(&self) -> &Path {
-        &self.control_socket
-    }
-
-    pub fn control(&self) -> ControlSocket {
-        ControlSocket::new_unchecked(self.control_socket.clone())
-    }
-
-    fn arguments(&self) -> [(&'static str, OsString); 16] {
+    fn arguments(&self) -> [(&'static str, OsString); 2] {
         [
-            ("--root-disk", self.root_disk.clone().into_os_string()),
-            ("--seed-disk", self.seed_disk.clone().into_os_string()),
-            ("--serial-log", self.serial_log.clone().into_os_string()),
-            (
-                "--diagnostic-log",
-                self.diagnostic_log.clone().into_os_string(),
-            ),
-            ("--pid-file", self.pid_file.clone().into_os_string()),
-            (
-                "--control-socket",
-                self.control_socket.clone().into_os_string(),
-            ),
+            ("--state-dir", self.state_dir.clone().into_os_string()),
             (
                 "--attach-socket",
                 self.attach_socket.clone().into_os_string(),
-            ),
-            (
-                "--attach-bridge-socket",
-                self.attach_bridge_socket.clone().into_os_string(),
-            ),
-            (
-                "--readiness-socket",
-                self.readiness_socket.clone().into_os_string(),
-            ),
-            ("--ssh-socket", self.ssh_socket.clone().into_os_string()),
-            ("--libkrun", self.library.clone().into_os_string()),
-            ("--firmware", self.firmware.clone().into_os_string()),
-            ("--attach-port", self.attach_port.to_string().into()),
-            ("--readiness-port", self.readiness_port.to_string().into()),
-            ("--ssh-port", self.ssh_port.to_string().into()),
-            (
-                "--resources",
-                format!("{}:{}", self.vcpus, self.memory_mib).into(),
             ),
         ]
     }
 
     fn validate(&self) -> Result<(), Error> {
         for (name, path) in [
+            ("state directory", &self.state_dir),
             ("root disk", &self.root_disk),
             ("seed disk", &self.seed_disk),
             ("serial log", &self.serial_log),
@@ -363,175 +340,6 @@ impl ControlSocket {
     }
 }
 
-struct Parser<I> {
-    arguments: I,
-    config: Parsed,
-}
-
-#[derive(Default)]
-struct Parsed {
-    root_disk: Option<PathBuf>,
-    seed_disk: Option<PathBuf>,
-    serial_log: Option<PathBuf>,
-    diagnostic_log: Option<PathBuf>,
-    pid_file: Option<PathBuf>,
-    control_socket: Option<PathBuf>,
-    attach_socket: Option<PathBuf>,
-    attach_bridge_socket: Option<PathBuf>,
-    readiness_socket: Option<PathBuf>,
-    ssh_socket: Option<PathBuf>,
-    library: Option<PathBuf>,
-    firmware: Option<PathBuf>,
-    attach_port: Option<u32>,
-    readiness_port: Option<u32>,
-    ssh_port: Option<u32>,
-    resources: Option<(u8, u32)>,
-}
-
-impl<I: Iterator<Item = OsString>> Parser<I> {
-    fn new(arguments: I) -> Self {
-        Self {
-            arguments,
-            config: Parsed::default(),
-        }
-    }
-
-    fn parse(mut self) -> Result<Config, Error> {
-        while let Some(flag) = self.arguments.next() {
-            let value = self.arguments.next().ok_or_else(|| {
-                Error::Arguments(format!("{} requires a value", flag.to_string_lossy()))
-            })?;
-            match flag.to_str() {
-                Some("--root-disk") => Self::path(&mut self.config.root_disk, &flag, value)?,
-                Some("--seed-disk") => Self::path(&mut self.config.seed_disk, &flag, value)?,
-                Some("--serial-log") => Self::path(&mut self.config.serial_log, &flag, value)?,
-                Some("--diagnostic-log") => {
-                    Self::path(&mut self.config.diagnostic_log, &flag, value)?;
-                },
-                Some("--pid-file") => Self::path(&mut self.config.pid_file, &flag, value)?,
-                Some("--control-socket") => {
-                    Self::path(&mut self.config.control_socket, &flag, value)?;
-                },
-                Some("--attach-socket") => {
-                    Self::path(&mut self.config.attach_socket, &flag, value)?;
-                },
-                Some("--attach-bridge-socket") => {
-                    Self::path(&mut self.config.attach_bridge_socket, &flag, value)?;
-                },
-                Some("--readiness-socket") => {
-                    Self::path(&mut self.config.readiness_socket, &flag, value)?;
-                },
-                Some("--ssh-socket") => Self::path(&mut self.config.ssh_socket, &flag, value)?,
-                Some("--libkrun") => Self::path(&mut self.config.library, &flag, value)?,
-                Some("--firmware") => Self::path(&mut self.config.firmware, &flag, value)?,
-                Some("--attach-port") => {
-                    Self::number(&mut self.config.attach_port, &flag, &value)?;
-                },
-                Some("--readiness-port") => {
-                    Self::number(&mut self.config.readiness_port, &flag, &value)?;
-                },
-                Some("--ssh-port") => Self::number(&mut self.config.ssh_port, &flag, &value)?,
-                Some("--resources") => {
-                    if self.config.resources.is_some() {
-                        return Err(Error::Arguments(
-                            "`--resources` was supplied more than once".to_owned(),
-                        ));
-                    }
-                    let value = value.to_str().ok_or_else(|| {
-                        Error::Arguments("`--resources` must be valid UTF-8".to_owned())
-                    })?;
-                    let (vcpus, memory) = value.split_once(':').ok_or_else(|| {
-                        Error::Arguments("`--resources` must have VCPUS:MEMORY_MIB".to_owned())
-                    })?;
-                    self.config.resources = Some((
-                        vcpus.parse().map_err(|_| {
-                            Error::Arguments("invalid vCPU count in `--resources`".to_owned())
-                        })?,
-                        memory.parse().map_err(|_| {
-                            Error::Arguments("invalid memory in `--resources`".to_owned())
-                        })?,
-                    ));
-                },
-                _ => {
-                    return Err(Error::Arguments(format!(
-                        "unknown flag `{}`",
-                        flag.to_string_lossy()
-                    )));
-                },
-            }
-        }
-        self.config.finish()
-    }
-
-    fn path(target: &mut Option<PathBuf>, flag: &OsStr, value: OsString) -> Result<(), Error> {
-        if target.replace(PathBuf::from(value)).is_some() {
-            return Err(Error::Arguments(format!(
-                "`{}` was supplied more than once",
-                flag.to_string_lossy()
-            )));
-        }
-        Ok(())
-    }
-
-    fn number<T: std::str::FromStr>(
-        target: &mut Option<T>,
-        flag: &OsStr,
-        value: &OsStr,
-    ) -> Result<(), Error> {
-        if target.is_some() {
-            return Err(Error::Arguments(format!(
-                "`{}` was supplied more than once",
-                flag.to_string_lossy()
-            )));
-        }
-        let value = value.to_str().ok_or_else(|| {
-            Error::Arguments(format!("`{}` must be valid UTF-8", flag.to_string_lossy()))
-        })?;
-        *target = Some(value.parse().map_err(|_| {
-            Error::Arguments(format!(
-                "invalid number for `{}`: {value}",
-                flag.to_string_lossy()
-            ))
-        })?);
-        Ok(())
-    }
-}
-
-impl Parsed {
-    fn finish(self) -> Result<Config, Error> {
-        let required = |value: Option<PathBuf>, flag: &'static str| {
-            value.ok_or_else(|| Error::Arguments(format!("missing required `{flag}`")))
-        };
-        let number = |value: Option<u32>, flag: &'static str| {
-            value.ok_or_else(|| Error::Arguments(format!("missing required `{flag}`")))
-        };
-        let (vcpus, memory_mib) = self
-            .resources
-            .ok_or_else(|| Error::Arguments("missing required `--resources`".to_owned()))?;
-        let config = Config {
-            root_disk: required(self.root_disk, "--root-disk")?,
-            seed_disk: required(self.seed_disk, "--seed-disk")?,
-            serial_log: required(self.serial_log, "--serial-log")?,
-            diagnostic_log: required(self.diagnostic_log, "--diagnostic-log")?,
-            pid_file: required(self.pid_file, "--pid-file")?,
-            control_socket: required(self.control_socket, "--control-socket")?,
-            attach_socket: required(self.attach_socket, "--attach-socket")?,
-            attach_bridge_socket: required(self.attach_bridge_socket, "--attach-bridge-socket")?,
-            readiness_socket: required(self.readiness_socket, "--readiness-socket")?,
-            ssh_socket: required(self.ssh_socket, "--ssh-socket")?,
-            library: required(self.library, "--libkrun")?,
-            firmware: required(self.firmware, "--firmware")?,
-            attach_port: number(self.attach_port, "--attach-port")?,
-            readiness_port: number(self.readiness_port, "--readiness-port")?,
-            ssh_port: number(self.ssh_port, "--ssh-port")?,
-            vcpus,
-            memory_mib,
-        };
-        config.validate()?;
-        Ok(config)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,30 +366,35 @@ mod tests {
     }
 
     #[test]
-    fn command_arguments_round_trip_through_the_strict_parser() {
+    fn command_arguments_reconstruct_the_fixed_shape() {
         let (_, config) = fixture();
         let arguments = config
             .arguments()
             .into_iter()
             .flat_map(|(flag, value)| [OsString::from(flag), value])
             .collect::<Vec<_>>();
-        assert_eq!(Config::parse(arguments).unwrap(), config);
+        let parsed = Config::parse(arguments).unwrap();
+        assert_eq!(parsed.state_dir, config.state_dir);
+        assert_eq!(parsed.attach_socket, config.attach_socket);
+        assert_eq!(parsed.root_disk, config.root_disk);
+        assert_eq!(parsed.attach_port, ATTACH_PORT);
+        assert_eq!(parsed.vcpus, VCPUS);
     }
 
     #[test]
-    fn parser_rejects_a_resource_policy_change() {
+    fn parser_rejects_any_attempt_to_override_the_fixed_shape() {
         let (_, config) = fixture();
         let mut arguments = config
             .arguments()
             .into_iter()
             .flat_map(|(flag, value)| [OsString::from(flag), value])
             .collect::<Vec<_>>();
-        let index = arguments
-            .iter()
-            .position(|argument| argument == "--resources")
-            .unwrap();
-        arguments[index + 1] = "4:4096".into();
+        arguments.extend(["--resources".into(), "4:4096".into()]);
         let error = Config::parse(arguments).unwrap_err();
-        assert!(error.to_string().contains("2 vCPUs and 2048 MiB"));
+        assert!(
+            error
+                .to_string()
+                .contains("expected `--state-dir PATH --attach-socket PATH`")
+        );
     }
 }

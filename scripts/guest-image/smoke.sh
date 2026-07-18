@@ -38,12 +38,7 @@ root_image="$work/root.raw"
 seed_iso="$work/seed.iso"
 serial_log="$work/serial.log"
 diagnostic_log="$work/helper.log"
-pid_file="$work/libkrun.pid"
-control_socket="$work/control.sock"
 attach_socket="$work/daemon-attach.sock"
-attach_bridge_socket="$work/attach.sock"
-ready_socket="$work/ready.sock"
-ssh_socket="$work/ssh.sock"
 
 image_hash_before="$(shasum -a 256 "$image" | awk '{print $1}')"
 image_mode_before="$(stat -f '%Lp' "$image")"
@@ -97,22 +92,8 @@ dump_helper_logs() {
 start_epoch=$(date +%s)
 
 "$helper" \
-  --root-disk "$root_image" \
-  --seed-disk "$seed_iso" \
-  --serial-log "$serial_log" \
-  --diagnostic-log "$diagnostic_log" \
-  --pid-file "$pid_file" \
-  --control-socket "$control_socket" \
+  --state-dir "$work" \
   --attach-socket "$attach_socket" \
-  --attach-bridge-socket "$attach_bridge_socket" \
-  --readiness-socket "$ready_socket" \
-  --ssh-socket "$ssh_socket" \
-  --libkrun "$libkrun" \
-  --firmware "$firmware" \
-  --attach-port 1024 \
-  --readiness-port 1025 \
-  --ssh-port 22 \
-  --resources 2:2048 \
   >"$work/helper.stdout" 2>&1 &
 helper_pid=$!
 
