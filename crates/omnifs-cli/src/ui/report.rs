@@ -26,7 +26,7 @@ impl Row {
 
     /// Render the row with a stable key column. Inline command spans are
     /// accentuated by the rail style owner.
-    pub(super) fn render(&self, mode: impl Into<style::ColorMode>) -> String {
+    pub(crate) fn render(&self, mode: impl Into<style::ColorMode>) -> String {
         let mode = mode.into();
         let display_key = super::truncate(&self.key, LEDGER_KEY_WIDTH);
         let key_pad = (LEDGER_KEY_WIDTH - display_key.chars().count()).max(1);

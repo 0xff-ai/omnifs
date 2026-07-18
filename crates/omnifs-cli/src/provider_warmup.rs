@@ -74,6 +74,13 @@ impl WarmupStatus {
         }
     }
 
+    /// Whether every provider finished warming. A complete warmup is the
+    /// steady state, so the human context strip omits it; JSON keeps the full
+    /// status either way.
+    pub(crate) fn is_complete(&self) -> bool {
+        self.state == WarmupState::Complete
+    }
+
     pub(crate) fn summary(&self) -> String {
         if self.total == 0 {
             self.state.label().to_owned()
@@ -200,7 +207,8 @@ impl ProviderWarmup {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        let mut progress = output.progress("provider warmup");
+        let total = ids.len();
+        let mut progress = output.progress("providers");
         if self.store.is_active()? {
             progress.update("waiting for background provider warmup");
         }
@@ -211,10 +219,10 @@ impl ProviderWarmup {
         })
         .await
         .context("join provider warmup lock task")??;
-        progress.update("warming selected providers");
+        progress.update(&format!("warming {total} provider(s)"));
         let result = self.warm(ids).await;
         match &result {
-            Ok(()) => progress.settle_ok("ready"),
+            Ok(()) => progress.settle_ok(format!("{total}/{total} warm")),
             Err(_) => progress.settle_fail("warmup failed"),
         }
         result?;

@@ -145,7 +145,11 @@ impl Meta {
     }
 
     fn render(&self) -> String {
-        format!("{} {}", self.label, self.value)
+        if self.label.is_empty() {
+            self.value.clone()
+        } else {
+            format!("{} {}", self.label, self.value)
+        }
     }
 }
 
@@ -439,9 +443,11 @@ pub(crate) struct Action {
 }
 
 impl Action {
+    /// Spec 2.10: a degraded row's recovery command reads `fix:  <command>`,
+    /// full width and never truncated.
     pub(crate) fn fix(command: impl Into<String>) -> Self {
         Self {
-            label: "Fix",
+            label: "fix:",
             command: command.into(),
         }
     }
@@ -732,7 +738,7 @@ mod tests {
                 .unwrap()
                 .contains("daemon running, mounts 2")
         );
-        assert!(output.lines().nth(2).unwrap().contains("Fix  omnifs up"));
+        assert!(output.lines().nth(2).unwrap().contains("fix:  omnifs up"));
     }
 
     #[test]
@@ -752,7 +758,10 @@ mod tests {
         assert!(first_row.contains("▲ reauth required"));
         assert!(first_row.find("github").unwrap() < first_row.find("▲ reauth required").unwrap());
         assert!(display_width(&first_row) <= 71);
-        assert_eq!(output.matches("Fix  omnifs mount reauth github").count(), 1);
+        assert_eq!(
+            output.matches("fix:  omnifs mount reauth github").count(),
+            1
+        );
         assert!(output.contains("Location  /very/long/location"));
     }
 

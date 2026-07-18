@@ -171,6 +171,12 @@ impl From<Result<Option<DaemonStatus>, anyhow::Error>> for DaemonObservation {
     }
 }
 
+/// Ordered by declared variant, least to most severe: derived `Ord` is the
+/// precedence a status-row headline picks from (`status.rs::mount_row_state`),
+/// never a "most severe of several fields" tie-break on its own (a merely
+/// informational `Neutral`, such as auth `not needed`, must not outrank a
+/// genuinely live serving state just because it sorts alongside a real
+/// `Attention`/`Error` elsewhere on the same row).
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Severity {
@@ -178,17 +184,6 @@ pub(crate) enum Severity {
     Neutral,
     Attention,
     Error,
-}
-
-impl Severity {
-    pub(crate) const fn rank(self) -> u8 {
-        match self {
-            Self::Positive => 0,
-            Self::Neutral => 1,
-            Self::Attention => 2,
-            Self::Error => 3,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

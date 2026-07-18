@@ -516,4 +516,40 @@ mod tests {
         assert_eq!(plan.remove_count(), 1);
         assert_eq!(plan.rows[0].id, "spec");
     }
+
+    /// `omnifs mount ls` renders exactly the Mounts section of the status
+    /// report (spec 3.10's per-command scope), never the context strip or
+    /// the Frontends table alongside it.
+    #[test]
+    fn render_mounts_is_exactly_the_status_mounts_section() {
+        let mounts = vec![crate::inventory::MountStatus {
+            name: "github".into(),
+            root: "/github".into(),
+            provider: crate::inventory::ProviderPin {
+                name: "github".into(),
+                version: Some("0.3.2".into()),
+                artifact: "a".repeat(64),
+                state: crate::inventory::ProviderPinState::Available,
+            },
+            auth: crate::inventory::AuthState::Ready,
+            serving: crate::inventory::ServingState::Live,
+            access_count: 1,
+            fix: None,
+        }];
+        let result = MountsResult {
+            mounts: mounts.clone(),
+            verdict: crate::inventory::Verdict::Ok,
+        };
+        let rendered = render_mounts(&result);
+        assert!(rendered.contains("Mounts"));
+        assert!(rendered.contains("github"));
+        assert!(!rendered.contains("omnifs  "), "{rendered:?}");
+        assert!(!rendered.contains("Frontends"), "{rendered:?}");
+
+        let mut expected = crate::ui::table::Report::new();
+        expected.push(crate::ui::table::Block::Resources(
+            crate::status::mount_table(&mounts),
+        ));
+        assert_eq!(rendered, expected.render());
+    }
 }

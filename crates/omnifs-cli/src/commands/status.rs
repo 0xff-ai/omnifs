@@ -18,6 +18,11 @@ impl StatusArgs {
             output.emit_result(report.inventory.verdict(), report.inventory)?;
         } else {
             crate::ui::print_raw(&format!("{}\n", report.render().render()));
+            output.narrate("");
+            output.narrate(format!(
+                "Browse:  `{}`",
+                crate::ui::access::browse_command(&report.inventory)
+            ));
         }
         Ok(exit_code)
     }

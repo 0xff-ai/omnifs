@@ -12,9 +12,10 @@
 // macros everywhere else. Only the raw and JSON output helpers print here.
 #![allow(clippy::disallowed_macros, clippy::print_stdout)]
 
+pub(crate) mod access;
 pub(crate) mod consent;
+pub(crate) mod live;
 pub(crate) mod output;
-pub(crate) mod progress;
 pub(crate) mod prompt;
 pub(crate) mod render;
 pub(crate) mod report;

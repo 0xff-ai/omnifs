@@ -443,7 +443,7 @@ mod golden {
         report.push(TableBlock::Resources(findings_table(&findings)));
         let rendered = strip_ansi(&report.render());
         assert!(rendered.contains("Findings  6"));
-        assert!(rendered.contains("Fix  omnifs mount reauth linear"));
+        assert!(rendered.contains("fix:  omnifs mount reauth linear"));
     }
 
     #[test]

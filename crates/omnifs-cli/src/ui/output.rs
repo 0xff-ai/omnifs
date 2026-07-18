@@ -410,6 +410,20 @@ impl Output {
         }
     }
 
+    /// Print one durable v2-register ledger row (spec 2.1) at an externally
+    /// supplied key width, so a block whose rows are printed one at a time
+    /// as async work settles still reads as one aligned unit rather than
+    /// each row sizing its own key column.
+    pub(crate) fn ledger_row(&self, row: &super::render::LedgerRow, key_width: usize) {
+        if self.mode == OutputMode::Human {
+            let caps = stderr_capabilities(self.quiet);
+            crate::ui::eprint_raw(&format!(
+                "{}\n",
+                super::render::ledger_row_line(row, key_width, caps)
+            ));
+        }
+    }
+
     pub(crate) fn plan(&self, plan: &super::consent::Plan) {
         if self.mode != OutputMode::Human {
             return;
@@ -467,8 +481,8 @@ impl Output {
         }
     }
 
-    pub(crate) fn progress(&self, key: impl Into<String>) -> crate::ui::progress::Progress {
-        crate::ui::progress::Progress::new(self.clone(), key)
+    pub(crate) fn progress(&self, key: impl Into<String>) -> crate::ui::live::Spinner {
+        crate::ui::live::Spinner::new(self.clone(), key)
     }
 
     pub(crate) const fn with_no_input(mut self, no_input: bool) -> Self {

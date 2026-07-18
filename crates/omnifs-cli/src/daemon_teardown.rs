@@ -6,7 +6,7 @@
 
 use crate::inventory::{DaemonProbe, Inventory};
 use crate::ui::consent::Outcome;
-use crate::ui::output::Output;
+use crate::ui::style;
 use omnifs_workspace::Workspace;
 use std::time::Duration;
 
@@ -91,9 +91,16 @@ impl DaemonTeardown {
     /// Stop the namespace daemon and render the typed outcomes through Output.
     /// Bails on the first failure so the exit code reflects an
     /// incomplete teardown.
-    pub(crate) async fn down(&self, output: &Output) -> anyhow::Result<()> {
+    pub(crate) async fn down(&self) -> anyhow::Result<()> {
         let outcomes = self.down_collect().await?;
-        render_outcomes(output, &outcomes);
+        // `down` is only ever called for human output (`commands/down.rs`
+        // routes structured invocations through the receipt path instead),
+        // so the whole transcript prints unconditionally: it is this
+        // command's entire receipt, not narration a script would want `-q`
+        // to drop.
+        for line in transcript(&outcomes, style::Stream::Stderr) {
+            crate::ui::eprint_raw(&format!("{line}\n"));
+        }
         if let Some(outcome) = outcomes.iter().find(|outcome| outcome.is_failure()) {
             anyhow::bail!(outcome.outcome().value);
         }
@@ -241,17 +248,49 @@ impl DaemonTeardown {
     }
 }
 
-fn render_outcomes(output: &Output, outcomes: &[TeardownOutcome]) {
+/// The exact human lines `down` prints (spec 3.7), pure and independent of
+/// the real terminal so it is deterministically testable. Human output shows
+/// exactly the `daemon` row: the `runtime-record` bookkeeping outcome is
+/// real for the JSON receipt (it can independently fail and needs its own
+/// machine-visible row there) but is implementation detail a human never
+/// asked to see, so it never reaches this transcript.
+///
+/// No `daemon`-identified outcome at all means the daemon was never running:
+/// whatever else happened was runtime-record bookkeeping, not a stop, so it
+/// stays off the human transcript too (an already-absent record needs no
+/// cleanup line, and a removed stale record isn't a "stop" either, since
+/// nothing was actually running).
+fn transcript(
+    outcomes: &[TeardownOutcome],
+    mode: impl Into<style::ColorMode> + Copy,
+) -> Vec<String> {
+    if outcomes.iter().all(|outcome| outcome.id() != "daemon") {
+        return vec!["Nothing to stop. The daemon isn't running.".to_owned()];
+    }
+    let mut lines = outcomes
+        .iter()
+        .filter(|outcome| outcome.id() == "daemon")
+        .map(|outcome| {
+            outcome
+                .outcome()
+                .render_receipt()
+                .render(mode)
+                .trim_start()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    // Frontends are independent processes and outlive a daemon stop; this is
+    // the one fact worth restating, never shown for a failed/no-op teardown.
     if outcomes
         .iter()
-        .all(|outcome| matches!(outcome, TeardownOutcome::StaleRecordAbsent))
+        .any(|outcome| matches!(outcome, TeardownOutcome::DaemonStopped { .. }))
     {
-        output.narrate("Nothing to tear down.");
+        lines.push(style::accentuate(
+            "  Frontends stay attached. Your files return with `omnifs up`.",
+            mode,
+        ));
     }
-    for outcome in outcomes {
-        let row = outcome.outcome().render_receipt();
-        output.row(&row);
-    }
+    lines
 }
 
 #[cfg(test)]
@@ -273,5 +312,51 @@ mod tests {
         // Daemon shutdown failure is a hard failure, not a warning.
         assert_eq!(failed.glyph(), Glyph::Fail);
         assert!(failed.value.contains("busy"));
+    }
+
+    /// Spec 3.7, the "daemon was running" branch:
+    /// ```text
+    /// ✓ daemon      stopped (pid 31114)
+    ///   Frontends stay attached. Your files return with omnifs up.
+    /// ```
+    #[test]
+    fn transcript_matches_the_stopped_daemon_shape() {
+        let outcomes = vec![
+            TeardownOutcome::DaemonStopped { pid: 31114 },
+            TeardownOutcome::StaleRecordRemoved,
+        ];
+        let lines = transcript(&outcomes, false);
+        assert_eq!(
+            lines,
+            vec![
+                "✓ daemon        stopped (pid 31114)".to_owned(),
+                "  Frontends stay attached. Your files return with omnifs up.".to_owned(),
+            ]
+        );
+    }
+
+    /// Spec 3.7, the "nothing running" branch: `Nothing to stop. The daemon
+    /// isn't running.` No orphan `runtime-record` ledger fragment leaks
+    /// through even when a stale record needed cleanup.
+    #[test]
+    fn transcript_matches_the_nothing_running_shape() {
+        assert_eq!(
+            transcript(&[TeardownOutcome::StaleRecordAbsent], false),
+            vec!["Nothing to stop. The daemon isn't running.".to_owned()]
+        );
+        assert_eq!(
+            transcript(&[TeardownOutcome::StaleRecordRemoved], false),
+            vec!["Nothing to stop. The daemon isn't running.".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_teardown_failure_never_shows_the_frontends_stay_attached_line() {
+        let outcomes = vec![TeardownOutcome::DaemonShutdownFailed {
+            error: "busy".to_owned(),
+        }];
+        let lines = transcript(&outcomes, false);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("shutdown failed"), "{lines:?}");
     }
 }

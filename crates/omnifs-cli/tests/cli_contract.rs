@@ -595,14 +595,19 @@ fn every_json_command_keeps_its_error_contract_before_workspace_resolution() {
 
 #[test]
 fn bare_invocation_without_mounts_points_to_mount_add() {
+    // Spec 3.1: a workspace with no mounts at all skips the status report
+    // entirely (there is nothing to report) and shows the dedicated
+    // fresh-workspace screen instead, closing on both ways to get started.
     let fixture = Fixture::new();
     let output = fixture.run(&[]);
 
     assert_eq!(exit_code(&output), 0);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Frontends  "));
-    assert!(stdout.contains("Mounts  0"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("omnifs mount add <provider>"));
+    assert!(!stdout.contains("Frontends  "), "{stdout}");
+    assert!(!stdout.contains("Mounts  "), "{stdout}");
+    assert!(stdout.contains("No mounts yet."), "{stdout}");
+    assert!(stdout.contains("omnifs setup"), "{stdout}");
+    assert!(stdout.contains("omnifs mount add"), "{stdout}");
 }
 
 #[test]

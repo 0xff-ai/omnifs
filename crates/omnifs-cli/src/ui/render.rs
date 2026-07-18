@@ -17,7 +17,26 @@
 //! experience v2 campaign migrates full command reports onto it.
 #![allow(dead_code)]
 
+use std::io::IsTerminal as _;
+
 use super::style::{self, Glyph};
+
+/// Real stdout terminal capabilities, mirroring `output.rs`'s stderr
+/// equivalent (`stderr_capabilities`) for human-mode command output that
+/// prints its record to stdout rather than narrating to stderr.
+pub(crate) fn stdout_capabilities() -> Capabilities {
+    let is_tty = std::io::stdout().is_terminal();
+    Capabilities {
+        width: if is_tty {
+            crossterm::terminal::size().map_or(80, |(columns, _rows)| usize::from(columns))
+        } else {
+            120
+        },
+        is_tty,
+        color: style::color_enabled(style::Stream::Stdout),
+        quiet: false,
+    }
+}
 
 /// Injected terminal capabilities for one render call. Real detection (an
 /// `is_tty` probe, `crossterm::terminal::size`, `style::color_enabled`) is a
@@ -94,6 +113,33 @@ impl LedgerRow {
 /// `max_key_width + 3`).
 const LEDGER_GAP: usize = 3;
 
+/// The key width a block of `rows` needs so every row's value column lines
+/// up. Callers that print rows one at a time as async work settles (rather
+/// than as one batch) compute this once from their known key set and pass it
+/// to [`ledger_row_line`] for every row, so the block still reads as one
+/// aligned unit even though no single call ever sees every row at once.
+pub(crate) fn ledger_key_width(rows: &[LedgerRow]) -> usize {
+    rows.iter()
+        .map(|row| display_width(&row.key))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Render one ledger row against an externally supplied key width. Never
+/// truncates: a key wider than `key_width` still gets its `LEDGER_GAP`
+/// separation before the value, it just breaks alignment with its
+/// neighbors rather than losing characters.
+pub(crate) fn ledger_row_line(row: &LedgerRow, key_width: usize, caps: Capabilities) -> String {
+    let pad = key_width.saturating_sub(display_width(&row.key)) + LEDGER_GAP;
+    format!(
+        "{} {}{}{}",
+        row.glyph.render(caps.color),
+        row.key,
+        " ".repeat(pad),
+        style::accentuate(&row.value, caps.color)
+    )
+}
+
 /// Render one contiguous ledger block. Left-anchored, no leading indent: the
 /// glyph starts at column 0. The key column is sized to the longest key in
 /// `rows` alone, never truncated and never fixed across blocks, so a report
@@ -102,22 +148,9 @@ pub(crate) fn ledger_block(rows: &[LedgerRow], caps: Capabilities) -> String {
     if rows.is_empty() {
         return String::new();
     }
-    let key_width = rows
-        .iter()
-        .map(|row| display_width(&row.key))
-        .max()
-        .unwrap_or(0);
+    let key_width = ledger_key_width(rows);
     rows.iter()
-        .map(|row| {
-            let pad = key_width - display_width(&row.key) + LEDGER_GAP;
-            format!(
-                "{} {}{}{}",
-                row.glyph.render(caps.color),
-                row.key,
-                " ".repeat(pad),
-                style::accentuate(&row.value, caps.color)
-            )
-        })
+        .map(|row| ledger_row_line(row, key_width, caps))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -281,6 +314,38 @@ mod tests {
             rendered,
             "✓ providers   2/2 warm (1.2s)\n✓ daemon      running (pid 31114), revision 3f69473"
         );
+    }
+
+    #[test]
+    fn streamed_ledger_rows_match_a_batch_ledger_block_of_the_same_rows() {
+        // Rows printed one at a time as async work settles (up/down's real
+        // usage) must read identically to the same rows rendered as one
+        // batch: the shared key width is the only thing that has to be
+        // computed up front.
+        let rows = [
+            LedgerRow::new(
+                Glyph::Done,
+                "daemon",
+                "running (pid 31114), revision 3f69473",
+            ),
+            LedgerRow::new(Glyph::Done, "mounts", "/github /dns serving"),
+        ];
+        let batch = ledger_block(&rows, caps(120, false));
+        let width = ledger_key_width(&rows);
+        let streamed = rows
+            .iter()
+            .map(|row| ledger_row_line(row, width, caps(120, false)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(batch, streamed);
+    }
+
+    #[test]
+    fn ledger_row_line_never_truncates_a_key_wider_than_the_shared_width() {
+        let row = LedgerRow::new(Glyph::Done, "credential store", "kept");
+        let rendered = ledger_row_line(&row, 6, caps(120, false));
+        assert!(rendered.contains("credential store"), "{rendered:?}");
+        assert!(!rendered.contains('…'), "{rendered:?}");
     }
 
     #[test]
