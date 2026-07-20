@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use omnifs_core::path::Path;
-use omnifs_engine::namespace::{Attrs, DirEntry, LookupAnswer};
+use omnifs_vfs::{Attrs, DirEntry, LookupAnswer};
 
 const MAX_ATTRS: usize = 32_768;
 const MAX_LOOKUPS: usize = 32_768;
@@ -201,7 +201,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_engine::namespace::{EntryKind, ReadStyle, StabilityClass};
+    use omnifs_vfs::{EntryKind, ReadStyle, StabilityClass};
     use std::time::Duration;
 
     fn path(value: &str) -> Path {
@@ -269,7 +269,7 @@ mod tests {
         assert!(matches!(
             cache.lookup(&parent, "missing"),
             Some(LookupAnswer {
-                state: omnifs_engine::namespace::LookupState::Missing { .. },
+                state: omnifs_vfs::LookupState::Missing { .. },
                 ..
             })
         ));

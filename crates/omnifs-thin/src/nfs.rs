@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Args as ClapArgs;
-use omnifs_engine::Namespace;
-use omnifs_vfs_wire::{
+use omnifs_vfs::Namespace;
+use omnifs_vfs::{
     AttachTarget, FrontendIdentity, FrontendKind, WireNamespace, resolve_ready_vsock_port,
 };
 use tokio::runtime::Handle;
@@ -57,7 +57,7 @@ pub(crate) fn run(args: Args) -> anyhow::Result<()> {
 
     #[cfg(target_os = "linux")]
     if let Some(port) = ready_port {
-        omnifs_vfs_wire::spawn_ready_signal(&handle, args.mount_point.clone(), port);
+        omnifs_vfs::spawn_ready_signal(&handle, args.mount_point.clone(), port);
     }
     #[cfg(not(target_os = "linux"))]
     let _ = ready_port;

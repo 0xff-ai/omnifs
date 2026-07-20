@@ -1,13 +1,13 @@
 //! FUSE mount and unmount operations.
 //!
 //! Provides `run_blocking` to start the FUSE filesystem over a
-//! [`Namespace`](omnifs_engine::Namespace) and `unmount` for clean teardown via
+//! [`Namespace`](omnifs_vfs::Namespace) and `unmount` for clean teardown via
 //! fusermount.
 
 use crate::{Frontend, NotifierHandle};
 use fuser::Session;
-use omnifs_engine::Namespace;
 use omnifs_mtab::{Platform, UnmountCommand};
+use omnifs_vfs::Namespace;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::runtime::Handle;

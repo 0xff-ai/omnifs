@@ -7,7 +7,7 @@ use crate::Frontend;
 use crate::common::{Inode, NodeKind, ROOT_INO};
 use fuser::{FileAttr, INodeNo};
 use omnifs_core::path::Path;
-use omnifs_engine::Attrs;
+use omnifs_vfs::Attrs;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 

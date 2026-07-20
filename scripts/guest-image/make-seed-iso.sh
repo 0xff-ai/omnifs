@@ -59,7 +59,7 @@ trap 'rm -rf "$staging"' EXIT
 # (crates/omnifs-api/src/lib.rs), addressed as `vsock:<port>` instead of
 # `host:port` for the libkrun runtime (docs/contracts/40-frontends.md).
 # OMNIFS_READY_VSOCK_PORT is the port the runner dials on host CID to signal
-# the FUSE mount is serving (crates/omnifs-vfs-wire/src/beacon.rs).
+# the FUSE mount is serving (crates/omnifs-vfs/src/beacon.rs).
 # OMNIFS_SSH_PUBKEY, when given, is installed into root's authorized_keys
 # before the vsock ssh socket starts
 # (scripts/guest-image/mkosi/mkosi.extra/usr/local/lib/omnifs/setup-ssh.sh).

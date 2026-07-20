@@ -760,7 +760,7 @@ fn fuse_docker_lifecycle_and_matrix() {
 ///    up host-side; the only observable effect is the container going away.
 ///    Docker frontend enable again creates a fresh container that serves.
 /// 2. **Kill the daemon, leaving the container alive.** The VFS wire client
-///    reconnects with backoff forever (`omnifs-vfs-wire`), and daemon startup
+///    reconnects with backoff forever (`omnifs-vfs`), and daemon startup
 ///    restores the predecessor TCP address and token before publishing
 ///    readiness. The same container therefore reattaches without replacement.
 ///    This test deliberately avoids a filesystem read while the daemon is

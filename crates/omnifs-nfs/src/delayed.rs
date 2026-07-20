@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use omnifs_core::path::Path;
-use omnifs_engine::namespace::DirEntry as NsDirEntry;
+use omnifs_vfs::DirEntry as NsDirEntry;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 

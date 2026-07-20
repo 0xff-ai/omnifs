@@ -65,7 +65,7 @@ const SERIAL_LOG_NAME: &str = "serial.log";
 
 /// Guest vsock port the daemon's attach listener is proxied onto.
 const ATTACH_VSOCK_PORT: u32 = 1024;
-/// Guest vsock port used by the readiness beacon in `omnifs-vfs-wire`.
+/// Guest vsock port used by the readiness beacon in `omnifs-vfs`.
 /// dials once the FUSE mount is serving.
 const READY_VSOCK_PORT: u32 = 1025;
 /// Guest vsock port the image's socket-activated dropbear listens on.

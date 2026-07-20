@@ -2767,7 +2767,7 @@ dependencies = [
  "omnifs-itest",
  "omnifs-mtab",
  "omnifs-nfs",
- "omnifs-vfs-wire",
+ "omnifs-vfs",
  "omnifs-workspace",
  "owo-colors",
  "ratatui",
@@ -2816,6 +2816,7 @@ dependencies = [
  "omnifs-auth",
  "omnifs-core",
  "omnifs-itest",
+ "omnifs-vfs",
  "omnifs-wit",
  "omnifs-workspace",
  "parking_lot",
@@ -2851,6 +2852,7 @@ dependencies = [
  "omnifs-core",
  "omnifs-engine",
  "omnifs-mtab",
+ "omnifs-vfs",
  "omnifs-wit",
  "omnifs-workspace",
  "parking_lot",
@@ -2900,6 +2902,7 @@ dependencies = [
  "omnifs-core",
  "omnifs-engine",
  "omnifs-mtab",
+ "omnifs-vfs",
  "omnifs-wit",
  "omnifs-workspace",
  "serde",
@@ -3040,33 +3043,30 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
- "omnifs-engine",
  "omnifs-fuse",
  "omnifs-mtab",
  "omnifs-nfs",
- "omnifs-vfs-wire",
+ "omnifs-vfs",
  "tokio",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "omnifs-vfs-wire"
+name = "omnifs-vfs"
 version = "0.2.1"
 dependencies = [
  "futures",
  "omnifs-api",
  "omnifs-core",
- "omnifs-engine",
- "omnifs-itest",
  "postcard",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-vsock",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

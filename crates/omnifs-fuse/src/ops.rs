@@ -1,4 +1,4 @@
-//! The FUSE op boundary over the [`Namespace`](omnifs_engine::Namespace)
+//! The FUSE op boundary over the [`Namespace`](omnifs_vfs::Namespace)
 //! surface.
 //!
 //! Each method is the decision half of a fuser callback: it resolves through the
@@ -14,7 +14,7 @@ use super::errno::ns_error_errno;
 use super::read_helpers::data_slice;
 use fuser::{Errno, FileAttr, FopenFlags};
 use omnifs_core::path::Path;
-use omnifs_engine::{DirCursor, EntryKind, LookupState};
+use omnifs_vfs::{DirCursor, EntryKind, LookupState};
 use std::time::Duration;
 
 impl Frontend {
@@ -68,7 +68,7 @@ impl Frontend {
     /// The current attributes of `ino`.
     pub(crate) async fn do_getattr(&self, ino: u64) -> Result<(FileAttr, Duration), Errno> {
         if ino == ROOT_INO {
-            let attrs = omnifs_engine::Attrs {
+            let attrs = omnifs_vfs::Attrs {
                 kind: EntryKind::Directory,
                 dev: 0,
                 ino: 0,
@@ -82,8 +82,8 @@ impl Frontend {
                 ttl: TTL,
                 change: 0,
                 direct_io: false,
-                stability: omnifs_engine::StabilityClass::Stable,
-                read_style: omnifs_engine::ReadStyle::Whole,
+                stability: omnifs_vfs::StabilityClass::Stable,
+                read_style: omnifs_vfs::ReadStyle::Whole,
             };
             return Ok(self.ns_file_attr(ROOT_INO, &Path::root(), &attrs));
         }
@@ -157,10 +157,10 @@ impl Frontend {
             FopenFlags::empty()
         };
         match attrs.read_style {
-            omnifs_engine::ReadStyle::Ranged => {
+            omnifs_vfs::ReadStyle::Ranged => {
                 self.ranged_fhs.insert(fh, node.clone());
             },
-            omnifs_engine::ReadStyle::Whole => {
+            omnifs_vfs::ReadStyle::Whole => {
                 // The engine serves the whole payload; buffer it once so a
                 // mutating control (`@next`) or an unversioned dynamic render
                 // runs exactly once per open.
@@ -197,7 +197,7 @@ impl Frontend {
                         .map_err(|error| ns_error_errno(&error)),
                 )
                 .await?;
-            if matches!(answer.attrs.stability, omnifs_engine::StabilityClass::Live) {
+            if matches!(answer.attrs.stability, omnifs_vfs::StabilityClass::Live) {
                 let mut grown = self.grown_sizes.entry(node).or_insert(0);
                 *grown = (*grown).max(answer.attrs.size);
             }

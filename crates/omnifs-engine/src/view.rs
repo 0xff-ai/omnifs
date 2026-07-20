@@ -703,11 +703,7 @@ pub struct DirentRecord {
     pub meta: EntryMeta,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum CachedCursor {
-    Opaque(String),
-    Page(u32),
-}
+pub use omnifs_vfs::CachedCursor;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DirentsPayload {
