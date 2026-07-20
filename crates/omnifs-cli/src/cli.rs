@@ -346,7 +346,7 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
         return Ok(exit_code);
     }
 
-    let running = inventory.daemon_state() == crate::inventory::DaemonState::Running;
+    let running = inventory.daemon_health() == crate::inventory::DaemonHealth::Running;
     let report = crate::status::InventoryReport { inventory };
     report.render().print();
     output.narrate("");
@@ -431,28 +431,28 @@ fn fresh_workspace_screen(
 /// unreachable, or a frontend severe enough to flip the verdict while the
 /// daemon is otherwise up), and the mount-related disjuncts are moot on an
 /// empty mount list. Returns the label to show and the fix command to run;
-/// the fix command is always `DaemonState::context_fix` or the frontend's
+/// the fix command is always `DaemonHealth::context_fix` or the frontend's
 /// own `fix` field, never re-derived here.
 fn fresh_workspace_degradation(
     inventory: &crate::inventory::Inventory,
 ) -> Option<(String, String)> {
-    let daemon_state = inventory.daemon_state();
-    let daemon_label = match daemon_state {
-        crate::inventory::DaemonState::Failed => Some("Daemon is unhealthy"),
-        crate::inventory::DaemonState::Unreachable => Some("Daemon is unreachable"),
+    let daemon_health = inventory.daemon_health();
+    let daemon_label = match daemon_health {
+        crate::inventory::DaemonHealth::Failed => Some("Daemon is unhealthy"),
+        crate::inventory::DaemonHealth::Unreachable => Some("Daemon is unreachable"),
         _ => None,
     };
     if let Some(label) = daemon_label
-        && let Some(fix) = daemon_state.context_fix()
+        && let Some(fix) = daemon_health.context_fix()
     {
         return Some((label.to_owned(), fix.to_owned()));
     }
 
     let daemon_up = matches!(
-        daemon_state,
-        crate::inventory::DaemonState::Running
-            | crate::inventory::DaemonState::Starting
-            | crate::inventory::DaemonState::Degraded
+        daemon_health,
+        crate::inventory::DaemonHealth::Running
+            | crate::inventory::DaemonHealth::Starting
+            | crate::inventory::DaemonHealth::Degraded
     );
     if !daemon_up {
         return None;
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn fresh_workspace_screen_stays_plain_and_ok_when_nothing_is_degraded() {
         let inventory = crate::inventory::Inventory::test(
-            crate::inventory::DaemonState::Stopped,
+            crate::inventory::DaemonHealth::Stopped,
             Vec::new(),
             Vec::new(),
         );
@@ -549,11 +549,11 @@ mod tests {
 
     /// An unreachable daemon flips the verdict to `Degraded` (exit 5) even
     /// with zero mounts; the screen must name it and reuse
-    /// `DaemonState::context_fix` verbatim rather than re-deriving the fix.
+    /// `DaemonHealth::context_fix` verbatim rather than re-deriving the fix.
     #[test]
     fn fresh_workspace_screen_names_an_unreachable_daemon() {
         let inventory = crate::inventory::Inventory::test(
-            crate::inventory::DaemonState::Unreachable,
+            crate::inventory::DaemonHealth::Unreachable,
             Vec::new(),
             Vec::new(),
         );
@@ -562,7 +562,7 @@ mod tests {
             super::fresh_workspace_degradation(&inventory),
             Some((
                 "Daemon is unreachable".to_owned(),
-                crate::inventory::DaemonState::Unreachable
+                crate::inventory::DaemonHealth::Unreachable
                     .context_fix()
                     .unwrap()
                     .to_owned()
@@ -592,7 +592,7 @@ mod tests {
             fix: Some("omnifs logs (container exited)".to_owned()),
         };
         let inventory = crate::inventory::Inventory::test(
-            crate::inventory::DaemonState::Running,
+            crate::inventory::DaemonHealth::Running,
             vec![frontend],
             Vec::new(),
         );

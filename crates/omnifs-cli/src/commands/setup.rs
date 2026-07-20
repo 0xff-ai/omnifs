@@ -556,7 +556,7 @@ fn format_elapsed(elapsed: Duration) -> String {
 mod tests {
     use super::*;
     use crate::inventory::{
-        AuthState, DaemonState, FrontendState, MountStatus, ProviderPin, ProviderPinState,
+        AuthState, DaemonHealth, FrontendState, MountStatus, ProviderPin, ProviderPinState,
         ServingState,
     };
     use std::path::PathBuf;
@@ -720,7 +720,7 @@ mod tests {
     #[test]
     fn closing_block_orders_tree_then_access_lines_then_the_closing_sentence() {
         let inventory = Inventory::test(
-            DaemonState::Running,
+            DaemonHealth::Running,
             vec![host_frontend()],
             vec![mount("github")],
         );
