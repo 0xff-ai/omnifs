@@ -9,7 +9,7 @@ use std::time::Duration;
 /// FUSE notifier and provider cache-invalidate effects. We still must hand the
 /// kernel a finite `Duration`, so pick one large enough that refresh churn is
 /// irrelevant in practice (~136 years). The namespace bakes this into
-/// [`omnifs_engine::Attrs::ttl`]; FUSE copies it through.
+/// [`omnifs_vfs::Attrs::ttl`]; FUSE copies it through.
 pub(crate) const TTL: Duration = Duration::from_secs(u32::MAX as u64);
 pub(crate) const ROOT_INO: u64 = 1;
 
@@ -46,12 +46,12 @@ impl NodeKind {
     }
 }
 
-impl From<&omnifs_engine::EntryKind> for NodeKind {
-    fn from(kind: &omnifs_engine::EntryKind) -> Self {
+impl From<&omnifs_vfs::EntryKind> for NodeKind {
+    fn from(kind: &omnifs_vfs::EntryKind) -> Self {
         match kind {
-            omnifs_engine::EntryKind::Directory => Self::Directory,
-            omnifs_engine::EntryKind::File => Self::File,
-            omnifs_engine::EntryKind::Symlink => Self::Symlink,
+            omnifs_vfs::EntryKind::Directory => Self::Directory,
+            omnifs_vfs::EntryKind::File => Self::File,
+            omnifs_vfs::EntryKind::Symlink => Self::Symlink,
         }
     }
 }

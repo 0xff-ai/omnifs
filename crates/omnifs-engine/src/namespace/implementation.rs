@@ -17,14 +17,14 @@ use tokio::sync::broadcast;
 use tracing::Instrument;
 
 use super::{
-    Attrs, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer, Namespace, NsError,
-    NsEvent, ReadAnswer, ReadStyle, StabilityClass, view_types,
+    Attrs, CachedCursor, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer,
+    Namespace, NsError, NsEvent, ReadAnswer, ReadStyle, StabilityClass,
 };
 use crate::clock::DYNAMIC_TTL_MILLIS;
 use crate::inspect;
 use crate::registry::{MountEntry, MountTable};
 use crate::tree::{HostKind, ListOutcome, RangedHandle, ReadResult, RequestCtx};
-use crate::view::{EntryMeta, FileAttrsCache, FileSize};
+use crate::view::{self as view_types, EntryMeta, FileAttrsCache, FileSize};
 use crate::{Engine, TreeError, TreeErrorKind};
 
 /// Effectively-infinite protocol TTL for stable exact-size entries.
@@ -37,25 +37,22 @@ const DRAIN_TICK: Duration = Duration::from_millis(100);
 const HANDLE_IDLE: Duration = Duration::from_secs(60);
 const MOUNT_ENUMERATION_MOUNT: &str = "";
 
-impl EntryKind {
-    fn from_node(node: &crate::Node) -> Self {
-        if node.is_dir() {
-            Self::Directory
-        } else {
-            Self::File
-        }
-    }
-
-    fn from_meta(meta: &EntryMeta) -> Self {
-        match meta.kind() {
-            view_types::EntryKind::Directory => Self::Directory,
-            view_types::EntryKind::File => Self::File,
-        }
+fn entry_kind_from_node(node: &crate::Node) -> EntryKind {
+    if node.is_dir() {
+        EntryKind::Directory
+    } else {
+        EntryKind::File
     }
 }
 
-impl Attrs {
-    fn from_cache(kind: EntryKind, attrs: Option<&FileAttrsCache>, change: u64) -> Self {
+fn entry_kind_from_meta(meta: &EntryMeta) -> EntryKind {
+    match meta.kind() {
+        view_types::EntryKind::Directory => EntryKind::Directory,
+        view_types::EntryKind::File => EntryKind::File,
+    }
+}
+
+fn attrs_from_cache(kind: EntryKind, attrs: Option<&FileAttrsCache>, change: u64) -> Attrs {
         let ttl = attrs.map_or(TTL_STATIC, |attrs| {
             if matches!(attrs.size(), FileSize::Exact(_))
                 && matches!(attrs.stability(), view_types::Stability::Stable)
@@ -84,7 +81,7 @@ impl Attrs {
             EntryKind::Directory => 2,
             EntryKind::File | EntryKind::Symlink => 1,
         };
-        Self {
+        Attrs {
             kind,
             dev: 0,
             ino: 0,
@@ -102,30 +99,27 @@ impl Attrs {
             read_style,
         }
     }
-}
 
-impl DirPage {
-    fn with_budget(
-        mut entries: Vec<DirEntry>,
-        then: Option<view_types::CachedCursor>,
-        budget: usize,
-        offline: bool,
-    ) -> Self {
-        if budget == 0 || entries.len() <= budget {
-            return Self {
-                entries,
-                next: then.map(DirCursor::Provider),
-            };
-        }
-        let overflow = entries.split_off(budget);
-        Self {
+fn dir_page_with_budget(
+    mut entries: Vec<DirEntry>,
+    then: Option<CachedCursor>,
+    budget: usize,
+    offline: bool,
+) -> DirPage {
+    if budget == 0 || entries.len() <= budget {
+        return DirPage {
             entries,
-            next: Some(DirCursor::Buffered {
-                entries: overflow,
-                then,
-                offline,
-            }),
-        }
+            next: then.map(DirCursor::Provider),
+        };
+    }
+    let overflow = entries.split_off(budget);
+    DirPage {
+        entries,
+        next: Some(DirCursor::Buffered {
+            entries: overflow,
+            then,
+            offline,
+        }),
     }
 }
 
@@ -604,8 +598,8 @@ impl TreeNamespace {
         attrs: Option<&FileAttrsCache>,
     ) -> Attrs {
         let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
-        Attrs::from_cache(
-            EntryKind::from_node(node),
+        attrs_from_cache(
+            entry_kind_from_node(node),
             attrs,
             self.root_aware_change(id, node, attrs, epoch),
         )
@@ -723,7 +717,7 @@ impl TreeNamespace {
                 let end = start.saturating_add(len as usize).min(data.len());
                 let bytes = data[start..end].to_vec();
                 let eof = end >= data.len();
-                let attrs = self.attrs_for_read(id, EntryKind::from_node(node), attrs.as_ref());
+                let attrs = self.attrs_for_read(id, entry_kind_from_node(node), attrs.as_ref());
                 Ok(ReadAnswer { bytes, eof, attrs })
             },
             // A subtree node is a directory; its files are served directly by the
@@ -735,7 +729,7 @@ impl TreeNamespace {
     /// Compute `Attrs` for a read answer, folding in the size the read learned.
     fn attrs_for_read(&self, id: &Path, kind: EntryKind, attrs: Option<&FileAttrsCache>) -> Attrs {
         let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
-        Attrs::from_cache(kind, attrs, change_counter_parts(id, attrs, epoch))
+        attrs_from_cache(kind, attrs, change_counter_parts(id, attrs, epoch))
     }
 
     fn store_learned(&self, id: &Path, learned: FileAttrsCache) {
@@ -792,7 +786,7 @@ impl TreeNamespace {
         let id = id.clone();
         let record_growth = move |new_end: u64| {
             let grown = base.clone().with_exact_size(new_end);
-            let attrs = Attrs::from_cache(
+            let attrs = attrs_from_cache(
                 EntryKind::File,
                 Some(&grown),
                 change_counter_parts(&id, Some(&grown), node_epoch),
@@ -841,7 +835,7 @@ impl TreeNamespace {
                         NsError::Invalid
                     });
                 }
-                return Ok(DirPage::with_budget(entries, then, budget, offline));
+                return Ok(dir_page_with_budget(entries, then, budget, offline));
             }
 
             let node = self.resolve_node(&full_path).await?;
@@ -864,7 +858,7 @@ impl TreeNamespace {
                         })
                     })
                     .collect();
-                return Ok(DirPage::with_budget(
+                return Ok(dir_page_with_budget(
                     entries,
                     None,
                     budget,
@@ -896,7 +890,7 @@ impl TreeNamespace {
                 .map(|entry| self.dir_entry(&parent_full, &entry.name, &entry.meta))
                 .collect();
             let tree_next = listing.next_cursor.map(|c| c.0);
-            Ok(DirPage::with_budget(
+            Ok(dir_page_with_budget(
                 entries,
                 tree_next,
                 budget,
@@ -929,8 +923,8 @@ impl TreeNamespace {
             },
         );
         let epoch = self.node_epochs.get(&id).map_or(0, |e| *e);
-        let kind = EntryKind::from_meta(meta);
-        let attrs = Attrs::from_cache(
+        let kind = entry_kind_from_meta(meta);
+        let attrs = attrs_from_cache(
             kind.clone(),
             merged.as_ref(),
             change_counter_parts(&id, merged.as_ref(), epoch),

@@ -4,9 +4,9 @@
 # log for two things: the guest reaching multi-user (systemd/EFI boot
 # actually worked) and the omnifs-frontend.service runner starting (the seed
 # was found, mounted, and the unit execed the binary). A successful attach is
-# not expected: no daemon listens on the mapped host socket, so
-# `omnifs-thin fuse` retries its connect for up to 30s
-# (INITIAL_CONNECT_DEADLINE in crates/omnifs-vfs-wire/src/client.rs)
+# not expected: the placeholder address has no route from inside the guest,
+# so `omnifs-thin fuse` retries its connect for up to 30s
+# (INITIAL_CONNECT_DEADLINE in crates/omnifs-vfs/src/client.rs)
 # before giving up. This smoke intentionally covers guest boot and service
 # startup only; it does not exercise a live attach.
 #

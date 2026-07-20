@@ -32,7 +32,7 @@ omnifs-libkrun = { version = "0.2.1", path = "crates/omnifs-libkrun" }
 omnifs-workspace = { version = "0.2.1", path = "crates/omnifs-workspace" }
 omnifs-core = { version = "0.2.1", path = "crates/omnifs-core" }
 omnifs-mtab = { version = "0.2.1", path = "crates/omnifs-mtab" }
-omnifs-vfs-wire = { version = "0.2.1", path = "crates/omnifs-vfs-wire" }
+omnifs-vfs = { version = "0.2.1", path = "crates/omnifs-vfs", default-features = false }
 omnifs-nfs = { version = "0.2.1", path = "crates/omnifs-nfs", default-features = false }
 omnifs-thin = { version = "0.2.1", path = "crates/omnifs-thin", default-features = false }
 omnifs-sdk = { version = "0.2.1", path = "crates/omnifs-sdk" }

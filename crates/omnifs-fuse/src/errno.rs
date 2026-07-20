@@ -1,7 +1,7 @@
 //! Namespace error to FUSE errno mapping.
 
 use fuser::Errno;
-use omnifs_engine::{NsError, NsRetryClass};
+use omnifs_vfs::{NsError, NsRetryClass};
 
 /// Map a plain-data [`NsError`] to its FUSE errno. The namespace owns the error
 /// partition (provider `error-kind` already folded into `NsError`); the FUSE

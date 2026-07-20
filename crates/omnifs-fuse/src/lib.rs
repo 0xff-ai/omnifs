@@ -35,7 +35,7 @@ pub(crate) use common::{DirSnapshot, Inode, NodeKind, ROOT_INO};
 use dashmap::DashMap;
 use fuser::{Errno, INodeNo, MountOption, Notifier};
 use omnifs_core::path::Path;
-use omnifs_engine::{Namespace, NsEvent};
+use omnifs_vfs::{Namespace, NsEvent};
 use parking_lot::Mutex;
 use std::ffi::OsStr;
 use std::sync::Arc;

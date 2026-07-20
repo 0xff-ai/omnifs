@@ -33,6 +33,7 @@ sha2 = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
 omnifs-core = { workspace = true }
+omnifs-vfs = { workspace = true }
 omnifs-workspace = { workspace = true, optional = true }
 omnifs-auth = { workspace = true, optional = true }
 omnifs-api = { workspace = true, optional = true }

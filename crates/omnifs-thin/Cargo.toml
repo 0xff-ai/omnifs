@@ -16,10 +16,9 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
-omnifs-engine = { workspace = true, default-features = false }
 omnifs-mtab = { workspace = true }
 omnifs-nfs = { workspace = true, default-features = false }
-omnifs-vfs-wire = { workspace = true }
+omnifs-vfs = { workspace = true, features = ["wire"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

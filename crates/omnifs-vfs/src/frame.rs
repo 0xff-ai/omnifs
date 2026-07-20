@@ -21,7 +21,7 @@ pub(crate) const KIND_REQUEST: u8 = 0;
 /// A response frame: a server-issued [`WireResponse`](crate::WireResponse), or
 /// the `Welcome` handshake.
 pub(crate) const KIND_RESPONSE: u8 = 1;
-/// An event frame: a server-pushed [`NsEvent`](omnifs_engine::NsEvent), always
+/// An event frame: a server-pushed [`NsEvent`](crate::NsEvent), always
 /// carried with `request_id = 0`.
 pub(crate) const KIND_EVENT: u8 = 2;
 

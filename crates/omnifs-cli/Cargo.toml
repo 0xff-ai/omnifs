@@ -21,7 +21,7 @@ omnifs-mtab = { workspace = true }
 omnifs-libkrun = { workspace = true }
 omnifs-workspace = { workspace = true }
 omnifs-auth = { workspace = true }
-omnifs-vfs-wire = { workspace = true }
+omnifs-vfs = { workspace = true, features = ["wire"] }
 clap = { workspace = true }
 clap_complete = "4"
 tokio = { workspace = true }

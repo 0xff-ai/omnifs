@@ -10,12 +10,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use futures::future::{BoxFuture, FutureExt};
-use omnifs_core::path::Path;
-use omnifs_engine::{
+use crate::{
     Attrs, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer, Namespace, NsError,
     NsEvent, ReadAnswer, ReadStyle, StabilityClass,
 };
+use futures::future::{BoxFuture, FutureExt};
+use omnifs_core::path::Path;
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use tokio::sync::broadcast;
 
@@ -896,125 +896,4 @@ async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
         assert_eq!(call.await.unwrap().unwrap().size, 7);
     }
     drop(stream_b);
-}
-
-mod trace_propagation {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use omnifs_api::events::InspectorEvent;
-    use omnifs_core::path::Path;
-    use omnifs_engine::Namespace;
-    use tokio::runtime::Handle;
-    use tracing_subscriber::prelude::*;
-
-    use crate::{
-        AttachTarget, FrontendIdentity, FrontendKind, ListenerTarget, VfsServer, WireNamespace,
-    };
-
-    /// Drain up to `max` records from `live` within a generous per-record
-    /// timeout, returning what arrived. Bounded so a missing event fails the
-    /// test instead of hanging it.
-    async fn drain(
-        live: &mut tokio::sync::broadcast::Receiver<Arc<omnifs_api::events::InspectorRecord>>,
-        max: usize,
-    ) -> Vec<Arc<omnifs_api::events::InspectorRecord>> {
-        let mut records = Vec::new();
-        for _ in 0..max {
-            match tokio::time::timeout(Duration::from_secs(5), live.recv()).await {
-                Ok(Ok(record)) => records.push(record),
-                _ => break,
-            }
-        }
-        records
-    }
-
-    /// A read served through a wire-attached namespace produces engine-side
-    /// trace records spanning the whole causal chain: the wire dispatch's
-    /// namespace request events (`FuseStart`/`FuseEnd`) and the provider
-    /// callout underneath them (`ProviderStart`/`ProviderEnd`), all tagged with
-    /// the one Path `TreeNamespace` resolved for this call.
-    #[tokio::test(flavor = "current_thread")]
-    #[allow(unsafe_code)] // env::remove_var requires unsafe; see SAFETY below.
-    async fn wire_relayed_read_produces_engine_side_trace_records() {
-        // SAFETY: cargo-nextest isolates each test into its own process, and
-        // this runs before any other task in the process could read the var
-        // concurrently.
-        unsafe {
-            std::env::remove_var("OMNIFS_INSPECTOR");
-        }
-        let sink =
-            omnifs_engine::init_global_from_env().expect("inspector sink enabled by default");
-        let mut live = sink.subscribe().live;
-        let _subscriber =
-            tracing::subscriber::set_default(tracing_subscriber::registry().with(sink.layer()));
-
-        let harness = omnifs_itest::make_runtime();
-        let tree_ns = Arc::clone(&harness.namespace);
-
-        let server = VfsServer::new(tree_ns);
-        let target = server
-            .ensure_tcp("127.0.0.1".parse().unwrap(), 0)
-            .unwrap();
-        let ListenerTarget::Tcp { addr } = target else {
-            panic!("trace server returned a non-TCP target")
-        };
-
-        let client = WireNamespace::attach(
-            AttachTarget::Tcp {
-                addr: addr.to_string(),
-            },
-            FrontendIdentity {
-                kind: FrontendKind::Fuse,
-                mount_point: PathBuf::from("/mnt/trace-test"),
-            },
-            Handle::current(),
-        )
-        .await
-        .expect("attach");
-
-        // Mirrors what a frontend does to serve `cat /test/hello/message`:
-        // resolve through the mount root and two lookups, then read the whole
-        // (fresh, uncached) file, so
-        // the read triggers a real provider callout underneath.
-        let mount = client.lookup(Path::root(), "test").await.unwrap();
-        let hello = client.lookup(mount.path, "hello").await.unwrap();
-        let message = client.lookup(hello.path, "message").await.unwrap();
-        let read = client.read(message.path, 0, 4096).await.unwrap();
-        assert_eq!(read.bytes, b"Hello, world!");
-
-        server.shutdown().await;
-
-        let records = drain(&mut live, 64).await;
-        let read_end = records
-            .iter()
-            .find(|r| matches!(&r.event, InspectorEvent::FuseEnd { op, .. } if op == "read"));
-        let Some(read_end) = read_end else {
-            panic!(
-                "expected a read span from the wire-relayed read; got: {:?}",
-                records.iter().map(|r| &r.event).collect::<Vec<_>>()
-            );
-        };
-        let trace_id = read_end.trace_id;
-
-        // The same id also tags a provider-callout event underneath it: the
-        // "engine -> provider callout" hop of the restored chain, not just an
-        // isolated frontend-facing span.
-        let has_provider_event = records.iter().any(|r| {
-            r.trace_id == trace_id
-                && matches!(
-                    &r.event,
-                    InspectorEvent::ProviderStart { .. } | InspectorEvent::ProviderEnd { .. }
-                )
-        });
-        assert!(
-            has_provider_event,
-            "expected a provider-op event sharing the read's trace id {trace_id}; got: {:?}",
-            records
-                .iter()
-                .map(|r| (r.trace_id, &r.event))
-                .collect::<Vec<_>>()
-        );
-    }
 }

@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use crate::{Namespace, NsEvent};
 use omnifs_api::{FrontendInfo, FrontendRuntime, FsType};
-use omnifs_engine::{Namespace, NsEvent};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -65,7 +65,6 @@ impl ListenerTarget {
             Self::Vsock { .. } => ListenerKind::Vsock,
         }
     }
-
 
     fn path(&self) -> Option<&Path> {
         match self {
@@ -402,7 +401,8 @@ impl VfsServer {
 
     /// Bind or return the UDS used by the vsock proxy.
     pub fn ensure_vsock(self: &Arc<Self>, path: &Path) -> io::Result<ListenerTarget> {
-        self.ensure_vsock_with_status(path).map(|(target, _)| target)
+        self.ensure_vsock_with_status(path)
+            .map(|(target, _)| target)
     }
 
     /// Bind or return the vsock listener and report whether this call created it.
@@ -588,14 +588,7 @@ impl VfsServer {
                     return;
                 }
             }
-            accept_loop(
-                listener,
-                namespace,
-                runtime,
-                attachments,
-                connection_tx,
-            )
-            .await;
+            accept_loop(listener, namespace, runtime, attachments, connection_tx).await;
             let _ = exit_tx.send((target_for_task, task_identity));
         });
         let mut state = self
@@ -718,7 +711,6 @@ async fn accept_loop(
     }
 }
 
-
 fn bind_unix(path: &Path, description: &str) -> io::Result<UnixListener> {
     use std::os::unix::ffi::OsStrExt as _;
     let len = path.as_os_str().as_bytes().len();
@@ -776,10 +768,7 @@ fn bind_unix(path: &Path, description: &str) -> io::Result<UnixListener> {
 /// Returns `Ok(())` on an orderly client disconnect and a [`WireError`] on a
 /// protocol fault (an oversized frame, a malformed handshake, or a version
 /// mismatch); a fault drops the connection.
-pub async fn serve_connection<S>(
-    namespace: Arc<dyn Namespace>,
-    stream: S,
-) -> Result<(), WireError>
+pub async fn serve_connection<S>(namespace: Arc<dyn Namespace>, stream: S) -> Result<(), WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
@@ -871,11 +860,7 @@ where
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
     }
     let hello: Handshake = postcard::from_bytes(&frame.body)?;
-    let Handshake::Hello {
-        protocol,
-        frontend,
-    } = hello
-    else {
+    let Handshake::Hello { protocol, frontend } = hello else {
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
     };
     if protocol != PROTOCOL {

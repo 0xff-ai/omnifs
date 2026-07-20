@@ -21,7 +21,7 @@ use tokio::net::UnixStream;
 use tracing::{info, warn};
 
 use super::context::DaemonContext;
-use omnifs_vfs_wire::ListenerTarget;
+use omnifs_vfs::ListenerTarget;
 
 /// A host address approved for the namespace attach listener. Loopback is
 /// always valid. On native Linux, the only additional authority is the IPv4
@@ -64,7 +64,7 @@ impl AttachBindAddr {
 /// The outcome of binding an attach transport. `NamespaceNotReady` is not an
 /// error: it is the transient window before the VFS server exists.
 pub(crate) enum AttachOutcome {
-    Bound(omnifs_vfs_wire::ListenerTarget),
+    Bound(omnifs_vfs::ListenerTarget),
     NamespaceNotReady,
 }
 
@@ -145,7 +145,7 @@ pub(crate) struct Daemon {
     inspector: Option<Arc<Inspector>>,
     record_store: Arc<DaemonRecordStore>,
     attach_store: Arc<AttachStore>,
-    vfs: OnceLock<Arc<omnifs_vfs_wire::VfsServer>>,
+    vfs: OnceLock<Arc<omnifs_vfs::VfsServer>>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     events_tx: OnceLock<tokio::sync::mpsc::UnboundedSender<TaskEvent>>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -230,7 +230,7 @@ impl Daemon {
     /// A second call is a no-op: the namespace is built exactly once per daemon
     /// start.
     pub(crate) fn set_namespace(&self, namespace: Arc<omnifs_engine::TreeNamespace>) {
-        let server = omnifs_vfs_wire::VfsServer::new(namespace);
+        let server = omnifs_vfs::VfsServer::new(namespace);
         let _ = self.vfs.set(server);
     }
 
@@ -383,7 +383,7 @@ impl Daemon {
     async fn supervise(
         &self,
         events_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TaskEvent>,
-        mut listener_events: tokio::sync::broadcast::Receiver<omnifs_vfs_wire::ListenerEvent>,
+        mut listener_events: tokio::sync::broadcast::Receiver<omnifs_vfs::ListenerEvent>,
     ) -> anyhow::Result<()> {
         let mut shutdown = self.shutdown_tx.subscribe();
         loop {
@@ -398,8 +398,8 @@ impl Daemon {
                     None => anyhow::bail!("daemon task supervision channel closed"),
                 },
                 event = listener_events.recv() => match event {
-                    Ok(omnifs_vfs_wire::ListenerEvent::Exited { target }) => {
-                        if matches!(target, omnifs_vfs_wire::ListenerTarget::Local { .. }) {
+                    Ok(omnifs_vfs::ListenerEvent::Exited { target }) => {
+                        if matches!(target, omnifs_vfs::ListenerTarget::Local { .. }) {
                             anyhow::bail!("local namespace listener exited");
                         }
                         self.attach_store.remove(&attach_target(&target)?)?;
@@ -972,21 +972,20 @@ mod tests {
             ControlOutcome::AttachTcp(target) => target,
             outcome => panic!("unexpected attach reply: {outcome:?}"),
         };
-        let attach_target = omnifs_vfs_wire::AttachTarget::Tcp {
+        let attach_target = omnifs_vfs::AttachTarget::Tcp {
             addr: target.addr.clone(),
         };
-        let identity = omnifs_vfs_wire::FrontendIdentity {
-            kind: omnifs_vfs_wire::FrontendKind::Fuse,
+        let identity = omnifs_vfs::FrontendIdentity {
+            kind: omnifs_vfs::FrontendKind::Fuse,
             mount_point: std::path::PathBuf::from("/guest/omnifs"),
         };
-        let wire =
-            omnifs_vfs_wire::WireNamespace::attach(attach_target.clone(), identity, rt.clone())
-                .await
-                .unwrap();
-        let wire2 = omnifs_vfs_wire::WireNamespace::attach(
+        let wire = omnifs_vfs::WireNamespace::attach(attach_target.clone(), identity, rt.clone())
+            .await
+            .unwrap();
+        let wire2 = omnifs_vfs::WireNamespace::attach(
             attach_target,
-            omnifs_vfs_wire::FrontendIdentity {
-                kind: omnifs_vfs_wire::FrontendKind::Fuse,
+            omnifs_vfs::FrontendIdentity {
+                kind: omnifs_vfs::FrontendKind::Fuse,
                 mount_point: std::path::PathBuf::from("/guest/omnifs"),
             },
             rt.clone(),
@@ -1071,12 +1070,12 @@ mod tests {
             ControlOutcome::Ready
         ));
 
-        let wire = omnifs_vfs_wire::WireNamespace::attach(
-            omnifs_vfs_wire::AttachTarget::Tcp {
+        let wire = omnifs_vfs::WireNamespace::attach(
+            omnifs_vfs::AttachTarget::Tcp {
                 addr: target.addr.parse().unwrap(),
             },
-            omnifs_vfs_wire::FrontendIdentity {
-                kind: omnifs_vfs_wire::FrontendKind::Fuse,
+            omnifs_vfs::FrontendIdentity {
+                kind: omnifs_vfs::FrontendKind::Fuse,
                 mount_point: std::path::PathBuf::from("/guest/omnifs"),
             },
             rt.clone(),

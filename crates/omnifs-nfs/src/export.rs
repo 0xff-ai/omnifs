@@ -8,7 +8,7 @@ use crate::protocol::consts::{
     NFS4ERR_SYMLINK, NFS4ERR_TOOSMALL, OPEN_STATE_LEASE_SECONDS, OPEN4_SHARE_ACCESS_READ,
 };
 use dashmap::DashMap;
-use omnifs_engine::namespace::{NsError, NsRetryClass};
+use omnifs_vfs::{NsError, NsRetryClass};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 

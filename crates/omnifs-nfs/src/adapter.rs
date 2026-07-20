@@ -33,7 +33,7 @@ use crate::protocol::consts::{
 };
 use dashmap::DashMap;
 use omnifs_core::path::{Path, Segment};
-use omnifs_engine::namespace::{
+use omnifs_vfs::{
     Attrs, DirCursor, DirEntry as NsDirEntry, EntryKind, EventStream, LookupAnswer, LookupState,
     Namespace, NsError, NsEvent,
 };
@@ -919,7 +919,7 @@ mod tests {
     use crate::export::StateId;
     use crate::persist::{FhEntry, PersistInit};
     use omnifs_core::path::Path;
-    use omnifs_engine::namespace::{
+    use omnifs_vfs::{
         Attrs, DirEntry as NamespaceDirEntry, DirPage, LookupAnswer, ReadAnswer, ReadStyle,
         StabilityClass,
     };

@@ -6,7 +6,7 @@
 //! request gets a fresh id and a oneshot reply slot; response frames are matched
 //! back by id; event frames feed a local broadcast that [`WireNamespace::subscribe`]
 //! taps. A disconnect fails every in-flight request with
-//! [`NsError::Network`](omnifs_engine::NsError::Network) and reconnects with
+//! [`NsError::Network`](crate::NsError::Network) and reconnects with
 //! backoff forever until the [`WireNamespace`] is dropped. A reconnect that lands
 //! A disconnect also publishes the existing root invalidation event so every
 //! consumer fences derived state through the same ordered stream.
@@ -16,11 +16,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::future::{BoxFuture, FutureExt};
-use omnifs_core::path::Path;
-use omnifs_engine::{
+use crate::{
     Attrs, DirCursor, DirPage, EventStream, LookupAnswer, Namespace, NsError, NsEvent, ReadAnswer,
 };
+use futures::future::{BoxFuture, FutureExt};
+use omnifs_core::path::Path;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::runtime::Handle;
@@ -567,10 +567,7 @@ impl Drop for Connection {
 /// Spawn the reader/writer pumps over `stream` and complete the handshake,
 /// sending `frontend` naming this connecting frontend. Generic over the stream
 /// type so both transports share one handshake path.
-async fn handshake_over<S>(
-    stream: S,
-    frontend: FrontendIdentity,
-) -> Result<Connection, WireError>
+async fn handshake_over<S>(stream: S, frontend: FrontendIdentity) -> Result<Connection, WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {

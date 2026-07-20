@@ -3,10 +3,10 @@ use crate::error::NfsFrontendError;
 use crate::persist::{FH_STATE_FILE, FhState, PersistInit};
 use crate::protocol::consts::EXPORT_ROOT_ID;
 use crate::server::start_server;
-use omnifs_engine::namespace::Namespace;
 #[cfg(target_os = "linux")]
 use omnifs_mtab::proc_mounts;
 use omnifs_mtab::{MountState, Platform, StateError, StateFile, UnmountCommand};
+use omnifs_vfs::Namespace;
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
