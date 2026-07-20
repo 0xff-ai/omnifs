@@ -6,7 +6,6 @@
 
 use anyhow::Context as _;
 use clap::Args;
-use omnifs_engine::GitCloner;
 use omnifs_engine::MountTable;
 use omnifs_engine::init_global_from_env;
 use omnifs_workspace::mounts::Registry;
@@ -61,24 +60,13 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
             args.mount_snapshot.display()
         )
     })?;
-    let registry = if args.offline {
-        Arc::new(MountTable::load_offline(context.host_context(), &desired)?)
-    } else {
-        let cloner = Arc::new(GitCloner::new(context.clone_cache())?);
-        let host_context = context.host_context();
-        info!(
-            config = %host_context.config_dir().display(),
-            cache = %cloner.cache_dir().display(),
-            providers = %host_context.providers_dir().display(),
-            "starting daemon"
-        );
-        Arc::new(MountTable::load_online(
-            host_context,
-            &cloner,
-            &desired,
-            &Handle::current(),
-        )?)
-    };
+    let host = context.host();
+    info!(
+        cache = %host.cache_dir().display(),
+        offline = host.is_offline(),
+        "starting daemon"
+    );
+    let registry = Arc::new(MountTable::load(host, &desired, &Handle::current())?);
     let rt = Handle::current();
     let inspector = init_global_from_env();
     if let Some(inspector) = &inspector {

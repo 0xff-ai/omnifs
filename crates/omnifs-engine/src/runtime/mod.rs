@@ -20,19 +20,21 @@ use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
 use omnifs_workspace::ids::ProviderId;
 use omnifs_workspace::mounts::Spec;
-use omnifs_workspace::provider::{
-    ConfigMetadata, ProviderAuthManifest, ProviderManifest, ProviderStore,
-};
+use omnifs_workspace::provider::{ConfigMetadata, ProviderAuthManifest, ProviderManifest};
 
-use std::path::{Path as StdPath, PathBuf};
+use std::path::Path as StdPath;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 
+pub(crate) mod host;
 pub(crate) mod instance;
 pub(crate) mod registry;
 pub(crate) mod wasi;
 pub(crate) mod wasm;
+
+#[allow(unused_imports)] // re-exported for callers via crate root
+pub use host::{Host, HostError, HostOffline, HostOfflineOpen, HostOnline, HostOpen};
 
 use crate::clock;
 use crate::op_validate;
@@ -44,71 +46,6 @@ const RATE_LIMIT_DEFAULT_COOLDOWN: std::time::Duration = std::time::Duration::fr
 // Upper bound so a hostile Retry-After cannot overflow `Instant` or wedge the
 // window open indefinitely.
 const RATE_LIMIT_MAX_COOLDOWN: std::time::Duration = std::time::Duration::from_hours(1);
-
-/// Host-owned filesystem context for provider runtime.
-#[derive(Clone, Debug)]
-pub struct HostContext {
-    cache_dir: PathBuf,
-    wasm_cache_dir: PathBuf,
-    config_dir: PathBuf,
-    providers_dir: PathBuf,
-    credentials_file: PathBuf,
-}
-
-impl HostContext {
-    pub fn new(
-        cache_dir: impl AsRef<StdPath>,
-        config_dir: impl AsRef<StdPath>,
-        providers_dir: impl AsRef<StdPath>,
-        credentials_file: impl AsRef<StdPath>,
-    ) -> Self {
-        let cache_dir = cache_dir.as_ref().to_path_buf();
-        Self {
-            wasm_cache_dir: omnifs_workspace::wasm_cache_dir(&cache_dir),
-            cache_dir,
-            config_dir: config_dir.as_ref().to_path_buf(),
-            providers_dir: providers_dir.as_ref().to_path_buf(),
-            credentials_file: credentials_file.as_ref().to_path_buf(),
-        }
-    }
-
-    /// Store compiled provider components separately from runtime cache data.
-    ///
-    /// Production hosts use the default path under [`Self::cache_dir`]. Test
-    /// harnesses can share compiled artifacts across otherwise-hermetic cache
-    /// directories so each test process does not compile the same component.
-    #[must_use]
-    pub fn with_wasm_cache_dir(mut self, wasm_cache_dir: impl AsRef<StdPath>) -> Self {
-        self.wasm_cache_dir = wasm_cache_dir.as_ref().to_path_buf();
-        self
-    }
-
-    pub fn cache_dir(&self) -> &StdPath {
-        &self.cache_dir
-    }
-
-    pub fn config_dir(&self) -> &StdPath {
-        &self.config_dir
-    }
-
-    pub fn providers_dir(&self) -> &StdPath {
-        &self.providers_dir
-    }
-
-    pub fn credentials_file(&self) -> &StdPath {
-        &self.credentials_file
-    }
-
-    pub(crate) fn wasm_cache_dir(&self) -> &StdPath {
-        &self.wasm_cache_dir
-    }
-
-    /// `<hex>.wasm` for a pinned provider id: the serving path the
-    /// daemon loads. Identity is the content hash, never a filename.
-    pub(crate) fn provider_path_by_id(&self, id: &ProviderId) -> PathBuf {
-        ProviderStore::new(&self.providers_dir).artifact_path(id)
-    }
-}
 
 /// Runtime for one mounted WASM provider component.
 ///
@@ -260,7 +197,6 @@ impl Runtime {
         config: &Spec,
         manifest: &ProviderManifest,
         cloner: Arc<GitCloner>,
-        _context: &HostContext,
         resources: Arc<MountResources>,
         trees: Arc<TreeRefs>,
         credential_service: &Arc<CredentialService>,

@@ -3,16 +3,15 @@
 //! Startup is atomic: every selected mount is built and validated in a
 //! temporary collection before the fixed table is published.
 
-use crate::auth::credential_service_for_file;
 use crate::cache::{Caches, MountResources, ProjectionError, ProjectionId};
-use crate::cloner::GitCloner;
+use crate::runtime::host::{Host, HostOffline, HostOnline};
 use crate::tree_refs::TreeRefs;
-use crate::{BuildError, ComponentEngine, HostContext, Runtime};
-use omnifs_auth::CredentialService;
+use crate::{BuildError, Runtime};
 use omnifs_workspace::mounts::{LoadedSpec, Name, Registry};
 use omnifs_workspace::provider::ProviderWasm;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -51,8 +50,9 @@ enum TableMode {
 
 /// Fixed selected mount table used by the single namespace implementation.
 pub struct MountTable {
-    context: HostContext,
     caches: Arc<Caches>,
+    cache_dir: PathBuf,
+    clone_dir: PathBuf,
     mode: TableMode,
     entries: BTreeMap<String, MountEntry>,
     timer_shutdown: watch::Sender<bool>,
@@ -62,50 +62,37 @@ pub struct MountTable {
 impl MountTable {
     /// Load every selected mount with its real provider runtime.
     pub fn load_online(
-        context: HostContext,
-        cloner: &Arc<GitCloner>,
+        host: &HostOnline,
         desired: &Registry,
         handle: &tokio::runtime::Handle,
     ) -> Result<Self, RegistryError> {
-        Self::load_online_with_options(context, cloner, desired, handle, false)
+        Self::load_online_with_options(host, desired, handle, false)
+    }
+
+    /// Dispatch online/offline load from an opened [`Host`].
+    pub fn load(
+        host: &Host,
+        desired: &Registry,
+        handle: &tokio::runtime::Handle,
+    ) -> Result<Self, RegistryError> {
+        match host {
+            Host::Online(online) => Self::load_online(online, desired, handle),
+            Host::Offline(offline) => Self::load_offline(offline, desired),
+        }
     }
 
     pub(crate) fn load_online_with_options(
-        context: HostContext,
-        cloner: &Arc<GitCloner>,
+        host: &HostOnline,
         desired: &Registry,
         handle: &tokio::runtime::Handle,
         capture_test_callouts: bool,
     ) -> Result<Self, RegistryError> {
         validate_registry(desired)?;
-        // Compiled component artifacts live with the rest of the host's state,
-        // under `<cache>/wasm`, rather than a global per-user wasmtime cache.
-        let wasm_cache = context.wasm_cache_dir();
-        let engine = ComponentEngine::new(Some(wasm_cache))
-            .map_err(|e| RegistryError::RuntimeError(format!("provider engine init: {e}")))?;
-
-        // One global body store and projection database. Each selected exact
-        // projection receives one long-lived MountResources owner.
-        let caches = Caches::open(context.cache_dir())
-            .map_err(|e| RegistryError::RuntimeError(format!("cache open: {e}")))?;
-
-        // One credential owner for the whole host, shared across every mount.
-        let credential_service = credential_service_for_file(context.credentials_file())
-            .map_err(|e| RegistryError::RuntimeError(format!("credential service init: {e}")))?;
         let (timer_shutdown, _) = watch::channel(false);
         let built = desired
             .loaded_iter()
             .map(|(name, loaded)| {
-                Self::build_online_mount(
-                    name,
-                    loaded,
-                    &engine,
-                    &caches,
-                    cloner,
-                    &context,
-                    &credential_service,
-                    capture_test_callouts,
-                )
+                Self::build_online_mount(name, loaded, host, capture_test_callouts)
             })
             .collect::<Result<Vec<_>, _>>()?;
         for (index, left) in built.iter().enumerate() {
@@ -129,8 +116,9 @@ impl MountTable {
             .map(|built| (built.entry.name.to_string(), built.entry.clone_for_table()))
             .collect();
         let table = Self {
-            context,
-            caches: Arc::clone(&caches),
+            caches: Arc::clone(host.caches()),
+            cache_dir: host.cache_dir().to_path_buf(),
+            clone_dir: host.clone_dir().to_path_buf(),
             mode: TableMode::Online,
             entries,
             timer_shutdown,
@@ -148,20 +136,15 @@ impl MountTable {
         Ok(table)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn build_online_mount(
         name: &Name,
         loaded: &LoadedSpec,
-        engine: &ComponentEngine,
-        caches: &Arc<Caches>,
-        cloner: &Arc<GitCloner>,
-        context: &HostContext,
-        credential_service: &Arc<CredentialService>,
+        host: &HostOnline,
         capture_test_callouts: bool,
     ) -> Result<BuiltMount, RegistryError> {
         let spec = loaded.spec();
         let mount = name.to_string();
-        let wasm_path = context.provider_path_by_id(&spec.provider.id);
+        let wasm_path = host.provider_path_by_id(&spec.provider.id);
         if !wasm_path.exists() {
             return Err(RegistryError::ProviderNotFound(
                 wasm_path.display().to_string(),
@@ -193,21 +176,21 @@ impl MountTable {
             })?;
         let provider_interval_secs = manifest.refresh_interval_secs;
         let projection_id = ProjectionId::new(loaded.source(), spec.provider.id);
-        let resources = caches
+        let resources = host
+            .caches()
             .mount(name, projection_id, spec.provider.id, loaded.source())
             .map_err(|error| RegistryError::RuntimeError(format!("cache open: {error}")))?;
         let trees = Arc::new(TreeRefs::new());
 
         let runtime = Runtime::build(
-            engine,
+            host.engine(),
             &wasm_path,
             spec,
             &manifest,
-            Arc::clone(cloner),
-            context,
+            Arc::clone(host.cloner()),
             resources.clone(),
             Arc::clone(&trees),
-            credential_service,
+            host.credentials(),
             capture_test_callouts,
         )
         .map_err(|error| RegistryError::from_build(&mount, error))?;
@@ -229,20 +212,17 @@ impl MountTable {
     /// Load only complete durable facts for the exact current mount snapshot.
     /// No provider artifact, credential owner, Wasmtime engine, timer, HTTP
     /// client, or Git process is constructed on this path.
-    pub fn load_offline(context: HostContext, desired: &Registry) -> Result<Self, RegistryError> {
-        let caches = Caches::open_existing(context.cache_dir())
-            .map_err(|error| RegistryError::OfflineCache(error.to_string()))?;
-        Self::load_offline_with_caches(context, desired, caches)
+    pub fn load_offline(host: &HostOffline, desired: &Registry) -> Result<Self, RegistryError> {
+        Self::load_offline_with_caches(host, desired, Arc::clone(host.caches()))
     }
 
     fn load_offline_with_caches(
-        context: HostContext,
+        host: &HostOffline,
         desired: &Registry,
         caches: Arc<Caches>,
     ) -> Result<Self, RegistryError> {
         validate_registry(desired)?;
         let mut entries = BTreeMap::new();
-        let mut cloner = None;
         for (name, loaded) in desired.loaded_iter() {
             let spec = loaded.spec();
             let projection_id = ProjectionId::new(loaded.source(), spec.provider.id);
@@ -258,13 +238,9 @@ impl MountTable {
                         message: error.to_string(),
                     })?
             {
-                let cloner = if let Some(cloner) = &cloner {
-                    cloner
-                } else {
-                    let opened = GitCloner::open_existing(context.cache_dir().join("clones"))
-                        .map_err(|error| RegistryError::OfflineCache(error.to_string()))?;
-                    cloner.insert(opened)
-                };
+                let cloner = host
+                    .ensure_cloner()
+                    .map_err(|error| RegistryError::OfflineCache(error.to_string()))?;
                 let repo = cloner
                     .open_cached(name.as_str(), &fact.id, &fact.relative_path)
                     .map_err(|error| RegistryError::OfflineGit {
@@ -292,8 +268,9 @@ impl MountTable {
         }
         let (timer_shutdown, _) = watch::channel(false);
         Ok(Self {
-            context,
             caches,
+            cache_dir: host.cache_dir().to_path_buf(),
+            clone_dir: host.clone_dir().to_path_buf(),
             mode: TableMode::Offline,
             entries,
             timer_shutdown,
@@ -305,18 +282,14 @@ impl MountTable {
     /// durable cache without publishing a second table or opening another
     /// cache database.
     pub fn validate_offline(&self, desired: &Registry) -> Result<(), RegistryError> {
-        let table = Self::load_offline_with_caches(
-            self.context.clone(),
-            desired,
+        let offline = HostOffline::from_open_caches(
             Arc::clone(&self.caches),
-        )?;
+            self.cache_dir.clone(),
+            self.clone_dir.clone(),
+        );
+        let table = Self::load_offline_with_caches(&offline, desired, Arc::clone(&self.caches))?;
         drop(table);
         Ok(())
-    }
-
-    /// Host context this registry resolves mounts against.
-    pub fn context(&self) -> &HostContext {
-        &self.context
     }
 
     /// The immutable runtime for one loaded mount.
@@ -490,8 +463,8 @@ fn validate_registry(desired: &Registry) -> Result<(), RegistryError> {
 #[cfg(test)]
 mod tests {
     use super::{MountTable, RegistryError};
-    use crate::HostContext;
     use crate::cloner::GitCloner;
+    use crate::runtime::host::{Host, HostOfflineOpen};
     use omnifs_workspace::ids::ProviderId;
     use omnifs_workspace::mounts::{Registry, Spec};
     use omnifs_workspace::provider::{Artifact, ProviderStore};
@@ -519,6 +492,20 @@ mod tests {
         store.retain(&artifact).expect("retain provider");
         body["provider"] = serde_json::to_value(reference).expect("serialize provider reference");
         serde_json::from_value(body).expect("build pinned spec")
+    }
+
+    fn test_host(
+        cache_dir: impl AsRef<Path>,
+        providers_dir: impl AsRef<Path>,
+        credentials_file: impl AsRef<Path>,
+    ) -> Host {
+        crate::test_support::open_test_host(
+            cache_dir.as_ref(),
+            providers_dir.as_ref(),
+            credentials_file.as_ref(),
+            cache_dir.as_ref().join("clones"),
+        )
+        .expect("open test host")
     }
 
     fn wasm_artifact_path(file_name: &str) -> PathBuf {
@@ -586,15 +573,12 @@ mod tests {
         )
         .expect("write spec");
 
-        let result = MountTable::load_online(
-            HostContext::new(
+        let result = MountTable::load(
+            &test_host(
                 cache_dir.path(),
-                config_dir.path(),
                 providers_dir.path(),
                 config_dir.path().join("credentials.json"),
-            )
-            .with_wasm_cache_dir(crate::test_support::wasm_cache_dir()),
-            &Arc::new(GitCloner::new(cache_dir.path().join("clones")).unwrap()),
+            ),
             &Registry::load(mounts_dir.path()).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
@@ -612,7 +596,7 @@ mod tests {
     async fn load_rejects_missing_provider_artifact() {
         let root = tempfile::tempdir().expect("temp root");
         let cache = root.path().join("cache");
-        let config = root.path().join("config");
+        let _config = root.path().join("config");
         let mounts = root.path().join("snapshot");
         let providers = root.path().join("providers");
         std::fs::create_dir_all(&mounts).expect("mounts");
@@ -628,12 +612,9 @@ mod tests {
             ),
         )
         .expect("spec");
-        let context =
-            HostContext::new(&cache, &config, &providers, root.path().join("credentials"))
-                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
-        let result = MountTable::load_online(
-            context,
-            &Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
+        let context = test_host(&cache, &providers, root.path().join("credentials"));
+        let result = MountTable::load(
+            &context,
             &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
@@ -646,15 +627,13 @@ mod tests {
         let mounts = root.path().join("snapshot");
         std::fs::create_dir_all(&mounts).expect("mounts");
         std::fs::write(mounts.join("broken.json"), b"not json").expect("spec");
-        let context = HostContext::new(
+        let context = test_host(
             root.path().join("cache"),
-            root.path().join("config"),
             root.path().join("providers"),
             root.path().join("credentials"),
         );
-        let result = MountTable::load_online(
-            context,
-            &Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
+        let result = MountTable::load(
+            &context,
             &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
@@ -700,16 +679,13 @@ mod tests {
             .expect("write spec");
         }
 
-        let context = HostContext::new(
+        let context = test_host(
             root.path().join("cache"),
-            root.path().join("config"),
             &providers,
             root.path().join("credentials"),
-        )
-        .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
-        let result = MountTable::load_online(
-            context,
-            &Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
+        );
+        let result = MountTable::load(
+            &context,
             &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         );
@@ -748,16 +724,13 @@ mod tests {
             serde_json::to_vec_pretty(&spec).expect("serialize spec"),
         )
         .expect("spec");
-        let context = HostContext::new(
+        let context = test_host(
             root.path().join("cache"),
-            root.path().join("config"),
             &providers,
             root.path().join("credentials"),
-        )
-        .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
-        let registry = MountTable::load_online(
-            context,
-            &Arc::new(GitCloner::new(root.path().join("clones")).unwrap()),
+        );
+        let registry = MountTable::load(
+            &context,
             &Registry::load(&mounts).expect("load selected snapshot"),
             &tokio::runtime::Handle::current(),
         )
@@ -809,12 +782,6 @@ mod tests {
         desired
             .put(&root_git_spec)
             .expect("write root Git mount bytes");
-        let context = HostContext::new(
-            &cache,
-            root.path().join("config"),
-            root.path().join("providers-missing"),
-            root.path().join("credentials-missing"),
-        );
         let (_, loaded) = desired
             .loaded_iter()
             .find(|(name, _)| name.as_str() == "test")
@@ -1062,8 +1029,14 @@ mod tests {
         drop(root_git_resources);
         drop(caches);
 
+        let offline_host = Host::open_offline(HostOfflineOpen {
+            cache_dir: cache.clone(),
+            clone_dir: cache.join("clones"),
+        })
+        .expect("open offline host");
         let table = Arc::new(
-            MountTable::load_offline(context.clone(), &desired).expect("offline table startup"),
+            MountTable::load_offline(offline_host.as_offline().expect("offline host"), &desired)
+                .expect("offline table startup"),
         );
         assert!(table.get("test").is_none());
         let namespace = TreeNamespace::offline(table, tokio::runtime::Handle::current());
@@ -1206,12 +1179,22 @@ mod tests {
             b"fn cached() {}\n"
         );
         drop(namespace);
+        drop(offline_host);
 
         let dynamic_body = BodyId::from_bytes(&dynamic_bytes);
         let body_path = cache.join("bodies").join(dynamic_body.hex());
         std::fs::write(&body_path, vec![b'x'; dynamic_bytes.len()]).expect("corrupt body");
         assert!(matches!(
-            MountTable::load_offline(context.clone(), &desired),
+            MountTable::load_offline(
+                Host::open_offline(HostOfflineOpen {
+                    cache_dir: cache.clone(),
+                    clone_dir: cache.join("clones"),
+                })
+                .expect("reopen offline host")
+                .as_offline()
+                .expect("offline host"),
+                &desired,
+            ),
             Err(RegistryError::CorruptProjection { .. })
         ));
         std::fs::write(&body_path, &dynamic_bytes).expect("restore body");
@@ -1233,7 +1216,16 @@ mod tests {
         assert!(tx.commit().unwrap().is_ok());
         drop(facts);
         drop(database);
-        match MountTable::load_offline(context, &desired) {
+        match MountTable::load_offline(
+            Host::open_offline(HostOfflineOpen {
+                cache_dir: cache.clone(),
+                clone_dir: cache.join("clones"),
+            })
+            .expect("reopen offline host")
+            .as_offline()
+            .expect("offline host"),
+            &desired,
+        ) {
             Err(RegistryError::CorruptProjection { .. }) => {},
             Err(error) => panic!("expected corrupt projection, got {error:?}"),
             Ok(_) => panic!("expected corrupt projection, got a table"),

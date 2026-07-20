@@ -24,6 +24,10 @@ struct FileStoreData {
 /// The caller supplies the file path; this type does not resolve home
 /// directories or create parent directories. The CLI resolves the concrete
 /// credentials file path before constructing this type.
+///
+/// `Clone` is a second handle to the same path and lock file; coordination
+/// remains the on-disk lock, not process-local identity.
+#[derive(Clone)]
 pub struct FileStore {
     path: PathBuf,
     lock_path: PathBuf,

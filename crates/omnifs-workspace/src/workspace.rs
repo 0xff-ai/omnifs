@@ -10,6 +10,7 @@ use std::cell::{OnceCell, RefCell, RefMut};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::creds::FileStore;
@@ -111,7 +112,7 @@ pub fn resolve_mount_point() -> Option<PathBuf> {
 
 pub struct Workspace {
     config_file: PathBuf,
-    credentials: FileStore,
+    credentials: Arc<FileStore>,
     catalog: Catalog,
     desired_state: DesiredState,
     daemon: DaemonState,
@@ -133,7 +134,7 @@ impl Workspace {
     pub fn under_root(root: &Path) -> Self {
         let home = absolute(root);
         let cache_dir = home.join(CACHE_SUBDIR);
-        let credentials = FileStore::new(home.join(CREDENTIALS_FILE));
+        let credentials = Arc::new(FileStore::new(home.join(CREDENTIALS_FILE)));
         let catalog = Catalog::open(home.join(PROVIDERS_SUBDIR));
         let daemon = DaemonState::new(home.clone());
         let frontend = FrontendState::new(home.clone(), cache_dir.clone());
@@ -168,6 +169,18 @@ impl Workspace {
     #[must_use]
     pub fn credentials(&self) -> &FileStore {
         &self.credentials
+    }
+
+    /// Shared handle for process-scoped openers (daemon `Host`).
+    #[must_use]
+    pub fn credentials_arc(&self) -> Arc<FileStore> {
+        Arc::clone(&self.credentials)
+    }
+
+    /// Cache root under the home; daemon `Host` opens runtime state here.
+    #[must_use]
+    pub fn cache_dir(&self) -> PathBuf {
+        self.daemon.cache_dir()
     }
 
     #[must_use]

@@ -120,11 +120,7 @@ impl DockerRunner {
         Self { client }
     }
 
-    pub(crate) async fn launch(
-        &self,
-        home: &std::path::Path,
-        attach_port: u16,
-    ) -> Result<()> {
+    pub(crate) async fn launch(&self, home: &std::path::Path, attach_port: u16) -> Result<()> {
         let body = FrontendContainerSpec {
             image: self.client.image(),
             home,

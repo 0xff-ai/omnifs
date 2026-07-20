@@ -1494,8 +1494,6 @@ mod tests {
     use std::sync::Arc;
 
     fn fixture_registry(root: &StdPath) -> Arc<MountTable> {
-        use crate::HostContext;
-        use crate::cloner::GitCloner;
         use omnifs_workspace::mounts::{Registry, Spec};
         use omnifs_workspace::provider::{Artifact, ProviderStore};
 
@@ -1529,16 +1527,18 @@ mod tests {
         }))
         .expect("test mount spec");
         desired.put(&spec).expect("write test mount");
-        let context =
-            HostContext::new(&cache, &config, &providers, config.join("credentials.json"))
-                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
+        let host = crate::test_support::open_test_host(
+            &cache,
+            &providers,
+            config.join("credentials.json"),
+            root.join("engine-clones"),
+        )
+        .expect("open test host");
         Arc::new(
-            MountTable::load_online_with_options(
-                context,
-                &Arc::new(GitCloner::new(root.join("engine-clones")).expect("git cloner")),
+            crate::test_support::load_mount_table_for_callout_tests(
+                host.as_online().expect("online host"),
                 &desired,
                 &tokio::runtime::Handle::current(),
-                true,
             )
             .expect("load test mount"),
         )

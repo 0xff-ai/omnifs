@@ -2,9 +2,8 @@ pub mod live;
 pub mod matrix;
 
 use omnifs_core::path::{Path, Segment};
-use omnifs_engine::GitCloner;
 use omnifs_engine::test_support::TestOp;
-use omnifs_engine::{BuildError, Engine, EngineError, HostContext, MountTable, TreeNamespace};
+use omnifs_engine::{BuildError, Engine, EngineError, MountTable, TreeNamespace};
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult,
     ReadFileOutcome, ReadFileResult,
@@ -115,19 +114,13 @@ impl RuntimeHarness {
             .expect("non-empty harness specs")
             .mount
             .clone();
-        let cloner = Arc::new(GitCloner::new(clone_dir.path()).map_err(|source| {
-            BuildError::Cache(format!(
-                "git clone cache at {}: {source}",
-                clone_dir.path().display()
-            ))
-        })?);
-        let context = HostContext::new(
+        let host = omnifs_engine::test_support::open_test_host(
             cache_dir.path(),
-            config_dir.path(),
             providers_dir.path(),
             config_dir.path().join("credentials.json"),
+            clone_dir.path(),
         )
-        .with_wasm_cache_dir(omnifs_engine::test_support::wasm_cache_dir());
+        .map_err(|error| BuildError::Cache(error.to_string()))?;
         let mut desired = omnifs_workspace::mounts::Registry::load(mounts_dir.path())
             .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         for spec in &specs {
@@ -135,12 +128,13 @@ impl RuntimeHarness {
                 .put(spec)
                 .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         }
+        let online = host.as_online().expect("online test host");
         let registry = if capture_test_callouts {
             omnifs_engine::test_support::load_mount_table_for_callout_tests(
-                context, &cloner, &desired, &handle,
+                online, &desired, &handle,
             )
         } else {
-            MountTable::load_online(context, &cloner, &desired, &handle)
+            MountTable::load_online(online, &desired, &handle)
         }
         .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         let registry = Arc::new(registry);

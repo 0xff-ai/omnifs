@@ -748,9 +748,7 @@ fn wire_frontend(
                     .targets()
                     .into_iter()
                     .find_map(|target| match target {
-                        omnifs_workspace::attach::Target::Tcp { addr } => {
-                            Some(addr.to_string())
-                        },
+                        omnifs_workspace::attach::Target::Tcp { addr } => Some(addr.to_string()),
                         omnifs_workspace::attach::Target::Vsock { .. } => None,
                     })
                     .expect("targets.json must carry TCP attach after --attach-tcp");
