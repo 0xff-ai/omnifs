@@ -23,9 +23,6 @@ tokio = { workspace = true }
 futures = "0.3"
 tracing = { workspace = true }
 thiserror = { workspace = true }
-constant_time_eq = "0.4"
-getrandom = "0.3"
-hex = { workspace = true }
 
 # The guest-side vsock dial for the libkrun frontend runner, and the
 # readiness beacon's own vsock dial back to the host. Linux-only: the libkrun

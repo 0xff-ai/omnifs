@@ -5,8 +5,8 @@ After=omnifs-seed-mount.service systemd-modules-load.service
 
 [Service]
 Type=exec
-# The seed conf is EnvironmentFile-shaped (KEY=VALUE lines): OMNIFS_ATTACH_ADDR,
-# OMNIFS_ATTACH_TOKEN, and OMNIFS_READY_VSOCK_PORT (crates/omnifs-api/src/lib.rs).
+# The seed conf is EnvironmentFile-shaped (KEY=VALUE lines): OMNIFS_ATTACH_ADDR
+# and OMNIFS_READY_VSOCK_PORT (crates/omnifs-api/src/lib.rs).
 # The runner dials host vsock on that port and writes `ready\n` once the FUSE
 # mount is serving (crates/omnifs-vfs-wire/src/beacon.rs); the host launch lease
 # accepts that beacon before publishing the launch. No leading '-':

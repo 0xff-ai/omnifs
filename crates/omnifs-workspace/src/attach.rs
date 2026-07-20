@@ -1,4 +1,8 @@
-//! Durable authority for token-authenticated namespace listeners.
+//! Durable authority for local-interface namespace listeners.
+//!
+//! TCP and vsock attach targets persist bind addresses so runners can
+//! reconnect across daemon replacement. Auth is the bind policy (loopback or
+//! verified docker0 / vsock proxy path), not a bearer secret.
 
 use std::io;
 use std::net::SocketAddr;
@@ -9,14 +13,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::io::write_atomic;
 
-const STORE_VERSION: u32 = 1;
+const STORE_VERSION: u32 = 2;
 
-/// One token-authenticated namespace listener that a frontend can reconnect to.
+/// One local-interface namespace listener that a frontend can reconnect to.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "transport", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Target {
-    Tcp { addr: SocketAddr, token: String },
-    Vsock { socket_path: PathBuf, token: String },
+    Tcp { addr: SocketAddr },
+    Vsock { socket_path: PathBuf },
 }
 
 impl Target {
@@ -160,17 +164,15 @@ fn sorted(mut targets: Vec<Target>) -> Vec<Target> {
 mod tests {
     use super::*;
 
-    fn tcp(port: u16, token: char) -> Target {
+    fn tcp(port: u16) -> Target {
         Target::Tcp {
             addr: SocketAddr::from(([127, 0, 0, 1], port)),
-            token: token.to_string().repeat(32),
         }
     }
 
-    fn vsock(path: &str, token: char) -> Target {
+    fn vsock(path: &str) -> Target {
         Target::Vsock {
             socket_path: PathBuf::from(path),
-            token: token.to_string().repeat(32),
         }
     }
 
@@ -181,14 +183,12 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert!(store.targets().is_empty());
 
-        store.set(vsock("/vsock.sock", 'b')).unwrap();
-        store.set(tcp(2, 'a')).unwrap();
+        store.set(vsock("/vsock.sock")).unwrap();
+        store.set(tcp(2)).unwrap();
+        assert_eq!(store.targets(), vec![tcp(2), vsock("/vsock.sock")]);
         assert_eq!(
-            store.targets(),
-            vec![tcp(2, 'a'), vsock("/vsock.sock", 'b')]
-        );
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["version"],
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()
+                ["version"],
             STORE_VERSION
         );
         #[cfg(unix)]
@@ -205,9 +205,9 @@ mod tests {
     fn set_replaces_only_the_same_transport_and_remove_is_exact() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("targets.json")).unwrap();
-        let first = tcp(1, 'a');
-        let replacement = tcp(2, 'b');
-        let other = vsock("/vsock.sock", 'c');
+        let first = tcp(1);
+        let replacement = tcp(2);
+        let other = vsock("/vsock.sock");
         store.set(first.clone()).unwrap();
         store.set(other.clone()).unwrap();
         store.set(replacement.clone()).unwrap();
@@ -224,17 +224,24 @@ mod tests {
         let path = dir.path().join("targets.json");
         std::fs::write(&path, br#"{"version":99,"targets":[]}"#).unwrap();
         assert!(Store::open(&path).is_err());
-        std::fs::write(&path, br#"{"version":1,"targets":[],"obsolete":true}"#).unwrap();
+        std::fs::write(&path, br#"{"version":2,"targets":[],"obsolete":true}"#).unwrap();
         assert!(Store::open(&path).is_err());
         std::fs::write(
             &path,
-            br#"{"version":1,"targets":[{"transport":"tcp","addr":"bad","token":"x"}]}"#,
+            br#"{"version":2,"targets":[{"transport":"tcp","addr":"bad"}]}"#,
+        )
+        .unwrap();
+        assert!(Store::open(&path).is_err());
+        // Token-bearing v1 records are rejected by version.
+        std::fs::write(
+            &path,
+            br#"{"version":1,"targets":[{"transport":"tcp","addr":"127.0.0.1:1","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#,
         )
         .unwrap();
         assert!(Store::open(&path).is_err());
         std::fs::write(
             &path,
-            br#"{"version":1,"targets":[{"transport":"tcp","addr":"127.0.0.1:1","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"transport":"tcp","addr":"127.0.0.1:2","token":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]}"#,
+            br#"{"version":2,"targets":[{"transport":"tcp","addr":"127.0.0.1:1"},{"transport":"tcp","addr":"127.0.0.1:2"}]}"#,
         )
         .unwrap();
         assert!(Store::open(&path).is_err());
@@ -245,7 +252,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("targets.json");
         let store = Store::open(&path).unwrap();
-        let target = tcp(1, 'a');
+        let target = tcp(1);
         std::fs::create_dir(&path).unwrap();
         assert!(store.set(target).is_err());
         assert!(store.targets().is_empty());

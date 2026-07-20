@@ -70,13 +70,9 @@ pub(crate) enum AttachOutcome {
 
 fn attach_target(target: &ListenerTarget) -> anyhow::Result<AttachTarget> {
     match target {
-        ListenerTarget::Tcp { addr, token } => Ok(AttachTarget::Tcp {
-            addr: *addr,
-            token: token.clone(),
-        }),
-        ListenerTarget::Vsock { socket_path, token } => Ok(AttachTarget::Vsock {
+        ListenerTarget::Tcp { addr } => Ok(AttachTarget::Tcp { addr: *addr }),
+        ListenerTarget::Vsock { socket_path } => Ok(AttachTarget::Vsock {
             socket_path: socket_path.clone(),
-            token: token.clone(),
         }),
         ListenerTarget::Local { .. } => {
             anyhow::bail!("local listener is not a durable attach target")
@@ -243,23 +239,14 @@ impl Daemon {
         bind_addr: AttachBindAddr,
         port: u16,
     ) -> anyhow::Result<AttachOutcome> {
-        if self.vfs.get().is_none_or(|vfs| !vfs.ready()) {
-            return Ok(AttachOutcome::NamespaceNotReady);
-        }
-        self.ensure_attach_tcp_with_token(bind_addr, port, None)
-    }
-
-    fn ensure_attach_tcp_with_token(
-        &self,
-        bind_addr: AttachBindAddr,
-        port: u16,
-        requested_token: Option<String>,
-    ) -> anyhow::Result<AttachOutcome> {
         let Some(vfs) = self.vfs.get() else {
             return Ok(AttachOutcome::NamespaceNotReady);
         };
+        if !vfs.ready() {
+            return Ok(AttachOutcome::NamespaceNotReady);
+        }
         let (listener_target, newly_bound) = vfs
-            .ensure_tcp_with_status(bind_addr.0, port, requested_token)
+            .ensure_tcp_with_status(bind_addr.0, port)
             .context("bind namespace TCP listener")?;
         let target = match attach_target(&listener_target) {
             Ok(record) => record,
@@ -280,22 +267,15 @@ impl Daemon {
     }
 
     fn ensure_attach_uds(&self) -> anyhow::Result<AttachOutcome> {
-        if self.vfs.get().is_none_or(|vfs| !vfs.ready()) {
-            return Ok(AttachOutcome::NamespaceNotReady);
-        }
-        self.ensure_attach_uds_with_token(None)
-    }
-
-    fn ensure_attach_uds_with_token(
-        &self,
-        requested_token: Option<String>,
-    ) -> anyhow::Result<AttachOutcome> {
         let Some(vfs) = self.vfs.get() else {
             return Ok(AttachOutcome::NamespaceNotReady);
         };
+        if !vfs.ready() {
+            return Ok(AttachOutcome::NamespaceNotReady);
+        }
         let path = self.context.vsock_attach_socket();
         let (listener_target, newly_bound) = vfs
-            .ensure_vsock_with_status(&path, requested_token)
+            .ensure_vsock_with_status(&path)
             .context("bind namespace vsock listener")?;
         let target = match attach_target(&listener_target) {
             Ok(record) => record,
@@ -373,33 +353,29 @@ impl Daemon {
     fn restore_attach_listeners(self: &Arc<Self>) -> anyhow::Result<()> {
         for target in self.attach_store.targets() {
             match target {
-                AttachTarget::Tcp { addr, token } => {
+                AttachTarget::Tcp { addr } => {
                     let ip = match addr.ip() {
                         std::net::IpAddr::V4(ip) => ip,
                         std::net::IpAddr::V6(_) => {
                             anyhow::bail!("persisted attach TCP address must be IPv4: {addr}")
                         },
                     };
-                    self.ensure_attach_tcp_with_token(
-                        AttachBindAddr::requested(Some(ip))?,
-                        addr.port(),
-                        Some(token),
-                    )?;
+                    self.ensure_attach_tcp(AttachBindAddr::requested(Some(ip))?, addr.port())?;
                 },
-                AttachTarget::Vsock { socket_path, token } => {
+                AttachTarget::Vsock { socket_path } => {
                     anyhow::ensure!(
                         socket_path == self.context.vsock_attach_socket(),
                         "persisted vsock attach socket path {} is not the daemon-approved path",
                         socket_path.display()
                     );
-                    self.ensure_attach_uds_with_token(Some(token))?;
+                    self.ensure_attach_uds()?;
                 },
             }
         }
         if let Some(port) = self.context.attach_tcp_port()
             && self.vfs.get().is_some_and(|vfs| !vfs.ready())
         {
-            self.ensure_attach_tcp_with_token(AttachBindAddr::loopback(), port, None)?;
+            self.ensure_attach_tcp(AttachBindAddr::loopback(), port)?;
         }
         Ok(())
     }
@@ -702,11 +678,10 @@ async fn handle_control_connection(
             let reply = match AttachBindAddr::requested(bind_ip)
                 .and_then(|bind_addr| daemon.ensure_attach_tcp(bind_addr, 0))
             {
-                Ok(AttachOutcome::Bound(ListenerTarget::Tcp { addr, token })) => ControlReply {
+                Ok(AttachOutcome::Bound(ListenerTarget::Tcp { addr })) => ControlReply {
                     version: CONTROL_PROTOCOL_VERSION,
                     outcome: ControlOutcome::AttachTcp(omnifs_api::TcpAttachTarget {
                         addr: addr.to_string(),
-                        token,
                     }),
                 },
                 Ok(AttachOutcome::Bound(_)) => ControlReply::error(ControlError::new(
@@ -726,12 +701,11 @@ async fn handle_control_connection(
         },
         ControlOperation::AttachVsock => {
             let reply = match daemon.ensure_attach_uds() {
-                Ok(AttachOutcome::Bound(ListenerTarget::Vsock { socket_path, token })) => {
+                Ok(AttachOutcome::Bound(ListenerTarget::Vsock { socket_path })) => {
                     ControlReply {
                         version: CONTROL_PROTOCOL_VERSION,
                         outcome: ControlOutcome::AttachVsock(omnifs_api::VsockAttachTarget {
                             socket_path,
-                            token,
                         }),
                     }
                 },
@@ -1004,7 +978,6 @@ mod tests {
         };
         let attach_target = omnifs_vfs_wire::AttachTarget::Tcp {
             addr: target.addr.clone(),
-            token: target.token.clone(),
         };
         let identity = omnifs_vfs_wire::FrontendIdentity {
             kind: omnifs_vfs_wire::FrontendKind::Fuse,
@@ -1074,7 +1047,6 @@ mod tests {
             persisted,
             vec![omnifs_workspace::attach::Target::Tcp {
                 addr: target.addr.parse().unwrap(),
-                token: target.token.clone(),
             }]
         );
 
@@ -1105,8 +1077,7 @@ mod tests {
 
         let wire = omnifs_vfs_wire::WireNamespace::attach(
             omnifs_vfs_wire::AttachTarget::Tcp {
-                addr: target.addr.parse().unwrap(),
-                token: target.token,
+                addr: target.addr.parse().unwrap()
             },
             omnifs_vfs_wire::FrontendIdentity {
                 kind: omnifs_vfs_wire::FrontendKind::Fuse,

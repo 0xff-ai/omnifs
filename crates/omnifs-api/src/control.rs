@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::DaemonStatus;
 
 /// The only control protocol version understood by this build.
-pub const CONTROL_PROTOCOL_VERSION: u16 = 4;
+pub const CONTROL_PROTOCOL_VERSION: u16 = 5;
 
 /// Maximum size of one request, reply, or inspector event line, including its
 /// trailing newline. The control plane is local and bounded, so oversized
@@ -65,14 +65,12 @@ pub enum ControlOutcome {
 #[serde(deny_unknown_fields)]
 pub struct TcpAttachTarget {
     pub addr: String,
-    pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VsockAttachTarget {
     pub socket_path: PathBuf,
-    pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,7 +145,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
-            r#"{"version":4,"operation":"attach_tcp","bind_ip":"127.0.0.1"}"#
+            r#"{"version":5,"operation":"attach_tcp","bind_ip":"127.0.0.1"}"#
         );
 
         let validate = ControlRequest {
@@ -159,7 +157,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&validate).unwrap(),
             format!(
-                r#"{{"version":4,"operation":"validate_offline","revision":"{}"}}"#,
+                r#"{{"version":5,"operation":"validate_offline","revision":"{}"}}"#,
                 "a".repeat(40)
             )
         );
@@ -170,12 +168,12 @@ mod tests {
         ));
         assert_eq!(
             serde_json::to_string(&reply).unwrap(),
-            r#"{"version":4,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
+            r#"{"version":5,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
         );
 
         assert_eq!(
             serde_json::to_string(&ControlReply::inspector_ready("epoch-1")).unwrap(),
-            r#"{"version":4,"result":"inspector_ready","value":{"instance_id":"epoch-1"}}"#
+            r#"{"version":5,"result":"inspector_ready","value":{"instance_id":"epoch-1"}}"#
         );
 
         assert!(

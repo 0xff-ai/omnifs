@@ -27,7 +27,6 @@ use crate::{
     WireError, WireNamespace, WireRequest, WireResponse, serve_connection,
 };
 
-const VALID_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 const EVENT_CAPACITY: usize = 1024;
 
 fn path(value: &str) -> Path {
@@ -179,38 +178,21 @@ impl Namespace for StubNamespace {
 // Frame-level client helpers over a duplex
 // ---------------------------------------------------------------------------
 
-/// Perform the client side of the handshake, returning success or the rejection
-/// reason. The wire handshake carries no daemon instance identity.
-async fn client_handshake_with_token(
-    io: &mut DuplexStream,
-    protocol: u32,
-    token: Option<String>,
-) -> Result<(), String> {
+/// Perform the client side of the handshake, returning success or the
+/// rejection reason. The wire handshake carries no daemon instance identity.
+async fn client_handshake(io: &mut DuplexStream, protocol: u32) -> Result<(), WireError> {
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol,
-        token,
         frontend: test_identity(),
     })
     .unwrap();
-    write_frame(io, &Frame::new(0, KIND_REQUEST, hello))
-        .await
-        .map_err(|error| error.to_string())?;
-    let welcome = read_frame(io)
-        .await
-        .map_err(|error| error.to_string())?
-        .expect("welcome frame");
+    write_frame(io, &Frame::new(0, KIND_REQUEST, hello)).await?;
+    let welcome = read_frame(io).await?.expect("welcome frame");
     match postcard::from_bytes::<Handshake>(&welcome.body).unwrap() {
         Handshake::Welcome { .. } => Ok(()),
-        Handshake::Rejected { reason } => Err(reason),
+        Handshake::Rejected { reason } => Err(WireError::Rejected(reason)),
         Handshake::Hello { .. } => panic!("server sent a hello"),
     }
-}
-
-/// Perform the client side of the handshake with no token.
-async fn client_handshake(io: &mut DuplexStream, protocol: u32) -> Result<(), WireError> {
-    client_handshake_with_token(io, protocol, None)
-        .await
-        .map_err(WireError::Rejected)
 }
 
 async fn send_request(io: &mut DuplexStream, request_id: u64, request: &WireRequest) {
@@ -232,52 +214,25 @@ fn start_local_server(namespace: Arc<dyn Namespace>, path: PathBuf) -> Arc<VfsSe
     server
 }
 
-fn start_tcp_server(
-    namespace: Arc<dyn Namespace>,
-    token: &str,
-) -> (Arc<VfsServer>, ListenerTarget) {
+fn start_tcp_server(namespace: Arc<dyn Namespace>) -> (Arc<VfsServer>, ListenerTarget) {
     let server = VfsServer::new(namespace);
-    let target = server
-        .ensure_tcp(Ipv4Addr::LOCALHOST, 0, Some(token.to_string()))
-        .unwrap();
+    let target = server.ensure_tcp(Ipv4Addr::LOCALHOST, 0).unwrap();
     (server, target)
 }
 
-fn start_vsock_server(
-    namespace: Arc<dyn Namespace>,
-    path: &StdPath,
-    token: &str,
-) -> Arc<VfsServer> {
+fn start_vsock_server(namespace: Arc<dyn Namespace>, path: &StdPath) -> Arc<VfsServer> {
     let server = VfsServer::new(namespace);
-    server.ensure_vsock(path, Some(token.to_string())).unwrap();
+    server.ensure_vsock(path).unwrap();
     server
 }
 
-/// Spawn a server over the server half of a fresh duplex, with no expected
-/// token (mirroring a Unix-socket listener); return the client half and the
-/// server's join handle.
+/// Spawn a server over the server half of a fresh duplex; return the client
+/// half and the server's join handle.
 fn serve_over_duplex(
     namespace: Arc<dyn Namespace>,
 ) -> (DuplexStream, tokio::task::JoinHandle<Result<(), WireError>>) {
-    serve_over_duplex_with_token(namespace, None)
-}
-
-/// Like [`serve_over_duplex`], but with an expected attach token (mirroring a
-/// TCP attach listener). `expected_token: None` still serves (a Unix-socket
-/// listener never checks it), so the same helper covers both transports.
-fn serve_over_duplex_with_token(
-    namespace: Arc<dyn Namespace>,
-    expected_token: Option<&'static str>,
-) -> (DuplexStream, tokio::task::JoinHandle<Result<(), WireError>>) {
-    serve_over_duplex_with(namespace, expected_token)
-}
-
-fn serve_over_duplex_with(
-    namespace: Arc<dyn Namespace>,
-    expected_token: Option<&'static str>,
-) -> (DuplexStream, tokio::task::JoinHandle<Result<(), WireError>>) {
     let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
-    let handle = tokio::spawn(serve_connection(namespace, server_io, expected_token));
+    let handle = tokio::spawn(serve_connection(namespace, server_io));
     (client_io, handle)
 }
 
@@ -567,7 +522,6 @@ async fn handshake_version_mismatch_is_rejected() {
     // The client offers the immediately previous strict protocol version.
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL - 1,
-        token: None,
         frontend: test_identity(),
     })
     .unwrap();
@@ -582,57 +536,6 @@ async fn handshake_version_mismatch_is_rejected() {
         },
         other => panic!("expected VersionMismatch, got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn tcp_style_token_is_accepted_when_it_matches() {
-    let stub = StubNamespace::new();
-    let (mut io, _server) = serve_over_duplex_with_token(stub, Some("right-token"));
-
-    client_handshake_with_token(&mut io, PROTOCOL, Some("right-token".to_string()))
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn tcp_style_wrong_token_is_rejected() {
-    let stub = StubNamespace::new();
-    let (mut io, server) = serve_over_duplex_with_token(stub, Some("right-token"));
-
-    let client_result =
-        client_handshake_with_token(&mut io, PROTOCOL, Some("wrong-token".to_string())).await;
-    assert_eq!(client_result, Err("attach token rejected".to_string()));
-
-    match server.await.unwrap() {
-        Err(WireError::TokenRejected) => {},
-        other => panic!("expected TokenRejected, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn tcp_style_missing_token_is_rejected() {
-    let stub = StubNamespace::new();
-    let (mut io, server) = serve_over_duplex_with_token(stub, Some("right-token"));
-
-    let client_result = client_handshake_with_token(&mut io, PROTOCOL, None).await;
-    assert_eq!(client_result, Err("attach token rejected".to_string()));
-
-    match server.await.unwrap() {
-        Err(WireError::TokenRejected) => {},
-        other => panic!("expected TokenRejected, got {other:?}"),
-    }
-}
-
-/// A Unix-socket listener (`expected_token: None`) ignores whatever the client
-/// sends in `token`, matching or not.
-#[tokio::test]
-async fn unix_style_listener_ignores_any_token() {
-    let stub = StubNamespace::new();
-    let (mut io, _server) = serve_over_duplex(stub);
-
-    client_handshake_with_token(&mut io, PROTOCOL, Some("whatever".to_string()))
-        .await
-        .unwrap();
 }
 
 #[tokio::test]
@@ -706,7 +609,6 @@ async fn startup_gate_holds_listener_until_ready_publication() {
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
-        token: None,
         frontend: test_identity(),
     })
     .unwrap();
@@ -733,18 +635,17 @@ async fn startup_gate_holds_listener_until_ready_publication() {
 }
 
 /// The Docker Desktop path end to end: a real TCP loopback listener, a real
-/// [`WireNamespace`] dialing it with the matching attach token.
+/// [`WireNamespace`] dialing it.
 #[tokio::test]
 async fn tcp_listener_end_to_end() {
     let stub = StubNamespace::new();
-    let (server, ListenerTarget::Tcp { addr, token }) = start_tcp_server(stub, VALID_TOKEN) else {
+    let (server, ListenerTarget::Tcp { addr }) = start_tcp_server(stub) else {
         panic!("TCP server returned a non-TCP target")
     };
 
     let namespace = WireNamespace::attach(
         AttachTarget::Tcp {
             addr: addr.to_string(),
-            token,
         },
         test_identity(),
         tokio::runtime::Handle::current(),
@@ -756,47 +657,21 @@ async fn tcp_listener_end_to_end() {
     server.shutdown().await;
 }
 
+/// The libkrun vsock-proxy path's host-side shape: a dynamically bound UDS
+/// listener (as opposed to the fixed local socket) that a connecting peer
+/// dials directly. Driven with the raw frame helpers (not
+/// `WireNamespace::attach`/`AttachTarget::Unix`) since production reaches this
+/// socket through libkrun's vsock proxy, not a bare Unix dial.
 #[tokio::test]
-async fn tcp_listener_rejects_wrong_token() {
-    let stub = StubNamespace::new();
-    let (server, ListenerTarget::Tcp { addr, .. }) = start_tcp_server(stub, VALID_TOKEN) else {
-        panic!("TCP server returned a non-TCP target")
-    };
-
-    let result = WireNamespace::attach(
-        AttachTarget::Tcp {
-            addr: addr.to_string(),
-            token: "wrong-token".to_string(),
-        },
-        test_identity(),
-        tokio::runtime::Handle::current(),
-    )
-    .await;
-    match result {
-        Err(WireError::Rejected(_)) => {},
-        Ok(_) => panic!("a wrong token must be rejected, not accepted"),
-        Err(other) => panic!("expected Rejected, got {other:?}"),
-    }
-    server.shutdown().await;
-}
-
-/// The libkrun vsock-proxy path's host-side shape: a real token-authenticated
-/// UDS listener, so a connecting peer must present it exactly like the TCP
-/// listener does. Driven with the
-/// raw frame helpers (not `WireNamespace::attach`/`AttachTarget::Unix`, which
-/// by design never sends a token) since production reaches this socket through
-/// libkrun's vsock proxy, not a bare Unix dial.
-#[tokio::test]
-async fn unix_listener_with_token_end_to_end() {
+async fn vsock_listener_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
     let stub = StubNamespace::new();
-    let server = start_vsock_server(stub.clone(), &socket, VALID_TOKEN);
+    let server = start_vsock_server(stub.clone(), &socket);
 
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
-        token: Some(VALID_TOKEN.to_string()),
         frontend: test_identity(),
     })
     .unwrap();
@@ -815,53 +690,10 @@ async fn unix_listener_with_token_end_to_end() {
     server.shutdown().await;
     assert!(!socket.exists(), "dynamic UDS must be removed on shutdown");
 
-    let rebound = start_vsock_server(stub, &socket, VALID_TOKEN);
+    let rebound = start_vsock_server(stub, &socket);
     assert!(socket.exists(), "dynamic UDS must be bindable again");
     rebound.shutdown().await;
     assert!(!socket.exists(), "rebound UDS must be cleaned too");
-}
-
-#[tokio::test]
-async fn unix_listener_with_token_rejects_wrong_token() {
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("ns.sock");
-    let stub = StubNamespace::new();
-    let server = start_vsock_server(stub, &socket, VALID_TOKEN);
-
-    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
-    let hello = postcard::to_allocvec(&Handshake::Hello {
-        protocol: PROTOCOL,
-        token: Some("wrong-token".to_string()),
-        frontend: test_identity(),
-    })
-    .unwrap();
-    write_frame(&mut stream, &Frame::new(0, KIND_REQUEST, hello))
-        .await
-        .unwrap();
-    let response = read_frame(&mut stream)
-        .await
-        .unwrap()
-        .expect("response frame");
-    match postcard::from_bytes::<Handshake>(&response.body).unwrap() {
-        Handshake::Rejected { .. } => {},
-        other => panic!("expected Rejected, got {other:?}"),
-    }
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn invalid_vsock_token_is_rejected_before_binding() {
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("invalid.sock");
-    let server = VfsServer::new(StubNamespace::new());
-
-    let error = server
-        .ensure_vsock(&socket, Some("not-a-valid-token".to_string()))
-        .unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(!socket.exists());
-
-    server.shutdown().await;
 }
 
 #[tokio::test]
@@ -870,7 +702,7 @@ async fn removing_dynamic_listener_recovers_readiness() {
     let server = VfsServer::new(StubNamespace::new());
     server.serve_local(dir.path().join("local.sock")).unwrap();
     let (target, newly_bound) = server
-        .ensure_tcp_with_status(Ipv4Addr::LOCALHOST, 0, Some(VALID_TOKEN.to_string()))
+        .ensure_tcp_with_status(Ipv4Addr::LOCALHOST, 0)
         .unwrap();
     assert!(newly_bound);
 
@@ -926,7 +758,6 @@ async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
     let stalled_attach = tokio::spawn(WireNamespace::attach(
         AttachTarget::Tcp {
             addr: stalled_addr.to_string(),
-            token: VALID_TOKEN.to_string(),
         },
         test_identity(),
         stalled_rt,
@@ -960,11 +791,9 @@ async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
     std_listener.set_nonblocking(true).unwrap();
     let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
     let rt = tokio::runtime::Handle::current();
-    let token = VALID_TOKEN.to_string();
 
     let attach_target = AttachTarget::Tcp {
         addr: addr.to_string(),
-        token: token.clone(),
     };
     let attach_task = rt.spawn(WireNamespace::attach(
         attach_target,
@@ -972,21 +801,18 @@ async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
         rt.clone(),
     ));
 
-    // Establish the initial instance and check the presented token. Keep this
-    // stream alive until the namespace subscriber is installed, otherwise EOF
-    // can publish the root invalidation before the test can observe it.
+    // Establish the initial instance. Keep this stream alive until the
+    // namespace subscriber is installed, otherwise EOF can publish the root
+    // invalidation before the test can observe it.
     let (mut stream_a, _) = listener.accept().await.unwrap();
     let hello_frame = read_frame(&mut stream_a)
         .await
         .unwrap()
         .expect("hello frame");
-    let Handshake::Hello {
-        token: presented, ..
-    } = postcard::from_bytes(&hello_frame.body).unwrap()
-    else {
-        panic!("expected a hello frame");
-    };
-    assert_eq!(presented.as_deref(), Some(token.as_str()));
+    assert!(matches!(
+        postcard::from_bytes::<Handshake>(&hello_frame.body).unwrap(),
+        Handshake::Hello { .. }
+    ));
     let welcome = postcard::to_allocvec(&Handshake::Welcome { protocol: PROTOCOL }).unwrap();
     write_frame(&mut stream_a, &Frame::new(0, KIND_RESPONSE, welcome))
         .await
@@ -1129,20 +955,15 @@ mod trace_propagation {
 
         let server = VfsServer::new(tree_ns);
         let target = server
-            .ensure_tcp(
-                "127.0.0.1".parse().unwrap(),
-                0,
-                Some(super::VALID_TOKEN.to_string()),
-            )
+            .ensure_tcp("127.0.0.1".parse().unwrap(), 0)
             .unwrap();
-        let ListenerTarget::Tcp { addr, token } = target else {
+        let ListenerTarget::Tcp { addr } = target else {
             panic!("trace server returned a non-TCP target")
         };
 
         let client = WireNamespace::attach(
             AttachTarget::Tcp {
                 addr: addr.to_string(),
-                token,
             },
             FrontendIdentity {
                 kind: FrontendKind::Fuse,

@@ -87,12 +87,9 @@ const SEED_CONF_NAME: &str = "omnifs-seed.conf";
 
 /// The exact seed keys a launch ever writes. The lockdown audit
 /// ([`audit_seed_staging`]) asserts the staging dir carries exactly this set
-/// before it is burned into the ISO: only `OMNIFS_ATTACH_TOKEN` is sensitive,
-/// so bounding the key set is what stands between "seed" and "accidental
-/// credential leak into a guest-readable volume."
-const SEED_CONF_KEYS: [&str; 4] = [
+/// before it is burned into the ISO.
+const SEED_CONF_KEYS: [&str; 3] = [
     "OMNIFS_ATTACH_ADDR",
-    "OMNIFS_ATTACH_TOKEN",
     "OMNIFS_READY_VSOCK_PORT",
     "OMNIFS_SSH_PUBKEY",
 ];
@@ -260,7 +257,7 @@ impl LibkrunRunner {
     /// staging dir against the exact expected key set, then hand it to
     /// `hdiutil makehybrid`. Array args throughout: nothing here is
     /// interpolated into a shell.
-    fn write_seed_iso(&self, attach_token: &str, ssh_pubkey: &str) -> Result<()> {
+    fn write_seed_iso(&self, ssh_pubkey: &str) -> Result<()> {
         let staging = self.seed_staging();
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging)
@@ -269,7 +266,6 @@ impl LibkrunRunner {
         let conf_path = staging.join(SEED_CONF_NAME);
         let conf = format!(
             "OMNIFS_ATTACH_ADDR=vsock:{ATTACH_VSOCK_PORT}\n\
-             OMNIFS_ATTACH_TOKEN={attach_token}\n\
              OMNIFS_READY_VSOCK_PORT={READY_VSOCK_PORT}\n\
              OMNIFS_SSH_PUBKEY={ssh_pubkey}\n"
         );
@@ -424,7 +420,6 @@ struct LibkrunLaunchLease<'a> {
     runner: &'a LibkrunRunner,
     daemon_attach_socket: PathBuf,
     guest_image: PathBuf,
-    attach_token: String,
     mount: Option<String>,
     timeout: Duration,
     child: Option<std::process::Child>,
@@ -434,7 +429,6 @@ struct LibkrunLaunchLease<'a> {
 
 pub(crate) struct LibkrunLaunchRequest<'a> {
     pub(crate) daemon_attach_socket: &'a Path,
-    pub(crate) attach_token: &'a str,
     pub(crate) config: &'a Config,
     pub(crate) guest_image_cache: &'a Path,
     pub(crate) output: Output,
@@ -448,7 +442,6 @@ impl<'a> LibkrunLaunchLease<'a> {
             runner,
             daemon_attach_socket: daemon_attach_socket.to_path_buf(),
             guest_image,
-            attach_token: String::new(),
             mount: None,
             timeout: Duration::ZERO,
             child: None,
@@ -462,7 +455,6 @@ impl<'a> LibkrunLaunchLease<'a> {
             runner,
             daemon_attach_socket: PathBuf::new(),
             guest_image: PathBuf::new(),
-            attach_token: String::new(),
             mount: None,
             timeout: Duration::ZERO,
             child: None,
@@ -475,7 +467,6 @@ impl<'a> LibkrunLaunchLease<'a> {
         let guest_image =
             resolve_guest_image(request.config, request.guest_image_cache, request.output).await?;
         let mut lease = Self::new(runner, request.daemon_attach_socket, guest_image);
-        request.attach_token.clone_into(&mut lease.attach_token);
         lease.mount = request.mount.map(str::to_owned);
         lease.timeout = request.timeout;
         Ok(lease)
@@ -526,7 +517,7 @@ impl<'a> LibkrunLaunchLease<'a> {
         self.materialize_root_disk()?;
         let ssh_pubkey = self.runner.ensure_ssh_keypair()?;
         self.runner
-            .write_seed_iso(&self.attach_token, &ssh_pubkey)?;
+            .write_seed_iso(&ssh_pubkey)?;
         self.ready_listener = Some(self.bind_ready_listener()?);
         let _ = std::fs::remove_file(self.runner.ssh_socket());
         let _ = std::fs::remove_file(self.runner.control_socket());
@@ -1015,7 +1006,6 @@ mod tests {
         std::fs::write(
             dir.path().join(SEED_CONF_NAME),
             "OMNIFS_ATTACH_ADDR=vsock:1024\n\
-             OMNIFS_ATTACH_TOKEN=abc123\n\
              OMNIFS_READY_VSOCK_PORT=1025\n\
              OMNIFS_SSH_PUBKEY=ssh-ed25519 AAAA test\n",
         )
@@ -1042,7 +1032,6 @@ mod tests {
         std::fs::write(
             dir.path().join(SEED_CONF_NAME),
             "OMNIFS_ATTACH_ADDR=vsock:1024\n\
-             OMNIFS_ATTACH_TOKEN=abc123\n\
              OMNIFS_READY_VSOCK_PORT=1025\n\
              OMNIFS_SSH_PUBKEY=ssh-ed25519 AAAA test\n\
              OMNIFS_HOME=/root/.omnifs\n",
@@ -1057,7 +1046,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(SEED_CONF_NAME),
-            "OMNIFS_ATTACH_ADDR=vsock:1024\nOMNIFS_ATTACH_TOKEN=abc123\n",
+            "OMNIFS_ATTACH_ADDR=vsock:1024\n",
         )
         .unwrap();
         let err = audit_seed_staging(dir.path()).unwrap_err();

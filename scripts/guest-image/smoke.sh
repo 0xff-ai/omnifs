@@ -51,8 +51,7 @@ fi
 
 "$root/scripts/guest-image/make-seed-iso.sh" \
   --out "$seed_iso" \
-  --attach-addr "vsock:1024" \
-  --attach-token "smoke-placeholder-token" \
+  --attach-addr "192.0.2.1:9999" \
   || exit 1
 
 helper_pid=""

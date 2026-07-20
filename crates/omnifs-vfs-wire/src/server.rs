@@ -30,19 +30,18 @@ use tokio::task::JoinSet;
 use crate::frame::{Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame};
 use crate::{FrontendIdentity, Handshake, PROTOCOL, WireError, WireRequest, WireResponse};
 
-const ATTACH_TOKEN_BYTES: usize = 16;
 const UDS_PATH_BYTE_LIMIT: usize = 100;
 
-/// The listener path determines both runtime authority and authentication.
+/// The listener path determines both runtime authority and delivery labeling.
 /// The guest identity in the handshake remains display-only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ListenerTarget {
     /// The fixed host-native Unix listener authenticated by filesystem mode.
     Local { path: PathBuf },
-    /// The Docker runtime listener and its token-authenticated address.
-    Tcp { addr: SocketAddr, token: String },
-    /// The libkrun vsock-proxy listener and its token-authenticated socket.
-    Vsock { socket_path: PathBuf, token: String },
+    /// The Docker runtime listener bound to loopback or a verified docker0 address.
+    Tcp { addr: SocketAddr },
+    /// The libkrun vsock-proxy listener on the host UDS path.
+    Vsock { socket_path: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,12 +66,6 @@ impl ListenerTarget {
         }
     }
 
-    fn token(&self) -> Option<&str> {
-        match self {
-            Self::Local { .. } => None,
-            Self::Tcp { token, .. } | Self::Vsock { token, .. } => Some(token),
-        }
-    }
 
     fn path(&self) -> Option<&Path> {
         match self {
@@ -219,8 +212,8 @@ impl Attachments {
     }
 }
 
-/// Owns the namespace attach listeners, their connection tasks, attach-token
-/// authority, live attachment snapshot, readiness, and shutdown.
+/// Owns the namespace attach listeners, their connection tasks, live attachment
+/// snapshot, readiness, and shutdown.
 pub struct VfsServer {
     namespace: Arc<dyn Namespace>,
     attachments: Arc<Attachments>,
@@ -379,14 +372,13 @@ impl VfsServer {
             .map(|(target, _)| target)
     }
 
-    /// Bind or return the token-authenticated TCP listener for Docker runtime.
+    /// Bind or return the TCP listener for Docker runtime.
     pub fn ensure_tcp(
         self: &Arc<Self>,
         bind_addr: Ipv4Addr,
         port: u16,
-        requested_token: Option<String>,
     ) -> io::Result<ListenerTarget> {
-        self.ensure_tcp_with_status(bind_addr, port, requested_token)
+        self.ensure_tcp_with_status(bind_addr, port)
             .map(|(target, _)| target)
     }
 
@@ -397,27 +389,20 @@ impl VfsServer {
         self: &Arc<Self>,
         bind_addr: Ipv4Addr,
         port: u16,
-        requested_token: Option<String>,
     ) -> io::Result<(ListenerTarget, bool)> {
         if let Some(target) = self.existing(ListenerKind::Tcp) {
             return Ok((target, false));
         }
-        let token = requested_token.map_or_else(generate_attach_token, validate_attach_token)?;
         let std_listener = std::net::TcpListener::bind((bind_addr, port))?;
         std_listener.set_nonblocking(true)?;
         let addr = std_listener.local_addr()?;
         let listener = TcpListener::from_std(std_listener)?;
-        self.install(ListenerTarget::Tcp { addr, token }, Listener::Tcp(listener))
+        self.install(ListenerTarget::Tcp { addr }, Listener::Tcp(listener))
     }
 
-    /// Bind or return the token-authenticated UDS used by the vsock proxy.
-    pub fn ensure_vsock(
-        self: &Arc<Self>,
-        path: &Path,
-        requested_token: Option<String>,
-    ) -> io::Result<ListenerTarget> {
-        self.ensure_vsock_with_status(path, requested_token)
-            .map(|(target, _)| target)
+    /// Bind or return the UDS used by the vsock proxy.
+    pub fn ensure_vsock(self: &Arc<Self>, path: &Path) -> io::Result<ListenerTarget> {
+        self.ensure_vsock_with_status(path).map(|(target, _)| target)
     }
 
     /// Bind or return the vsock listener and report whether this call created it.
@@ -426,15 +411,12 @@ impl VfsServer {
     pub fn ensure_vsock_with_status(
         self: &Arc<Self>,
         path: &Path,
-        requested_token: Option<String>,
     ) -> io::Result<(ListenerTarget, bool)> {
         if let Some(target) = self.existing(ListenerKind::Vsock) {
             return Ok((target, false));
         }
-        let token = requested_token.map_or_else(generate_attach_token, validate_attach_token)?;
         let target = ListenerTarget::Vsock {
             socket_path: path.to_path_buf(),
-            token,
         };
         let listener = bind_unix(path, "vsock attach socket")?;
         match self.install(target, Listener::Unix(listener)) {
@@ -609,7 +591,6 @@ impl VfsServer {
             accept_loop(
                 listener,
                 namespace,
-                target_for_task.token().map(str::to_owned),
                 runtime,
                 attachments,
                 connection_tx,
@@ -673,7 +654,6 @@ fn unlink_socket(path: &Path) {
 async fn accept_loop(
     listener: Listener,
     namespace: Arc<dyn Namespace>,
-    token: Option<String>,
     runtime: FrontendRuntime,
     attachments: Arc<Attachments>,
     connection_tx: mpsc::UnboundedSender<Connection>,
@@ -683,14 +663,12 @@ async fn accept_loop(
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let namespace = Arc::clone(&namespace);
-                    let token = token.clone();
                     let attachments = Arc::clone(&attachments);
                     if connection_tx
                         .send(Box::pin(async move {
                             if let Err(error) = serve_connection_with_registry(
                                 namespace,
                                 stream,
-                                token.as_deref(),
                                 Some((attachments, runtime)),
                             )
                             .await
@@ -713,14 +691,12 @@ async fn accept_loop(
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let namespace = Arc::clone(&namespace);
-                    let token = token.clone();
                     let attachments = Arc::clone(&attachments);
                     if connection_tx
                         .send(Box::pin(async move {
                             if let Err(error) = serve_connection_with_registry(
                                 namespace,
                                 stream,
-                                token.as_deref(),
                                 Some((attachments, runtime)),
                             )
                             .await
@@ -742,25 +718,6 @@ async fn accept_loop(
     }
 }
 
-fn generate_attach_token() -> io::Result<String> {
-    let mut bytes = [0_u8; ATTACH_TOKEN_BYTES];
-    getrandom::fill(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
-    Ok(hex::encode(bytes))
-}
-
-fn validate_attach_token(token: String) -> io::Result<String> {
-    if token.len() != ATTACH_TOKEN_BYTES * 2
-        || !token
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "persisted attach token must be 32 lowercase hexadecimal characters",
-        ));
-    }
-    Ok(token)
-}
 
 fn bind_unix(path: &Path, description: &str) -> io::Result<UnixListener> {
     use std::os::unix::ffi::OsStrExt as _;
@@ -812,30 +769,26 @@ fn bind_unix(path: &Path, description: &str) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// Serve one attached client over `stream` until it disconnects. `expected_token`
-/// is `None` for a Unix-socket
-/// listener (the field is ignored) and `Some(token)` for a TCP attach listener,
-/// which rejects a Hello whose token does not match. Production listeners are
-/// owned by [`VfsServer`]; this direct helper is retained for protocol tests.
+/// Serve one attached client over `stream` until it disconnects. Production
+/// listeners are owned by [`VfsServer`]; this direct helper is retained for
+/// protocol tests.
 ///
 /// Returns `Ok(())` on an orderly client disconnect and a [`WireError`] on a
-/// protocol fault (an oversized frame, a malformed handshake, a version
-/// mismatch, a bad token); a fault drops the connection.
+/// protocol fault (an oversized frame, a malformed handshake, or a version
+/// mismatch); a fault drops the connection.
 pub async fn serve_connection<S>(
     namespace: Arc<dyn Namespace>,
     stream: S,
-    expected_token: Option<&str>,
 ) -> Result<(), WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
-    serve_connection_with_registry(namespace, stream, expected_token, None).await
+    serve_connection_with_registry(namespace, stream, None).await
 }
 
 async fn serve_connection_with_registry<S>(
     namespace: Arc<dyn Namespace>,
     stream: S,
-    expected_token: Option<&str>,
     attachment: Option<(Arc<Attachments>, FrontendRuntime)>,
 ) -> Result<(), WireError>
 where
@@ -848,7 +801,7 @@ where
     // so frames never interleave on the wire.
     // Complete the handshake before subscribing to namespace events so Welcome
     // is always the first server frame on a new connection.
-    let handshake_result = server_handshake(&mut reader, &mut writer, expected_token).await;
+    let handshake_result = server_handshake(&mut reader, &mut writer).await;
     let identity = match handshake_result {
         Ok(identity) => identity,
         Err(error) => {
@@ -901,13 +854,11 @@ where
     read_result
 }
 
-/// Read the client's `Hello`, check the protocol and (when `expected_token` is
-/// set) the token, and answer with `Welcome` or `Rejected`. On success returns
-/// the connecting frontend's identity.
+/// Read the client's `Hello`, check the protocol, and answer with `Welcome` or
+/// `Rejected`. On success returns the connecting frontend's identity.
 async fn server_handshake<R, W>(
     reader: &mut R,
     writer: &mut W,
-    expected_token: Option<&str>,
 ) -> Result<FrontendIdentity, WireError>
 where
     R: AsyncRead + Unpin,
@@ -922,7 +873,6 @@ where
     let hello: Handshake = postcard::from_bytes(&frame.body)?;
     let Handshake::Hello {
         protocol,
-        token,
         frontend,
     } = hello
     else {
@@ -935,13 +885,6 @@ where
         };
         send_rejected(writer, error.to_string()).await?;
         return Err(error);
-    }
-    if let Some(expected) = expected_token {
-        let presented = token.as_deref().unwrap_or_default();
-        if !constant_time_eq::constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
-            send_rejected(writer, "attach token rejected".to_string()).await?;
-            return Err(WireError::TokenRejected);
-        }
     }
     let welcome = Handshake::Welcome { protocol: PROTOCOL };
     let body = postcard::to_allocvec(&welcome)?;

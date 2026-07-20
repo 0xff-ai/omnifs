@@ -44,59 +44,43 @@ const EVENT_CAPACITY: usize = 1024;
 /// Where a [`WireNamespace`] dials the daemon it attaches to.
 ///
 /// `Unix` is the host-native path: auth is filesystem permissions on the
-/// socket, so no token is sent. `Tcp` is the Docker Desktop path: the
-/// containerized frontend cannot share a host Unix socket into the Linux VM it
-/// runs in, so it dials TCP instead and proves itself with the daemon's
-/// per-instance attach token. `addr` is a `host:port` string rather than a
+/// socket. `Tcp` is the Docker path: the containerized frontend cannot share a
+/// host Unix socket, so it dials TCP to an address bound on loopback or a
+/// verified docker0 gateway. `addr` is a `host:port` string rather than a
 /// pre-resolved `SocketAddr` because the Docker-hosted frontend dials the
-/// `host.docker.internal` name Docker injects into the container's DNS, not a
-/// literal address the CLI could resolve ahead of time; `TcpStream::connect`
-/// resolves it same as any other socket address type.
+/// `host.docker.internal` name Docker injects into the container's DNS.
 ///
-/// `Vsock` is the libkrun-on-macOS path: the guest VM has no shared host Unix
-/// socket and no Docker-style loopback either, but libkrun gives it a virtio
-/// socket device, so it dials host CID 2 (`VMADDR_CID_HOST`) on `port` instead.
-/// libkrun proxies that vsock connection onto a host Unix socket
-/// (`--device virtio-vsock,port=N,socketURL=<path>,listen`), and every
-/// connection libkrun forwards looks like the same trusted local peer to that
-/// socket, so `token` proves the guest's identity the same way it does over
-/// TCP. The dial itself only builds on Linux (the guest OS); on any other
-/// target it fails at attach time with a named, non-retriable error rather
-/// than being a compile-time option.
+/// `Vsock` is the libkrun-on-macOS path: the guest dials host CID 2 on `port`
+/// and libkrun proxies onto a host Unix socket. The dial itself only builds on
+/// Linux (the guest OS); on any other target it fails at attach time with a
+/// named, non-retriable error rather than being a compile-time option.
 #[derive(Debug, Clone)]
 pub enum AttachTarget {
     Unix(PathBuf),
-    Tcp { addr: String, token: String },
-    Vsock { port: u32, token: String },
+    Tcp { addr: String },
+    Vsock { port: u32 },
 }
 
 impl AttachTarget {
     /// Resolve the explicit `--attach <socket>` when given, otherwise the target
-    /// named by `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN`. Neither present is a
-    /// hard error: there is no default to fall back to silently.
+    /// named by `OMNIFS_ATTACH_ADDR`. Neither present is a hard error: there is
+    /// no default to fall back to silently.
     pub fn resolve(attach: Option<PathBuf>) -> Result<Self, AttachTargetError> {
         if let Some(socket) = attach {
             return Ok(Self::Unix(socket));
         }
-        Self::from_env(
-            std::env::var(omnifs_api::OMNIFS_ATTACH_ADDR_ENV).ok(),
-            std::env::var(omnifs_api::OMNIFS_ATTACH_TOKEN_ENV).ok(),
-        )
+        Self::from_env(std::env::var(omnifs_api::OMNIFS_ATTACH_ADDR_ENV).ok())
     }
 
-    /// Parse the env-driven target from explicit values so validation remains
+    /// Parse the env-driven target from an explicit value so validation remains
     /// testable without mutating process environment.
     ///
     /// `addr` is `vsock:<port>` for a libkrun guest or `host:port` for TCP. TCP
     /// targets remain unresolved because `host.docker.internal` exists only in
     /// the frontend container's DNS and cannot be resolved by the host CLI.
-    fn from_env(addr: Option<String>, token: Option<String>) -> Result<Self, AttachTargetError> {
+    fn from_env(addr: Option<String>) -> Result<Self, AttachTargetError> {
         let addr = addr.ok_or(AttachTargetError::Missing {
             env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
-        })?;
-        let token = token.ok_or(AttachTargetError::MissingToken {
-            addr_env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
-            token_env: omnifs_api::OMNIFS_ATTACH_TOKEN_ENV,
         })?;
         if let Some(port) = addr.strip_prefix("vsock:") {
             let port: u32 = port
@@ -106,7 +90,7 @@ impl AttachTarget {
                     addr: addr.clone(),
                     source,
                 })?;
-            return Ok(Self::Vsock { port, token });
+            return Ok(Self::Vsock { port });
         }
         if addr
             .rsplit_once(':')
@@ -117,7 +101,7 @@ impl AttachTarget {
                 addr,
             });
         }
-        Ok(Self::Tcp { addr, token })
+        Ok(Self::Tcp { addr })
     }
 
     /// Connect with backoff. With a `deadline`, a transient failure past the
@@ -190,22 +174,22 @@ impl AttachTarget {
         match self {
             Self::Unix(path) => {
                 let stream = UnixStream::connect(path).await?;
-                handshake_over(stream, None, identity.clone()).await
+                handshake_over(stream, identity.clone()).await
             },
-            Self::Tcp { addr, token } => {
+            Self::Tcp { addr } => {
                 let stream = TcpStream::connect(addr.as_str()).await?;
-                handshake_over(stream, Some(token.clone()), identity.clone()).await
+                handshake_over(stream, identity.clone()).await
             },
-            Self::Vsock { port, token } => {
+            Self::Vsock { port } => {
                 #[cfg(target_os = "linux")]
                 {
                     let addr = tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_HOST, *port);
                     let stream = tokio_vsock::VsockStream::connect(addr).await?;
-                    handshake_over(stream, Some(token.clone()), identity.clone()).await
+                    handshake_over(stream, identity.clone()).await
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    let _ = (port, token, identity);
+                    let _ = (port, identity);
                     Err(WireError::VsockUnsupported)
                 }
             },
@@ -217,24 +201,18 @@ impl std::fmt::Display for AttachTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unix(path) => write!(f, "{}", path.display()),
-            Self::Tcp { addr, .. } => write!(f, "{addr}"),
-            Self::Vsock { port, .. } => write!(f, "vsock:{port}"),
+            Self::Tcp { addr } => write!(f, "{addr}"),
+            Self::Vsock { port } => write!(f, "vsock:{port}"),
         }
     }
 }
 
-/// Failure resolving an [`AttachTarget`] from `--attach` or the
-/// `OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN` env vars, before any connection
-/// is attempted.
+/// Failure resolving an [`AttachTarget`] from `--attach` or
+/// `OMNIFS_ATTACH_ADDR`, before any connection is attempted.
 #[derive(Debug, thiserror::Error)]
 pub enum AttachTargetError {
     #[error("neither --attach nor {env} is set; the frontend runner needs one attach target")]
     Missing { env: &'static str },
-    #[error("{addr_env} is set but {token_env} is not")]
-    MissingToken {
-        addr_env: &'static str,
-        token_env: &'static str,
-    },
     #[error("{env} `{addr}` is not a `host:port` address")]
     InvalidAddr { env: &'static str, addr: String },
     #[error("{env} `{addr}` has an invalid vsock port")]
@@ -273,7 +251,7 @@ impl WireNamespace {
     ///
     /// Fails when the target cannot be reached within the deadline (naming it),
     /// when the server speaks an incompatible protocol version, or (`Tcp`) when
-    /// the attach token is rejected.
+    /// the handshake is rejected.
     pub async fn attach(
         target: AttachTarget,
         identity: FrontendIdentity,
@@ -587,12 +565,10 @@ impl Drop for Connection {
 }
 
 /// Spawn the reader/writer pumps over `stream` and complete the handshake,
-/// sending `token` in the Hello (`None` for a Unix socket, `Some` for TCP) and
-/// `frontend` naming this connecting frontend. Generic over the stream type so
-/// both transports share one handshake path.
+/// sending `frontend` naming this connecting frontend. Generic over the stream
+/// type so both transports share one handshake path.
 async fn handshake_over<S>(
     stream: S,
-    token: Option<String>,
     frontend: FrontendIdentity,
 ) -> Result<Connection, WireError>
 where
@@ -602,7 +578,6 @@ where
 
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
-        token,
         frontend,
     })?;
     write_frame(&mut write_half, &Frame::new(0, KIND_REQUEST, hello)).await?;
@@ -653,8 +628,8 @@ where
 
 impl WireError {
     /// Whether retrying the connect can plausibly succeed. A refused socket or a
-    /// mid-handshake close is transient; a version mismatch, a rejected token,
-    /// or a decode fault is not (the server is up but refuses this client).
+    /// mid-handshake close is transient; a version mismatch or a decode fault
+    /// is not (the server is up but refuses this client).
     fn is_retriable(&self) -> bool {
         matches!(self, WireError::Io(_) | WireError::HandshakeClosed)
     }
@@ -684,47 +659,33 @@ mod attach_target_tests {
 
     #[test]
     fn attach_falls_back_to_tcp_env_vars() {
-        let target = AttachTarget::from_env(
-            Some("host.docker.internal:54321".to_string()),
-            Some("secret".to_string()),
-        )
-        .unwrap();
+        let target =
+            AttachTarget::from_env(Some("host.docker.internal:54321".to_string())).unwrap();
         match target {
-            AttachTarget::Tcp { addr, token } => {
+            AttachTarget::Tcp { addr } => {
                 assert_eq!(addr, "host.docker.internal:54321");
-                assert_eq!(token, "secret");
             },
             other => panic!("expected a tcp target, got {other:?}"),
         }
     }
 
     #[test]
-    fn attach_env_requires_both_addr_and_token() {
-        AttachTarget::from_env(None, None).expect_err("neither var set must fail");
-        AttachTarget::from_env(Some("host.docker.internal:1".to_string()), None)
-            .expect_err("addr without token must fail");
-        AttachTarget::from_env(None, Some("secret".to_string()))
-            .expect_err("token without addr must fail");
+    fn attach_env_requires_addr() {
+        AttachTarget::from_env(None).expect_err("addr unset must fail");
     }
 
     #[test]
     fn attach_env_rejects_a_portless_address() {
-        AttachTarget::from_env(
-            Some("host.docker.internal".to_string()),
-            Some("secret".to_string()),
-        )
-        .expect_err("an address with no port must fail");
+        AttachTarget::from_env(Some("host.docker.internal".to_string()))
+            .expect_err("an address with no port must fail");
     }
 
     #[test]
     fn attach_falls_back_to_vsock_env_vars() {
-        let target =
-            AttachTarget::from_env(Some("vsock:9000".to_string()), Some("secret".to_string()))
-                .unwrap();
+        let target = AttachTarget::from_env(Some("vsock:9000".to_string())).unwrap();
         match target {
-            AttachTarget::Vsock { port, token } => {
+            AttachTarget::Vsock { port } => {
                 assert_eq!(port, 9000);
-                assert_eq!(token, "secret");
             },
             other => panic!("expected a vsock target, got {other:?}"),
         }
@@ -732,22 +693,16 @@ mod attach_target_tests {
 
     #[test]
     fn attach_env_rejects_vsock_with_no_port() {
-        AttachTarget::from_env(Some("vsock:".to_string()), Some("secret".to_string()))
+        AttachTarget::from_env(Some("vsock:".to_string()))
             .expect_err("a vsock address with no port must fail");
     }
 
     #[test]
     fn attach_env_rejects_vsock_with_a_bad_port() {
-        AttachTarget::from_env(
-            Some("vsock:not-a-port".to_string()),
-            Some("secret".to_string()),
-        )
-        .expect_err("a non-numeric vsock port must fail");
-        AttachTarget::from_env(
-            Some("vsock:99999999999".to_string()),
-            Some("secret".to_string()),
-        )
-        .expect_err("a vsock port that overflows u32 must fail");
+        AttachTarget::from_env(Some("vsock:not-a-port".to_string()))
+            .expect_err("a non-numeric vsock port must fail");
+        AttachTarget::from_env(Some("vsock:99999999999".to_string()))
+            .expect_err("a vsock port that overflows u32 must fail");
     }
 
     #[test]
@@ -756,9 +711,7 @@ mod attach_target_tests {
         // and the vsock transport; the grammar resolves it to vsock, since
         // there is no other way to address the vsock transport at all, while a
         // host named `vsock` is a name a caller could always change.
-        let target =
-            AttachTarget::from_env(Some("vsock:8080".to_string()), Some("secret".to_string()))
-                .unwrap();
-        assert!(matches!(target, AttachTarget::Vsock { port: 8080, .. }));
+        let target = AttachTarget::from_env(Some("vsock:8080".to_string())).unwrap();
+        assert!(matches!(target, AttachTarget::Vsock { port: 8080 }));
     }
 }
