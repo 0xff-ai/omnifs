@@ -187,8 +187,7 @@ mod tests {
         store.set(tcp(2)).unwrap();
         assert_eq!(store.targets(), vec![tcp(2), vsock("/vsock.sock")]);
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()
-                ["version"],
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap()["version"],
             STORE_VERSION
         );
         #[cfg(unix)]

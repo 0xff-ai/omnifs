@@ -7,9 +7,8 @@ Owns: CLI/daemon split, typed local control protocol, mount desired state, front
 not expose the home root, generic directory getters, or path-transfer objects.
 CLI and daemon code request behavior-owning components, and a concrete path may
 leave a component only at the immediate filesystem, process, protocol, engine,
-test-fixture, or final-output boundary that consumes it. Relative path names
-and home-root env resolution live in `omnifs_workspace::layout`; only
-`Workspace` binds those names to components.
+test-fixture, or final-output boundary that consumes it. Relative path names and home-root env resolution live on `Workspace`
+itself; only that type binds those names to behavior-owning components.
 
 ## Read when
 

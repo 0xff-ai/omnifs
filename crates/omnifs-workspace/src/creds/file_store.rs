@@ -50,7 +50,7 @@ impl FileStore {
         FileStoreDiagnostic {
             exists: self.path.exists(),
             parent_exists: self.path.parent().is_some_and(Path::exists),
-            display: crate::layout::display(&self.path),
+            display: crate::workspace::display(&self.path),
         }
     }
 
