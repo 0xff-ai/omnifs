@@ -16,7 +16,7 @@ use crate::docker::DockerClient;
 use crate::docker::DockerTarget;
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::image::{ImageRef, names_registry};
-use crate::inventory::{AuthState, DaemonState, Inventory, MountStatus, Severity};
+use crate::inventory::{AuthState, DaemonHealth, Inventory, MountStatus, Severity};
 use crate::ui::output::{Output, ResultVerdict};
 use crate::ui::prompt::Confirm;
 use crate::ui::render::{self, Capabilities, LedgerRow};
@@ -269,38 +269,38 @@ fn build_rows(findings: &[Finding]) -> (Vec<Row>, Vec<Row>) {
 }
 
 fn daemon_row(inventory: &Inventory) -> Row {
-    match inventory.daemon.state() {
-        DaemonState::Running => Row {
+    match inventory.daemon.health() {
+        DaemonHealth::Running => Row {
             severity: Severity::Positive,
             key: "running".to_owned(),
             value: daemon_running_value(inventory),
             fix: None,
         },
-        DaemonState::Starting => Row {
+        DaemonHealth::Starting => Row {
             severity: Severity::Attention,
             key: "starting".to_owned(),
             value: "daemon is still coming up".to_owned(),
             fix: None,
         },
-        DaemonState::Degraded => Row {
+        DaemonHealth::Degraded => Row {
             severity: Severity::Attention,
             key: "degraded".to_owned(),
             value: "daemon reports a degraded subsystem".to_owned(),
             fix: Some("omnifs status".to_owned()),
         },
-        DaemonState::Stopped => Row {
+        DaemonHealth::Stopped => Row {
             severity: Severity::Neutral,
             key: "stopped".to_owned(),
             value: "daemon is not running".to_owned(),
             fix: Some("omnifs up".to_owned()),
         },
-        DaemonState::Failed => Row {
+        DaemonHealth::Failed => Row {
             severity: Severity::Error,
             key: "failed".to_owned(),
             value: "daemon is unhealthy".to_owned(),
             fix: Some("omnifs logs".to_owned()),
         },
-        DaemonState::Unreachable => Row {
+        DaemonHealth::Unreachable => Row {
             severity: Severity::Error,
             key: "unreachable".to_owned(),
             value: "daemon record exists but the control socket did not answer".to_owned(),
@@ -773,7 +773,7 @@ mod golden {
     }
 
     fn running_inventory() -> Inventory {
-        Inventory::test(DaemonState::Running, Vec::new(), Vec::new())
+        Inventory::test(DaemonHealth::Running, Vec::new(), Vec::new())
     }
 
     #[test]
@@ -828,7 +828,7 @@ mod golden {
     fn verdict_combines_inventory_with_maximum_finding_severity() {
         let clean = DoctorResult {
             inventory: Inventory::test(
-                crate::inventory::DaemonState::Stopped,
+                crate::inventory::DaemonHealth::Stopped,
                 Vec::new(),
                 Vec::new(),
             ),
@@ -838,7 +838,7 @@ mod golden {
 
         let degraded = DoctorResult {
             inventory: Inventory::test(
-                crate::inventory::DaemonState::Failed,
+                crate::inventory::DaemonHealth::Failed,
                 Vec::new(),
                 Vec::new(),
             ),
@@ -867,7 +867,7 @@ mod golden {
     fn doctor_json_preserves_inventory_and_findings_and_skips_presentation_only_fields() {
         let payload = DoctorResult {
             inventory: Inventory::test(
-                crate::inventory::DaemonState::Stopped,
+                crate::inventory::DaemonHealth::Stopped,
                 Vec::new(),
                 Vec::new(),
             ),
@@ -913,7 +913,7 @@ mod golden {
         let doctor = Doctor {
             workspace: &workspace,
             inventory: Inventory::test(
-                crate::inventory::DaemonState::Stopped,
+                crate::inventory::DaemonHealth::Stopped,
                 Vec::new(),
                 Vec::new(),
             ),

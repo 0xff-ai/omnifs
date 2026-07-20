@@ -255,10 +255,10 @@ mod tests {
     use crate::commands::frontend::{
         FrontendFilesystem as Filesystem, FrontendId, FrontendRuntime as Runtime,
     };
-    use crate::inventory::{DaemonState, FrontendState};
+    use crate::inventory::{DaemonHealth, FrontendState};
 
     fn inventory_with_frontends(frontends: Vec<FrontendStatus>) -> Inventory {
-        Inventory::test(DaemonState::Running, frontends, Vec::new())
+        Inventory::test(DaemonHealth::Running, frontends, Vec::new())
     }
 
     #[test]

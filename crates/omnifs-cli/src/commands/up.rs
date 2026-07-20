@@ -118,7 +118,7 @@ async fn emit_receipt(workspace: &Workspace, output: Output) -> anyhow::Result<E
 mod tests {
     use super::*;
     use crate::commands::frontend::{FrontendFilesystem as Filesystem, FrontendRuntime as Runtime};
-    use crate::inventory::{DaemonState, FrontendState, FrontendStatus};
+    use crate::inventory::{DaemonHealth, FrontendState, FrontendStatus};
     use omnifs_workspace::mounts::Revision;
     use std::path::PathBuf;
 
@@ -126,7 +126,7 @@ mod tests {
     /// ~/omnifs`.
     #[test]
     fn no_op_message_names_the_revision_and_the_primary_host_surface() {
-        let mut inventory = Inventory::test(DaemonState::Running, Vec::new(), Vec::new());
+        let mut inventory = Inventory::test(DaemonHealth::Running, Vec::new(), Vec::new());
         inventory.applied_revision = Some(Revision::new("3".repeat(40)).unwrap());
         // A path outside any real $HOME, so `omnifs_workspace::display`'s
         // `~`-collapse never fires and the assertion stays independent of
@@ -151,13 +151,13 @@ mod tests {
 
     #[test]
     fn no_op_message_degrades_gracefully_without_a_revision_or_a_host_frontend() {
-        let inventory = Inventory::test(DaemonState::Running, Vec::new(), Vec::new());
+        let inventory = Inventory::test(DaemonHealth::Running, Vec::new(), Vec::new());
         assert_eq!(no_op_message(&inventory), "Already serving.");
     }
 
     #[test]
     fn no_op_message_still_names_the_revision_without_an_attached_host_frontend() {
-        let mut inventory = Inventory::test(DaemonState::Running, Vec::new(), Vec::new());
+        let mut inventory = Inventory::test(DaemonHealth::Running, Vec::new(), Vec::new());
         inventory.applied_revision = Some(Revision::new("4".repeat(40)).unwrap());
         assert_eq!(
             no_op_message(&inventory),

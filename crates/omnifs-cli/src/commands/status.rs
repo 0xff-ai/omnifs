@@ -23,7 +23,7 @@ impl StatusArgs {
             // repeating a `Browse:` line derived from a daemon that cannot
             // currently serve anything would state two competing "what to
             // do next" facts.
-            if crate::ui::access::show_browse_line(report.inventory.daemon_state()) {
+            if crate::ui::access::show_browse_line(report.inventory.daemon_health()) {
                 output.narrate("");
                 output.narrate(format!(
                     "Browse:  `{}`",
