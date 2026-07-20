@@ -24,11 +24,7 @@ pub(crate) mod ops;
 #[cfg(feature = "runtime")]
 pub(crate) mod pagination;
 #[cfg(feature = "runtime")]
-pub mod render;
-#[cfg(feature = "runtime")]
 pub(crate) mod runtime;
-#[cfg(feature = "runtime")]
-pub(crate) mod sandbox;
 #[cfg(feature = "runtime")]
 pub mod test_support;
 #[cfg(feature = "runtime")]
@@ -46,15 +42,18 @@ pub use inspect::{Inspector, InspectorLayer, Subscription, init_global_from_env}
 #[cfg(feature = "runtime")]
 pub use namespace::TreeNamespace;
 pub use namespace::{
-    Attrs, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer, Namespace, NsError,
-    NsEvent, NsRetryClass, ReadAnswer, ReadStyle, StabilityClass,
+    Attrs, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer, LookupState,
+    Namespace, NsError, NsEvent, NsRetryClass, ReadAnswer, ReadStyle, StabilityClass,
 };
 #[cfg(feature = "runtime")]
 pub use runtime::registry::{MountTable, RegistryError};
 #[cfg(feature = "runtime")]
 pub use runtime::wasm::{ComponentEngine, WarmOutcome};
 #[cfg(feature = "runtime")]
-pub use runtime::{BuildError, EngineError, HostContext, Runtime as Engine};
+pub use runtime::{
+    BuildError, EngineError, Host, HostError, HostOffline, HostOfflineOpen, HostOnline, HostOpen,
+    Runtime as Engine,
+};
 #[cfg(feature = "runtime")]
 pub(crate) use tree::{Cursor, Node, RequestCtx, TreeError, TreeErrorKind, spawn_live_follow_pump};
 

@@ -618,10 +618,10 @@ pub fn start_wire_frontend_holding_lock() -> Option<WireFrontendDaemon> {
 }
 
 /// Like [`start_wire_frontend`], but the out-of-process runner attaches over
-/// TCP loopback (`OMNIFS_ATTACH_ADDR`/`OMNIFS_ATTACH_TOKEN`) instead of a Unix
-/// socket: the same transport the Docker-hosted frontend uses, minus the
-/// container. Used by the attach-transport perf comparison (TCP vs UDS), which
-/// isolates the transport cost from Docker's own overhead.
+/// TCP loopback (`OMNIFS_ATTACH_ADDR`) instead of a Unix socket: the same
+/// transport the Docker-hosted frontend uses, minus the container. Used by the
+/// attach-transport perf comparison (TCP vs UDS), which isolates the transport
+/// cost from Docker's own overhead.
 #[must_use]
 pub fn start_wire_frontend_tcp_holding_lock() -> Option<WireFrontendDaemon> {
     wire_frontend(AttachTransport::Tcp, None)
@@ -748,15 +748,11 @@ fn wire_frontend(
                     .targets()
                     .into_iter()
                     .find_map(|target| match target {
-                        omnifs_workspace::attach::Target::Tcp { addr, token } => {
-                            Some((addr.to_string(), token))
-                        },
+                        omnifs_workspace::attach::Target::Tcp { addr } => Some(addr.to_string()),
                         omnifs_workspace::attach::Target::Vsock { .. } => None,
                     })
                     .expect("targets.json must carry TCP attach after --attach-tcp");
-            frontend_cmd
-                .env(omnifs_api::OMNIFS_ATTACH_ADDR_ENV, &attach.0)
-                .env(omnifs_api::OMNIFS_ATTACH_TOKEN_ENV, &attach.1);
+            frontend_cmd.env(omnifs_api::OMNIFS_ATTACH_ADDR_ENV, &attach);
         },
     }
     let frontend = frontend_cmd.spawn();

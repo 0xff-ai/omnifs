@@ -292,7 +292,7 @@ async fn test_object_dir_child_lookup_preserves_full_listing() {
     // `cat /items/open/7/body`: the lookup the FUSE/NFS path runs to resolve the
     // child before reading it.
     let lookup = resolve_namespace(&harness.namespace, "/items/open/7/body").await;
-    assert_eq!(lookup.attrs.kind, EntryKind::File);
+    assert_eq!(lookup.attrs().unwrap().kind, EntryKind::File);
 
     // A subsequent readdir reads the cached dirents the lookup just folded into.
     let mut warm_names: Vec<String> = list_namespace(&harness.namespace, object_dir.as_str())
@@ -313,7 +313,10 @@ async fn test_ranged_open_read_chunk_contract() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
     let ranged = resolve_namespace(&harness.namespace, "/hello/ranged").await;
-    assert_eq!(ranged.attrs.read_style, omnifs_engine::ReadStyle::Ranged);
+    assert_eq!(
+        ranged.attrs().unwrap().read_style,
+        omnifs_engine::ReadStyle::Ranged
+    );
 
     let chunk = harness
         .namespace
@@ -342,7 +345,7 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
     let unknown = resolve_namespace(&harness.namespace, "/hello/unknown-ranged").await;
-    assert_eq!(unknown.attrs.size, 1);
+    assert_eq!(unknown.attrs().unwrap().size, 1);
     let eof = harness
         .namespace
         .read(unknown.path.clone(), 8, 32)
@@ -356,8 +359,11 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
         13
     );
     let volatile = resolve_namespace(&harness.namespace, "/hello/volatile-tail").await;
-    assert_eq!(volatile.attrs.read_style, omnifs_engine::ReadStyle::Ranged);
-    assert_eq!(volatile.attrs.size, 1);
+    assert_eq!(
+        volatile.attrs().unwrap().read_style,
+        omnifs_engine::ReadStyle::Ranged
+    );
+    assert_eq!(volatile.attrs().unwrap().size, 1);
     let chunk = harness
         .namespace
         .read(volatile.path, 42, 128)
@@ -372,9 +378,9 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
 async fn test_lookup_child() {
     let harness = make_runtime();
     let result = resolve_namespace(&harness.namespace, "/hello").await;
-    assert_eq!(result.attrs.kind, EntryKind::Directory);
+    assert_eq!(result.attrs().unwrap().kind, EntryKind::Directory);
     let exact_file = resolve_namespace(&harness.namespace, "/hello/lazy").await;
-    assert_eq!(exact_file.attrs.kind, EntryKind::File);
+    assert_eq!(exact_file.attrs().unwrap().kind, EntryKind::File);
 
     assert_eq!(
         harness
@@ -391,7 +397,7 @@ async fn test_lookup_child() {
         .namespace
         .lookup(hello.path.clone(), "missing")
         .await;
-    assert_eq!(missing, Err(NsError::NotFound));
+    assert!(missing.unwrap().is_missing());
 }
 
 #[tokio::test]
@@ -469,9 +475,9 @@ async fn test_cache_isolated_by_mount_name() {
     tick_result.unwrap();
     publish_effects_for_test(&runtime_a, &effects, op_gen).expect("timer effects should publish");
     let refreshed_a = ns.getattr(item_a.path.clone()).await.unwrap();
-    assert_ne!(refreshed_a.change, item_a.attrs.change);
+    assert_ne!(refreshed_a.change, item_a.attrs().unwrap().change);
     let refreshed_b = ns.getattr(item_b.path.clone()).await.unwrap();
-    assert_eq!(refreshed_b.change, item_b.attrs.change);
+    assert_eq!(refreshed_b.change, item_b.attrs().unwrap().change);
     let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
         .await
         .expect("mount-a invalidation event")

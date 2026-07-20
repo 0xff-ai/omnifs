@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, MountPoint};
-use omnifs_api::{OMNIFS_ATTACH_ADDR_ENV, OMNIFS_ATTACH_TOKEN_ENV};
+use omnifs_api::OMNIFS_ATTACH_ADDR_ENV;
 use omnifs_workspace::OMNIFS_HOME_ENV;
 
 use crate::docker::ContainerName;
@@ -92,7 +92,6 @@ pub(crate) struct FrontendContainerSpec<'a> {
     /// name for the host, not a literal address the CLI could resolve ahead
     /// of time.
     pub attach_port: u16,
-    pub attach_token: &'a str,
     /// `--add-host host.docker.internal:host-gateway`: required on Linux,
     /// where Docker does not predefine the name; Docker Desktop (macOS)
     /// already resolves it without this flag.
@@ -123,13 +122,10 @@ impl FrontendContainerSpec<'_> {
             ..Default::default()
         };
 
-        let env = vec![
-            format!(
-                "{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:{}",
-                self.attach_port
-            ),
-            format!("{OMNIFS_ATTACH_TOKEN_ENV}={}", self.attach_token),
-        ];
+        let env = vec![format!(
+            "{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:{}",
+            self.attach_port
+        )];
 
         ContainerCreateBody {
             image: Some(self.image.as_str().to_string()),
@@ -142,14 +138,14 @@ impl FrontendContainerSpec<'_> {
 }
 
 /// Env var names the frontend container's image may set on its own (its
-/// `Dockerfile` `ENV`/base-image defaults), beyond the two attach vars this
+/// `Dockerfile` `ENV`/base-image defaults), beyond the attach addr this
 /// launcher injects. Anything else on a freshly started container means
 /// something leaked onto this credential-free container.
 const IMAGE_DEFAULT_ENV_NAMES: [&str; 2] = ["PATH", "HOME"];
 
 /// Fail-closed structural assertion, run immediately after `docker inspect`
 /// on a just-started frontend container: no mounts of any kind, and an env
-/// set that is exactly the two attach vars plus the image's own defaults.
+/// set that is exactly the attach addr plus the image's own defaults.
 /// Returns the violation message on failure; the caller kills the container.
 pub(crate) fn assert_locked_down(mounts: &[MountPoint], env: &[String]) -> Result<(), String> {
     if !mounts.is_empty() {
@@ -161,7 +157,7 @@ pub(crate) fn assert_locked_down(mounts: &[MountPoint], env: &[String]) -> Resul
     if let Some(bad) = env.iter().find(|var| !env_var_allowed(var)) {
         return Err(format!(
             "frontend container has unexpected env var `{bad}`; the no-credentials contract \
-             allows only {OMNIFS_ATTACH_ADDR_ENV}, {OMNIFS_ATTACH_TOKEN_ENV}, and the image's own defaults"
+             allows only {OMNIFS_ATTACH_ADDR_ENV} and the image's own defaults"
         ));
     }
     Ok(())
@@ -171,9 +167,7 @@ fn env_var_allowed(var: &str) -> bool {
     let Some((name, _)) = var.split_once('=') else {
         return false;
     };
-    name == OMNIFS_ATTACH_ADDR_ENV
-        || name == OMNIFS_ATTACH_TOKEN_ENV
-        || IMAGE_DEFAULT_ENV_NAMES.contains(&name)
+    name == OMNIFS_ATTACH_ADDR_ENV || IMAGE_DEFAULT_ENV_NAMES.contains(&name)
 }
 
 #[cfg(test)]
@@ -285,7 +279,6 @@ mod tests {
             image: &image,
             home: Path::new("/home/u/.omnifs"),
             attach_port: 54321,
-            attach_token: "test-token",
             add_host_gateway: true,
         };
         let body = spec.build_body();
@@ -310,17 +303,10 @@ mod tests {
 
         let env = body.env.expect("env");
         assert_eq!(
-            env.len(),
-            2,
-            "expected exactly the two attach vars: {env:?}"
-        );
-        assert!(
-            env.iter()
-                .any(|e| e == &format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:54321"))
-        );
-        assert!(
-            env.iter()
-                .any(|e| e == &format!("{OMNIFS_ATTACH_TOKEN_ENV}=test-token"))
+            env,
+            vec![format!(
+                "{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:54321"
+            )]
         );
 
         let labels = body.labels.expect("labels");
@@ -337,7 +323,6 @@ mod tests {
             image: &image,
             home: Path::new("/home/u/.omnifs"),
             attach_port: 1,
-            attach_token: "t",
             add_host_gateway: false,
         };
         let body = spec.build_body();
@@ -358,7 +343,6 @@ mod tests {
                 "PATH=/usr/bin".to_string(),
                 "HOME=/root".to_string(),
                 format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:1"),
-                format!("{OMNIFS_ATTACH_TOKEN_ENV}=abc"),
             ],
         )
         .expect("the exact allowed set must pass");

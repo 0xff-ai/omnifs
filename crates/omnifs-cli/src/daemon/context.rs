@@ -7,7 +7,7 @@ use omnifs_api::{
     CredentialHealth, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo, HealthState,
     MountInfo, SubsystemHealth,
 };
-use omnifs_engine::HostContext;
+use omnifs_engine::{Host, HostOffline, HostOfflineOpen, HostOnline, HostOpen};
 use omnifs_workspace::daemon_record::{DaemonRecord, Endpoint};
 use omnifs_workspace::mounts::Revision;
 use omnifs_workspace::{DaemonState, FrontendState, Workspace};
@@ -15,12 +15,13 @@ use std::fmt::Write as _;
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-#[derive(Debug)]
 pub(crate) struct DaemonContext {
     daemon: DaemonState,
     frontend: FrontendState,
     metrics: omnifs_workspace::metrics::Store,
+    host: Host,
     mount_revision: Revision,
     offline: bool,
     /// Random per-start id reported in status and written to the daemon record.
@@ -42,20 +43,32 @@ impl DaemonContext {
     pub(crate) fn resolve(args: &DaemonArgs) -> anyhow::Result<Self> {
         let attach_tcp = args.attach_tcp;
         let workspace = Workspace::resolve()?;
-        let daemon = workspace.daemon().clone();
-        let frontend = workspace.frontend().clone();
-        let metrics = workspace.metrics().clone();
         let process = ProcessInfo::current();
         anyhow::ensure!(
             args.mount_snapshot.is_dir(),
             "mount snapshot {} is not a directory",
             args.mount_snapshot.display()
         );
+        let host = if args.offline {
+            Host::Offline(HostOffline::open(HostOfflineOpen {
+                cache_dir: workspace.cache_dir(),
+                clone_dir: workspace.daemon().clone_cache(),
+            })?)
+        } else {
+            Host::Online(HostOnline::open(HostOpen {
+                cache_dir: workspace.cache_dir(),
+                wasm_cache_dir: workspace.warmup().wasm_cache_dir(),
+                credentials: Arc::new(workspace.credentials().clone()),
+                catalog: workspace.catalog().clone(),
+                clone_dir: workspace.daemon().clone_cache(),
+            })?)
+        };
 
         Ok(Self {
-            daemon,
-            frontend,
-            metrics,
+            daemon: workspace.daemon().clone(),
+            frontend: workspace.frontend().clone(),
+            metrics: workspace.metrics().clone(),
+            host,
             mount_revision: args.mount_revision.clone(),
             offline: args.offline,
             instance_id: generate_instance_id(),
@@ -183,17 +196,8 @@ impl DaemonContext {
         )
     }
 
-    pub(crate) fn host_context(&self) -> HostContext {
-        HostContext::new(
-            self.daemon.cache_dir(),
-            self.daemon.config_dir(),
-            self.daemon.providers_dir(),
-            self.daemon.credentials_file(),
-        )
-    }
-
-    pub(crate) fn clone_cache(&self) -> PathBuf {
-        self.daemon.clone_cache()
+    pub(crate) fn host(&self) -> &Host {
+        &self.host
     }
 
     pub(crate) fn mount_snapshot(&self, revision: &Revision) -> PathBuf {
@@ -348,10 +352,21 @@ mod tests {
     fn context(root: &Path) -> DaemonContext {
         let workspace = Workspace::under_root(root);
         let mount_revision = Revision::new("a".repeat(40)).unwrap();
+        let host = Host::Online(
+            HostOnline::open(HostOpen {
+                cache_dir: workspace.cache_dir(),
+                wasm_cache_dir: workspace.warmup().wasm_cache_dir(),
+                credentials: Arc::new(workspace.credentials().clone()),
+                catalog: workspace.catalog().clone(),
+                clone_dir: workspace.daemon().clone_cache(),
+            })
+            .expect("open test host"),
+        );
         DaemonContext {
             daemon: workspace.daemon().clone(),
             frontend: workspace.frontend().clone(),
             metrics: workspace.metrics().clone(),
+            host,
             mount_revision,
             offline: false,
             instance_id: "test-instance".to_owned(),

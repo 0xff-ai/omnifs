@@ -20,6 +20,7 @@ use super::{
     Attrs, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer, Namespace, NsError,
     NsEvent, ReadAnswer, ReadStyle, StabilityClass, view_types,
 };
+use crate::clock::DYNAMIC_TTL_MILLIS;
 use crate::inspect;
 use crate::registry::{MountEntry, MountTable};
 use crate::tree::{HostKind, ListOutcome, RangedHandle, ReadResult, RequestCtx};
@@ -1335,7 +1336,16 @@ impl Namespace for TreeNamespace {
             let span = Self::begin_span("lookup", &display_mount, &display_path);
             let result = async {
                 let parent_node = self.resolve_node(&parent_full).await?;
-                let node = self.resolve_child(&parent_node, name, &RequestCtx).await?;
+                let node = match self.resolve_child(&parent_node, name, &RequestCtx).await {
+                    Ok(node) => node,
+                    Err(error) if error.kind == TreeErrorKind::NotFound => {
+                        return Ok(LookupAnswer::missing(
+                            child_full,
+                            Duration::from_millis(DYNAMIC_TTL_MILLIS),
+                        ));
+                    },
+                    Err(error) => return Err(NsError::from(error)),
+                };
                 let id = self.intern(&node);
                 let attrs = if let Some((tree_ref, relative, _)) = node.host() {
                     let metadata = self.host_stat(tree_ref, relative).await?;
@@ -1343,11 +1353,16 @@ impl Namespace for TreeNamespace {
                 } else {
                     self.attrs_for(&id, &node)
                 };
-                Ok(LookupAnswer { path: id, attrs })
+                Ok(LookupAnswer::found(id, attrs))
             }
             .instrument(span.clone())
             .await;
-            Self::record_outcome(&span, &result);
+            match &result {
+                Ok(answer) if answer.is_missing() => {
+                    inspect::record_outcome(&span, InspectorOutcome::NotFound);
+                },
+                _ => Self::record_outcome(&span, &result),
+            }
             result
         }
         .boxed()
@@ -1479,8 +1494,6 @@ mod tests {
     use std::sync::Arc;
 
     fn fixture_registry(root: &StdPath) -> Arc<MountTable> {
-        use crate::HostContext;
-        use crate::cloner::GitCloner;
         use omnifs_workspace::mounts::{Registry, Spec};
         use omnifs_workspace::provider::{Artifact, ProviderStore};
 
@@ -1514,16 +1527,18 @@ mod tests {
         }))
         .expect("test mount spec");
         desired.put(&spec).expect("write test mount");
-        let context =
-            HostContext::new(&cache, &config, &providers, config.join("credentials.json"))
-                .with_wasm_cache_dir(crate::test_support::wasm_cache_dir());
+        let host = crate::test_support::open_test_host(
+            &cache,
+            &providers,
+            config.join("credentials.json"),
+            root.join("engine-clones"),
+        )
+        .expect("open test host");
         Arc::new(
-            MountTable::load_online_with_options(
-                context,
-                &Arc::new(GitCloner::new(root.join("engine-clones")).expect("git cloner")),
+            crate::test_support::load_mount_table_for_callout_tests(
+                &host,
                 &desired,
                 &tokio::runtime::Handle::current(),
-                true,
             )
             .expect("load test mount"),
         )
@@ -1559,7 +1574,7 @@ mod tests {
         use crate::authority::RuntimeAuthority;
         use crate::cache::identity::GitId;
         use crate::git::GitExecutor;
-        use crate::render::MATERIALIZE_MAX_BYTES;
+        use crate::tree::MATERIALIZE_MAX_BYTES;
         use crate::tree_refs::TreeRefs;
         use omnifs_wit::provider::types::{CalloutResult, GitOpenRequest};
         use std::io::{Seek, SeekFrom, Write};
@@ -1678,8 +1693,8 @@ mod tests {
             readme.path, readme_entry.path,
             "list then lookup reuses Path identity"
         );
-        assert_eq!(readme.attrs.kind, EntryKind::File);
-        assert_eq!(readme.attrs.mode, 0o444);
+        assert_eq!(readme.attrs().unwrap().kind, EntryKind::File);
+        assert_eq!(readme.attrs().unwrap().mode, 0o444);
         let readme_read = Namespace::read(namespace.as_ref(), readme.path, 0, 64)
             .await
             .expect("README read");
@@ -1693,7 +1708,7 @@ mod tests {
             .lookup(src.path, "main.rs")
             .await
             .expect("main lookup");
-        assert_eq!(main.attrs.mode, 0o444);
+        assert_eq!(main.attrs().unwrap().mode, 0o444);
         let main_read = Namespace::read(namespace.as_ref(), main.path, 0, 64)
             .await
             .expect("main read");
@@ -1703,8 +1718,8 @@ mod tests {
             .lookup(checkout.clone(), "run.sh")
             .await
             .expect("run lookup");
-        assert_eq!(executable.attrs.kind, EntryKind::File);
-        assert_eq!(executable.attrs.mode, 0o555);
+        assert_eq!(executable.attrs().unwrap().kind, EntryKind::File);
+        assert_eq!(executable.attrs().unwrap().mode, 0o555);
 
         #[cfg(unix)]
         {
@@ -1712,8 +1727,8 @@ mod tests {
                 .lookup(checkout.clone(), "README.link")
                 .await
                 .expect("link lookup");
-            assert_eq!(link.attrs.kind, EntryKind::Symlink);
-            assert_eq!(link.attrs.mode, 0o777);
+            assert_eq!(link.attrs().unwrap().kind, EntryKind::Symlink);
+            assert_eq!(link.attrs().unwrap().mode, 0o777);
             assert_eq!(
                 namespace.readlink(link.path).await.unwrap(),
                 PathBuf::from("README.md")
@@ -1722,7 +1737,7 @@ mod tests {
                 .lookup(checkout.clone(), "external-dir")
                 .await
                 .expect("external link lookup");
-            assert_eq!(external.attrs.kind, EntryKind::Symlink);
+            assert_eq!(external.attrs().unwrap().kind, EntryKind::Symlink);
             assert!(matches!(
                 namespace
                     .readdir(external.path, super::DirCursor::start(), 0)
@@ -1735,8 +1750,8 @@ mod tests {
             .lookup(checkout, "large-host.bin")
             .await
             .expect("large lookup");
-        assert_eq!(large.attrs.read_style, super::ReadStyle::Ranged);
-        assert_eq!(large.attrs.size, MATERIALIZE_MAX_BYTES + 5);
+        assert_eq!(large.attrs().unwrap().read_style, super::ReadStyle::Ranged);
+        assert_eq!(large.attrs().unwrap().size, MATERIALIZE_MAX_BYTES + 5);
         let tail = Namespace::read(namespace.as_ref(), large.path, MATERIALIZE_MAX_BYTES, 5)
             .await
             .expect("large tail read");

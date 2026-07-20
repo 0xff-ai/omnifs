@@ -16,18 +16,15 @@
 //!
 //! # Handshake
 //!
-//! On connect the client sends one `Hello { protocol, token, frontend }`
+//! On connect the client sends one `Hello { protocol, frontend }`
 //! request frame (`request_id = 0`), naming itself with a [`FrontendIdentity`]
 //! so the server can track it live. The server replies
 //! with either `Welcome { protocol }` or `Rejected { reason }`
 //! (both response frames, `request_id = 0`), then closes the connection in the
-//! rejected case. A plain UDS listener ignores `token` (filesystem permissions
-//! are that transport's whole auth); a TCP attach listener, and a UDS listener
-//! bound with a token (the libkrun vsock-proxy path, where every guest dial
-//! looks like the same trusted local peer to the socket), both require it to
-//! match the per-instance attach token. A protocol mismatch is rejected the
-//! same way. Reconnect identity is carried by the ordered namespace event
-//! stream, not by a second attach channel.
+//! rejected case. Auth is transport-local: UDS uses filesystem mode; TCP binds
+//! only loopback or a verified docker0 address; vsock uses the host proxy path.
+//! A protocol mismatch is rejected with a named reason. Reconnect identity is
+//! carried by the ordered namespace event stream, not by a second attach channel.
 //!
 //! `frontend` is display-only for the host: the guest names its own kind and
 //! mount point so the daemon's status surface can report it, but the host
@@ -63,9 +60,9 @@ pub use client::{AttachTarget, AttachTargetError, WireNamespace};
 pub use server::{ListenerEvent, ListenerTarget, VfsServer, serve_connection};
 
 /// The Omnifs VFS wire protocol version. A client and server that disagree refuse
-/// to serve: there is no version negotiation, so v5 rejects a v4 (or lower)
+/// to serve: there is no version negotiation, so v6 rejects a v5 (or lower)
 /// peer outright with a named reason.
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 7;
 
 /// Identity a connecting frontend presents in its handshake `Hello`, naming
 /// its own kind and guest-side mount point (display-only). The server reports
@@ -136,24 +133,20 @@ pub(crate) enum WireResponse {
 /// sends first. The frame `kind` (request vs response) already distinguishes the
 /// direction; the enum keeps a wrong-direction message detectable.
 ///
-/// `token` is `None` over a Unix socket (the client has nothing to prove
-/// beyond the filesystem permissions that let it open the socket); a TCP
-/// attach listener requires it and rejects a mismatch via `Rejected`.
 /// `frontend` names the connecting frontend so [`VfsServer`] can report it in
 /// its live snapshot; display-only, never used for a trust decision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Handshake {
     Hello {
         protocol: u32,
-        token: Option<String>,
         frontend: FrontendIdentity,
     },
     Welcome {
         protocol: u32,
     },
-    /// The server refused the handshake (a protocol mismatch or a bad attach
-    /// token) and is about to close the connection. Sent so the client gets a
-    /// terminal, named reason instead of an ambiguous closed pipe.
+    /// The server refused the handshake (typically a protocol mismatch) and is
+    /// about to close the connection. Sent so the client gets a terminal, named
+    /// reason instead of an ambiguous closed pipe.
     Rejected {
         reason: String,
     },
@@ -178,14 +171,8 @@ pub enum WireError {
     HandshakeClosed,
     #[error("expected a {expected} handshake frame")]
     HandshakeUnexpected { expected: &'static str },
-    /// The TCP attach listener's token did not match. Not retriable: unlike a
-    /// refused or dropped connection, presenting the same token again cannot
-    /// succeed.
-    #[error("attach token rejected")]
-    TokenRejected,
-    /// The server sent [`Handshake::Rejected`] naming why (a version mismatch
-    /// or a bad token). Not retriable for the same reason as
-    /// [`WireError::TokenRejected`].
+    /// The server sent [`Handshake::Rejected`] naming why (typically a version
+    /// mismatch). Not retriable without changing the peer or the build.
     #[error("attach rejected by the daemon: {0}")]
     Rejected(String),
     #[error(

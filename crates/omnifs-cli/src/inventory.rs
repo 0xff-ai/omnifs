@@ -52,7 +52,7 @@ pub(crate) enum DaemonProbe {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum DaemonState {
+pub(crate) enum DaemonHealth {
     Running,
     Starting,
     Degraded,
@@ -61,7 +61,7 @@ pub(crate) enum DaemonState {
     Unreachable,
 }
 
-impl DaemonState {
+impl DaemonHealth {
     /// The context strip's `fix:` action for this state, if any. This is the
     /// one owner of "which daemon states already name a next step": `status`
     /// renders the action from it, and the closing `Browse:` line suppresses
@@ -77,23 +77,23 @@ impl DaemonState {
 }
 
 impl DaemonObservation {
-    pub(crate) fn state(&self) -> DaemonState {
+    pub(crate) fn health(&self) -> DaemonHealth {
         match (&self.probe, self.status.as_ref()) {
-            (DaemonProbe::Stopped, _) => DaemonState::Stopped,
+            (DaemonProbe::Stopped, _) => DaemonHealth::Stopped,
             (DaemonProbe::Unreachable { .. }, _) => {
                 if self.runtime.is_some() {
-                    DaemonState::Unreachable
+                    DaemonHealth::Unreachable
                 } else {
-                    DaemonState::Stopped
+                    DaemonHealth::Stopped
                 }
             },
             (DaemonProbe::Responding, Some(status)) => match status.health.overall_state() {
-                HealthState::Healthy => DaemonState::Running,
-                HealthState::Starting => DaemonState::Starting,
-                HealthState::Degraded => DaemonState::Degraded,
-                HealthState::Unhealthy => DaemonState::Failed,
+                HealthState::Healthy => DaemonHealth::Running,
+                HealthState::Starting => DaemonHealth::Starting,
+                HealthState::Degraded => DaemonHealth::Degraded,
+                HealthState::Unhealthy => DaemonHealth::Failed,
             },
-            (DaemonProbe::Responding, None) => DaemonState::Unreachable,
+            (DaemonProbe::Responding, None) => DaemonHealth::Unreachable,
         }
     }
 
@@ -105,19 +105,19 @@ impl DaemonObservation {
     }
 
     #[cfg(test)]
-    pub(crate) fn test(state: DaemonState) -> Self {
+    pub(crate) fn test(state: DaemonHealth) -> Self {
         let probe = match state {
-            DaemonState::Stopped => DaemonProbe::Stopped,
-            DaemonState::Unreachable => DaemonProbe::Unreachable {
+            DaemonHealth::Stopped => DaemonProbe::Stopped,
+            DaemonHealth::Unreachable => DaemonProbe::Unreachable {
                 message: "unreachable".to_owned(),
             },
-            DaemonState::Running
-            | DaemonState::Starting
-            | DaemonState::Degraded
-            | DaemonState::Failed => DaemonProbe::Responding,
+            DaemonHealth::Running
+            | DaemonHealth::Starting
+            | DaemonHealth::Degraded
+            | DaemonHealth::Failed => DaemonProbe::Responding,
         };
         let status = match state {
-            DaemonState::Stopped | DaemonState::Unreachable => None,
+            DaemonHealth::Stopped | DaemonHealth::Unreachable => None,
             _ => Some(DaemonStatus {
                 version: "test".to_owned(),
                 pid: 1,
@@ -132,18 +132,18 @@ impl DaemonObservation {
                 health: omnifs_api::DaemonHealth::new(vec![omnifs_api::SubsystemHealth::new(
                     omnifs_api::DaemonSubsystem::Control,
                     match state {
-                        DaemonState::Running | DaemonState::Stopped | DaemonState::Unreachable => {
-                            HealthState::Healthy
-                        },
-                        DaemonState::Starting => HealthState::Starting,
-                        DaemonState::Degraded => HealthState::Degraded,
-                        DaemonState::Failed => HealthState::Unhealthy,
+                        DaemonHealth::Running
+                        | DaemonHealth::Stopped
+                        | DaemonHealth::Unreachable => HealthState::Healthy,
+                        DaemonHealth::Starting => HealthState::Starting,
+                        DaemonHealth::Degraded => HealthState::Degraded,
+                        DaemonHealth::Failed => HealthState::Unhealthy,
                     },
                     "test",
                 )]),
             }),
         };
-        let runtime = (state == DaemonState::Unreachable).then(|| {
+        let runtime = (state == DaemonHealth::Unreachable).then(|| {
             DaemonRecord::new(
                 Revision::new("a".repeat(40)).expect("test revision"),
                 omnifs_workspace::daemon_record::Endpoint::Unix {
@@ -532,8 +532,8 @@ impl Inventory {
         let degraded = self.frontends.iter().any(|entry| {
             entry.state.severity() >= Severity::Attention
                 && matches!(
-                    self.daemon.state(),
-                    DaemonState::Running | DaemonState::Starting | DaemonState::Degraded
+                    self.daemon.health(),
+                    DaemonHealth::Running | DaemonHealth::Starting | DaemonHealth::Degraded
                 )
         }) || self.mounts.iter().any(|entry| {
             entry.fix.is_some()
@@ -541,8 +541,8 @@ impl Inventory {
                 || entry.auth.severity() >= Severity::Attention
                 || entry.serving.severity() >= Severity::Attention
         }) || matches!(
-            self.daemon.state(),
-            DaemonState::Failed | DaemonState::Unreachable
+            self.daemon.health(),
+            DaemonHealth::Failed | DaemonHealth::Unreachable
         );
         if degraded {
             Verdict::Degraded
@@ -551,13 +551,13 @@ impl Inventory {
         }
     }
 
-    pub(crate) fn daemon_state(&self) -> DaemonState {
-        self.daemon.state()
+    pub(crate) fn daemon_health(&self) -> DaemonHealth {
+        self.daemon.health()
     }
 
     #[cfg(test)]
     pub(crate) fn test(
-        state: DaemonState,
+        state: DaemonHealth,
         frontends: Vec<FrontendStatus>,
         mounts: Vec<MountStatus>,
     ) -> Self {
@@ -1037,7 +1037,7 @@ mod tests {
 
     #[test]
     fn live_daemon_auth_health_overrides_fresh_local_store_readiness() {
-        let mut observation = DaemonObservation::test(DaemonState::Running);
+        let mut observation = DaemonObservation::test(DaemonHealth::Running);
         observation.status.as_mut().unwrap().mounts = vec![
             omnifs_api::MountInfo {
                 mount: "consent".into(),
@@ -1100,7 +1100,7 @@ mod tests {
             access_count: 0,
             fix: auth.command().map(ToOwned::to_owned),
         };
-        let inventory = Inventory::test(DaemonState::Stopped, vec![], vec![mount]);
+        let inventory = Inventory::test(DaemonHealth::Stopped, vec![], vec![mount]);
         assert_eq!(inventory.verdict(), Verdict::Degraded);
         assert_eq!(
             inventory.mounts[0].auth.command(),
@@ -1111,7 +1111,7 @@ mod tests {
     #[test]
     fn access_paths_are_derived_on_request() {
         let inventory = Inventory::test(
-            DaemonState::Running,
+            DaemonHealth::Running,
             vec![FrontendStatus {
                 filesystem: Filesystem::Fuse,
                 runtime: Runtime::Host,
@@ -1210,20 +1210,20 @@ mod tests {
         );
         let mut unreachable = DaemonObservation::from(probe);
         unreachable.runtime = Some(expected);
-        assert_eq!(unreachable.state(), DaemonState::Unreachable);
+        assert_eq!(unreachable.health(), DaemonHealth::Unreachable);
         assert_eq!(
-            DaemonObservation::from(Err(anyhow::anyhow!("connection refused"))).state(),
-            DaemonState::Stopped
+            DaemonObservation::from(Err(anyhow::anyhow!("connection refused"))).health(),
+            DaemonHealth::Stopped
         );
     }
 
     #[test]
     fn daemon_health_maps_to_distinct_operational_states() {
         for (health, expected) in [
-            (HealthState::Healthy, DaemonState::Running),
-            (HealthState::Starting, DaemonState::Starting),
-            (HealthState::Degraded, DaemonState::Degraded),
-            (HealthState::Unhealthy, DaemonState::Failed),
+            (HealthState::Healthy, DaemonHealth::Running),
+            (HealthState::Starting, DaemonHealth::Starting),
+            (HealthState::Degraded, DaemonHealth::Degraded),
+            (HealthState::Unhealthy, DaemonHealth::Failed),
         ] {
             let status = DaemonStatus {
                 version: "test".into(),
@@ -1242,14 +1242,14 @@ mod tests {
                     "test",
                 )]),
             };
-            assert_eq!(DaemonObservation::from(Ok(Some(status))).state(), expected);
+            assert_eq!(DaemonObservation::from(Ok(Some(status))).health(), expected);
         }
     }
 
     #[test]
     fn access_paths_cover_every_frontend_and_mount_state() {
         let inventory = Inventory::test(
-            DaemonState::Running,
+            DaemonHealth::Running,
             vec![
                 FrontendStatus {
                     filesystem: Filesystem::Fuse,
@@ -1314,7 +1314,7 @@ mod tests {
     #[test]
     fn verdict_matrix_maps_actionable_states() {
         let base = Inventory::test(
-            DaemonState::Stopped,
+            DaemonHealth::Stopped,
             vec![],
             vec![MountStatus {
                 name: "x".into(),
@@ -1342,7 +1342,7 @@ mod tests {
         };
         assert_eq!(expired.verdict(), Verdict::Degraded);
         let mut unmanaged = base.clone();
-        unmanaged.daemon = DaemonObservation::test(DaemonState::Running);
+        unmanaged.daemon = DaemonObservation::test(DaemonHealth::Running);
         unmanaged.frontends.push(FrontendStatus {
             filesystem: Filesystem::Fuse,
             runtime: Runtime::Host,
@@ -1354,14 +1354,14 @@ mod tests {
         });
         assert_eq!(unmanaged.verdict(), Verdict::Degraded);
         let mut unreachable = base;
-        unreachable.daemon = DaemonObservation::test(DaemonState::Unreachable);
+        unreachable.daemon = DaemonObservation::test(DaemonHealth::Unreachable);
         assert_eq!(unreachable.verdict(), Verdict::Degraded);
     }
 
     #[test]
     fn structured_inventory_keeps_runtime_expectation_and_absolute_identity() {
         let inventory = Inventory::test(
-            DaemonState::Stopped,
+            DaemonHealth::Stopped,
             vec![],
             vec![MountStatus {
                 name: "x".into(),

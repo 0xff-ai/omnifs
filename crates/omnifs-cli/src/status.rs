@@ -1,7 +1,7 @@
 //! Status report: data types, collection, and rendering.
 
 use crate::error::ExitCode;
-use crate::inventory::{DaemonState, FrontendStatus, Inventory, MountStatus, Severity};
+use crate::inventory::{DaemonHealth, FrontendStatus, Inventory, MountStatus, Severity};
 use crate::ui::render::count;
 use crate::ui::table::{
     Action as TableAction, Block as TableBlock, Cell as TableCell, Column as TableColumn,
@@ -26,7 +26,7 @@ impl InventoryReport {
     }
 
     pub(crate) fn exit_code(&self) -> ExitCode {
-        if self.inventory.daemon_state() == DaemonState::Unreachable {
+        if self.inventory.daemon_health() == DaemonHealth::Unreachable {
             ExitCode::DaemonUnavailable
         } else {
             match self.inventory.verdict() {
@@ -38,17 +38,17 @@ impl InventoryReport {
 
     pub(crate) fn render(&self) -> TableReport {
         let mut report = TableReport::new();
-        let daemon_state = self.inventory.daemon_state();
-        let context_state = match daemon_state {
-            DaemonState::Running => match self.inventory.verdict() {
+        let daemon_health = self.inventory.daemon_health();
+        let context_state = match daemon_health {
+            DaemonHealth::Running => match self.inventory.verdict() {
                 crate::inventory::Verdict::Ok => TableState::positive("healthy"),
                 crate::inventory::Verdict::Degraded => TableState::attention("degraded"),
             },
-            DaemonState::Starting => TableState::attention("starting"),
-            DaemonState::Degraded => TableState::attention("degraded"),
-            DaemonState::Stopped => TableState::neutral("stopped"),
-            DaemonState::Unreachable => TableState::failure("unreachable"),
-            DaemonState::Failed => TableState::failure("failed"),
+            DaemonHealth::Starting => TableState::attention("starting"),
+            DaemonHealth::Degraded => TableState::attention("degraded"),
+            DaemonHealth::Stopped => TableState::neutral("stopped"),
+            DaemonHealth::Unreachable => TableState::failure("unreachable"),
+            DaemonHealth::Failed => TableState::failure("failed"),
         };
         let mut metadata = match self.inventory.daemon.pid() {
             Some(pid) => vec![
@@ -75,7 +75,7 @@ impl InventoryReport {
             context_state,
         )
         .with_metadata(metadata);
-        if let Some(fix) = daemon_state.context_fix() {
+        if let Some(fix) = daemon_health.context_fix() {
             context = context.with_action(TableAction::fix(fix));
         }
         report.push(TableBlock::Context(context));
@@ -215,7 +215,7 @@ fn table_state(severity: Severity, label: impl Into<String>) -> TableState {
 mod tests {
     use super::*;
 
-    fn report(daemon: DaemonState) -> InventoryReport {
+    fn report(daemon: DaemonHealth) -> InventoryReport {
         let inventory = Inventory::test(daemon, Vec::new(), Vec::new());
         InventoryReport { inventory }
     }
@@ -223,16 +223,16 @@ mod tests {
     #[test]
     fn status_exit_code_reserves_daemon_unreachable_for_code_three() {
         assert_eq!(
-            report(DaemonState::Unreachable).exit_code(),
+            report(DaemonHealth::Unreachable).exit_code(),
             ExitCode::DaemonUnavailable
         );
-        assert_eq!(report(DaemonState::Running).exit_code(), ExitCode::Success);
+        assert_eq!(report(DaemonHealth::Running).exit_code(), ExitCode::Success);
     }
 
     #[test]
     fn stopped_context_metadata_names_configured_mounts_not_a_stale_pid() {
         let rendered =
-            report(DaemonState::Stopped)
+            report(DaemonHealth::Stopped)
                 .render()
                 .render_with(crate::ui::table::RenderOptions {
                     width: 120,
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn running_context_metadata_reports_pid_mounts_and_frontends_as_one_sentence() {
         let inventory = Inventory::test(
-            DaemonState::Running,
+            DaemonHealth::Running,
             vec![crate::inventory::FrontendStatus {
                 filesystem: crate::commands::frontend::FrontendFilesystem::Nfs,
                 runtime: crate::commands::frontend::FrontendRuntime::Host,
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn status_report_matches_the_documented_shape_with_a_degraded_row() {
         let inventory = Inventory::test(
-            DaemonState::Running,
+            DaemonHealth::Running,
             vec![crate::inventory::FrontendStatus {
                 filesystem: crate::commands::frontend::FrontendFilesystem::Nfs,
                 runtime: crate::commands::frontend::FrontendRuntime::Host,
@@ -360,8 +360,8 @@ mod tests {
     }
 
     #[test]
-    fn context_actions_follow_observed_daemon_state() {
-        let healthy = report(DaemonState::Running);
+    fn context_actions_follow_observed_daemon_health() {
+        let healthy = report(DaemonHealth::Running);
         let healthy_text = healthy
             .render()
             .render_with(crate::ui::table::RenderOptions {
@@ -370,7 +370,7 @@ mod tests {
             });
         assert!(!healthy_text.contains("fix:  omnifs"));
 
-        let unreachable = report(DaemonState::Unreachable).render().render_with(
+        let unreachable = report(DaemonHealth::Unreachable).render().render_with(
             crate::ui::table::RenderOptions {
                 width: 120,
                 color: false,

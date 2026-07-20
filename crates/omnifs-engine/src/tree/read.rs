@@ -13,12 +13,12 @@ use crate::cache::{
 use crate::clock::now_millis;
 use crate::ops::namespace::{ReadBytes, ReadOutcome};
 use crate::pagination::NextPageOutcome;
-use crate::render::MATERIALIZE_MAX_BYTES;
 use crate::view as view_types;
 use crate::view::{AttrPayload, EntryMeta, FileAttrsCache, FilePayload, LookupPayload};
 use crate::{EngineError, Runtime};
 use tracing::warn;
 
+use super::MATERIALIZE_MAX_BYTES;
 use super::error::{Result, TreeError};
 use super::node::{Node, PaginationControl, SyntheticContent};
 use crate::{RequestCtx, TreeNamespace};

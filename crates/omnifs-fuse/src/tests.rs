@@ -25,8 +25,8 @@ use super::common::{DirSnapshot, ROOT_INO};
 use crate::new_notifier_handle;
 use omnifs_core::path::Path;
 use omnifs_engine::{
-    Attrs, DirCursor, DirPage, EntryKind, EventStream, GitCloner, HostContext, LookupAnswer,
-    MountTable, Namespace, NsError, ReadAnswer, ReadStyle, StabilityClass, TreeNamespace,
+    Attrs, DirCursor, DirPage, EntryKind, EventStream, LookupAnswer, MountTable, Namespace,
+    NsError, ReadAnswer, ReadStyle, StabilityClass, TreeNamespace,
 };
 use std::future::Future;
 use std::path::{Path as StdPath, PathBuf};
@@ -88,25 +88,21 @@ fn build_harness() -> FuseHarness {
             }}"#
     );
 
-    let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")).unwrap());
     let mounts_dir = tempfile::tempdir().expect("mounts dir");
     std::fs::write(mounts_dir.path().join("test.json"), mount_config.as_bytes())
         .expect("write mount spec");
     let desired =
         omnifs_workspace::mounts::Registry::load(mounts_dir.path()).expect("load mount snapshot");
+    let host = omnifs_engine::test_support::open_test_host(
+        cache_dir.path(),
+        providers_dir.path(),
+        config_dir.path().join("credentials.json"),
+        cache_dir.path().join("clones"),
+    )
+    .expect("open test host");
     let registry = Arc::new(
-        MountTable::load_online(
-            HostContext::new(
-                cache_dir.path(),
-                config_dir.path(),
-                providers_dir.path(),
-                config_dir.path().join("credentials.json"),
-            ),
-            &cloner,
-            &desired,
-            &tokio::runtime::Handle::current(),
-        )
-        .expect("registry init"),
+        MountTable::load_online(&host, &desired, &tokio::runtime::Handle::current())
+            .expect("registry init"),
     );
 
     let rt = tokio::runtime::Handle::current();
@@ -354,10 +350,8 @@ impl Namespace for PathNamespace {
             } else {
                 0
             };
-            Ok(LookupAnswer {
-                path: node,
-                attrs: Self::attrs(kind, size),
-            })
+            let attrs = Self::attrs(kind, size);
+            Ok(LookupAnswer::found(node, attrs))
         })
     }
 

@@ -5,17 +5,16 @@
 # labeled OMNIFS-SEED containing one KEY=VALUE file the guest's
 # omnifs-frontend.service reads via systemd's EnvironmentFile=. macOS builds
 # it with the native hdiutil (no mkisofs/xorriso dependency); a libkrun launch
-# regenerates it fresh every time, since the attach token is per-instance.
+# regenerates it fresh every time.
 #
-# Usage: make-seed-iso.sh --out PATH --attach-addr HOST:PORT --attach-token
-#   TOKEN [--ready-vsock-port PORT] [--ssh-pubkey KEY]
+# Usage: make-seed-iso.sh --out PATH --attach-addr HOST:PORT
+#   [--ready-vsock-port PORT] [--ssh-pubkey KEY]
 set -euo pipefail
 
 seed_label=OMNIFS-SEED
 
 out=""
 attach_addr=""
-attach_token=""
 ready_vsock_port="0"
 ssh_pubkey=""
 
@@ -27,10 +26,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --attach-addr)
       attach_addr="$2"
-      shift 2
-      ;;
-    --attach-token)
-      attach_token="$2"
       shift 2
       ;;
     --ready-vsock-port)
@@ -50,7 +45,6 @@ done
 
 : "${out:?--out PATH is required}"
 : "${attach_addr:?--attach-addr HOST:PORT is required}"
-: "${attach_token:?--attach-token TOKEN is required}"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "make-seed-iso.sh: hdiutil is macOS-only; this script has no other backend" >&2
@@ -61,18 +55,17 @@ staging="$(mktemp -d)"
 trap 'rm -rf "$staging"' EXIT
 
 # EnvironmentFile= format (systemd.exec(5)): KEY=VALUE lines, no quoting.
-# OMNIFS_ATTACH_ADDR / OMNIFS_ATTACH_TOKEN are the same env vars the Docker
-# frontend launcher injects (crates/omnifs-api/src/lib.rs), addressed as
-# `vsock:<port>` instead of `host:port` for the libkrun runtime
-# (docs/contracts/40-frontends.md). OMNIFS_READY_VSOCK_PORT is the port the
-# runner dials on host CID to signal the FUSE mount is serving
-# (crates/omnifs-vfs-wire/src/beacon.rs). OMNIFS_SSH_PUBKEY, when given, is
-# installed into root's authorized_keys before the vsock ssh socket starts
+# OMNIFS_ATTACH_ADDR is the same env var the Docker frontend launcher injects
+# (crates/omnifs-api/src/lib.rs), addressed as `vsock:<port>` instead of
+# `host:port` for the libkrun runtime (docs/contracts/40-frontends.md).
+# OMNIFS_READY_VSOCK_PORT is the port the runner dials on host CID to signal
+# the FUSE mount is serving (crates/omnifs-vfs-wire/src/beacon.rs).
+# OMNIFS_SSH_PUBKEY, when given, is installed into root's authorized_keys
+# before the vsock ssh socket starts
 # (scripts/guest-image/mkosi/mkosi.extra/usr/local/lib/omnifs/setup-ssh.sh).
 # The boot smoke omits the key, which leaves ssh disabled for that launch.
 cat >"$staging/omnifs-seed.conf" <<EOF
 OMNIFS_ATTACH_ADDR=${attach_addr}
-OMNIFS_ATTACH_TOKEN=${attach_token}
 OMNIFS_READY_VSOCK_PORT=${ready_vsock_port}
 EOF
 if [[ -n "$ssh_pubkey" ]]; then

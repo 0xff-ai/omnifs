@@ -101,12 +101,12 @@ fn browse_or_guest_fallback(inventory: &Inventory) -> String {
 
 /// Whether `omnifs status`'s closing `Browse:` line should print at all
 /// suppressed whenever the context strip already carries a
-/// `fix:` action naming the next step ([`DaemonState::context_fix`]), so the
+/// `fix:` action naming the next step ([`DaemonHealth::context_fix`]), so the
 /// human register never states two competing "what to do next" facts in the
 /// same report. Bare `omnifs` (`cli.rs::run_bare`) already branches on
-/// `DaemonState::Running` itself and does not use this.
-pub(crate) fn show_browse_line(daemon_state: crate::inventory::DaemonState) -> bool {
-    daemon_state.context_fix().is_none()
+/// `DaemonHealth::Running` itself and does not use this.
+pub(crate) fn show_browse_line(daemon_health: crate::inventory::DaemonHealth) -> bool {
+    daemon_health.context_fix().is_none()
 }
 
 /// The single derived browse action for `omnifs status`'s closing
@@ -143,7 +143,7 @@ mod tests {
     use super::*;
     use crate::commands::frontend::FrontendFilesystem as Filesystem;
     use crate::inventory::{AuthState, FrontendState, ServingState};
-    use crate::inventory::{DaemonState, MountStatus, ProviderPin, ProviderPinState};
+    use crate::inventory::{DaemonHealth, MountStatus, ProviderPin, ProviderPinState};
     use omnifs_workspace::mounts::Name as MountName;
     use std::path::PathBuf;
 
@@ -178,22 +178,22 @@ mod tests {
 
     #[test]
     fn browse_line_is_suppressed_exactly_when_the_context_strip_already_has_a_fix_action() {
-        use crate::inventory::DaemonState;
+        use crate::inventory::DaemonHealth;
 
         // Stopped/Failed/Unreachable all print a `fix:` action in
         // `status.rs::render`'s context strip, so the closing `Browse:` line
         // would restate a competing "what to do next" fact.
         for suppressed in [
-            DaemonState::Stopped,
-            DaemonState::Failed,
-            DaemonState::Unreachable,
+            DaemonHealth::Stopped,
+            DaemonHealth::Failed,
+            DaemonHealth::Unreachable,
         ] {
             assert!(!show_browse_line(suppressed), "{suppressed:?}");
         }
         for shown in [
-            DaemonState::Running,
-            DaemonState::Starting,
-            DaemonState::Degraded,
+            DaemonHealth::Running,
+            DaemonHealth::Starting,
+            DaemonHealth::Degraded,
         ] {
             assert!(show_browse_line(shown), "{shown:?}");
         }
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn no_observed_frontend_names_the_enable_command_not_a_path() {
-        let inventory = Inventory::test(DaemonState::Running, Vec::new(), vec![mount("github")]);
+        let inventory = Inventory::test(DaemonHealth::Running, Vec::new(), vec![mount("github")]);
         let rendered = lines(&inventory);
         assert_eq!(rendered.len(), 1);
         assert!(rendered[0].starts_with("Serving 1 mount. No frontend attached yet:"));
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn attached_host_frontend_names_its_location() {
         let inventory = Inventory::test(
-            DaemonState::Running,
+            DaemonHealth::Running,
             vec![frontend(
                 Runtime::Host,
                 Some("/mnt/omnifs-test-home/omnifs"),
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn attached_guest_frontend_names_the_shell_command_not_the_wire_mount_point() {
         let inventory = Inventory::test(
-            DaemonState::Running,
+            DaemonHealth::Running,
             vec![frontend(
                 Runtime::Libkrun,
                 Some("/omnifs"),
@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn host_takes_precedence_over_guest_for_the_primary_browse_action() {
         let inventory = Inventory::test(
-            DaemonState::Running,
+            DaemonHealth::Running,
             vec![
                 frontend(Runtime::Libkrun, Some("/omnifs"), FrontendState::Attached),
                 frontend(
@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn browse_command_defers_to_the_first_mount() {
         let inventory = Inventory::test(
-            DaemonState::Running,
+            DaemonHealth::Running,
             vec![frontend(
                 Runtime::Host,
                 Some("/mnt/omnifs-test-home/omnifs"),
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn access_row_names_path_filesystem_and_runtime() {
         let inventory = Inventory::test(
-            DaemonState::Running,
+            DaemonHealth::Running,
             vec![frontend(
                 Runtime::Host,
                 Some("/mnt/omnifs-test-home/omnifs"),
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn a_failed_frontend_is_not_treated_as_observed_access() {
         let inventory = Inventory::test(
-            DaemonState::Running,
+            DaemonHealth::Running,
             vec![frontend(Runtime::Host, Some("/mnt"), FrontendState::Failed)],
             vec![mount("github")],
         );

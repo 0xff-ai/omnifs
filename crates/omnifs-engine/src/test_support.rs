@@ -15,7 +15,7 @@ pub use crate::ops::namespace::{
     ChunkOutcome, DirEntry, DirListing, ListOutcome as NamespaceListOutcome, OpenOutcome,
     ReadBytes, ReadOutcome,
 };
-pub use crate::{ComponentEngine, Engine, EngineError, GitCloner, HostContext};
+pub use crate::{ComponentEngine, Engine, EngineError, GitCloner, HostOnline, HostOpen};
 
 /// Stable compiled-component cache shared by test processes.
 ///
@@ -68,20 +68,36 @@ pub mod auth {
     }
 }
 
+/// Open an online [`HostOnline`] for tests, using the shared wasm compile cache.
+pub fn open_test_host(
+    cache_dir: impl AsRef<std::path::Path>,
+    providers_dir: impl AsRef<std::path::Path>,
+    credentials_file: impl AsRef<std::path::Path>,
+    clone_dir: impl AsRef<std::path::Path>,
+) -> Result<crate::HostOnline, crate::HostError> {
+    use omnifs_workspace::creds::FileStore;
+    use omnifs_workspace::provider::Catalog;
+    use std::sync::Arc;
+    crate::HostOnline::open(crate::HostOpen {
+        cache_dir: cache_dir.as_ref().to_path_buf(),
+        wasm_cache_dir: wasm_cache_dir(),
+        credentials: Arc::new(FileStore::new(credentials_file.as_ref())),
+        catalog: Catalog::open(providers_dir.as_ref()),
+        clone_dir: clone_dir.as_ref().to_path_buf(),
+    })
+}
+
 /// Load a complete immutable mount snapshot with provider callout capture
 /// enabled. This keeps live frontend concurrency fixtures on the same startup
 /// construction path as the daemon while exposing the capture option only in
 /// the test-support surface.
 #[doc(hidden)]
 pub fn load_mount_table_for_callout_tests(
-    context: HostContext,
-    cloner: &std::sync::Arc<GitCloner>,
+    host: &crate::runtime::host::HostOnline,
     desired: &omnifs_workspace::mounts::Registry,
     handle: &tokio::runtime::Handle,
 ) -> Result<crate::MountTable, crate::RegistryError> {
-    crate::runtime::registry::MountTable::load_online_with_options(
-        context, cloner, desired, handle, true,
-    )
+    crate::runtime::registry::MountTable::load_online_with_options(host, desired, handle, true)
 }
 
 pub mod blob {

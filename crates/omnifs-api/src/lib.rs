@@ -19,13 +19,8 @@ pub mod events;
 /// and read by the out-of-process `omnifs-thin fuse` runner when no `--attach`
 /// unix path is given. Carries `host.docker.internal:<port>` so a
 /// containerized frontend reaches the host-native daemon's TCP attach
-/// listener.
+/// listener. Bind policy (loopback or verified docker0) is the auth.
 pub const OMNIFS_ATTACH_ADDR_ENV: &str = "OMNIFS_ATTACH_ADDR";
-
-/// The per-instance attach token paired with [`OMNIFS_ATTACH_ADDR_ENV`],
-/// authenticating the TCP namespace attach handshake in place of filesystem
-/// permissions.
-pub const OMNIFS_ATTACH_TOKEN_ENV: &str = "OMNIFS_ATTACH_TOKEN";
 
 /// Guest vsock port the frontend runner dials on host CID (`VMADDR_CID_HOST`)
 /// once its FUSE mount is serving, writing a single `ready\n` line so the
@@ -194,7 +189,7 @@ pub enum FrontendRuntime {
     /// Attached over the TCP namespace listener, the Docker Desktop delivery
     /// path.
     Docker,
-    /// Attached over the token-checking UDS vsock-proxy listener, the
+    /// Attached over the UDS vsock-proxy listener, the
     /// libkrun-on-macOS delivery path.
     Libkrun,
 }

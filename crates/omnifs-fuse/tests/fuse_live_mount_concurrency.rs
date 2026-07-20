@@ -12,7 +12,6 @@
 //! async dispatch prevents head-of-line blocking.
 
 use omnifs_engine::GitCloner;
-use omnifs_engine::HostContext;
 use omnifs_engine::MountTable;
 use omnifs_fuse::new_notifier_handle;
 use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
@@ -237,17 +236,17 @@ impl MountFixture {
         let desired =
             omnifs_workspace::mounts::Registry::load(&mounts_dir).expect("load mount snapshot");
 
-        let cloner = Arc::new(GitCloner::new(cache_dir.join("clones")).unwrap());
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let host = omnifs_engine::test_support::open_test_host(
+            &cache_dir,
+            &providers_dir,
+            config_dir.join("credentials.json"),
+            cache_dir.join("clones"),
+        )
+        .expect("open test host");
         let registry = Arc::new(
             omnifs_engine::test_support::load_mount_table_for_callout_tests(
-                HostContext::new(
-                    &cache_dir,
-                    &config_dir,
-                    &providers_dir,
-                    config_dir.join("credentials.json"),
-                ),
-                &cloner,
+                &host,
                 &desired,
                 rt.handle(),
             )

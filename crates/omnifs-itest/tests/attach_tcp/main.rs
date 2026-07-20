@@ -106,31 +106,17 @@ fn post_frontend_attach_target(ctrl_socket: &Path, body: Option<&str>) -> serde_
     }
 }
 
-fn assert_looks_like_a_token(token: &str) {
-    assert_eq!(
-        token.len(),
-        32,
-        "attach token must be 32 hex chars: {token}"
-    );
-    assert!(
-        token.chars().all(|c| c.is_ascii_hexdigit()),
-        "attach token must be hex: {token}"
-    );
-}
-
 #[test]
 fn attach_tcp_flag_binds_at_start_and_persists_the_target() {
     let daemon = spawn_namespace_only(&["--attach-tcp", "0"]);
     wait_ready(&daemon.control_socket(), Duration::from_secs(30));
 
     let targets = daemon.attach_targets();
-    let [omnifs_workspace::attach::Target::Tcp { addr, token }] = targets.as_slice() else {
+    let [omnifs_workspace::attach::Target::Tcp { addr }] = targets.as_slice() else {
         panic!("expected one durable TCP attach target, got {targets:?}");
     };
-    assert_looks_like_a_token(token);
 
-    // The listener is really up: a bare TCP connect succeeds (the handshake
-    // itself, including the token, is proven at the wire-crate level).
+    // The listener is really up: a bare TCP connect succeeds.
     TcpStream::connect(addr)
         .unwrap_or_else(|error| panic!("connect to the attach listener at {addr}: {error}"));
 }
@@ -153,23 +139,21 @@ fn frontend_attach_target_route_binds_on_demand_and_is_idempotent() {
 
     let first = post_frontend_attach_target(&ctrl_socket, Some(r#"{"bind_ip":"127.0.0.1"}"#));
     let addr = first["addr"].as_str().expect("addr").to_string();
-    let token = first["token"].as_str().expect("token").to_string();
-    assert_looks_like_a_token(&token);
     assert!(
         addr.starts_with("127.0.0.1:"),
         "the requested bind address must be honored: {addr}"
     );
+    assert!(
+        first.get("token").is_none(),
+        "attach replies must not carry a token: {first}"
+    );
 
-    // A listener cannot be re-pointed once serving: a repeat call (even with a
-    // another request returns the same binding rather than rebinding.
+    // A listener cannot be re-pointed once serving: a repeat call returns the
+    // same binding rather than rebinding.
     let second = post_frontend_attach_target(&ctrl_socket, Some("{}"));
     assert_eq!(
         second["addr"], first["addr"],
         "a repeat call must not rebind"
-    );
-    assert_eq!(
-        second["token"], first["token"],
-        "a repeat call must return the same token"
     );
 
     // Attach authority is durable but separate from process identity. Reusing
@@ -178,17 +162,10 @@ fn frontend_attach_target_route_binds_on_demand_and_is_idempotent() {
     post_frontend_attach_target(&ctrl_socket, None);
     assert_eq!(daemon.record(), daemon_record);
     let targets = daemon.attach_targets();
-    let [
-        omnifs_workspace::attach::Target::Tcp {
-            addr: stored_addr,
-            token: stored_token,
-        },
-    ] = targets.as_slice()
-    else {
+    let [omnifs_workspace::attach::Target::Tcp { addr: stored_addr }] = targets.as_slice() else {
         panic!("expected one durable TCP attach target, got {targets:?}");
     };
     assert_eq!(stored_addr.to_string(), addr);
-    assert_eq!(stored_token, &token);
 
     TcpStream::connect(&addr)
         .unwrap_or_else(|error| panic!("connect to the attach listener at {addr}: {error}"));
