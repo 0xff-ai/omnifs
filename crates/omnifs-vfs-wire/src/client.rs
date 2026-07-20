@@ -459,9 +459,7 @@ impl ManagerState {
                     if let Some(frame) = frame {
                         self.handle_inbound(&frame, &mut pending);
                     } else {
-                        let _ = self.events.send(NsEvent::InvalidateSubtree {
-                            path: Path::root(),
-                        });
+                        let _ = self.events.send(NsEvent::reset());
                         // The root invalidation is the first observable disconnect
                         // signal. Complete requests that were already in flight only
                         // after publishing it, so frontends cannot process Network

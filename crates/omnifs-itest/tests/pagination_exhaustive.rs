@@ -8,10 +8,8 @@ use omnifs_itest::RuntimeHarness;
 
 async fn resolve(harness: &RuntimeHarness, value: &str) -> LookupAnswer {
     let namespace = harness.namespace.as_ref();
-    let mut answer = LookupAnswer {
-        path: Path::root(),
-        attrs: namespace.getattr(Path::root()).await.unwrap(),
-    };
+    let attrs = namespace.getattr(Path::root()).await.unwrap();
+    let mut answer = LookupAnswer::found(Path::root(), attrs);
     for segment in Path::parse(value).unwrap().segments() {
         answer = namespace.lookup(answer.path, segment).await.unwrap();
     }
