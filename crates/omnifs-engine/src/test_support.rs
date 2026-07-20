@@ -4,11 +4,18 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+use crate::Runtime;
 use crate::callouts::{TestSignal, record_outcome as inner_record};
 use crate::log_redaction::{LogUrl as InternalLogUrl, WitHeaders as InternalWitHeaders};
-use crate::{EngineError, Runtime};
 use omnifs_wit::provider::types as wit_types;
 
+pub use crate::BuildError;
+pub use crate::effect_apply::{LookupEntry, LookupOutcome};
+pub use crate::ops::namespace::{
+    ChunkOutcome, DirEntry, DirListing, ListOutcome as NamespaceListOutcome, OpenOutcome,
+    ReadBytes, ReadOutcome,
+};
+pub use crate::{ComponentEngine, Engine, EngineError, GitCloner, HostOnline, HostOpen};
 /// Stable compiled-component cache shared by test processes.
 ///
 /// Runtime data remains in each fixture's temporary cache directory. Only
@@ -50,17 +57,17 @@ pub mod auth {
     }
 }
 
-/// Open an online [`crate::Host`] for tests, using the shared wasm compile cache.
+/// Open an online [`HostOnline`] for tests, using the shared wasm compile cache.
 pub fn open_test_host(
     cache_dir: impl AsRef<std::path::Path>,
     providers_dir: impl AsRef<std::path::Path>,
     credentials_file: impl AsRef<std::path::Path>,
     clone_dir: impl AsRef<std::path::Path>,
-) -> Result<crate::Host, crate::HostError> {
+) -> Result<crate::HostOnline, crate::HostError> {
     use omnifs_workspace::creds::FileStore;
     use omnifs_workspace::provider::Catalog;
     use std::sync::Arc;
-    crate::Host::open_online(crate::HostOpen {
+    crate::HostOnline::open(crate::HostOpen {
         cache_dir: cache_dir.as_ref().to_path_buf(),
         wasm_cache_dir: wasm_cache_dir(),
         credentials: Arc::new(FileStore::new(credentials_file.as_ref())),

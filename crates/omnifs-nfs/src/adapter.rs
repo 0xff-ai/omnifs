@@ -899,8 +899,7 @@ mod tests {
         )
         .expect("open test host");
         let registry = Arc::new(
-            MountTable::load_online(host.as_online().expect("online host"), &desired, &handle)
-                .expect("load mount snapshot"),
+            MountTable::load_online(&host, &desired, &handle).expect("load mount snapshot"),
         );
 
         let namespace = TreeNamespace::online(registry, handle.clone());
