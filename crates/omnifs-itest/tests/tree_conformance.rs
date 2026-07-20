@@ -9,10 +9,8 @@ use omnifs_itest::RuntimeHarness;
 
 async fn resolve(harness: &RuntimeHarness, value: &str) -> LookupAnswer {
     let namespace = harness.namespace.as_ref();
-    let mut answer = LookupAnswer {
-        path: Path::root(),
-        attrs: namespace.getattr(Path::root()).await.unwrap(),
-    };
+    let attrs = namespace.getattr(Path::root()).await.unwrap();
+    let mut answer = LookupAnswer::found(Path::root(), attrs);
     for segment in Path::parse(value).unwrap().segments() {
         answer = namespace.lookup(answer.path, segment).await.unwrap();
     }
@@ -58,7 +56,7 @@ async fn generated_readmes_are_visible_and_hidden_by_root_ignore_patterns() {
     let root_text = String::from_utf8(root_bytes).unwrap();
     assert!(root_text.contains("The keying schema is the path grammar below."));
     let ignore = resolve(&harness, "/test/.gitignore").await;
-    assert_eq!(ignore.attrs.kind, omnifs_engine::EntryKind::File);
+    assert_eq!(ignore.attrs().unwrap().kind, omnifs_engine::EntryKind::File);
     let bytes = harness
         .namespace
         .read(ignore.path, 0, u32::MAX)
@@ -123,7 +121,7 @@ async fn reads_whole_file_exact_bytes() {
 async fn reads_ranged_file_in_chunks() {
     let harness = RuntimeHarness::new(omnifs_itest::TEST_PROVIDER_CONFIG).unwrap();
     let node = resolve(&harness, "/test/hello/ranged").await;
-    assert_eq!(node.attrs.read_style, ReadStyle::Ranged);
+    assert_eq!(node.attrs().unwrap().read_style, ReadStyle::Ranged);
     assert_eq!(
         harness
             .namespace
@@ -173,9 +171,13 @@ async fn lists_cursored_pages() {
 async fn resolves_unrouted_path_as_not_found() {
     let harness = RuntimeHarness::new(omnifs_itest::TEST_PROVIDER_CONFIG).unwrap();
     let parent = resolve(&harness, "/test/hello").await;
-    assert_eq!(
-        harness.namespace.lookup(parent.path, "not-routed").await,
-        Err(omnifs_engine::NsError::NotFound)
+    assert!(
+        harness
+            .namespace
+            .lookup(parent.path, "not-routed")
+            .await
+            .expect("known missing child")
+            .is_missing()
     );
 }
 

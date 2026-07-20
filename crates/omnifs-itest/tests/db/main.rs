@@ -3,7 +3,7 @@
 mod db_fixture;
 
 use omnifs_core::path::Path;
-use omnifs_engine::{DirCursor, LookupAnswer, Namespace, NsError};
+use omnifs_engine::{DirCursor, LookupAnswer, Namespace};
 use omnifs_itest::{
     ReadFileOpExt, RuntimeHarness, TestOpExt, expect_inline, make_initialized_runtime, parse_path,
 };
@@ -37,10 +37,8 @@ fn read_bytes(harness: &RuntimeHarness, path: &str) -> Vec<u8> {
 }
 
 async fn resolve_namespace(namespace: &dyn Namespace, path: &str) -> LookupAnswer {
-    let mut answer = LookupAnswer {
-        path: Path::root(),
-        attrs: namespace.getattr(Path::root()).await.unwrap(),
-    };
+    let attrs = namespace.getattr(Path::root()).await.unwrap();
+    let mut answer = LookupAnswer::found(Path::root(), attrs);
     for segment in parse_path(path).segments() {
         answer = namespace.lookup(answer.path, segment).await.unwrap();
     }
@@ -216,7 +214,7 @@ async fn db_missing_table_is_not_found() {
     let tables = resolve_namespace(namespace, "/db/tables").await;
     assert!(matches!(
         namespace.lookup(tables.path.clone(), "NoSuchTable").await,
-        Err(NsError::NotFound)
+        Ok(answer) if answer.is_missing()
     ));
 
     let schema = harness
@@ -231,7 +229,7 @@ async fn db_missing_table_is_not_found() {
     );
     assert!(matches!(
         namespace.lookup(tables.path, "NoSuchTable").await,
-        Err(NsError::NotFound)
+        Ok(answer) if answer.is_missing()
     ));
 }
 

@@ -7,10 +7,8 @@ use omnifs_engine::{DirCursor, LookupAnswer, Namespace};
 use omnifs_itest::make_runtime;
 
 async fn resolve(namespace: &dyn Namespace, value: &str) -> LookupAnswer {
-    let mut answer = LookupAnswer {
-        path: Path::root(),
-        attrs: namespace.getattr(Path::root()).await.unwrap(),
-    };
+    let attrs = namespace.getattr(Path::root()).await.unwrap();
+    let mut answer = LookupAnswer::found(Path::root(), attrs);
     for segment in Path::parse(value).unwrap().segments() {
         answer = namespace.lookup(answer.path, segment).await.unwrap();
     }
@@ -66,5 +64,5 @@ async fn resolve_rehydrates_from_path_with_stable_identity() {
     let first = resolve(namespace, "/test/hello/message").await;
     let second = namespace.getattr(first.path.clone()).await.unwrap();
     assert_eq!(first.path, Path::parse("/test/hello/message").unwrap());
-    assert_eq!(second.kind, first.attrs.kind);
+    assert_eq!(second.kind, first.attrs().unwrap().kind);
 }

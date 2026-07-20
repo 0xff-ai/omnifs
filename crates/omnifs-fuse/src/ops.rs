@@ -14,7 +14,7 @@ use super::errno::ns_error_errno;
 use super::read_helpers::data_slice;
 use fuser::{Errno, FileAttr, FopenFlags};
 use omnifs_core::path::Path;
-use omnifs_engine::{DirCursor, EntryKind};
+use omnifs_engine::{DirCursor, EntryKind, LookupState};
 use std::time::Duration;
 
 impl Frontend {
@@ -56,9 +56,12 @@ impl Frontend {
                     .map_err(|error| ns_error_errno(&error)),
             )
             .await?;
-        let kind = NodeKind::from(&answer.attrs.kind);
+        let LookupState::Found { attrs } = answer.state else {
+            return Err(Errno::ENOENT);
+        };
+        let kind = NodeKind::from(&attrs.kind);
         let ino = self.intern_node(parent_ino, name, answer.path.clone(), kind);
-        let (attr, ttl) = self.ns_file_attr(ino, &answer.path, &answer.attrs);
+        let (attr, ttl) = self.ns_file_attr(ino, &answer.path, &attrs);
         Ok((ino, attr, ttl))
     }
 

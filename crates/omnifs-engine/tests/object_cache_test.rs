@@ -2,17 +2,15 @@
 
 use omnifs_core::path::Path;
 use omnifs_engine::test_support::cache::publish_effects_for_test;
-use omnifs_engine::{LookupAnswer, Namespace, NsError};
+use omnifs_engine::{LookupAnswer, Namespace};
 use omnifs_itest::make_initialized_runtime;
 use omnifs_wit::provider::types::{CanonicalStore, Effects, LogicalId};
 
 const CONFIG: &str = r#"{"provider":"test_provider.wasm","mount":"test"}"#;
 
 async fn resolve(namespace: &dyn Namespace, value: &str) -> LookupAnswer {
-    let mut answer = LookupAnswer {
-        path: Path::root(),
-        attrs: namespace.getattr(Path::root()).await.unwrap(),
-    };
+    let attrs = namespace.getattr(Path::root()).await.unwrap();
+    let mut answer = LookupAnswer::found(Path::root(), attrs);
     for segment in Path::parse(value).unwrap().segments() {
         answer = namespace.lookup(answer.path, segment).await.unwrap();
     }
@@ -51,20 +49,20 @@ async fn plain_path_lookup_ignores_unrelated_indexed_validator() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn negative_lookup_is_observable_as_not_found() {
+async fn negative_lookup_is_a_durable_missing_answer() {
     let harness = make_initialized_runtime(CONFIG);
     let hello = resolve(harness.namespace.as_ref(), "/test/hello").await;
-    let error = harness
+    let first = harness
         .namespace
         .lookup(hello.path.clone(), "definitely-missing")
         .await
-        .expect_err("provider missing lookup should be NotFound");
-    assert_eq!(error, NsError::NotFound);
+        .expect("provider missing lookup answer");
+    assert!(first.is_missing());
     harness.runtime.shutdown().unwrap();
     let second = harness
         .namespace
         .lookup(hello.path, "definitely-missing")
         .await
-        .expect_err("durable negative lookup should short-circuit to NotFound");
-    assert_eq!(second, NsError::NotFound);
+        .expect("durable negative lookup answer");
+    assert!(second.is_missing());
 }

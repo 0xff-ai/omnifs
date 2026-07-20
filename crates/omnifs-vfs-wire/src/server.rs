@@ -876,7 +876,7 @@ where
                         if write_frame(&mut writer, &Frame::new(0, KIND_EVENT, body)).await.is_err() { return; }
                         drained += 1;
                         if drained >= 1024 {
-                            let root = NsEvent::InvalidateSubtree { path: omnifs_core::path::Path::root() };
+                            let root = NsEvent::reset();
                             let Ok(body) = postcard::to_allocvec(&root) else { return; };
                             if write_frame(&mut writer, &Frame::new(0, KIND_EVENT, body)).await.is_err() { return; }
                             break;

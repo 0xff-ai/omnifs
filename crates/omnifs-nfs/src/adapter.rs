@@ -19,6 +19,7 @@
 //! prunes and closes stale opens before it re-reads its inode, and a polling
 //! `tail -f` picks up an `AttrsChanged` grown size on its next re-stat.
 
+use crate::cache::ReplyCache;
 use crate::delayed::{PendingListings, PendingOutcome};
 use crate::export::{
     Attr, DirEntry, DirListing, NodeKind, OpenRead, OpenResult, OpenSeed, OpenTable,
@@ -33,7 +34,8 @@ use crate::protocol::consts::{
 use dashmap::DashMap;
 use omnifs_core::path::{Path, Segment};
 use omnifs_engine::namespace::{
-    Attrs, DirCursor, DirEntry as NsDirEntry, EntryKind, EventStream, Namespace, NsError, NsEvent,
+    Attrs, DirCursor, DirEntry as NsDirEntry, EntryKind, EventStream, LookupAnswer, LookupState,
+    Namespace, NsError, NsEvent,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -102,6 +104,9 @@ pub struct Export {
     /// The projection surface. Every name resolution, attribute, listing, and
     /// read goes through it; the adapter holds nothing else of the engine.
     namespace: Arc<dyn Namespace>,
+    /// Bounded protocol reply cache for the NFS mount, whose kernel attribute
+    /// and negative-name caches are deliberately disabled.
+    replies: ReplyCache,
     /// Invalidation and live-growth events, drained inline after each namespace
     /// op so the frontend applies them with drain-before-answer ordering.
     events: Mutex<EventStream>,
@@ -231,6 +236,7 @@ impl Export {
             generation,
             clients: ClientTable::new(generation),
             namespace,
+            replies: ReplyCache::new(),
             events,
             delayed_lists,
             inodes,
@@ -250,6 +256,39 @@ impl Export {
     ) -> Result<T, NsError> {
         let result = self.rt.block_on(future);
         self.apply_pending_events();
+        result
+    }
+
+    fn node_attrs(&self, path: Path, exact: bool) -> Result<Attrs, NsError> {
+        self.apply_pending_events();
+        if let Some(attrs) = self.replies.attrs(&path) {
+            return Ok(attrs);
+        }
+
+        let fence = self.replies.fence();
+        let result = if exact {
+            self.block_on_namespace(self.namespace.getattr_exact(path.clone()))
+        } else {
+            self.block_on_namespace(self.namespace.getattr(path.clone()))
+        };
+        if let Ok(attrs) = &result {
+            self.replies.remember_attrs(fence, path, attrs);
+        }
+        result
+    }
+
+    fn child_lookup(&self, parent: Path, name: &str) -> Result<LookupAnswer, NsError> {
+        self.apply_pending_events();
+        if let Some(answer) = self.replies.lookup(&parent, name) {
+            return Ok(answer);
+        }
+
+        let fence = self.replies.fence();
+        let result = self.block_on_namespace(self.namespace.lookup(parent.clone(), name));
+        if let Ok(answer) = &result {
+            self.replies
+                .remember_lookup(fence, parent, name.to_string(), answer);
+        }
         result
     }
 
@@ -278,6 +317,7 @@ impl Export {
         while let Some(event) = events.try_recv() {
             match event {
                 NsEvent::InvalidateSubtree { path } => {
+                    self.replies.invalidate(&path);
                     self.delayed_lists.reset(&path);
                     if path.is_root() {
                         self.grown_sizes.clear();
@@ -286,6 +326,7 @@ impl Export {
                     }
                 },
                 NsEvent::AttrsChanged { path, attrs } => {
+                    self.replies.invalidate(&path);
                     // Live growth is monotonic; never let a stale event shrink it.
                     let mut entry = self.grown_sizes.entry(path).or_insert(0);
                     *entry = (*entry).max(attrs.size);
@@ -452,13 +493,21 @@ impl Export {
     /// Build a finite directory snapshot from a drained namespace listing,
     /// binding each child and eagerly probing a file child's exact size for the
     /// `fattr4` the flatten renderer needs.
-    fn snapshot(&self, scope: u64, parent: u64, entries: &[NsDirEntry]) -> DirListing {
+    fn snapshot(
+        &self,
+        scope: u64,
+        parent: u64,
+        parent_path: &Path,
+        entries: &[NsDirEntry],
+    ) -> DirListing {
+        self.replies
+            .seed(self.replies.fence(), parent_path, entries);
         let mut out = Vec::with_capacity(entries.len());
         for entry in entries {
             let kind = NodeKind::from(&entry.attrs.kind);
             let id = self.intern_node(None, scope, parent, &entry.name, entry.path.clone(), kind);
             let mut attr = if kind == NodeKind::File {
-                match self.block_on_namespace(self.namespace.getattr_exact(entry.path.clone())) {
+                match self.node_attrs(entry.path.clone(), true) {
                     Ok(attrs) => Attr::from_namespace(id, parent, &attrs),
                     // A child that vanished between listing and probe keeps its
                     // listing attrs rather than dropping out of the snapshot.
@@ -525,7 +574,7 @@ impl ReadOnlyExport for Export {
         }
 
         let node = body.node().ok_or(Status::Stale)?;
-        let attrs = match self.block_on_namespace(self.namespace.getattr(node.clone())) {
+        let attrs = match self.node_attrs(node.clone(), false) {
             Ok(attrs) => attrs,
             // A vanished node is a stale filehandle, not a plain lookup miss.
             Err(NsError::NotFound) => {
@@ -566,43 +615,47 @@ impl ReadOnlyExport for Export {
         }
 
         let parent_node = body.node().ok_or(Status::Stale)?;
-        match self.block_on_namespace(self.namespace.lookup(parent_node, name.as_str())) {
-            Ok(answer) => {
-                let id = self.intern_node(
-                    None,
-                    scope,
-                    parent,
-                    name.as_str(),
-                    answer.path.clone(),
-                    NodeKind::from(&answer.attrs.kind),
-                );
-                // Eagerly probe a file child's exact size so a bare `stat`/`ls -l`
-                // after the lookup reflects a ranged file's real size; the
-                // namespace caches the learned size for the later `getattr`.
-                // `getattr_exact` only learns a deferred-ranged file's size; an
-                // unknown-length deferred-full file only learns its exact size
-                // through a read, which materializes it and lets the namespace
-                // cache the result. This must happen at lookup time: the macOS
-                // NFS client pins the size it knew before OPEN for the lifetime
-                // of that open (even `fstat` on the open fd serves the pinned
-                // value), so learning at OPEN is too late and the first `cat` of
-                // a cold file would be clamped to the 1-byte sentinel.
-                if matches!(NodeKind::from(&answer.attrs.kind), NodeKind::File)
-                    && let Ok(attrs) =
-                        self.block_on_namespace(self.namespace.getattr_exact(answer.path.clone()))
-                    && attrs.size <= 1
+        match self.child_lookup(parent_node, name.as_str()) {
+            Ok(answer) => match answer.state {
+                LookupState::Found { attrs } => {
+                    let answer_path = answer.path;
+                    let id = self.intern_node(
+                        None,
+                        scope,
+                        parent,
+                        name.as_str(),
+                        answer_path.clone(),
+                        NodeKind::from(&attrs.kind),
+                    );
+                    // Eagerly probe a file child's exact size so a bare `stat`/`ls -l`
+                    // after the lookup reflects a ranged file's real size; the
+                    // namespace caches the learned size for the later `getattr`.
+                    // `getattr_exact` only learns a deferred-ranged file's size; an
+                    // unknown-length deferred-full file only learns its exact size
+                    // through a read, which materializes it and lets the namespace
+                    // cache the result. This must happen at lookup time: the macOS
+                    // NFS client pins the size it knew before OPEN for the lifetime
+                    // of that open (even `fstat` on the open fd serves the pinned
+                    // value), so learning at OPEN is too late and the first `cat` of
+                    // a cold file would be clamped to the 1-byte sentinel.
+                    if matches!(NodeKind::from(&attrs.kind), NodeKind::File)
+                        && let Ok(exact) = self.node_attrs(answer_path.clone(), true)
+                        && exact.size <= 1
+                    {
+                        let _ = self.read_node_chunk(id, answer_path, 0, 1);
+                    }
+                    self.apply_pending_events();
+                    Ok(id)
+                },
+                LookupState::Missing { .. }
+                    if parent == ROOT_ID && name.as_str() == NFS_EXPORT_NAME =>
                 {
-                    let _ = self.read_node_chunk(id, answer.path.clone(), 0, 1);
-                }
-                self.apply_pending_events();
-                Ok(id)
+                    Ok(EXPORT_ROOT_ID)
+                },
+                LookupState::Missing { .. } => Err(Status::NoEnt),
             },
             // A cold provider lookup that misses at the protocol root resolves the
             // `/omnifs` export alias, mirroring how the client mounts `:/omnifs`.
-            Err(NsError::NotFound) if parent == ROOT_ID && name.as_str() == NFS_EXPORT_NAME => {
-                Ok(EXPORT_ROOT_ID)
-            },
-            Err(NsError::NotFound) => Err(Status::NoEnt),
             Err(error) => {
                 tracing::warn!(op = "lookup", name = %name, error = %error, "NFS namespace lookup failed");
                 Err(Status::from(&error))
@@ -626,13 +679,13 @@ impl ReadOnlyExport for Export {
         // or maps to a terminal `Status`.
         let outcome =
             self.delayed_lists
-                .resolve(node.clone(), NFS_INLINE_BUDGET, self.list_op(node));
+                .resolve(node.clone(), NFS_INLINE_BUDGET, self.list_op(node.clone()));
         self.apply_pending_events();
         match outcome {
             PendingOutcome::Ready(result) => {
                 self.apply_pending_events();
                 match result.as_ref() {
-                    Ok(entries) => Ok(self.snapshot(scope, id, entries)),
+                    Ok(entries) => Ok(self.snapshot(scope, id, &node, entries)),
                     Err(status) => Err(*status),
                 }
             },
@@ -871,7 +924,8 @@ mod tests {
     use crate::persist::{FhEntry, PersistInit};
     use omnifs_core::path::Path;
     use omnifs_engine::namespace::{
-        Attrs, DirPage, LookupAnswer, ReadAnswer, ReadStyle, StabilityClass,
+        Attrs, DirEntry as NamespaceDirEntry, DirPage, LookupAnswer, ReadAnswer, ReadStyle,
+        StabilityClass,
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -893,6 +947,7 @@ mod tests {
         /// exact size by materializing through a read.
         deferred_node: Option<Path>,
         materialized: AtomicBool,
+        getattrs: AtomicU64,
         reads: AtomicU64,
         last_read: Mutex<Option<(u64, u32)>>,
     }
@@ -914,7 +969,7 @@ mod tests {
             accessed: None,
             modified: None,
             created: None,
-            ttl: Duration::ZERO,
+            ttl: Duration::from_mins(1),
             change: 1,
             direct_io: false,
             stability: StabilityClass::Stable,
@@ -931,6 +986,7 @@ mod tests {
                 && !self.materialized.load(Ordering::Relaxed)
             {
                 attrs.size = 1;
+                attrs.ttl = Duration::ZERO;
             }
             attrs
         }
@@ -945,19 +1001,27 @@ mod tests {
             self.lookups.fetch_add(1, Ordering::Relaxed);
             let answer = self
                 .children
-                .get(&(parent, name.to_string()))
-                .map(|(node, kind)| LookupAnswer {
-                    path: node.clone(),
-                    attrs: self.attrs_for(node, kind.clone()),
-                })
-                .ok_or(NsError::NotFound);
-            Box::pin(async move { answer })
+                .get(&(parent.clone(), name.to_string()))
+                .map_or_else(
+                    || {
+                        LookupAnswer::missing(
+                            parent.join(name).expect("stub lookup path"),
+                            Duration::from_mins(1),
+                        )
+                    },
+                    |(node, kind)| {
+                        let attrs = self.attrs_for(node, kind.clone());
+                        LookupAnswer::found(node.clone(), attrs)
+                    },
+                );
+            Box::pin(async move { Ok(answer) })
         }
 
         fn getattr(
             &self,
             node: Path,
         ) -> Pin<Box<dyn Future<Output = Result<Attrs, NsError>> + Send + '_>> {
+            self.getattrs.fetch_add(1, Ordering::Relaxed);
             let answer = self
                 .kinds
                 .get(&node)
@@ -975,13 +1039,26 @@ mod tests {
 
         fn readdir(
             &self,
-            _node: Path,
+            node: Path,
             _cursor: DirCursor,
             _budget: usize,
         ) -> Pin<Box<dyn Future<Output = Result<DirPage, NsError>> + Send + '_>> {
-            Box::pin(async {
+            let entries = self
+                .children
+                .iter()
+                .filter(|((parent, _), _)| parent == &node)
+                .map(|((_, name), (path, kind))| {
+                    let attrs = self.attrs_for(path, kind.clone());
+                    NamespaceDirEntry {
+                        name: name.clone(),
+                        path: path.clone(),
+                        attrs,
+                    }
+                })
+                .collect();
+            Box::pin(async move {
                 Ok(DirPage {
-                    entries: Vec::new(),
+                    entries,
                     next: None,
                 })
             })
@@ -1041,6 +1118,7 @@ mod tests {
             lookups: AtomicU64::new(0),
             deferred_node: None,
             materialized: AtomicBool::new(false),
+            getattrs: AtomicU64::new(0),
             reads: AtomicU64::new(0),
             last_read: Mutex::new(None),
         }
@@ -1129,6 +1207,118 @@ mod tests {
             },
         );
         assert!(matches!(export2.attr(102), Err(Status::Stale)));
+    }
+
+    #[test]
+    fn lookup_seeds_attrs_without_getattr() {
+        let runtime = TokioRuntime::new().expect("tokio runtime");
+        let namespace = Arc::new(stub_tree());
+        let export = Export::new(
+            runtime.handle().clone(),
+            Arc::clone(&namespace) as Arc<dyn Namespace>,
+        );
+
+        let test_dir = export.lookup(export.root(), "test").expect("lookup test");
+        export.attr(test_dir).expect("first attr");
+        export.attr(test_dir).expect("second attr");
+
+        assert_eq!(
+            namespace.getattrs.load(Ordering::Relaxed),
+            0,
+            "a positive lookup must seed the child's attribute answer"
+        );
+    }
+
+    #[test]
+    fn cacheable_attrs_round_trip_once() {
+        let runtime = TokioRuntime::new().expect("tokio runtime");
+        let namespace = Arc::new(stub_tree());
+        let state_dir = tempfile::tempdir().expect("state dir");
+        let export = Export::with_persistence(
+            runtime.handle().clone(),
+            Arc::clone(&namespace) as Arc<dyn Namespace>,
+            PersistInit {
+                generation: 0x1234,
+                next_ino: 200,
+                entries: cold_entries(),
+                state_path: state_dir.path().join("filehandles.json"),
+            },
+        );
+
+        for _ in 0..128 {
+            export.attr(101).expect("cached attr");
+        }
+
+        assert_eq!(
+            namespace.getattrs.load(Ordering::Relaxed),
+            1,
+            "a cacheable namespace attr must cross the process boundary once"
+        );
+    }
+
+    #[test]
+    fn zero_ttl_attrs_always_round_trip() {
+        let runtime = TokioRuntime::new().expect("tokio runtime");
+        let namespace = Arc::new(stub_tree_with_deferred_file());
+        let state_dir = tempfile::tempdir().expect("state dir");
+        let export = Export::with_persistence(
+            runtime.handle().clone(),
+            Arc::clone(&namespace) as Arc<dyn Namespace>,
+            PersistInit {
+                generation: 0x1234,
+                next_ino: 200,
+                entries: cold_entries(),
+                state_path: state_dir.path().join("filehandles.json"),
+            },
+        );
+
+        export.attr(101).expect("first attr");
+        export.attr(101).expect("second attr");
+
+        assert_eq!(
+            namespace.getattrs.load(Ordering::Relaxed),
+            2,
+            "an unknown-size zero-TTL attr must never be retained"
+        );
+    }
+
+    #[test]
+    fn negative_lookup_round_trips_once() {
+        let runtime = TokioRuntime::new().expect("tokio runtime");
+        let namespace = Arc::new(stub_tree());
+        let export = Export::new(
+            runtime.handle().clone(),
+            Arc::clone(&namespace) as Arc<dyn Namespace>,
+        );
+
+        for _ in 0..128 {
+            assert_eq!(export.lookup(export.root(), ".git"), Err(Status::NoEnt));
+        }
+
+        assert_eq!(
+            namespace.lookups.load(Ordering::Relaxed),
+            1,
+            "a leased negative lookup must cross the process boundary once"
+        );
+    }
+
+    #[test]
+    fn readdir_seeds_lookup() {
+        let runtime = TokioRuntime::new().expect("tokio runtime");
+        let namespace = Arc::new(stub_tree());
+        let export = Export::new(
+            runtime.handle().clone(),
+            Arc::clone(&namespace) as Arc<dyn Namespace>,
+        );
+
+        export.readdir(export.root()).expect("root listing");
+        export.lookup(export.root(), "test").expect("seeded lookup");
+
+        assert_eq!(
+            namespace.lookups.load(Ordering::Relaxed),
+            0,
+            "a listed child must not require a second namespace lookup"
+        );
     }
 
     #[test]

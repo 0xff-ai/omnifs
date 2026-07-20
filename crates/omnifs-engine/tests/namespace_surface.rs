@@ -75,7 +75,7 @@ async fn root_enumerates_and_descends_to_message() {
     let mount = ns.lookup(Path::root(), "test").await.unwrap();
     // Mount lookup finds the `hello` directory the provider projects.
     let hello = ns.lookup(mount.path.clone(), "hello").await.unwrap();
-    assert_eq!(hello.attrs.kind, EntryKind::Directory);
+    assert_eq!(hello.attrs().unwrap().kind, EntryKind::Directory);
 
     // Root readdir enumerates the mount's root children.
     let page = ns
@@ -95,7 +95,7 @@ async fn root_enumerates_and_descends_to_message() {
         .lookup(hello.path.clone(), "message")
         .await
         .expect("lookup /hello/message");
-    assert_eq!(message.attrs.kind, EntryKind::File);
+    assert_eq!(message.attrs().unwrap().kind, EntryKind::File);
     assert!(matches!(
         ns.lookup(message.path.clone(), "child").await,
         Err(NsError::NotDirectory)
@@ -331,7 +331,7 @@ async fn stream_face_reads_through_open_file() {
     let open = ns.lookup(items.path, "open").await.expect("open");
     let seven = ns.lookup(open.path, "7").await.expect("7");
     let log = ns.lookup(seven.path, "log").await.expect("log");
-    assert_eq!(log.attrs.kind, EntryKind::File);
+    assert_eq!(log.attrs().unwrap().kind, EntryKind::File);
 
     let answer = ns
         .read(log.path, 0, 16)
@@ -346,16 +346,17 @@ async fn stream_face_reads_through_open_file() {
 // --- errors ------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn missing_child_is_not_found() {
+async fn missing_child_is_a_cacheable_lookup_answer() {
     let t = test_ns();
     let ns = &t.ns;
 
     let hello = mount_child(ns.as_ref(), "hello").await;
-    let err = ns
+    let answer = ns
         .lookup(hello.path.clone(), "nonexistent")
         .await
-        .expect_err("missing child errors");
-    assert_eq!(err, NsError::NotFound);
+        .expect("missing child answer");
+    assert!(answer.is_missing());
+    assert!(!answer.ttl().is_zero());
 }
 
 // --- invalidation events -----------------------------------------------------

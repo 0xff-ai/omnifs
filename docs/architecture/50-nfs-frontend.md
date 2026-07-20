@@ -41,7 +41,7 @@ Unknown and non-zero sizes follow the shared file-attribute contract. NFS must n
 
 Frontend caches are protocol caches. Shared cache records and projection policy belong to host/tree code.
 
-If NFS needs local handle or attr caches, invalidation must flow from tree or host invalidation events. Do not add provider-specific cache invalidation inside NFS.
+NFS keeps one bounded, process-local protocol cache for plain attribute and lookup answers because its mount options disable those kernel caches. The engine sets each positive or negative answer's cache lifetime; NFS may retain only that answer, seeds positive entries from directory listings, and evicts by namespace invalidation. Zero-TTL answers always cross the wire. The cache is never persisted and contains no provider or projection cache schema.
 
 ## Mount lifecycle
 
@@ -55,7 +55,7 @@ FUSE gives the daemon per-operation control over what the kernel believes. An NF
 
 Mitigated by mount options today:
 
-- **Attribute and lookup staleness.** The client caches attrs and lookups on its own schedule, which fights live and growing projected files. Mitigation: `noac` plus `nonegnamecache` (macOS), `actimeo=0` plus `lookupcache=none` (Linux). Cost: every stat and lookup round-trips to the loopback server. Revisit when tree invalidation can drive cache validity instead of disabling caching wholesale.
+- **Attribute and lookup staleness.** The client caches attrs and lookups on its own schedule, which fights live and growing projected files. Mitigation: `noac` plus `nonegnamecache` (macOS), `actimeo=0` plus `lookupcache=none` (Linux). Cost: every stat and lookup reaches the loopback server. The NFS-local bounded protocol cache absorbs repeated engine-leased answers without crossing `omnifs-thin` and the wire; zero-validity answers still reach the daemon.
 - **Hangs against a dead server.** A default NFS mount blocks processes indefinitely when the server dies. Mitigation: `soft`, `timeo=5`, `retrans=1` (Linux) and `intr`, `timeo=5`, `retrans=1`, `retrycnt=0` (macOS) bound the wait; teardown force-unmounts and sweeps state files for daemon crashes.
 - **Delegation and callback complexity.** `nocallback` (macOS) disables delegations, so no callback channel or recall handling exists to get wrong.
 

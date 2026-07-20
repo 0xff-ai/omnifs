@@ -1,6 +1,5 @@
 mod support;
 
-use omnifs_core::path::Path;
 use omnifs_nfs::{DirListing, Export, NodeKind, ReadOnlyExport, Status};
 use std::time::{Duration, Instant};
 use support::{test_export, test_export_with_mount};
@@ -169,7 +168,7 @@ fn mount_enumeration_root_reflects_startup_mount_set() {
         "root directory change remains stable for the immutable startup mount set"
     );
 
-    let root_event = omnifs_engine::NsEvent::InvalidateSubtree { path: Path::root() };
+    let root_event = omnifs_engine::NsEvent::reset();
     harness
         .events
         .send(root_event)
@@ -370,7 +369,16 @@ fn omnifs_export_invalidates_path_state_and_open_cache() {
         .block_on(runtime.call_timer_tick())
         .expect("timer tick");
 
-    assert!(matches!(export.attr(item), Err(Status::Stale)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match export.attr(item) {
+            Err(Status::Stale) => break,
+            Ok(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            },
+            result => panic!("item did not become stale after invalidation: {result:?}"),
+        }
+    }
     assert!(matches!(
         export.read_state(opened.stateid, 0, 32),
         Err(Status::BadStateId)

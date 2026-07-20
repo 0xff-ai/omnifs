@@ -1163,19 +1163,28 @@ mod tests {
             .lookup(partial.path.clone(), "known")
             .await
             .expect("known partial child");
-        assert_eq!(known.attrs.kind, crate::namespace::EntryKind::File);
+        assert_eq!(
+            known.attrs().unwrap().kind,
+            crate::namespace::EntryKind::File
+        );
         assert!(matches!(
             namespace.lookup(partial.path.clone(), "unknown").await,
             Err(NsError::OfflineMiss)
         ));
-        assert!(matches!(
-            namespace.lookup(partial.path, "gone").await,
-            Err(NsError::NotFound)
-        ));
-        assert!(matches!(
-            namespace.lookup(mount.path, "unknown").await,
-            Err(NsError::NotFound)
-        ));
+        assert!(
+            namespace
+                .lookup(partial.path, "gone")
+                .await
+                .expect("known missing partial child")
+                .is_missing()
+        );
+        assert!(
+            namespace
+                .lookup(mount.path, "unknown")
+                .await
+                .expect("known missing mount child")
+                .is_missing()
+        );
         let root_git_mount = namespace
             .lookup(ProjectedPath::root(), "rootgit")
             .await

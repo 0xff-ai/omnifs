@@ -354,10 +354,8 @@ impl Namespace for PathNamespace {
             } else {
                 0
             };
-            Ok(LookupAnswer {
-                path: node,
-                attrs: Self::attrs(kind, size),
-            })
+            let attrs = Self::attrs(kind, size);
+            Ok(LookupAnswer::found(node, attrs))
         })
     }
 

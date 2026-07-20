@@ -25,6 +25,8 @@ Learned sizes and read semantics belong with file attrs and tree policy, not fro
 
 The host owns all caching as opaque byte storage. Providers do not add private LRUs or time-based expiration policy. Frontends do not own cache schema.
 
+The namespace boundary carries engine-issued cache lifetimes. A frontend may retain only the plain positive or negative answer for that lifetime and must evict it on namespace invalidation. Missing children are lookup answers, while transport, offline, and provider failures remain errors.
+
 `Caches` owns one Fjall database and one global content-addressed `BodyStore`. One `ProjectionStore` keyspace, selected by the exact mount-spec bytes and pinned provider identity, owns every durable fact for that immutable projection. The process-local memory tier is derived and belongs to the projection's `MountResources`.
 
 Exactly one live `Arc<MountResources>` exists per projection identity in a process. Its single transition boundary publishes object relations, typed lookup/attr/file/listing facts, blob and Git references, freshness, and invalidations in one durable transaction. A provider terminal is observable only after that transaction commits and the derived memory tier is invalidated. Runtime invalidation epochs remain process-local and fence the complete stale transition.

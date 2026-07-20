@@ -55,7 +55,10 @@ async fn first_page_carries_cursor_and_manual_cursor_expands_to_completion() {
     }
     assert_eq!(names.len(), 6);
     let sibling = harness.namespace.lookup(feed.path, "item-0").await.unwrap();
-    assert_eq!(sibling.attrs.kind, omnifs_engine::EntryKind::Directory);
+    assert_eq!(
+        sibling.attrs().unwrap().kind,
+        omnifs_engine::EntryKind::Directory
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -86,7 +89,10 @@ async fn pagination_preserves_siblings_and_non_paged_directories_have_no_next() 
         .lookup(feed.path.clone(), "item-0")
         .await
         .unwrap();
-    assert_eq!(sibling.attrs.kind, omnifs_engine::EntryKind::Directory);
+    assert_eq!(
+        sibling.attrs().unwrap().kind,
+        omnifs_engine::EntryKind::Directory
+    );
 
     let hello = harness
         .namespace

@@ -6,6 +6,7 @@
 //! types; the Omnifs VFS wire protocol remains isolated behind `ReadOnlyExport`.
 
 mod adapter;
+mod cache;
 mod delayed;
 mod error;
 mod export;

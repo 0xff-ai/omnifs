@@ -8,10 +8,8 @@ use omnifs_itest::RuntimeHarness;
 
 async fn resolve(harness: &RuntimeHarness, value: &str) -> LookupAnswer {
     let namespace = harness.namespace.as_ref();
-    let mut answer = LookupAnswer {
-        path: Path::root(),
-        attrs: namespace.getattr(Path::root()).await.unwrap(),
-    };
+    let attrs = namespace.getattr(Path::root()).await.unwrap();
+    let mut answer = LookupAnswer::found(Path::root(), attrs);
     for segment in Path::parse(value).unwrap().segments() {
         answer = namespace.lookup(answer.path, segment).await.unwrap();
     }
@@ -23,8 +21,8 @@ async fn live_file_grows_and_follow_read_observes_appended_bytes() {
     let harness = RuntimeHarness::new(omnifs_itest::TEST_PROVIDER_CONFIG).unwrap();
     let namespace = harness.namespace.as_ref();
     let node = resolve(&harness, "/test/hello/live-log").await;
-    assert_eq!(node.attrs.kind, EntryKind::File);
-    assert_eq!(node.attrs.read_style, ReadStyle::Ranged);
+    assert_eq!(node.attrs().unwrap().kind, EntryKind::File);
+    assert_eq!(node.attrs().unwrap().read_style, ReadStyle::Ranged);
     let mut events = namespace.subscribe();
 
     let first = namespace.read(node.path.clone(), 0, 128).await.unwrap();
