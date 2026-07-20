@@ -42,6 +42,11 @@ pub(crate) use self::list::{Cursor, ListOutcome};
 pub(crate) use self::node::HostKind;
 pub(crate) use self::node::{Node, NodeBody};
 pub(crate) use self::read::ReadResult;
+/// Maximum whole-file payload the tree will materialize in memory for one read.
+///
+/// Ranged reads stream through [`RangedHandle`] and are not subject to this cap.
+pub(crate) const MATERIALIZE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Per-call request policy context. Observability follows the active tracing
 /// span rather than being threaded through tree operations.
 #[derive(Debug, Clone, Default)]

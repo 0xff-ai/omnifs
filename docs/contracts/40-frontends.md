@@ -13,7 +13,7 @@ Read this before touching `omnifs-thin`, the `omnifs-fuse` or `omnifs-nfs` proto
 
 Frontend crates translate namespace answers into protocol state. They do not decide projection semantics.
 
-A frontend consumes the narrow `omnifs_engine::namespace` surface (`Namespace`, validated `Path`, `Attrs`, `DirPage`, `ReadAnswer`, `NsEvent`, and friends) and nothing else of the engine. It never touches internal tree, render, or view modules directly: the already-policied protocol answer (size, TTL, change counter, direct-I/O, read style) crosses the `Namespace` boundary as plain data. Keep inode numbers, filehandles, stateids, leases, notifications, reply construction, and protocol-specific error mapping in frontend crates. Convert namespace types into protocol replies once at the frontend boundary.
+A frontend consumes the narrow `omnifs_engine::namespace` surface (`Namespace`, validated `Path`, `Attrs`, `DirPage`, `ReadAnswer`, `NsEvent`, and friends) and nothing else of the engine. It never touches internal tree or view modules directly: the already-policied protocol answer (size, TTL, change counter, direct-I/O, read style) crosses the `Namespace` boundary as plain data. Keep inode numbers, filehandles, stateids, leases, notifications, reply construction, and protocol-specific error mapping in frontend crates. Convert namespace types into protocol replies once at the frontend boundary.
 
 ### Frontend registry
 

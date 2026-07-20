@@ -2,7 +2,6 @@
 
 use crate::cache::{canonical_directory, ensure_directory, identity::GitId};
 use crate::log_redaction::LogUrl;
-use crate::sandbox::publish;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -10,7 +9,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use url::Url;
 
@@ -185,14 +184,14 @@ impl GitCloner {
         }
 
         let span = crate::inspector::clone_span(operation_id, &cache_id, clone_url);
-        let temporary = publish::temp_sibling_path(&cache_path);
+        let temporary = Self::temp_sibling_path(&cache_path);
         let temporary_repo = temporary.join(CLONE_REPO_DIR);
         std::fs::create_dir(&temporary).map_err(CloneError::Publish)?;
         let outcome = span.in_scope(|| {
             Self::run_clone(clone_url, reference, &temporary_repo).and_then(|()| {
                 Self::write_binding(&Self::binding_path(&temporary), canonical_remote, reference)
                     .map_err(CloneError::Publish)?;
-                publish::publish_dir_by_rename(&temporary, &cache_path).map_err(CloneError::Publish)
+                Self::publish_dir_by_rename(&temporary, &cache_path).map_err(CloneError::Publish)
             })
         });
         crate::inspector::record_outcome(
@@ -204,7 +203,7 @@ impl GitCloner {
             },
         );
         if let Err(error) = outcome {
-            publish::remove_path_best_effort(&temporary);
+            Self::remove_path_best_effort(&temporary);
             return Err(error);
         }
 
@@ -231,7 +230,69 @@ impl GitCloner {
         };
         let bytes = serde_json::to_vec(&binding)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        publish::replace_file_via_temp_rename(path, &bytes)
+        Self::replace_file_via_temp_rename(path, &bytes)
+    }
+
+    /// Unique sibling temp path for a later rename into `dest`.
+    ///
+    /// Visibility is atomic on one filesystem via rename; this does not fsync
+    /// and does not claim crash durability.
+    fn temp_sibling_path(dest: &Path) -> PathBuf {
+        let name = dest
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        dest.with_file_name(format!(".{name}.tmp.{}.{nanos}", std::process::id()))
+    }
+
+    fn publish_dir_by_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
+        let source_meta = std::fs::symlink_metadata(source)?;
+        if !source_meta.is_dir() || source_meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "publish source is not a regular directory",
+            ));
+        }
+        if let Some(parent) = destination.parent() {
+            let metadata = std::fs::symlink_metadata(parent)?;
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "publish destination parent is not a regular directory",
+                ));
+            }
+        }
+        std::fs::rename(source, destination)
+    }
+
+    fn replace_file_via_temp_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        let tmp = Self::temp_sibling_path(path);
+        if let Err(e) = std::fs::write(&tmp, bytes) {
+            Self::remove_path_best_effort(&tmp);
+            return Err(e);
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            Self::remove_path_best_effort(&tmp);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn remove_existing_path(path: &Path) -> std::io::Result<()> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        }
+    }
+
+    fn remove_path_best_effort(path: &Path) {
+        let _ = Self::remove_existing_path(path);
     }
 
     fn is_valid_clone(path: &Path, remote: &str, reference: Option<&str>) -> bool {
@@ -308,7 +369,7 @@ impl GitCloner {
                     if status.success() {
                         return Ok(());
                     }
-                    publish::remove_path_best_effort(dest);
+                    Self::remove_path_best_effort(dest);
                     warn!(url = %LogUrl(url), %status, "git clone failed");
                     return Err(CloneError::Failed { status });
                 },
@@ -316,7 +377,7 @@ impl GitCloner {
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = stderr_thread.join();
-                    publish::remove_path_best_effort(dest);
+                    Self::remove_path_best_effort(dest);
                     warn!(url = %LogUrl(url), "git clone timed out");
                     return Err(CloneError::Timeout {
                         timeout_secs: CLONE_TIMEOUT.as_secs(),
@@ -327,7 +388,7 @@ impl GitCloner {
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = stderr_thread.join();
-                    publish::remove_path_best_effort(dest);
+                    Self::remove_path_best_effort(dest);
                     return Err(CloneError::Wait(error));
                 },
             }
