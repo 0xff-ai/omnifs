@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::creds::FileStore;
-use crate::layout::{self, WorkspaceLayout};
+use crate::layout;
 use crate::mounts::{Name, Registry, Repository, Revision, Spec, SpecError};
 use crate::provider::Catalog;
 use atomic_write_file::OpenOptions as AtomicOpenOptions;
@@ -17,11 +17,11 @@ use serde::{Deserialize, Serialize};
 /// The central broker for one omnifs home.
 ///
 /// `Workspace` owns the persistent components under `OMNIFS_HOME`, not a bag
-/// of paths. It never exposes `WorkspaceLayout`, the home root, generic
-/// directory getters, or path-transfer objects. Callers request a
-/// behavior-owning component, and a concrete path can leave that component
-/// only at the immediate filesystem, process, protocol, engine, test-fixture,
-/// or final-output boundary that consumes it.
+/// of paths. It never exposes the home root, generic directory getters, or
+/// path-transfer objects. Callers request a behavior-owning component, and a
+/// concrete path can leave that component only at the immediate filesystem,
+/// process, protocol, engine, test-fixture, or final-output boundary that
+/// consumes it.
 pub struct Workspace {
     config_file: PathBuf,
     credentials: FileStore,
@@ -37,39 +37,30 @@ pub struct Workspace {
 impl Workspace {
     /// Resolve the workspace from `OMNIFS_HOME` or `$HOME/.omnifs`.
     pub fn resolve() -> Result<Self, layout::ResolveError> {
-        let layout = WorkspaceLayout::resolve()?;
-        Ok(Self::from_layout(layout))
+        Ok(Self::under_root(&layout::resolve_root()?))
     }
 
     /// Construct a workspace under a fixture or explicitly selected root.
     /// Relative roots are normalized once at this boundary.
     #[must_use]
     pub fn under_root(root: &Path) -> Self {
-        Self::from_layout(WorkspaceLayout::under_root(&absolute(root)))
-    }
-
-    fn from_layout(layout: WorkspaceLayout) -> Self {
-        let layout = absolute_layout(layout);
-        let mounts_dir = layout.mounts_dir.clone();
-        let cache_dir = layout.cache_dir.clone();
-        let config_dir = layout.config_dir.clone();
-        let credentials = FileStore::new(layout.credentials_file.clone());
-        let catalog = Catalog::open(layout.providers_dir.clone());
-        let daemon = DaemonState::new(&layout);
-        let frontend = FrontendState::new(&layout);
-        let identity = WorkspaceIdentity {
-            home: config_dir.clone(),
-        };
+        let home = absolute(root);
+        let cache_dir = home.join(layout::CACHE_SUBDIR);
+        let credentials = FileStore::new(home.join(layout::CREDENTIALS_FILE));
+        let catalog = Catalog::open(home.join(layout::PROVIDERS_SUBDIR));
+        let daemon = DaemonState::new(home.clone());
+        let frontend = FrontendState::new(home.clone(), cache_dir.clone());
+        let identity = WorkspaceIdentity { home: home.clone() };
         Self {
-            config_file: layout.config_file,
+            config_file: home.join(layout::CONFIG_FILE),
             credentials,
             catalog,
-            desired_state: DesiredState::new(mounts_dir, cache_dir.clone()),
+            desired_state: DesiredState::new(home.join(layout::MOUNTS_SUBDIR), cache_dir.clone()),
             daemon,
             frontend,
             identity,
-            metrics: crate::metrics::Store::new(&config_dir),
-            warmup: WarmupStore::new(config_dir, cache_dir),
+            metrics: crate::metrics::Store::new(&home),
+            warmup: WarmupStore::new(home, cache_dir),
         }
     }
 
@@ -241,10 +232,8 @@ pub struct DaemonState {
 }
 
 impl DaemonState {
-    fn new(layout: &WorkspaceLayout) -> Self {
-        Self {
-            home: layout.config_dir.clone(),
-        }
+    fn new(home: PathBuf) -> Self {
+        Self { home }
     }
 
     pub fn record(&self) -> io::Result<Option<crate::daemon_record::DaemonRecord>> {
@@ -318,11 +307,12 @@ pub struct FrontendState {
 }
 
 impl FrontendState {
-    fn new(layout: &WorkspaceLayout) -> Self {
+    fn new(config_dir: PathBuf, cache_dir: PathBuf) -> Self {
+        let state_root = cache_dir.join(layout::FRONTEND_STATE_SUBDIR);
         Self {
-            config_dir: layout.config_dir.clone(),
-            cache_dir: layout.cache_dir.clone(),
-            state_root: layout.frontend_state_root(),
+            config_dir,
+            cache_dir,
+            state_root,
         }
     }
 
@@ -492,16 +482,6 @@ fn absolute(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
     std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-}
-
-fn absolute_layout(mut layout: WorkspaceLayout) -> WorkspaceLayout {
-    layout.config_dir = absolute(&layout.config_dir);
-    layout.cache_dir = absolute(&layout.cache_dir);
-    layout.mounts_dir = absolute(&layout.mounts_dir);
-    layout.providers_dir = absolute(&layout.providers_dir);
-    layout.credentials_file = absolute(&layout.credentials_file);
-    layout.config_file = absolute(&layout.config_file);
-    layout
 }
 
 #[cfg(test)]

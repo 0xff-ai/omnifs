@@ -1,9 +1,8 @@
-//! omnifs home directory layout and path resolution.
+//! Omnifs home path constants and root resolution.
 //!
-//! This crate is the single source of truth for the omnifs on-disk layout.
-//! Lower-level storage code and hermetic fixtures may construct this layout;
-//! application code should use [`crate::Workspace`] so component ownership
-//! stays behind typed brokers.
+//! Relative names under the home, plus the env policy that picks the home root,
+//! live here. [`crate::Workspace`] is the only type that binds those names to
+//! behavior-owning components.
 //!
 //! Resolution order:
 //!   1. `OMNIFS_HOME`
@@ -49,20 +48,6 @@ pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
 /// Overrides the host-visible mount point the daemon serves at.
 pub const OMNIFS_MOUNT_POINT_ENV: &str = "OMNIFS_MOUNT_POINT";
 
-/// The fully resolved omnifs directory layout.
-#[derive(Debug)]
-pub(crate) struct WorkspaceLayout {
-    pub(crate) config_dir: PathBuf,
-    pub(crate) cache_dir: PathBuf,
-    /// Staging directory holding one JSON file per mount.
-    pub(crate) mounts_dir: PathBuf,
-    /// Directory holding compiled provider WASM components, looked up
-    /// by the `provider:` field of each mount config.
-    pub(crate) providers_dir: PathBuf,
-    pub(crate) credentials_file: PathBuf,
-    pub(crate) config_file: PathBuf,
-}
-
 /// Path resolution failed because no default root could be derived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolveError;
@@ -75,39 +60,12 @@ impl std::fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
-impl WorkspaceLayout {
-    /// Resolve paths from env, `OMNIFS_HOME`, then the `$HOME/.omnifs` default.
-    pub(crate) fn resolve() -> Result<Self, ResolveError> {
-        let omnifs_home = std::env::var_os(OMNIFS_HOME_ENV).map(PathBuf::from);
-        let default_root =
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(DEFAULT_HOME_SUBDIR));
-
-        let root = omnifs_home.or(default_root).ok_or(ResolveError)?;
-
-        Ok(Self::under_root(&root))
-    }
-
-    /// Assemble the canonical flat layout under a single `root`.
-    ///
-    /// This is the one place that maps the omnifs structure to concrete paths.
-    /// Both host default resolution and the in-container guest layout build on
-    /// this so they always stay in sync.
-    pub(crate) fn under_root(root: &Path) -> Self {
-        let config_dir = root.to_path_buf();
-        WorkspaceLayout {
-            config_file: config_dir.join(CONFIG_FILE),
-            credentials_file: config_dir.join(CREDENTIALS_FILE),
-            mounts_dir: config_dir.join(MOUNTS_SUBDIR),
-            providers_dir: config_dir.join(PROVIDERS_SUBDIR),
-            cache_dir: config_dir.join(CACHE_SUBDIR),
-            config_dir,
-        }
-    }
-
-    /// Discoverable parent of all local frontend state directories.
-    pub(crate) fn frontend_state_root(&self) -> PathBuf {
-        self.cache_dir.join(FRONTEND_STATE_SUBDIR)
-    }
+/// Resolve the omnifs home root from `OMNIFS_HOME`, else `$HOME/.omnifs`.
+pub(crate) fn resolve_root() -> Result<PathBuf, ResolveError> {
+    let omnifs_home = std::env::var_os(OMNIFS_HOME_ENV).map(PathBuf::from);
+    let default_root =
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(DEFAULT_HOME_SUBDIR));
+    omnifs_home.or(default_root).ok_or(ResolveError)
 }
 
 /// Home-relativize a path for human display, falling back to the full path.
@@ -123,8 +81,8 @@ pub fn display(path: &Path) -> String {
 
 /// Compiled provider-component artifacts live under `<cache_dir>/wasm`, with
 /// the rest of the host's state, rather than a global per-user wasmtime cache.
-/// The single owner of this path: both the resolved workspace layout and the
-/// host runtime derive it from their cache dir through here.
+/// Callers derive it from a cache dir through here so the relative name cannot
+/// drift between warmup storage and the host runtime.
 pub fn wasm_cache_dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("wasm")
 }
