@@ -1,4 +1,10 @@
 //! The workspace broker for persistent omnifs state.
+//!
+//! Relative names under the home, home-root env resolution, and the free
+//! helpers that are not component fields live here alongside [`Workspace`].
+//! Resolution order for the home root:
+//!   1. `OMNIFS_HOME`
+//!   2. Default: `$HOME/.omnifs`
 
 use std::cell::{OnceCell, RefCell, RefMut};
 use std::fs::{File, OpenOptions};
@@ -7,21 +13,102 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::creds::FileStore;
-use crate::layout;
 use crate::mounts::{Name, Registry, Repository, Revision, Spec, SpecError};
 use crate::provider::Catalog;
 use atomic_write_file::OpenOptions as AtomicOpenOptions;
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 
-/// The central broker for one omnifs home.
+const DEFAULT_HOME_SUBDIR: &str = ".omnifs";
+
+// The on-disk structure of an omnifs root, relative to the root directory.
+// Every concrete path (host default resolution and the in-container guest
+// layout) is `root` joined with one of these. Host and guest share the same
+// flat shape.
+pub(crate) const CONFIG_FILE: &str = "config.toml";
+pub(crate) const CREDENTIALS_FILE: &str = "credentials.json";
+pub(crate) const MOUNTS_SUBDIR: &str = "mounts";
+pub(crate) const PROVIDERS_SUBDIR: &str = "providers";
+pub(crate) const CACHE_SUBDIR: &str = "cache";
+/// Subdirectory of `cache_dir` holding immutable mount-spec revision snapshots.
+pub(crate) const MOUNT_REVISIONS_SUBDIR: &str = "mount-revisions";
+/// Subdirectory of `cache_dir` holding local frontend state.
+pub(crate) const FRONTEND_STATE_SUBDIR: &str = "frontends";
+/// Subdirectory of `config_dir` holding the daemon's namespace attach sockets
+/// served to out-of-process frontend runners: the fixed local socket
+/// (`<config_dir>/frontends/local.sock`) and, on demand, the vsock-proxy
+/// listener below.
+pub(crate) const FRONTENDS_SUBDIR: &str = "frontends";
+/// Filename of the daemon's fixed namespace attach socket for local frontend
+/// runners (`<config_dir>/frontends/local.sock`). One socket, always at this
+/// name; auth is filesystem permissions on the socket.
+pub(crate) const LOCAL_ATTACH_SOCKET_NAME: &str = "local.sock";
+/// Filename of the UDS namespace attach listener under `frontends/`
+/// (`<config_dir>/frontends/vsock-attach.sock`). Bound on demand via the
+/// daemon's `AttachVsock` control operation, one per daemon instance. Libkrun's
+/// vsock-proxy path terminates every guest vsock dial on this socket as the
+/// same local peer; bind locality is the auth, same as TCP loopback/docker0.
+pub(crate) const VSOCK_ATTACH_SOCKET_NAME: &str = "vsock-attach.sock";
+/// Durable TCP and vsock listener authority.
+pub(crate) const ATTACH_TARGETS_FILE: &str = "targets.json";
+pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
+/// Overrides the host-visible mount point the daemon serves at.
+pub const OMNIFS_MOUNT_POINT_ENV: &str = "OMNIFS_MOUNT_POINT";
+
+/// Path resolution failed because no default root could be derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolveError;
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cannot resolve omnifs home: set HOME or OMNIFS_HOME")
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
+/// Resolve the omnifs home root from `OMNIFS_HOME`, else `$HOME/.omnifs`.
+fn resolve_root() -> Result<PathBuf, ResolveError> {
+    let omnifs_home = std::env::var_os(OMNIFS_HOME_ENV).map(PathBuf::from);
+    let default_root =
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(DEFAULT_HOME_SUBDIR));
+    omnifs_home.or(default_root).ok_or(ResolveError)
+}
+
+/// Home-relativize a path for human display, falling back to the full path.
+pub fn display(path: &Path) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        if let Ok(stripped) = path.strip_prefix(&home) {
+            return format!("~/{}", stripped.display());
+        }
+    }
+    path.display().to_string()
+}
+
+/// Compiled provider-component artifacts live under `<cache_dir>/wasm`, with
+/// the rest of the host's state, rather than a global per-user wasmtime cache.
+/// Callers derive it from a cache dir through here so the relative name cannot
+/// drift between warmup storage and the host runtime.
+pub fn wasm_cache_dir(cache_dir: &Path) -> PathBuf {
+    cache_dir.join("wasm")
+}
+
+/// Resolve the host-visible mount point the daemon serves at:
+/// `OMNIFS_MOUNT_POINT` when set (the container entrypoint exports it),
+/// otherwise `$HOME/omnifs`, deliberately outside `OMNIFS_HOME` so the mounted
+/// tree lives at a normal user-owned location. `None` only when neither is
+/// available.
 ///
-/// `Workspace` owns the persistent components under `OMNIFS_HOME`, not a bag
-/// of paths. It never exposes the home root, generic directory getters, or
-/// path-transfer objects. Callers request a behavior-owning component, and a
-/// concrete path can leave that component only at the immediate filesystem,
-/// process, protocol, engine, test-fixture, or final-output boundary that
-/// consumes it.
+/// Single owner of this path: the daemon serves here and `omnifs setup`
+/// previews it, so the served location and the preview cannot drift.
+pub fn resolve_mount_point() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os(OMNIFS_MOUNT_POINT_ENV) {
+        return Some(PathBuf::from(explicit));
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("omnifs"))
+}
+
 pub struct Workspace {
     config_file: PathBuf,
     credentials: FileStore,
@@ -36,8 +123,8 @@ pub struct Workspace {
 
 impl Workspace {
     /// Resolve the workspace from `OMNIFS_HOME` or `$HOME/.omnifs`.
-    pub fn resolve() -> Result<Self, layout::ResolveError> {
-        Ok(Self::under_root(&layout::resolve_root()?))
+    pub fn resolve() -> Result<Self, ResolveError> {
+        Ok(Self::under_root(&resolve_root()?))
     }
 
     /// Construct a workspace under a fixture or explicitly selected root.
@@ -45,17 +132,17 @@ impl Workspace {
     #[must_use]
     pub fn under_root(root: &Path) -> Self {
         let home = absolute(root);
-        let cache_dir = home.join(layout::CACHE_SUBDIR);
-        let credentials = FileStore::new(home.join(layout::CREDENTIALS_FILE));
-        let catalog = Catalog::open(home.join(layout::PROVIDERS_SUBDIR));
+        let cache_dir = home.join(CACHE_SUBDIR);
+        let credentials = FileStore::new(home.join(CREDENTIALS_FILE));
+        let catalog = Catalog::open(home.join(PROVIDERS_SUBDIR));
         let daemon = DaemonState::new(home.clone());
         let frontend = FrontendState::new(home.clone(), cache_dir.clone());
         let identity = WorkspaceIdentity { home: home.clone() };
         Self {
-            config_file: home.join(layout::CONFIG_FILE),
+            config_file: home.join(CONFIG_FILE),
             credentials,
             catalog,
-            desired_state: DesiredState::new(home.join(layout::MOUNTS_SUBDIR), cache_dir.clone()),
+            desired_state: DesiredState::new(home.join(MOUNTS_SUBDIR), cache_dir.clone()),
             daemon,
             frontend,
             identity,
@@ -74,7 +161,7 @@ impl Workspace {
     pub fn config_diagnostic(&self) -> ConfigDiagnostic {
         ConfigDiagnostic {
             exists: self.config_file.exists(),
-            display: layout::display(&self.config_file),
+            display: display(&self.config_file),
         }
     }
 
@@ -280,17 +367,17 @@ impl DaemonState {
 
     #[must_use]
     pub fn cache_dir(&self) -> PathBuf {
-        self.home.join(layout::CACHE_SUBDIR)
+        self.home.join(CACHE_SUBDIR)
     }
 
     #[must_use]
     pub fn providers_dir(&self) -> PathBuf {
-        self.home.join(layout::PROVIDERS_SUBDIR)
+        self.home.join(PROVIDERS_SUBDIR)
     }
 
     #[must_use]
     pub fn credentials_file(&self) -> PathBuf {
-        self.home.join(layout::CREDENTIALS_FILE)
+        self.home.join(CREDENTIALS_FILE)
     }
 }
 
@@ -308,7 +395,7 @@ pub struct FrontendState {
 
 impl FrontendState {
     fn new(config_dir: PathBuf, cache_dir: PathBuf) -> Self {
-        let state_root = cache_dir.join(layout::FRONTEND_STATE_SUBDIR);
+        let state_root = cache_dir.join(FRONTEND_STATE_SUBDIR);
         Self {
             config_dir,
             cache_dir,
@@ -319,8 +406,8 @@ impl FrontendState {
     pub fn attach_store(&self) -> io::Result<crate::attach::Store> {
         crate::attach::Store::open(
             self.config_dir
-                .join(layout::FRONTENDS_SUBDIR)
-                .join(layout::ATTACH_TARGETS_FILE),
+                .join(FRONTENDS_SUBDIR)
+                .join(ATTACH_TARGETS_FILE),
         )
     }
 
@@ -338,15 +425,15 @@ impl FrontendState {
     #[must_use]
     pub fn local_attach_socket(&self) -> PathBuf {
         self.config_dir
-            .join(layout::FRONTENDS_SUBDIR)
-            .join(layout::LOCAL_ATTACH_SOCKET_NAME)
+            .join(FRONTENDS_SUBDIR)
+            .join(LOCAL_ATTACH_SOCKET_NAME)
     }
 
     #[must_use]
     pub fn vsock_attach_socket(&self) -> PathBuf {
         self.config_dir
-            .join(layout::FRONTENDS_SUBDIR)
-            .join(layout::VSOCK_ATTACH_SOCKET_NAME)
+            .join(FRONTENDS_SUBDIR)
+            .join(VSOCK_ATTACH_SOCKET_NAME)
     }
 
     #[must_use]
@@ -413,7 +500,7 @@ impl WarmupStore {
     }
     #[must_use]
     pub fn wasm_cache_dir(&self) -> PathBuf {
-        layout::wasm_cache_dir(&self.cache_dir)
+        wasm_cache_dir(&self.cache_dir)
     }
 
     pub fn acquire(&self) -> io::Result<File> {

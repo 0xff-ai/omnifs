@@ -250,7 +250,7 @@ impl Repository {
 
     pub(crate) fn snapshot_path(cache_dir: &Path, revision: &Revision) -> PathBuf {
         cache_dir
-            .join(crate::layout::MOUNT_REVISIONS_SUBDIR)
+            .join(crate::workspace::MOUNT_REVISIONS_SUBDIR)
             .join(revision.as_str())
     }
 
@@ -814,13 +814,13 @@ mod tests {
         assert_eq!(snapshot.get(&name).unwrap().mount, "demo");
         assert!(
             cache
-                .join(crate::layout::MOUNT_REVISIONS_SUBDIR)
+                .join(crate::workspace::MOUNT_REVISIONS_SUBDIR)
                 .join(revision.as_str())
                 .exists()
         );
 
         let snapshot_path = cache
-            .join(crate::layout::MOUNT_REVISIONS_SUBDIR)
+            .join(crate::workspace::MOUNT_REVISIONS_SUBDIR)
             .join(revision.as_str());
         let expected_bytes = fs::read(snapshot_path.join("demo.json")).unwrap();
         #[cfg(unix)]
