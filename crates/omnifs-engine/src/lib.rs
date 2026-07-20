@@ -24,11 +24,7 @@ pub(crate) mod ops;
 #[cfg(feature = "runtime")]
 pub(crate) mod pagination;
 #[cfg(feature = "runtime")]
-pub mod render;
-#[cfg(feature = "runtime")]
 pub(crate) mod runtime;
-#[cfg(feature = "runtime")]
-pub(crate) mod sandbox;
 #[cfg(feature = "runtime")]
 pub mod test_support;
 #[cfg(feature = "runtime")]

@@ -33,7 +33,7 @@ If a rule here and a contract disagree, follow current code plus the relevant co
 - All object reasoning lives SDK-side: identity, canonical assembly via render, versioning, preload, and revalidation.
 - No provider-specific behavior belongs in the host, tree, or frontends.
 - `omnifs-engine` owns projection semantics shared by FUSE, NFS, and future frontends.
-- Frontends translate namespace answers into protocol state. They consume the narrow `omnifs_engine::namespace` surface, never internal tree/render/view modules directly, and do not decide projection semantics. The daemon is a registry that serves several frontends over one shared namespace.
+- Frontends translate namespace answers into protocol state. They consume the narrow `omnifs_engine::namespace` surface, never internal tree/view modules directly, and do not decide projection semantics. The daemon is a registry that serves several frontends over one shared namespace.
 - Host caching is opaque byte storage. Providers do not add private LRUs or time-based expiration policy.
 - Declarations must bind behavior. A permission, capability, schema rule, routing rule, cache contract, or validation guarantee must feed an enforced runtime or build-time decision.
 

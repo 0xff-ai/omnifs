@@ -1574,7 +1574,7 @@ mod tests {
         use crate::authority::RuntimeAuthority;
         use crate::cache::identity::GitId;
         use crate::git::GitExecutor;
-        use crate::render::MATERIALIZE_MAX_BYTES;
+        use crate::tree::MATERIALIZE_MAX_BYTES;
         use crate::tree_refs::TreeRefs;
         use omnifs_wit::provider::types::{CalloutResult, GitOpenRequest};
         use std::io::{Seek, SeekFrom, Write};
