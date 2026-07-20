@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::DaemonStatus;
 
 /// The only control protocol version understood by this build.
-pub const CONTROL_PROTOCOL_VERSION: u16 = 3;
+pub const CONTROL_PROTOCOL_VERSION: u16 = 4;
 
 /// Maximum size of one request, reply, or inspector event line, including its
 /// trailing newline. The control plane is local and bounded, so oversized
@@ -57,7 +57,7 @@ pub enum ControlOutcome {
     OfflineValidated,
     AttachTcp(TcpAttachTarget),
     AttachVsock(VsockAttachTarget),
-    InspectorReady,
+    InspectorReady { instance_id: String },
     Error(ControlError),
 }
 
@@ -115,10 +115,12 @@ impl ControlReply {
     }
 
     #[must_use]
-    pub fn inspector_ready() -> Self {
+    pub fn inspector_ready(instance_id: impl Into<String>) -> Self {
         Self {
             version: CONTROL_PROTOCOL_VERSION,
-            outcome: ControlOutcome::InspectorReady,
+            outcome: ControlOutcome::InspectorReady {
+                instance_id: instance_id.into(),
+            },
         }
     }
 
@@ -145,7 +147,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
-            r#"{"version":3,"operation":"attach_tcp","bind_ip":"127.0.0.1"}"#
+            r#"{"version":4,"operation":"attach_tcp","bind_ip":"127.0.0.1"}"#
         );
 
         let validate = ControlRequest {
@@ -157,7 +159,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&validate).unwrap(),
             format!(
-                r#"{{"version":3,"operation":"validate_offline","revision":"{}"}}"#,
+                r#"{{"version":4,"operation":"validate_offline","revision":"{}"}}"#,
                 "a".repeat(40)
             )
         );
@@ -168,7 +170,12 @@ mod tests {
         ));
         assert_eq!(
             serde_json::to_string(&reply).unwrap(),
-            r#"{"version":3,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
+            r#"{"version":4,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
+        );
+
+        assert_eq!(
+            serde_json::to_string(&ControlReply::inspector_ready("epoch-1")).unwrap(),
+            r#"{"version":4,"result":"inspector_ready","value":{"instance_id":"epoch-1"}}"#
         );
 
         assert!(

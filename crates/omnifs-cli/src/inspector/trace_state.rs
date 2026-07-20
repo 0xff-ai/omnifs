@@ -2,7 +2,7 @@
 //!
 //! This module owns the state derived from the inspector event stream:
 //! retained operations for the waterfall, the live path forest, mount
-//! metric windows, palette assignment, and operation selection.
+//! metric windows, palette assignment, sandbox stats, and session stats.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -13,6 +13,7 @@ use omnifs_api::events::{
 use super::filter::ViewFilter;
 use super::format;
 use super::metrics::MountWindow;
+use super::sandbox::{MountSandboxView, SandboxStats};
 use super::tree::MountForest;
 use ratatui::style::Color;
 
@@ -141,9 +142,9 @@ impl Stage {
     }
 }
 
-/// Durable per-session counters, untouched by `reset_recent` or pause: the
-/// quit receipt needs "what happened this whole session," not "what's
-/// currently retained in the waterfall."
+/// Durable whole-session counters for the quit receipt. Timeline refolds
+/// derive their own prefix counters, while [`App`](super::app::App) reads the
+/// live reducer so pausing and scrubbing never undercount the session.
 #[derive(Debug, Default, Clone)]
 pub struct SessionStats {
     pub events: u64,
@@ -163,10 +164,8 @@ pub struct SlowOp {
 }
 
 impl SessionStats {
-    /// Fraction of completions served from cache. Mirrors
-    /// [`MountWindow::cache_hit_ratio`]'s hit/(hit+completion) definition so
-    /// the quit receipt's number means the same thing the live sparkline's
-    /// per-mount number does; `None` when nothing completed yet.
+    /// Fraction of completions served from cache. Uses the same
+    /// hit/(hit+completion) definition as [`MountWindow::cache_hit_ratio`].
     #[allow(clippy::cast_precision_loss)]
     pub fn cache_hit_ratio(&self) -> Option<f64> {
         let total = self.cache_hits + self.completions;
@@ -244,40 +243,41 @@ impl Operation {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct TraceReducer {
     pub forest: MountForest,
     pub palette: MountPalette,
-    selected: Option<TraceId>,
     operations: HashMap<TraceId, Operation>,
     trace_order: VecDeque<TraceId>,
     mount_windows: HashMap<String, MountWindow>,
+    sandbox: SandboxStats,
     session: SessionStats,
 }
 
 impl TraceReducer {
-    pub fn selected(&self) -> Option<TraceId> {
-        self.selected
-    }
-
-    /// Force the selection to an exact identity, bypassing the usual
-    /// next/prev/visibility computation. Lets a choice made against one
-    /// reducer instance (e.g. the paused snapshot) be projected onto
-    /// another (the live reducer) at the same trace identity, so the two
-    /// don't drift apart while the view is frozen.
-    pub fn set_selected(&mut self, trace_id: Option<TraceId>) {
-        self.selected = trace_id;
-    }
-
-    /// Durable session counters. Unlike every other accessor here, callers
-    /// needing the quit receipt should read this off the live reducer, not
-    /// a paused snapshot: pausing must not make the receipt undercount.
+    /// Durable counters for the whole record sequence folded into this
+    /// reducer. Quit receipts use the live reducer, never a scrub prefix.
     pub fn session(&self) -> &SessionStats {
         &self.session
     }
 
     pub fn mount_window(&self, mount: &str) -> Option<&MountWindow> {
         self.mount_windows.get(mount)
+    }
+
+    /// Sandbox port stats for one mount: per-export-method and
+    /// per-import-kind windows, open-call counts, and lifetime totals.
+    pub fn mount_sandbox(&self, mount: &str) -> Option<MountSandboxView<'_>> {
+        self.sandbox.mount_view(mount)
+    }
+
+    /// Mounts with any sandbox activity, most recent first.
+    pub fn sandbox_mounts_by_activity(&self) -> Vec<&str> {
+        self.sandbox.mounts_by_activity()
+    }
+
+    pub fn sandbox_active_mount(&self, preferred: Option<&str>) -> Option<&str> {
+        self.sandbox.active_mount(preferred)
     }
 
     pub fn ordered_mounts_for_strip(&self, cap: usize) -> Vec<String> {
@@ -309,7 +309,7 @@ impl TraceReducer {
     }
 
     pub fn apply_record(&mut self, record: &InspectorRecord) {
-        self.session.events += 1;
+        self.session.events = self.session.events.saturating_add(1);
         let trace_id = record.trace_id;
         match &record.event {
             InspectorEvent::FuseStart { op, mount, path } => {
@@ -324,23 +324,53 @@ impl TraceReducer {
             ),
             InspectorEvent::ProviderStart {
                 operation_id,
+                mount,
                 provider,
                 method,
                 path,
-                ..
-            } => self.on_provider_start(trace_id, *operation_id, provider, method, path),
-            InspectorEvent::ProviderEnd { end, .. } => {
-                self.on_provider_end(trace_id, end.elapsed_us, end.result.outcome);
+            } => self.on_provider_start(
+                trace_id,
+                *operation_id,
+                mount,
+                provider,
+                method,
+                path,
+                record.mono_us,
+            ),
+            InspectorEvent::ProviderEnd { operation_id, end } => {
+                self.on_provider_end(
+                    trace_id,
+                    *operation_id,
+                    end.elapsed_us,
+                    end.result.outcome,
+                    record.mono_us,
+                );
             },
             InspectorEvent::CalloutStart {
+                operation_id,
                 callout_index,
                 kind,
                 summary,
-                ..
-            } => self.on_callout_start(trace_id, *callout_index, *kind, summary),
+            } => self.on_callout_start(
+                trace_id,
+                *operation_id,
+                *callout_index,
+                *kind,
+                summary,
+                record.mono_us,
+            ),
             InspectorEvent::CalloutEnd {
-                callout_index, end, ..
-            } => self.on_callout_end(trace_id, *callout_index, end.elapsed_us, end.result.outcome),
+                operation_id,
+                callout_index,
+                end,
+            } => self.on_callout_end(
+                trace_id,
+                *operation_id,
+                *callout_index,
+                end.elapsed_us,
+                end.result.outcome,
+                record.mono_us,
+            ),
             InspectorEvent::CacheEvent {
                 mount,
                 path,
@@ -363,66 +393,11 @@ impl TraceReducer {
         }
     }
 
-    pub fn reset_recent(&mut self, filter: &ViewFilter) {
+    pub fn reset_recent(&mut self) {
         self.operations
             .retain(|_, op| op.status == OperationStatus::Running);
         self.trace_order
             .retain(|id| self.operations.contains_key(id));
-        self.ensure_selected_visible(filter);
-    }
-
-    pub fn select_next(&mut self, filter: &ViewFilter) {
-        let visible = self.visible_trace_ids(filter);
-        if visible.is_empty() {
-            return;
-        }
-        let idx = self
-            .selected
-            .and_then(|sel| visible.iter().position(|id| *id == sel))
-            .map_or(0, |i| (i + 1).min(visible.len() - 1));
-        self.selected = Some(visible[idx]);
-    }
-
-    pub fn select_prev(&mut self, filter: &ViewFilter) {
-        let visible = self.visible_trace_ids(filter);
-        if visible.is_empty() {
-            return;
-        }
-        let idx = self
-            .selected
-            .and_then(|sel| visible.iter().position(|id| *id == sel))
-            .map_or(0, |i| i.saturating_sub(1));
-        self.selected = Some(visible[idx]);
-    }
-
-    pub fn select_latest_for_path(&mut self, mount: &str, path: &str) {
-        let mut best: Option<(u64, TraceId)> = None;
-        for op in self.operations.values() {
-            if op.mount != mount {
-                continue;
-            }
-            let matches_path =
-                path.is_empty() || op.path == path || op.path.starts_with(&format!("{path}/"));
-            if !matches_path {
-                continue;
-            }
-            let ts = op.ended_mono.unwrap_or(op.started_mono);
-            if best.is_none_or(|(prev, _)| ts >= prev) {
-                best = Some((ts, op.trace_id));
-            }
-        }
-        if let Some((_, trace_id)) = best {
-            self.selected = Some(trace_id);
-        }
-    }
-
-    pub fn ensure_selected_visible(&mut self, filter: &ViewFilter) {
-        let selected_is_visible = self
-            .selected
-            .is_some_and(|id| self.operation(id).is_some_and(|op| filter.matches(op)));
-        if !selected_is_visible {
-            self.selected = self.visible_trace_ids(filter).first().copied();
-        }
     }
 
     fn on_fuse_start(
@@ -447,9 +422,6 @@ impl TraceReducer {
         self.forest
             .mount_tree_mut(mount)
             .mark_in_flight(&normalized_path, trace_id, mono_us);
-        if self.selected.is_none() {
-            self.selected = Some(trace_id);
-        }
     }
 
     fn on_fuse_end(
@@ -470,15 +442,15 @@ impl TraceReducer {
             .entry(mount.clone())
             .or_default()
             .record_completion(mono_us, elapsed_us, outcome);
-        self.session.completions += 1;
+        self.session.completions = self.session.completions.saturating_add(1);
         if outcome_status(outcome) == OperationStatus::Error {
-            self.session.errors += 1;
+            self.session.errors = self.session.errors.saturating_add(1);
         }
         if self
             .session
             .slowest
             .as_ref()
-            .is_none_or(|prev| elapsed_us > prev.elapsed_us)
+            .is_none_or(|previous| elapsed_us > previous.elapsed_us)
         {
             self.session.slowest = Some(SlowOp {
                 mount: mount.clone(),
@@ -505,13 +477,18 @@ impl TraceReducer {
         }
     }
 
+    // The parameter list mirrors the wire event's fields one-to-one; a
+    // params struct would just restate `InspectorEvent::ProviderStart`.
+    #[allow(clippy::too_many_arguments)]
     fn on_provider_start(
         &mut self,
         trace_id: TraceId,
         operation_id: u64,
+        mount: &str,
         provider: &str,
         method: &str,
         path: &str,
+        mono_us: u64,
     ) {
         if let Some(operation) = self.operations.get_mut(&trace_id) {
             operation.provider_name = Some(provider.to_string());
@@ -527,44 +504,76 @@ impl TraceReducer {
                 "",
             ));
         }
+        // Unlike provider.end and the callout events, provider.start
+        // carries its own mount, so sandbox stats don't need the
+        // operation log to resolve it and stay correct even if the
+        // matching fuse.start was already evicted.
+        self.sandbox
+            .on_provider_start(mount, trace_id, operation_id, provider, method, mono_us);
     }
 
-    fn on_provider_end(&mut self, trace_id: TraceId, elapsed_us: u64, outcome: InspectorOutcome) {
-        let Some(operation) = self.operations.get_mut(&trace_id) else {
-            return;
-        };
-        let method = operation.provider_method.clone();
-        operation.close_in_flight(
-            |s| {
-                s.in_flight
-                    && matches!(&s.kind, StageKind::Provider(m) if Some(m.as_str()) == method.as_deref())
-            },
-            elapsed_us,
-            outcome,
-        );
+    fn on_provider_end(
+        &mut self,
+        trace_id: TraceId,
+        operation_id: u64,
+        elapsed_us: u64,
+        outcome: InspectorOutcome,
+        mono_us: u64,
+    ) {
+        if let Some(operation) = self.operations.get_mut(&trace_id) {
+            let method = operation.provider_method.clone();
+            operation.close_in_flight(
+                |s| {
+                    s.in_flight
+                        && matches!(&s.kind, StageKind::Provider(m) if Some(m.as_str()) == method.as_deref())
+                },
+                elapsed_us,
+                outcome,
+            );
+        }
+        self.sandbox
+            .on_provider_end(trace_id, operation_id, elapsed_us, outcome, mono_us);
     }
 
     fn on_callout_start(
         &mut self,
         trace_id: TraceId,
+        operation_id: u64,
         callout_index: u32,
         kind: CalloutKind,
         summary: &str,
+        mono_us: u64,
     ) {
-        if let Some(operation) = self.operations.get_mut(&trace_id) {
-            operation.stages.push(Stage::in_flight(
-                StageKind::Callout(callout_index),
-                format!("{kind} {summary}"),
-            ));
-        }
+        // Callout events carry no mount; resolve it through the trace's
+        // operation. If the trace was already evicted there's nothing to
+        // correlate the callout to, so skip silently rather than guess.
+        let Some(operation) = self.operations.get_mut(&trace_id) else {
+            return;
+        };
+        let mount = operation.mount.clone();
+        operation.stages.push(Stage::in_flight(
+            StageKind::Callout(callout_index),
+            format!("{kind} {summary}"),
+        ));
+        self.sandbox.on_callout_start(
+            &mount,
+            trace_id,
+            operation_id,
+            callout_index,
+            kind,
+            summary,
+            mono_us,
+        );
     }
 
     fn on_callout_end(
         &mut self,
         trace_id: TraceId,
+        operation_id: u64,
         callout_index: u32,
         elapsed_us: u64,
         outcome: InspectorOutcome,
+        mono_us: u64,
     ) {
         if let Some(operation) = self.operations.get_mut(&trace_id) {
             operation.close_in_flight(
@@ -573,6 +582,14 @@ impl TraceReducer {
                 outcome,
             );
         }
+        self.sandbox.on_callout_end(
+            trace_id,
+            operation_id,
+            callout_index,
+            elapsed_us,
+            outcome,
+            mono_us,
+        );
     }
 
     fn on_cache(
@@ -607,7 +624,7 @@ impl TraceReducer {
             self.forest
                 .mount_tree_mut(mount)
                 .cache_hit(&normalized_path, mono_us);
-            self.session.cache_hits += 1;
+            self.session.cache_hits = self.session.cache_hits.saturating_add(1);
         }
     }
 
@@ -683,9 +700,7 @@ impl TraceReducer {
 
     fn evict_trace(&mut self, trace_id: TraceId) {
         self.operations.remove(&trace_id);
-        if self.selected == Some(trace_id) {
-            self.selected = None;
-        }
+        self.sandbox.remove_trace(trace_id);
     }
 
     fn trace_visible(&self, trace_id: TraceId, filter: &ViewFilter) -> bool {
@@ -706,11 +721,41 @@ fn outcome_status(outcome: InspectorOutcome) -> OperationStatus {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use super::super::sandbox::PortId;
     use super::*;
     use omnifs_api::events::{OpEnd, OutcomeFields};
 
     fn record(trace_id: TraceId, mono_us: u64, event: InspectorEvent) -> InspectorRecord {
         InspectorRecord::new("2026-05-23T12:00:00Z", mono_us, trace_id, event)
+    }
+
+    fn ok_end(elapsed_us: u64) -> OpEnd {
+        OpEnd {
+            elapsed_us,
+            result: OutcomeFields::ok(),
+        }
+    }
+
+    fn provider_start(
+        trace_id: TraceId,
+        mono_us: u64,
+        operation_id: u64,
+        mount: &str,
+        method: &str,
+    ) -> InspectorRecord {
+        record(
+            trace_id,
+            mono_us,
+            InspectorEvent::ProviderStart {
+                operation_id,
+                mount: mount.into(),
+                provider: mount.into(),
+                method: method.into(),
+                path: "/x".into(),
+            },
+        )
     }
 
     #[test]
@@ -726,17 +771,7 @@ mod tests {
                     path: "/raulk/omnifs".into(),
                 },
             ),
-            record(
-                7,
-                20,
-                InspectorEvent::ProviderStart {
-                    operation_id: 42,
-                    mount: "github".into(),
-                    provider: "github".into(),
-                    method: "lookup_child".into(),
-                    path: "/raulk/omnifs".into(),
-                },
-            ),
+            provider_start(7, 20, 42, "github", "lookup_child"),
             record(
                 7,
                 30,
@@ -753,10 +788,7 @@ mod tests {
                 InspectorEvent::CalloutEnd {
                     operation_id: 42,
                     callout_index: 0,
-                    end: OpEnd {
-                        elapsed_us: 1_200,
-                        result: OutcomeFields::ok(),
-                    },
+                    end: ok_end(1_200),
                 },
             ),
             record(
@@ -775,10 +807,7 @@ mod tests {
                 60,
                 InspectorEvent::ProviderEnd {
                     operation_id: 42,
-                    end: OpEnd {
-                        elapsed_us: 2_500,
-                        result: OutcomeFields::ok(),
-                    },
+                    end: ok_end(2_500),
                 },
             ),
             record(
@@ -786,10 +815,7 @@ mod tests {
                 70,
                 InspectorEvent::FuseEnd {
                     op: "lookup".into(),
-                    end: OpEnd {
-                        elapsed_us: 3_000,
-                        result: OutcomeFields::ok(),
-                    },
+                    end: ok_end(3_000),
                 },
             ),
         ];
@@ -833,7 +859,7 @@ mod tests {
         ));
         let op = traces.operation(8).expect("trace");
         assert_eq!(op.path, "/notifications");
-        let rows = traces.forest.render_rows(10, 30_000_000);
+        let rows = traces.forest.render_rows(10, 30_000_000, &HashSet::new());
         let paths: Vec<_> = rows.iter().map(|row| row.path.as_str()).collect();
         assert!(paths.contains(&"notifications"));
         assert!(!paths.contains(&"github/notifications"));
@@ -866,11 +892,126 @@ mod tests {
             traces.operation(9).expect("trace").outcome,
             Some(InspectorOutcome::NotFound)
         );
-        let rows = traces.forest.render_rows(20, 30_000_000);
+        let rows = traces.forest.render_rows(20, 30_000_000, &HashSet::new());
         let missing = rows
             .iter()
             .find(|row| row.path == "notifications/missing")
             .expect("missing path row");
         assert_eq!(missing.status, super::super::tree::NodeStatus::Miss);
+    }
+
+    #[test]
+    fn sandbox_stats_track_lifecycle_activity_and_eviction() {
+        let mut traces = TraceReducer::default();
+        let export = PortId::Export("lookup_child".into());
+        let import = PortId::Import(CalloutKind::Fetch);
+        for event in [
+            record(
+                11,
+                10,
+                InspectorEvent::FuseStart {
+                    op: "lookup".into(),
+                    mount: "github".into(),
+                    path: "/raulk/omnifs".into(),
+                },
+            ),
+            provider_start(11, 20, 55, "github", "lookup_child"),
+            record(
+                11,
+                30,
+                InspectorEvent::CalloutStart {
+                    operation_id: 55,
+                    callout_index: 0,
+                    kind: CalloutKind::Fetch,
+                    summary: "GET api.github.com/repos/raulk/omnifs".into(),
+                },
+            ),
+        ] {
+            traces.apply_record(&event);
+        }
+
+        let sandbox = traces.mount_sandbox("github").expect("mount sandbox");
+        assert_eq!(sandbox.open_count(&export), 1);
+        assert_eq!(sandbox.open_count(&import), 1);
+        assert_eq!(
+            (sandbox.total_open_exports(), sandbox.total_open_imports()),
+            (1, 1)
+        );
+
+        for event in [
+            record(
+                11,
+                40,
+                InspectorEvent::CalloutEnd {
+                    operation_id: 55,
+                    callout_index: 0,
+                    end: ok_end(1_200),
+                },
+            ),
+            record(
+                11,
+                50,
+                InspectorEvent::ProviderEnd {
+                    operation_id: 55,
+                    end: ok_end(2_000),
+                },
+            ),
+        ] {
+            traces.apply_record(&event);
+        }
+
+        let sandbox = traces.mount_sandbox("github").expect("mount sandbox");
+        assert_eq!(
+            (sandbox.total_open_exports(), sandbox.total_open_imports()),
+            (0, 0)
+        );
+        for port in [&export, &import] {
+            let stats = sandbox.port_stats(port).expect("port stats");
+            assert_eq!(stats.lifetime, 1);
+            assert!(!stats.window.is_empty());
+        }
+
+        traces.apply_record(&provider_start(12, 70, 7, "scratch", "read_file"));
+        assert_eq!(
+            traces.sandbox_mounts_by_activity(),
+            vec!["scratch", "github"]
+        );
+        assert_eq!(
+            traces
+                .mount_sandbox("scratch")
+                .expect("mount sandbox")
+                .total_open_exports(),
+            1
+        );
+        traces.evict_trace(12);
+        assert_eq!(
+            traces
+                .mount_sandbox("scratch")
+                .expect("mount sandbox")
+                .total_open_exports(),
+            0
+        );
+    }
+
+    #[test]
+    fn completion_settles_sandbox_after_operation_eviction() {
+        let mut traces = TraceReducer::default();
+        traces.apply_record(&provider_start(120, 10, 7, "github", "lookup_child"));
+        traces.operations.remove(&120);
+        traces.apply_record(&record(
+            120,
+            20,
+            InspectorEvent::ProviderEnd {
+                operation_id: 7,
+                end: ok_end(10),
+            },
+        ));
+        let sandbox = traces.mount_sandbox("github").expect("sandbox");
+        assert_eq!(sandbox.total_open_exports(), 0);
+        let stats = sandbox
+            .port_stats(&PortId::Export("lookup_child".into()))
+            .unwrap();
+        assert_eq!(stats.lifetime, 1);
+        assert!(!stats.window.is_empty());
     }
 }

@@ -1,5 +1,6 @@
 //! Event sources: replay file, live typed control-plane subscriber.
 
+use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Lines, Write};
 use std::path::{Path, PathBuf};
@@ -48,7 +49,7 @@ impl EventsClient {
     /// for every typed newline-framed line until the stream ends or fails.
     pub fn attach<E>(
         &self,
-        on_connect: impl FnOnce(),
+        on_connect: impl FnOnce(String),
         mut on_line: impl FnMut(&InspectorLine) -> std::result::Result<(), E>,
     ) -> std::result::Result<AttachOutcome, E> {
         self.rt.block_on(async {
@@ -76,12 +77,13 @@ impl EventsClient {
                     else {
                         return Ok(AttachOutcome::Unreachable);
                     };
-                    if reply.version != CONTROL_PROTOCOL_VERSION
-                        || !matches!(reply.outcome, ControlOutcome::InspectorReady)
-                    {
+                    if reply.version != CONTROL_PROTOCOL_VERSION {
                         return Ok(AttachOutcome::Unreachable);
                     }
-                    on_connect();
+                    let ControlOutcome::InspectorReady { instance_id } = reply.outcome else {
+                        return Ok(AttachOutcome::Unreachable);
+                    };
+                    on_connect(instance_id);
                     loop {
                         let line = match read_control_line(&mut stream).await {
                             Ok(line) => line,
@@ -132,7 +134,9 @@ pub enum SourceKind {
 pub enum SourceMessage {
     Line(InspectorLine),
     /// First successful socket connection, or a successful reconnect after a drop.
-    Connected,
+    Connected {
+        epoch: String,
+    },
     /// Stream closed after a previously-connected session (daemon
     /// shutdown or transient drop). Reconnection attempts continue.
     Disconnected,
@@ -140,6 +144,35 @@ pub enum SourceMessage {
     Finished,
     /// A source reached a terminal error and will not produce more lines.
     Failed(String),
+}
+
+#[derive(Debug, Default)]
+struct InspectorSession {
+    epoch: Option<String>,
+    high_water_seq: u64,
+}
+
+impl InspectorSession {
+    fn begin(&mut self, epoch: String) {
+        if self.epoch.as_deref() != Some(epoch.as_str()) {
+            self.epoch = Some(epoch);
+            self.high_water_seq = 0;
+        }
+    }
+
+    fn accept(&mut self, line: &InspectorLine) -> bool {
+        let InspectorLine::Record(record) = line else {
+            return true;
+        };
+        if record.seq == 0 {
+            return true;
+        }
+        if record.seq <= self.high_water_seq {
+            return false;
+        }
+        self.high_water_seq = record.seq;
+        true
+    }
 }
 
 pub struct EventSource {
@@ -268,12 +301,18 @@ fn socket_source(endpoint: EventEndpoint, record: Option<&Path>, tx: &Sender<Sou
         return;
     };
 
+    let session = RefCell::new(InspectorSession::default());
+
     loop {
         let outcome = client.attach(
-            || {
-                let _ = tx.send(SourceMessage::Connected);
+            |instance_id| {
+                session.borrow_mut().begin(instance_id.clone());
+                let _ = tx.send(SourceMessage::Connected { epoch: instance_id });
             },
             |line| {
+                if !session.borrow_mut().accept(line) {
+                    return Ok(());
+                }
                 if let Some(file) = record_file.as_mut() {
                     let serialized = line
                         .to_json_line()
@@ -360,8 +399,33 @@ mod tests {
             },
             Some(SourceMessage::Finished) | None => panic!("malformed replay became EOF"),
             Some(
-                SourceMessage::Line(_) | SourceMessage::Connected | SourceMessage::Disconnected,
+                SourceMessage::Line(_)
+                | SourceMessage::Connected { .. }
+                | SourceMessage::Disconnected,
             ) => panic!("unexpected source message"),
         }
+    }
+
+    #[test]
+    fn inspector_session_deduplicates_within_epoch_and_resets_between_epochs() {
+        let event = InspectorEvent::FuseStart {
+            op: "lookup".into(),
+            mount: "github".into(),
+            path: "/a".into(),
+        };
+        let record = |seq| {
+            InspectorLine::Record(InspectorRecord::new("t", seq, 1, event.clone()).with_seq(seq))
+        };
+        let mut session = InspectorSession::default();
+        session.begin("one".into());
+        assert!(session.accept(&record(0)));
+        assert_eq!(session.high_water_seq, 0);
+        assert!(session.accept(&record(2)));
+        assert!(!session.accept(&record(1)));
+        assert!(!session.accept(&record(2)));
+        assert!(session.accept(&record(3)));
+        session.begin("two".into());
+        assert_eq!(session.high_water_seq, 0);
+        assert!(session.accept(&record(1)));
     }
 }

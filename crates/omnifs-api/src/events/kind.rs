@@ -48,8 +48,9 @@ impl CacheKind {
 }
 
 /// WIT callout variant names on the wire. `Display` matches the serde
-/// wire form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
+/// wire form. `Hash` lets subscribers key per-kind aggregates (e.g. the
+/// inspector's per-mount import stats) directly off the variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum CalloutKind {

@@ -762,7 +762,11 @@ async fn handle_control_connection(
                 .await?;
                 return Ok(());
             };
-            write_control_reply(&mut stream, ControlReply::inspector_ready()).await?;
+            write_control_reply(
+                &mut stream,
+                ControlReply::inspector_ready(daemon.context.instance_id()),
+            )
+            .await?;
             let subscription = inspector.subscribe();
             for record in subscription.history {
                 write_inspector_line(&mut stream, InspectorLine::Record((*record).clone())).await?;
@@ -1161,9 +1165,8 @@ mod tests {
 
         let unknown = raw_request(
             &control_socket,
-            br#"{"version":3,"operation":"unknown"}
-"#
-            .to_vec(),
+            format!("{{\"version\":{CONTROL_PROTOCOL_VERSION},\"operation\":\"unknown\"}}\n")
+                .into_bytes(),
         )
         .await;
         assert!(matches!(
@@ -1173,9 +1176,11 @@ mod tests {
 
         let invalid_offline_revision = raw_request(
             &control_socket,
-            br#"{"version":3,"operation":"validate_offline","revision":"invalid"}
-"#
-            .to_vec(),
+            format!(
+                "{{\"version\":{CONTROL_PROTOCOL_VERSION},\
+                 \"operation\":\"validate_offline\",\"revision\":\"invalid\"}}\n"
+            )
+            .into_bytes(),
         )
         .await;
         assert!(matches!(

@@ -10,29 +10,78 @@ use ratatui::{
 
 use omnifs_api::events::InspectorOutcome;
 
-use super::app::{App, ConnectionMode, PaneFocus, footer_text};
+use super::app::{App, AppView, ConnectionMode, PaneFocus, footer_text};
 use super::filter::FilterMode;
 use super::format;
 use super::metrics::{MountWindow, render_sparkline};
 use super::trace_state::{Operation, OperationStatus, Stage, StageKind};
 use super::tree::{NodeStatus, RenderRow};
 
-/// Cursor/selection highlight background. Plain `DarkGray` (ANSI-16, not
-/// truecolor) so the highlight survives 16-color terminals; the previous
-/// `Color::Rgb` silently vanished outside a truecolor-capable emulator. The
-/// `›` marker (see `CURSOR_MARKER`) carries the same signal without relying
-/// on color at all.
-const CURSOR_BG: Color = Color::DarkGray;
-/// Prefixes the cursor row / selected operation block so the highlight
-/// still reads when a terminal renders `CURSOR_BG` indistinguishably from
-/// the surrounding rows.
+// Shared with `sandbox_ui`: both full-screen views highlight a cursor
+// row the same way. ANSI-16 color keeps the cue visible on terminals
+// without truecolor support, while `CURSOR_MARKER` provides a non-color cue.
+pub(super) const CURSOR_BG: Color = Color::DarkGray;
 const CURSOR_MARKER: &str = "› ";
 
 const SPARK_BUCKETS: usize = 12;
 const SPARK_MOUNT_CAP: usize = 8;
 
+struct StageCell {
+    indent: &'static str,
+    glyph: &'static str,
+    glyph_color: Color,
+    display: String,
+}
+
+impl StageCell {
+    fn for_stage(stage: &Stage) -> Self {
+        match &stage.kind {
+            StageKind::Provider(method) => Self {
+                indent: "  ",
+                glyph: "▸",
+                glyph_color: Color::LightCyan,
+                display: method.clone(),
+            },
+            StageKind::Callout(_) => Self {
+                indent: "    ",
+                glyph: "◇",
+                glyph_color: Color::LightYellow,
+                display: stage.detail.clone(),
+            },
+            StageKind::Cache(_) => Self {
+                indent: "  ",
+                glyph: "◐",
+                glyph_color: Color::LightGreen,
+                display: format!("{} {}", stage.kind.display_label(), stage.detail),
+            },
+            StageKind::SubtreeStart | StageKind::SubtreeEnd => Self {
+                indent: "  ",
+                glyph: "▸",
+                glyph_color: Color::Magenta,
+                display: format!("{} {}", stage.kind.display_label(), stage.detail),
+            },
+            StageKind::CloneStart | StageKind::CloneEnd => Self {
+                indent: "    ",
+                glyph: "⇣",
+                glyph_color: Color::LightMagenta,
+                display: format!("{} {}", stage.kind.display_label(), stage.detail),
+            },
+            StageKind::Fuse(_) => Self {
+                indent: "  ",
+                glyph: "·",
+                glyph_color: Color::DarkGray,
+                display: stage.kind.display_label().into_owned(),
+            },
+        }
+    }
+}
+
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    if app.view == AppView::Sandbox {
+        super::sandbox_ui::render(frame, app, area);
+        return;
+    }
     if format::compact_mode(area.width, area.height) {
         render_compact(frame, app, area);
         return;
@@ -61,7 +110,10 @@ fn render_compact(frame: &mut Frame, app: &App, area: Rect) {
     render_operations_log(frame, app, chunks[1]);
 }
 
-fn render_header(frame: &mut Frame, app: &App, area: Rect) {
+/// Shared by both full-screen views: `sandbox_ui::render` calls this
+/// too so the two views agree on connection state, pause state, and
+/// filter status, differing only in the view name and key hints.
+pub(super) fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let source = match app.mode {
         ConnectionMode::Inspector => {
             // When disconnected, surface the address we're failing to
@@ -79,7 +131,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         },
         ConnectionMode::Replay => format!("replay · {}", app.container),
     };
-    let pause = if app.paused {
+    let pause = if app.paused() {
         format!(
             " paused  +{} buffered  (space to resume)",
             app.buffered_since_pause()
@@ -99,11 +151,15 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         String::new()
     };
+    let view_name = match app.view {
+        AppView::Activity => "recent activity",
+        AppView::Sandbox => "sandbox map",
+    };
     let title = format!(
-        " omnifs inspect · recent activity │ {source}{pause} │ {:.1} evt/s │ dropped {} ",
+        " omnifs inspect · {view_name} │ {source}{pause} │ {:.1} evt/s │ dropped {} ",
         app.events_per_sec, app.dropped_events
     );
-    let keys = footer_text();
+    let keys = footer_text(app);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
@@ -127,11 +183,10 @@ fn render_sparkline_strip(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut lines = Vec::with_capacity(mounts.len());
     let empty_window = MountWindow::default();
-    let now_mono = app.view_now_mono();
     for mount in &mounts {
         let window = app.mount_window(mount).unwrap_or(&empty_window);
         let color = app.palette().peek(mount).unwrap_or(Color::DarkGray);
-        lines.push(sparkline_line(mount, window, color, now_mono));
+        lines.push(sparkline_line(mount, window, color, app.view_now_mono()));
     }
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
@@ -182,11 +237,6 @@ fn render_main(frame: &mut Frame, app: &App, area: Rect) {
     render_operations_log(frame, app, columns[1]);
 }
 
-/// The "nothing happened yet" message shared by the tree pane and the
-/// operations log: a real (or best-effort static) path to `cat`, so a new
-/// user staring at a blank canvas has something concrete to try rather than
-/// a dead end. `app.teaching_path` is resolved once at startup from local
-/// mount specs (see `commands/inspect.rs`); it's never a daemon round trip.
 fn empty_state_lines(app: &App) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
@@ -265,9 +315,6 @@ impl TreeRowView<'_> {
             .as_ref()
             .is_some_and(|c| c.mount == row.mount && c.path == row.path);
 
-        // Reserve the marker column on every row (blank when not the
-        // cursor) so the cursor row's `›` never shifts that row's columns
-        // out of alignment with its neighbors.
         let mut spans = vec![
             Span::raw(if is_cursor { CURSOR_MARKER } else { "  " }),
             Span::raw("  ".repeat(row.depth)),
@@ -363,9 +410,6 @@ fn render_operations_log(frame: &mut Frame, app: &App, area: Rect) {
         }
         for (index, raw) in block.iter().enumerate() {
             let mut line = if is_selected && index == 0 {
-                // Only the block's header row gets the marker: stage rows
-                // already right-align their elapsed/outcome column against
-                // `width`, and prepending it there would throw that off.
                 let mut spans = vec![Span::raw(CURSOR_MARKER)];
                 spans.extend(raw.spans.clone());
                 Line::from(spans)
@@ -488,65 +532,6 @@ struct StageView<'a> {
     width: usize,
 }
 
-/// Visual cell of a `StageView`: indent, glyph, glyph color, and the
-/// formatted display string for the stage's left half. Selected by
-/// pattern-matching on `Stage::kind` so the mapping is exhaustive
-/// and the renderer doesn't string-parse the label per frame.
-struct StageCell {
-    indent: &'static str,
-    glyph: &'static str,
-    glyph_color: Color,
-    display: String,
-}
-
-impl StageCell {
-    /// Pick the visual cell for a stage based on its kind.
-    fn for_stage(stage: &Stage) -> Self {
-        match &stage.kind {
-            StageKind::Provider(method) => Self {
-                indent: "  ",
-                glyph: "▸",
-                glyph_color: Color::LightCyan,
-                display: method.clone(),
-            },
-            StageKind::Callout(_) => Self {
-                indent: "    ",
-                glyph: "◇",
-                glyph_color: Color::LightYellow,
-                display: stage.detail.clone(),
-            },
-            // Keep the `cache.<kind>` prefix in the visible text so
-            // a row like `◐ cache.browse_hit /github/...` reads
-            // unambiguously without relying on the user knowing what
-            // the ◐ glyph means.
-            StageKind::Cache(_) => Self {
-                indent: "  ",
-                glyph: "◐",
-                glyph_color: Color::LightGreen,
-                display: format!("{} {}", stage.kind.display_label(), stage.detail),
-            },
-            StageKind::SubtreeStart | StageKind::SubtreeEnd => Self {
-                indent: "  ",
-                glyph: "▸",
-                glyph_color: Color::Magenta,
-                display: format!("{} {}", stage.kind.display_label(), stage.detail),
-            },
-            StageKind::CloneStart | StageKind::CloneEnd => Self {
-                indent: "    ",
-                glyph: "⇣",
-                glyph_color: Color::LightMagenta,
-                display: format!("{} {}", stage.kind.display_label(), stage.detail),
-            },
-            StageKind::Fuse(_) => Self {
-                indent: "  ",
-                glyph: "·",
-                glyph_color: Color::DarkGray,
-                display: stage.kind.display_label().into_owned(),
-            },
-        }
-    }
-}
-
 impl StageView<'_> {
     fn into_line(self) -> Line<'static> {
         let StageView { stage, width } = self;
@@ -625,12 +610,7 @@ mod tests {
 
     #[test]
     fn tree_rollup_badge_explains_failure_count() {
-        let app = App::new(
-            ConnectionMode::Replay,
-            "test",
-            None,
-            "~/omnifs/dns/example.com/A",
-        );
+        let app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
         let row = RenderRow {
             depth: 0,
             name: "github".to_string(),
