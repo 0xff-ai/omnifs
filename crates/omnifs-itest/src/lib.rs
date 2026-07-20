@@ -128,13 +128,12 @@ impl RuntimeHarness {
                 .put(spec)
                 .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         }
-        let online = host.as_online().expect("online test host");
         let registry = if capture_test_callouts {
             omnifs_engine::test_support::load_mount_table_for_callout_tests(
-                online, &desired, &handle,
+                &host, &desired, &handle,
             )
         } else {
-            MountTable::load_online(online, &desired, &handle)
+            MountTable::load_online(&host, &desired, &handle)
         }
         .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         let registry = Arc::new(registry);

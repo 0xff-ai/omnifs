@@ -7,7 +7,7 @@ use omnifs_api::{
     CredentialHealth, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo, HealthState,
     MountInfo, SubsystemHealth,
 };
-use omnifs_engine::{Host, HostOfflineOpen, HostOpen};
+use omnifs_engine::{Host, HostOffline, HostOfflineOpen, HostOnline, HostOpen};
 use omnifs_workspace::daemon_record::{DaemonRecord, Endpoint};
 use omnifs_workspace::mounts::Revision;
 use omnifs_workspace::{DaemonState, FrontendState, Workspace};
@@ -15,6 +15,7 @@ use std::fmt::Write as _;
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub(crate) struct DaemonContext {
     daemon: DaemonState,
@@ -49,18 +50,18 @@ impl DaemonContext {
             args.mount_snapshot.display()
         );
         let host = if args.offline {
-            Host::open_offline(HostOfflineOpen {
+            Host::Offline(HostOffline::open(HostOfflineOpen {
                 cache_dir: workspace.cache_dir(),
                 clone_dir: workspace.daemon().clone_cache(),
-            })?
+            })?)
         } else {
-            Host::open_online(HostOpen {
+            Host::Online(HostOnline::open(HostOpen {
                 cache_dir: workspace.cache_dir(),
                 wasm_cache_dir: workspace.warmup().wasm_cache_dir(),
-                credentials: workspace.credentials_arc(),
+                credentials: Arc::new(workspace.credentials().clone()),
                 catalog: workspace.catalog().clone(),
                 clone_dir: workspace.daemon().clone_cache(),
-            })?
+            })?)
         };
 
         Ok(Self {
@@ -351,14 +352,16 @@ mod tests {
     fn context(root: &Path) -> DaemonContext {
         let workspace = Workspace::under_root(root);
         let mount_revision = Revision::new("a".repeat(40)).unwrap();
-        let host = Host::open_online(HostOpen {
-            cache_dir: workspace.cache_dir(),
-            wasm_cache_dir: workspace.warmup().wasm_cache_dir(),
-            credentials: workspace.credentials_arc(),
-            catalog: workspace.catalog().clone(),
-            clone_dir: workspace.daemon().clone_cache(),
-        })
-        .expect("open test host");
+        let host = Host::Online(
+            HostOnline::open(HostOpen {
+                cache_dir: workspace.cache_dir(),
+                wasm_cache_dir: workspace.warmup().wasm_cache_dir(),
+                credentials: Arc::new(workspace.credentials().clone()),
+                catalog: workspace.catalog().clone(),
+                clone_dir: workspace.daemon().clone_cache(),
+            })
+            .expect("open test host"),
+        );
         DaemonContext {
             daemon: workspace.daemon().clone(),
             frontend: workspace.frontend().clone(),

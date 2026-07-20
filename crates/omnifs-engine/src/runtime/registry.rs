@@ -51,7 +51,6 @@ enum TableMode {
 /// Fixed selected mount table used by the single namespace implementation.
 pub struct MountTable {
     caches: Arc<Caches>,
-    cache_dir: PathBuf,
     clone_dir: PathBuf,
     mode: TableMode,
     entries: BTreeMap<String, MountEntry>,
@@ -117,7 +116,6 @@ impl MountTable {
             .collect();
         let table = Self {
             caches: Arc::clone(host.caches()),
-            cache_dir: host.cache_dir().to_path_buf(),
             clone_dir: host.clone_dir().to_path_buf(),
             mode: TableMode::Online,
             entries,
@@ -144,7 +142,7 @@ impl MountTable {
     ) -> Result<BuiltMount, RegistryError> {
         let spec = loaded.spec();
         let mount = name.to_string();
-        let wasm_path = host.provider_path_by_id(&spec.provider.id);
+        let wasm_path = host.catalog().provider_path_by_id(&spec.provider.id);
         if !wasm_path.exists() {
             return Err(RegistryError::ProviderNotFound(
                 wasm_path.display().to_string(),
@@ -269,7 +267,6 @@ impl MountTable {
         let (timer_shutdown, _) = watch::channel(false);
         Ok(Self {
             caches,
-            cache_dir: host.cache_dir().to_path_buf(),
             clone_dir: host.clone_dir().to_path_buf(),
             mode: TableMode::Offline,
             entries,
@@ -282,11 +279,8 @@ impl MountTable {
     /// durable cache without publishing a second table or opening another
     /// cache database.
     pub fn validate_offline(&self, desired: &Registry) -> Result<(), RegistryError> {
-        let offline = HostOffline::from_open_caches(
-            Arc::clone(&self.caches),
-            self.cache_dir.clone(),
-            self.clone_dir.clone(),
-        );
+        let offline =
+            HostOffline::with_open_caches(Arc::clone(&self.caches), self.clone_dir.clone());
         let table = Self::load_offline_with_caches(&offline, desired, Arc::clone(&self.caches))?;
         drop(table);
         Ok(())
@@ -464,7 +458,7 @@ fn validate_registry(desired: &Registry) -> Result<(), RegistryError> {
 mod tests {
     use super::{MountTable, RegistryError};
     use crate::cloner::GitCloner;
-    use crate::runtime::host::{Host, HostOfflineOpen};
+    use crate::runtime::host::{Host, HostOffline, HostOfflineOpen};
     use omnifs_workspace::ids::ProviderId;
     use omnifs_workspace::mounts::{Registry, Spec};
     use omnifs_workspace::provider::{Artifact, ProviderStore};
@@ -499,13 +493,15 @@ mod tests {
         providers_dir: impl AsRef<Path>,
         credentials_file: impl AsRef<Path>,
     ) -> Host {
-        crate::test_support::open_test_host(
-            cache_dir.as_ref(),
-            providers_dir.as_ref(),
-            credentials_file.as_ref(),
-            cache_dir.as_ref().join("clones"),
+        Host::Online(
+            crate::test_support::open_test_host(
+                cache_dir.as_ref(),
+                providers_dir.as_ref(),
+                credentials_file.as_ref(),
+                cache_dir.as_ref().join("clones"),
+            )
+            .expect("open test host"),
         )
-        .expect("open test host")
     }
 
     fn wasm_artifact_path(file_name: &str) -> PathBuf {
@@ -1029,14 +1025,13 @@ mod tests {
         drop(root_git_resources);
         drop(caches);
 
-        let offline_host = Host::open_offline(HostOfflineOpen {
+        let offline_host = HostOffline::open(HostOfflineOpen {
             cache_dir: cache.clone(),
             clone_dir: cache.join("clones"),
         })
         .expect("open offline host");
         let table = Arc::new(
-            MountTable::load_offline(offline_host.as_offline().expect("offline host"), &desired)
-                .expect("offline table startup"),
+            MountTable::load_offline(&offline_host, &desired).expect("offline table startup"),
         );
         assert!(table.get("test").is_none());
         let namespace = TreeNamespace::offline(table, tokio::runtime::Handle::current());
@@ -1186,13 +1181,11 @@ mod tests {
         std::fs::write(&body_path, vec![b'x'; dynamic_bytes.len()]).expect("corrupt body");
         assert!(matches!(
             MountTable::load_offline(
-                Host::open_offline(HostOfflineOpen {
+                &HostOffline::open(HostOfflineOpen {
                     cache_dir: cache.clone(),
                     clone_dir: cache.join("clones"),
                 })
-                .expect("reopen offline host")
-                .as_offline()
-                .expect("offline host"),
+                .expect("reopen offline host"),
                 &desired,
             ),
             Err(RegistryError::CorruptProjection { .. })
@@ -1217,13 +1210,11 @@ mod tests {
         drop(facts);
         drop(database);
         match MountTable::load_offline(
-            Host::open_offline(HostOfflineOpen {
+            &HostOffline::open(HostOfflineOpen {
                 cache_dir: cache.clone(),
                 clone_dir: cache.join("clones"),
             })
-            .expect("reopen offline host")
-            .as_offline()
-            .expect("offline host"),
+            .expect("reopen offline host"),
             &desired,
         ) {
             Err(RegistryError::CorruptProjection { .. }) => {},

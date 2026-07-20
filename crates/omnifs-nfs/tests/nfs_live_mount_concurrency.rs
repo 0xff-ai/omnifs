@@ -300,7 +300,7 @@ impl MountFixture {
         .expect("open test host");
         let registry = Arc::new(
             omnifs_engine::test_support::load_mount_table_for_callout_tests(
-                host.as_online().expect("online host"),
+                &host,
                 &desired,
                 rt.handle(),
             )

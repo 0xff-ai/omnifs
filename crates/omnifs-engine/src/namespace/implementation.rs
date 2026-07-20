@@ -1536,7 +1536,7 @@ mod tests {
         .expect("open test host");
         Arc::new(
             crate::test_support::load_mount_table_for_callout_tests(
-                host.as_online().expect("online host"),
+                &host,
                 &desired,
                 &tokio::runtime::Handle::current(),
             )

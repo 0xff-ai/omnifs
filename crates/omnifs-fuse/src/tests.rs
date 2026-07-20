@@ -101,12 +101,8 @@ fn build_harness() -> FuseHarness {
     )
     .expect("open test host");
     let registry = Arc::new(
-        MountTable::load_online(
-            host.as_online().expect("online host"),
-            &desired,
-            &tokio::runtime::Handle::current(),
-        )
-        .expect("registry init"),
+        MountTable::load_online(&host, &desired, &tokio::runtime::Handle::current())
+            .expect("registry init"),
     );
 
     let rt = tokio::runtime::Handle::current();

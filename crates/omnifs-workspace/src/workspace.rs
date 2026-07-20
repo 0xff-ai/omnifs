@@ -171,12 +171,6 @@ impl Workspace {
         &self.credentials
     }
 
-    /// Shared handle for process-scoped openers (daemon `Host`).
-    #[must_use]
-    pub fn credentials_arc(&self) -> Arc<FileStore> {
-        Arc::clone(&self.credentials)
-    }
-
     /// Cache root under the home; daemon `Host` opens runtime state here.
     #[must_use]
     pub fn cache_dir(&self) -> PathBuf {

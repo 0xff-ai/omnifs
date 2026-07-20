@@ -20,9 +20,8 @@ pub fn load_registry_from_mount_dir(
     )
     .expect("open test host");
     let desired = Registry::load(mounts_dir).expect("load mount snapshot");
-    let registry =
-        MountTable::load_online(host.as_online().expect("online host"), &desired, handle)
-            .unwrap_or_else(|error| panic!("load mount snapshot: {error}"));
+    let registry = MountTable::load_online(&host, &desired, handle)
+        .unwrap_or_else(|error| panic!("load mount snapshot: {error}"));
 
     // The provider timer interval fires once immediately after spawn. Tests
     // that assert explicit invalidation behavior start from a quiet fixture.
