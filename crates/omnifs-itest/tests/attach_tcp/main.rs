@@ -106,7 +106,6 @@ fn post_frontend_attach_target(ctrl_socket: &Path, body: Option<&str>) -> serde_
     }
 }
 
-
 #[test]
 fn attach_tcp_flag_binds_at_start_and_persists_the_target() {
     let daemon = spawn_namespace_only(&["--attach-tcp", "0"]);
@@ -163,8 +162,7 @@ fn frontend_attach_target_route_binds_on_demand_and_is_idempotent() {
     post_frontend_attach_target(&ctrl_socket, None);
     assert_eq!(daemon.record(), daemon_record);
     let targets = daemon.attach_targets();
-    let [omnifs_workspace::attach::Target::Tcp { addr: stored_addr }] = targets.as_slice()
-    else {
+    let [omnifs_workspace::attach::Target::Tcp { addr: stored_addr }] = targets.as_slice() else {
         panic!("expected one durable TCP attach target, got {targets:?}");
     };
     assert_eq!(stored_addr.to_string(), addr);

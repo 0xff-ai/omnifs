@@ -866,7 +866,7 @@ impl Attr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_engine::{GitCloner, HostContext, MountTable, TreeNamespace};
+    use omnifs_engine::{MountTable, TreeNamespace};
     use tempfile::TempDir;
     use tokio::runtime::Runtime as TokioRuntime;
 
@@ -888,23 +888,19 @@ mod tests {
         let config_dir = tempfile::tempdir().expect("config dir");
         let providers_dir = tempfile::tempdir().expect("providers dir");
         let credentials_file = config_dir.path().join("credentials.json");
-        let cloner = Arc::new(GitCloner::new(cache_dir.path().join("clones")).unwrap());
         let mounts_dir = tempfile::tempdir().expect("mounts dir");
         let desired = omnifs_workspace::mounts::Registry::load(mounts_dir.path())
             .expect("load mount snapshot");
+        let host = omnifs_engine::test_support::open_test_host(
+            cache_dir.path(),
+            providers_dir.path(),
+            &credentials_file,
+            cache_dir.path().join("clones"),
+        )
+        .expect("open test host");
         let registry = Arc::new(
-            MountTable::load_online(
-                HostContext::new(
-                    cache_dir.path(),
-                    config_dir.path(),
-                    providers_dir.path(),
-                    &credentials_file,
-                ),
-                &cloner,
-                &desired,
-                &handle,
-            )
-            .expect("load mount snapshot"),
+            MountTable::load_online(host.as_online().expect("online host"), &desired, &handle)
+                .expect("load mount snapshot"),
         );
 
         let namespace = TreeNamespace::online(registry, handle.clone());

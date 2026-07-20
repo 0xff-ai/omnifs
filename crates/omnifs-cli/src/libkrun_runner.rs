@@ -615,8 +615,7 @@ impl<'a> LibkrunLaunchLease<'a> {
 
         self.materialize_root_disk()?;
         let ssh_pubkey = self.runner.ensure_ssh_keypair()?;
-        self.runner
-            .write_seed_iso(&ssh_pubkey)?;
+        self.runner.write_seed_iso(&ssh_pubkey)?;
         self.ready_listener = Some(self.bind_ready_listener()?);
         let _ = std::fs::remove_file(self.runner.ssh_socket());
 

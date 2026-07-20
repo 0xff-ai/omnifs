@@ -701,13 +701,11 @@ async fn handle_control_connection(
         },
         ControlOperation::AttachVsock => {
             let reply = match daemon.ensure_attach_uds() {
-                Ok(AttachOutcome::Bound(ListenerTarget::Vsock { socket_path })) => {
-                    ControlReply {
-                        version: CONTROL_PROTOCOL_VERSION,
-                        outcome: ControlOutcome::AttachVsock(omnifs_api::VsockAttachTarget {
-                            socket_path,
-                        }),
-                    }
+                Ok(AttachOutcome::Bound(ListenerTarget::Vsock { socket_path })) => ControlReply {
+                    version: CONTROL_PROTOCOL_VERSION,
+                    outcome: ControlOutcome::AttachVsock(omnifs_api::VsockAttachTarget {
+                        socket_path,
+                    }),
                 },
                 Ok(AttachOutcome::Bound(_)) => ControlReply::error(ControlError::new(
                     ControlErrorCode::Internal,
@@ -879,12 +877,10 @@ mod tests {
         std::fs::create_dir_all(&args.mount_snapshot).unwrap();
         let context = crate::daemon::context::DaemonContext::resolve(&args).unwrap();
         context.prepare_startup_dirs(false).unwrap();
-        let cloner = Arc::new(omnifs_engine::GitCloner::new(context.clone_cache()).unwrap());
         let desired = omnifs_workspace::mounts::Registry::load(&args.mount_snapshot).unwrap();
         let registry = Arc::new(
-            omnifs_engine::MountTable::load_online(
-                context.host_context(),
-                &cloner,
+            omnifs_engine::MountTable::load(
+                context.host(),
                 &desired,
                 &tokio::runtime::Handle::current(),
             )
@@ -1077,7 +1073,7 @@ mod tests {
 
         let wire = omnifs_vfs_wire::WireNamespace::attach(
             omnifs_vfs_wire::AttachTarget::Tcp {
-                addr: target.addr.parse().unwrap()
+                addr: target.addr.parse().unwrap(),
             },
             omnifs_vfs_wire::FrontendIdentity {
                 kind: omnifs_vfs_wire::FrontendKind::Fuse,

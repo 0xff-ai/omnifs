@@ -303,16 +303,10 @@ mod tests {
 
         let env = body.env.expect("env");
         assert_eq!(
-            env.len(),
-            2,
-            "expected exactly the two attach vars: {env:?}"
-        );
-        assert!(
-            env.iter()
-                .any(|e| e == &format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:54321"))
-        );
-        assert!(
-            env.iter()
+            env,
+            vec![format!(
+                "{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:54321"
+            )]
         );
 
         let labels = body.labels.expect("labels");
@@ -349,7 +343,7 @@ mod tests {
                 "PATH=/usr/bin".to_string(),
                 "HOME=/root".to_string(),
                 format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:1"),
-                            ],
+            ],
         )
         .expect("the exact allowed set must pass");
     }
