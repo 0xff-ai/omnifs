@@ -31,8 +31,7 @@ pub(crate) struct DaemonArgs {
     #[arg(long)]
     pub(crate) offline: bool,
     /// Additionally serve the shared namespace over a TCP loopback listener at
-    /// `127.0.0.1:<port>` (`0` asks the OS for an ephemeral port), guarded by a
-    /// per-instance attach token instead of filesystem permissions. This is the
+    /// `127.0.0.1:<port>` (`0` asks the OS for an ephemeral port). This is the
     /// Docker Desktop path: a containerized frontend cannot share a host Unix
     /// socket into the Linux VM it runs in, so it dials TCP instead. Absent:
     /// no TCP attach listener at start (one can still be bound later on a

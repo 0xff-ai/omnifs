@@ -47,7 +47,6 @@ fi
 "$root/scripts/guest-image/make-seed-iso.sh" \
   --out "$seed_iso" \
   --attach-addr "192.0.2.1:9999" \
-  --attach-token "smoke-placeholder-token" \
   || exit 1
 
 krunkit_pid=""

@@ -124,13 +124,11 @@ impl DockerRunner {
         &self,
         home: &std::path::Path,
         attach_port: u16,
-        attach_token: &str,
     ) -> Result<()> {
         let body = FrontendContainerSpec {
             image: self.client.image(),
             home,
             attach_port,
-            attach_token,
             add_host_gateway: cfg!(target_os = "linux"),
         }
         .build_body();

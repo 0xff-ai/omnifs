@@ -450,16 +450,9 @@ fn assert_no_credentials_contract(container: &str) {
         names.contains(&"OMNIFS_ATTACH_ADDR"),
         "missing OMNIFS_ATTACH_ADDR: {env:?}"
     );
-    assert!(
-        names.contains(&"OMNIFS_ATTACH_TOKEN"),
-        "missing OMNIFS_ATTACH_TOKEN: {env:?}"
-    );
     for name in &names {
         assert!(
-            matches!(
-                *name,
-                "OMNIFS_ATTACH_ADDR" | "OMNIFS_ATTACH_TOKEN" | "PATH" | "HOME"
-            ),
+            matches!(*name, "OMNIFS_ATTACH_ADDR" | "PATH" | "HOME"),
             "unexpected env var `{name}` leaked into the credential-free frontend container: {env:?}"
         );
     }

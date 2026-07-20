@@ -707,7 +707,7 @@ async fn launch_docker(workspace: &Workspace, mount: Option<&str>, output: Outpu
     let runner = DockerRunner::new(runtime);
     let identity = workspace.identity();
     runner
-        .launch(identity.container_label(), addr.port(), &attach.token)
+        .launch(identity.container_label(), addr.port())
         .await?;
     wait_for_mount(&runner, mount, DOCKER_TIMEOUT).await
 }
@@ -736,7 +736,6 @@ async fn launch_libkrun(
         .launch(
             LibkrunLaunchRequest {
                 daemon_attach_socket: Path::new(&attach.socket_path),
-                attach_token: &attach.token,
                 config: &config,
                 guest_image_cache: &guest_image_cache,
                 output,
