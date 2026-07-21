@@ -6,15 +6,15 @@
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use omnifs_workspace::mounts::{Limits, Name as MountName, Spec};
+use omnifs_workspace::authn::AuthKind;
+use omnifs_workspace::mounts::{Auth, Limits, Name as MountName, OAuth, Spec, StaticToken};
 use omnifs_workspace::provider::{ProviderAuthManifest, ProviderManifest};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::auth::AuthSelection;
-use crate::commands::mount::mount_file::mount_spec;
 use crate::commands::mount::provider_selection;
-use crate::commands::mount::spec_creation::{CreatedMountSpec, MountSpecCreator};
+use crate::commands::mount::spec_creation::{create_config, validate_config};
 use crate::commands::mount::{AddArgs, AuthImportDecision, ImportOutcome};
 use crate::error::{ExitCode, WithExitCode};
 use crate::provider_bundle::EmbeddedProviders;
@@ -265,13 +265,7 @@ pub(crate) fn spec_creation(
         .auth
         .as_ref()
         .map(ProviderAuthManifest::wasm_auth_manifest);
-    let default_auth = selected_auth(
-        args,
-        &reference,
-        &mount_name,
-        &manifest,
-        auth_manifest.as_ref(),
-    )?;
+    let default_auth = selected_auth(args, &manifest, auth_manifest.as_ref())?;
 
     // Receipt rows for the two facts already true at this point: the
     // provider artifact is retained in the store (`ProviderResolver::resolve`
@@ -324,8 +318,7 @@ pub(crate) fn spec_creation(
         .with_exit_code(ExitCode::AuthRequired);
     }
 
-    let creator = MountSpecCreator::new(&reference, &mount_name, &manifest);
-    if !interactive && creator.requires_prompt() && args.config_json.is_none() {
+    if !interactive && manifest.requires_mount_input() && args.config_json.is_none() {
         anyhow::bail!(
             "cannot complete provider config prompts for `{provider_name}` without an interactive terminal; pass --config-json <json>"
         );
@@ -333,24 +326,35 @@ pub(crate) fn spec_creation(
     // A supplied --config-json owns the whole config: skip default generation
     // (which validates manifest defaults and fails on required fields the
     // override provides) and validate the override where it is applied.
-    let mut created = if args.config_json.is_some() {
-        creator.create_for_config_override()
+    let config_raw = if args.config_json.is_some() {
+        None
     } else {
-        creator.create(output, interactive)?
+        create_config(&manifest, output, interactive)?
     };
-    apply_mount_overrides(args, &manifest, &creator, &mut created)?;
-
-    let spec = mount_spec(
-        &mount_name,
-        &reference,
-        auth.as_ref(),
-        &args.scopes,
-        created,
-    );
+    let mut spec = Spec {
+        provider: reference,
+        mount: mount_name.to_string(),
+        auth: auth.as_ref().map(|auth| {
+            let account = auth.account.clone();
+            let scheme = auth.scheme.clone();
+            match auth.auth_type {
+                AuthKind::StaticToken => Auth::StaticToken(StaticToken { scheme, account }),
+                AuthKind::OAuth => Auth::OAuth(OAuth {
+                    scheme,
+                    account,
+                    scopes: (!args.scopes.is_empty()).then(|| args.scopes.clone()),
+                    ..OAuth::default()
+                }),
+            }
+        }),
+        limits: (!manifest.limits.is_empty()).then(|| Limits::from_declarations(&manifest.limits)),
+        config_raw,
+    };
+    apply_mount_overrides(args, &manifest, &mut spec)?;
 
     Ok(MountInitPlan {
         mount_name,
-        manifest: manifest.clone(),
+        manifest,
         effective_auth: auth,
         imported_token: token,
         spec,
@@ -518,8 +522,6 @@ pub(crate) fn parse_wait_duration(raw: &str) -> anyhow::Result<Duration> {
 
 fn selected_auth(
     args: &AddArgs,
-    reference: &omnifs_workspace::ids::ProviderRef,
-    mount_name: &MountName,
     manifest: &ProviderManifest,
     auth_manifest: Option<&omnifs_workspace::authn::AuthManifest>,
 ) -> anyhow::Result<Option<AuthSelection>> {
@@ -532,9 +534,7 @@ fn selected_auth(
     if let Some(scheme) = args.scheme.as_deref() {
         return AuthSelection::from_scheme(auth_manifest, scheme, None).map(Some);
     }
-    Ok(AuthSelection::from_provider_default(
-        reference, mount_name, manifest,
-    ))
+    Ok(AuthSelection::from_provider_default(manifest))
 }
 
 /// Write the mount spec. Silent: `configure_mount` prints the `mount ...
@@ -554,8 +554,7 @@ fn persist_mount_spec(
 fn apply_mount_overrides(
     args: &AddArgs,
     manifest: &ProviderManifest,
-    creator: &MountSpecCreator<'_>,
-    created: &mut CreatedMountSpec,
+    spec: &mut Spec,
 ) -> anyhow::Result<()> {
     if let Some(raw) = args.config_json.as_deref() {
         let config: Value = parse_json_flag("--config-json", raw)?;
@@ -565,11 +564,11 @@ fn apply_mount_overrides(
                 manifest.id
             );
         }
-        creator.validate(&config)?;
-        created.config = Some(config);
+        validate_config(manifest, &config)?;
+        spec.config_raw = Some(config);
     }
     if let Some(raw) = args.limits_json.as_deref() {
-        created.limits = Some(parse_json_flag::<Limits>("--limits-json", raw)?);
+        spec.limits = Some(parse_json_flag::<Limits>("--limits-json", raw)?);
     }
     Ok(())
 }

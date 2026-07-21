@@ -3,7 +3,6 @@
 pub(crate) mod add;
 pub(crate) mod auth_import;
 pub(crate) mod detect;
-pub(crate) mod mount_file;
 pub(crate) mod provider_selection;
 pub(crate) mod revoke;
 pub(crate) mod spec_creation;
