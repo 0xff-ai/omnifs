@@ -1005,18 +1005,10 @@ impl From<FrontendRuntime> for Runtime {
     }
 }
 fn frontend_cmp(left: &FrontendStatus, right: &FrontendStatus) -> Ordering {
-    runtime_rank(left.runtime)
-        .cmp(&runtime_rank(right.runtime))
+    left.runtime
+        .cmp(&right.runtime)
         .then_with(|| left.filesystem.label().cmp(right.filesystem.label()))
         .then_with(|| left.location.cmp(&right.location))
-}
-
-fn runtime_rank(runtime: Runtime) -> u8 {
-    match runtime {
-        Runtime::Host => 0,
-        Runtime::Docker => 1,
-        Runtime::Libkrun => 2,
-    }
 }
 
 #[cfg(test)]
