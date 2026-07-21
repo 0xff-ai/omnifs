@@ -49,26 +49,18 @@ impl TokenSource {
     /// stray newline or copy-paste padding never becomes part of the secret.
     /// Interactive prompts via the shared hidden password input (TTY only).
     pub fn read(self, output: &crate::ui::output::Output) -> anyhow::Result<SecretString> {
-        match self {
+        let (value, empty_error) = match self {
             Self::Stdin => {
                 let mut buf = String::new();
                 std::io::stdin()
                     .read_to_string(&mut buf)
                     .context("read token from stdin")?;
-                let trimmed = buf.trim();
-                if trimmed.is_empty() {
-                    bail!("stdin produced an empty token");
-                }
-                Ok(SecretString::from(trimmed.to_string()))
+                (buf, "stdin produced an empty token".to_owned())
             },
             Self::Env(var) => {
                 let value =
                     std::env::var(&var).with_context(|| format!("read token from ${var}"))?;
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    bail!("${var} is empty");
-                }
-                Ok(SecretString::from(trimmed.to_string()))
+                (value, format!("${var} is empty"))
             },
             Self::Interactive => {
                 if !crate::ui::prompt::is_terminal() {
@@ -77,12 +69,13 @@ impl TokenSource {
                     );
                 }
                 let token = crate::ui::prompt::Password::new("Token").ask_with_output(output)?;
-                let trimmed = token.trim();
-                if trimmed.is_empty() {
-                    bail!("token cannot be empty");
-                }
-                Ok(SecretString::from(trimmed.to_string()))
+                (token, "token cannot be empty".to_owned())
             },
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            bail!(empty_error);
         }
+        Ok(SecretString::from(value.to_owned()))
     }
 }
