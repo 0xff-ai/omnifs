@@ -14,25 +14,18 @@ use std::time::{Duration, Instant};
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
-pub enum DetectedCredential {
-    /// An environment variable carries a token.
-    EnvVar { name: String, value: SecretString },
-    /// A declared command's trimmed stdout carried a token. `note` is the
-    /// provider-supplied human-facing description of the source.
-    Command { note: String, value: SecretString },
+pub struct DetectedCredential {
+    source: String,
+    value: SecretString,
 }
 
 impl DetectedCredential {
-    pub(super) fn source(&self) -> String {
-        match self {
-            Self::EnvVar { name, .. } => format!("${name}"),
-            Self::Command { note, .. } => note.clone(),
-        }
+    pub(super) fn source(&self) -> &str {
+        &self.source
     }
 
     pub(super) fn value(&self) -> SecretString {
-        let (Self::EnvVar { value, .. } | Self::Command { value, .. }) = self;
-        value.clone()
+        self.value.clone()
     }
 }
 
@@ -56,15 +49,15 @@ fn read_source(source: &AmbientSource) -> Option<DetectedCredential> {
             if trimmed.is_empty() {
                 return None;
             }
-            Some(DetectedCredential::EnvVar {
-                name: name.clone(),
+            Some(DetectedCredential {
+                source: format!("${name}"),
                 value: SecretString::from(trimmed.to_string()),
             })
         },
         AmbientKind::Command { argv } => {
             let token = run_command(argv)?;
-            Some(DetectedCredential::Command {
-                note: source.note.clone(),
+            Some(DetectedCredential {
+                source: source.note.clone(),
                 value: SecretString::from(token),
             })
         },
@@ -160,13 +153,7 @@ mod tests {
             note: String::new(),
         }]);
         let found = detect(Some(&manifest));
-        assert!(
-            found.iter().any(|d| matches!(
-                d,
-                DetectedCredential::EnvVar { name, .. } if name == "DETECT_TEST_ENV_VAR"
-            )),
-            "found: {found:?}"
-        );
+        assert_eq!(found[0].source(), "$DETECT_TEST_ENV_VAR");
         // SAFETY: same rationale as the set_var above.
         unsafe {
             std::env::remove_var("DETECT_TEST_ENV_VAR");
@@ -182,15 +169,9 @@ mod tests {
             note: "echo probe".into(),
         }]);
         let found = detect(Some(&manifest));
-        let credential = found
-            .into_iter()
-            .find(|d| matches!(d, DetectedCredential::Command { .. }))
-            .expect("command credential detected");
-        let DetectedCredential::Command { note, value } = credential else {
-            unreachable!()
-        };
-        assert_eq!(note, "echo probe");
-        assert_eq!(value.expose_secret(), "command-token");
+        let credential = found.first().expect("command credential detected");
+        assert_eq!(credential.source(), "echo probe");
+        assert_eq!(credential.value().expose_secret(), "command-token");
     }
 
     #[test]
