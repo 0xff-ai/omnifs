@@ -513,7 +513,7 @@ impl Doctor<'_> {
             Section::Environment,
             "fuse",
             None,
-            self.probe_fuse(),
+            Self::probe_fuse(),
         ));
 
         let image_result = match (
@@ -543,7 +543,7 @@ impl Doctor<'_> {
             Section::Workspace,
             "ssh-agent",
             None,
-            self.probe_ssh_agent(),
+            Self::probe_ssh_agent(),
         ));
         findings.push(Finding::from_probe(
             Section::Workspace,
@@ -607,8 +607,7 @@ impl Doctor<'_> {
         }
     }
 
-    #[allow(clippy::unused_self)] // Kept as a Doctor probe method for a uniform probe surface.
-    fn probe_fuse(&self) -> ProbeResult {
+    fn probe_fuse() -> ProbeResult {
         #[cfg(target_os = "linux")]
         {
             let path = Path::new("/dev/fuse");
@@ -681,8 +680,7 @@ impl Doctor<'_> {
         }
     }
 
-    #[allow(clippy::unused_self)] // Kept as a Doctor probe method for a uniform probe surface.
-    fn probe_ssh_agent(&self) -> ProbeResult {
+    fn probe_ssh_agent() -> ProbeResult {
         match std::env::var_os("SSH_AUTH_SOCK") {
             Some(sock) if Path::new(&sock).exists() => {
                 ProbeResult::Ok(omnifs_workspace::display(Path::new(&sock)))
