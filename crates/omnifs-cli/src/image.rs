@@ -63,6 +63,15 @@ impl ImageRef {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Whether this reference names a registry host. Bare references such as
+    /// `omnifs-frontend:dev` are local build products.
+    pub(crate) fn has_registry(&self) -> bool {
+        match self.0.split_once('/') {
+            None => false,
+            Some((first, _)) => first.contains('.') || first.contains(':') || first == "localhost",
+        }
+    }
 }
 
 impl fmt::Display for ImageRef {
@@ -71,18 +80,9 @@ impl fmt::Display for ImageRef {
     }
 }
 
-/// Return whether an image reference names a registry host. Bare references
-/// such as `omnifs-frontend:dev` are local build products.
-pub(crate) fn names_registry(image: &str) -> bool {
-    match image.split_once('/') {
-        None => false,
-        Some((first, _)) => first.contains('.') || first.contains(':') || first == "localhost",
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::names_registry;
+    use super::ImageRef;
 
     #[test]
     fn names_registry_table() {
@@ -95,10 +95,11 @@ mod tests {
             ("registry.local/omnifs-frontend", true),
         ];
         for (image, expected) in cases {
+            let image = ImageRef::new(image).unwrap();
             assert_eq!(
-                names_registry(image),
+                image.has_registry(),
                 expected,
-                "names_registry({image:?}) should be {expected}"
+                "ImageRef::has_registry({image:?}) should be {expected}"
             );
         }
     }

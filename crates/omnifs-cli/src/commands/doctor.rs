@@ -15,7 +15,7 @@ use omnifs_workspace::creds::CredentialStore;
 use crate::docker::DockerClient;
 use crate::docker::DockerTarget;
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
-use crate::image::{ImageRef, names_registry};
+use crate::image::ImageRef;
 use crate::inventory::{AuthState, DaemonHealth, Inventory, MountStatus, Severity};
 use crate::ui::output::{Output, ResultVerdict};
 use crate::ui::prompt::Confirm;
@@ -637,7 +637,7 @@ impl Doctor<'_> {
             Ok(_) => ProbeResult::Ok(format!("{image} cached")),
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
-            }) if names_registry(image.as_str()) => ProbeResult::Warn(format!(
+            }) if image.has_registry() => ProbeResult::Warn(format!(
                 "{image} not cached (will pull on `omnifs frontend enable`)"
             )),
             Err(bollard::errors::Error::DockerResponseServerError {

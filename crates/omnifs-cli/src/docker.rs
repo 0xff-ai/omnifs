@@ -21,7 +21,7 @@ use futures_util::TryStreamExt;
 use crate::commands::frontend::GUEST_MOUNT;
 use crate::error::WithHint;
 use crate::frontend_container::{FrontendContainerSpec, assert_locked_down};
-use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef, names_registry};
+use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
 use crate::ui::output::{Output, OutputMode};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -547,7 +547,7 @@ impl DockerClient {
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
-            }) if !names_registry(self.image().as_str()) => {
+            }) if !self.image().has_registry() => {
                 // A registry-less reference is a local build product. Never
                 // reach for a registry: refuse and point at the dev build.
                 self.output
