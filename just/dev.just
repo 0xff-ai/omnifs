@@ -84,8 +84,9 @@ guest-image-smoke:
     bash scripts/guest-image/smoke.sh
 
 # Run the libkrun runtime conformance lane against a live guest: builds the
-# guest image if missing, then runs `crates/omnifs-itest/tests/frontend_libkrun`
-# with the live-acceptance opt-in set. macOS (Apple Silicon) only, and
+# guest image if missing, builds the host thin runner used as the baseline, then
+# runs `crates/omnifs-itest/tests/frontend_libkrun` with the live-acceptance
+# opt-in set. macOS (Apple Silicon) only, and
 # LOCAL-ONLY: GitHub-hosted macOS runners cannot nest virtualization, so this
 # never runs in CI (see docs/contracts/60-build-validation.md). Requires
 # the staged private libkrun payload (`just libkrun-runtime`) and `socat` on
@@ -99,4 +100,5 @@ libkrun-conformance:
       just guest-image
     fi
     just libkrun-runtime
+    cargo build -p omnifs-thin
     OMNIFS_ACCEPTANCE_LIVE=1 cargo nextest run -p omnifs-itest --test frontend_libkrun
