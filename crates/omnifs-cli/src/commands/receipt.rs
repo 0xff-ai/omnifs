@@ -9,7 +9,7 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-use crate::commands::frontend::{FrontendId, FrontendResult, FrontendRuntime as Runtime};
+use crate::commands::frontend::{FrontendResult, FrontendRuntime as Runtime};
 use crate::inventory::{AccessPath, FrontendStatus, Inventory};
 use crate::stages::MountInitStatus;
 use crate::ui::consent::{Outcome, Plan};
@@ -189,10 +189,7 @@ impl FrontendReceipt {
         let frontends = inventory
             .frontends
             .iter()
-            .filter(|frontend| {
-                rows.iter()
-                    .any(|row| frontend_matches_id(frontend, &row.id))
-            })
+            .filter(|frontend| rows.iter().any(|row| row.id.matches_status(frontend)))
             .cloned()
             .collect::<Vec<_>>();
         let access_paths = frontend_access_paths(inventory, &rows);
@@ -228,12 +225,6 @@ impl FrontendReceipt {
             Verdict::Degraded | Verdict::Failed => crate::error::ExitCode::Degraded,
         }
     }
-}
-
-fn frontend_matches_id(frontend: &FrontendStatus, id: &FrontendId) -> bool {
-    frontend.filesystem == id.filesystem()
-        && frontend.runtime == id.runtime()
-        && (id.runtime() != Runtime::Host || frontend.location.as_deref() == id.location())
 }
 
 fn frontend_access_paths(inventory: &Inventory, rows: &[FrontendResult]) -> Vec<AccessPath> {
