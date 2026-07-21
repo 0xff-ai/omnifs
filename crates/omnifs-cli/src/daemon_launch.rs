@@ -1,5 +1,7 @@
 //! Host-native daemon process launch.
 
+use std::fs::File;
+use std::io::{BufRead as _, BufReader};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -121,14 +123,45 @@ pub(crate) async fn launch(
 }
 
 fn last_log_line(log_path: &Path) -> Option<String> {
-    let contents = std::fs::read_to_string(log_path).ok()?;
-    contents
-        .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .map(str::to_owned)
+    let mut reader = BufReader::new(File::open(log_path).ok()?);
+    let mut buffer = Vec::new();
+    let mut last = None;
+    loop {
+        buffer.clear();
+        match reader.read_until(b'\n', &mut buffer) {
+            Ok(0) => return last,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buffer);
+                let line = line.trim_end_matches(['\n', '\r']);
+                if !line.trim().is_empty() {
+                    last = Some(line.to_owned());
+                }
+            },
+            Err(_) => return None,
+        }
+    }
 }
 
 fn log_cause_suffix(log_path: &Path) -> String {
     last_log_line(log_path).map_or_else(String::new, |line| format!(": {line}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_log_line_streams_to_the_last_non_empty_record() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            temp.path(),
+            b"starting daemon\n\nprovider failed to initialize\r\n   \n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            last_log_line(temp.path()).as_deref(),
+            Some("provider failed to initialize")
+        );
+    }
 }
