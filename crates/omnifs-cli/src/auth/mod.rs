@@ -14,8 +14,8 @@ pub(crate) use mount::{AuthSelection, MountAuth};
 pub(crate) use readiness::AuthReadiness;
 
 /// Keys any completed-auth receipt row may use:
-/// `oauth` (device-code flow, [`login::login_with_spec`]/
-/// [`login::login_with_workspace`]), `signed in` (every other completed auth
+/// `oauth` (device-code flow, [`login::login`]/[`login::login_with_workspace`]),
+/// `signed in` (every other completed auth
 /// path), `credential` (static-token store and ambient import). Shared
 /// verbatim by `mount add`'s and `mount reauth`'s auth blocks, since both
 /// route through the same `login`/`run_static_token_init`/

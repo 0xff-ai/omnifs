@@ -406,9 +406,10 @@ impl MountInitPlan {
                     return Ok(MountInitStatus::SignInDeclined);
                 }
             }
-            crate::auth::login::login_with_spec(
-                workspace,
-                &plan.spec,
+            crate::auth::login::login(
+                workspace.catalog(),
+                crate::auth::MountAuth::from_spec(workspace.catalog(), plan.spec.clone()),
+                workspace.credentials(),
                 auth.account.as_deref(),
                 crate::auth::LoginInteractivity {
                     no_browser: args.no_browser,
