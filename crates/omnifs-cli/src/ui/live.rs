@@ -98,10 +98,6 @@ impl Spinner {
         }
     }
 
-    pub(crate) fn human_bytes(bytes: u64) -> String {
-        human_bytes(bytes)
-    }
-
     pub(crate) fn update(&mut self, text: &str) {
         if !self.output.show_progress() {
             return;
