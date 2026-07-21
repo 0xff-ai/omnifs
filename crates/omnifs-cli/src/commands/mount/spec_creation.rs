@@ -1,6 +1,4 @@
 use anyhow::{Context, anyhow};
-use omnifs_workspace::ids::ProviderRef;
-use omnifs_workspace::mounts::{Limits, Name as MountName, Spec};
 use omnifs_workspace::provider::{
     ConfigField, ConfigMetadata, HostResourceBinding, ProviderManifest, is_hostname_only,
 };
@@ -9,98 +7,37 @@ use std::path::PathBuf;
 
 use crate::ui::output::Output;
 
-#[derive(Debug, Default, Clone)]
-pub(crate) struct CreatedMountSpec {
-    pub(crate) config: Option<Value>,
-    pub(crate) limits: Option<Limits>,
+pub(crate) fn create_config(
+    manifest: &ProviderManifest,
+    output: &Output,
+    interactive: bool,
+) -> anyhow::Result<Option<Value>> {
+    let Some(config_metadata) = manifest.config.as_ref() else {
+        return Ok(None);
+    };
+    let mut config = config_metadata.defaults();
+    if interactive {
+        prompt_host_files(config_metadata, &mut config, output)?;
+        if let Some(field) = manifest.dynamic_domain_field() {
+            prompt_domains(field, &mut config, output)?;
+        }
+    }
+    validate_config(manifest, &config)?;
+    Ok(Some(config))
 }
 
-pub(crate) struct MountSpecCreator<'a> {
-    reference: &'a ProviderRef,
-    mount_name: &'a MountName,
-    manifest: &'a ProviderManifest,
-}
-
-impl<'a> MountSpecCreator<'a> {
-    pub(crate) fn new(
-        reference: &'a ProviderRef,
-        mount_name: &'a MountName,
-        manifest: &'a ProviderManifest,
-    ) -> Self {
-        Self {
-            reference,
-            mount_name,
-            manifest,
-        }
+pub(crate) fn validate_config(manifest: &ProviderManifest, config: &Value) -> anyhow::Result<()> {
+    let config_metadata = manifest
+        .config
+        .as_ref()
+        .ok_or_else(|| anyhow!("provider `{}` has no config metadata", manifest.id))?;
+    config_metadata
+        .validate_config(config)
+        .map_err(|error| anyhow!("provider config failed validation: {error}"))?;
+    if let Some(field) = manifest.dynamic_domain_field() {
+        validate_dynamic_domains(config, field)?;
     }
-
-    /// Spec skeleton for a caller that supplies the whole config through an
-    /// override flag: pinned manifest needs and limits, no generated config,
-    /// no prompts, no default-config validation (the override is validated
-    /// where it is applied).
-    pub(crate) fn create_for_config_override(&self) -> CreatedMountSpec {
-        CreatedMountSpec {
-            config: None,
-            limits: (!self.manifest.limits.is_empty())
-                .then(|| Limits::from_declarations(&self.manifest.limits)),
-        }
-    }
-
-    pub(crate) fn create(
-        &self,
-        output: &Output,
-        interactive: bool,
-    ) -> anyhow::Result<CreatedMountSpec> {
-        let limits = (!self.manifest.limits.is_empty())
-            .then(|| Limits::from_declarations(&self.manifest.limits));
-        let mut spec = Spec {
-            provider: self.reference.clone(),
-            mount: self.mount_name.to_string(),
-            auth: None,
-            limits: None,
-            config_raw: None,
-        };
-        spec.apply_config_defaults(self.manifest);
-        let Some(mut config) = spec.config_raw else {
-            return Ok(CreatedMountSpec {
-                config: None,
-                limits,
-            });
-        };
-
-        if interactive {
-            if let Some(config_metadata) = self.manifest.config.as_ref() {
-                prompt_host_files(config_metadata, &mut config, output)?;
-            }
-            if let Some(field) = self.manifest.dynamic_domain_field() {
-                prompt_domains(field, &mut config, output)?;
-            }
-        }
-        self.validate(&config)?;
-        Ok(CreatedMountSpec {
-            config: Some(config),
-            limits,
-        })
-    }
-
-    pub(crate) fn requires_prompt(&self) -> bool {
-        self.manifest.requires_mount_input()
-    }
-
-    pub(crate) fn validate(&self, config: &Value) -> anyhow::Result<()> {
-        let config_metadata = self
-            .manifest
-            .config
-            .as_ref()
-            .ok_or_else(|| anyhow!("provider `{}` has no config metadata", self.manifest.id))?;
-        config_metadata
-            .validate_config(config)
-            .map_err(|error| anyhow!("provider config failed validation: {error}"))?;
-        if let Some(field) = self.manifest.dynamic_domain_field() {
-            validate_dynamic_domains(config, field)?;
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Prompt for the host path of each field the provider marks as a host file and
@@ -215,9 +152,7 @@ fn prompt_host_file(name: &str, field: &ConfigField, output: &Output) -> anyhow:
 
 #[cfg(test)]
 mod tests {
-    use super::{MountSpecCreator, parse_domain_list};
-    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
-    use omnifs_workspace::mounts::Name as MountName;
+    use super::{parse_domain_list, validate_config};
     use omnifs_workspace::provider::ProviderManifest;
 
     #[test]
@@ -273,20 +208,12 @@ mod tests {
             }]}
         }))
         .unwrap();
-        let reference = ProviderRef {
-            id: ProviderId::from_wasm_bytes(b"web"),
-            meta: ProviderMeta {
-                name: ProviderName::new("web").unwrap(),
-                version: None,
-            },
-        };
-        let mount_name = MountName::try_from("web").unwrap();
-        let creator = MountSpecCreator::new(&reference, &mount_name, &manifest);
-
         assert!(
-            creator
-                .validate(&serde_json::json!({"domains": ["API.Example.COM"]}))
-                .is_ok()
+            validate_config(
+                &manifest,
+                &serde_json::json!({"domains": ["API.Example.COM"]})
+            )
+            .is_ok()
         );
         for value in [
             serde_json::json!({"domains": []}),
@@ -296,7 +223,7 @@ mod tests {
             serde_json::json!({"domains": ["*"]}),
         ] {
             assert!(
-                creator.validate(&value).is_err(),
+                validate_config(&manifest, &value).is_err(),
                 "expected {value} to fail"
             );
         }

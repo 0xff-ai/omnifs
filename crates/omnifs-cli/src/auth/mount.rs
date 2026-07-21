@@ -5,7 +5,6 @@ use omnifs_auth::OAuthRequest;
 use omnifs_workspace::authn::AuthKind;
 use omnifs_workspace::authn::{AuthManifest, AuthScheme, StaticTokenScheme};
 use omnifs_workspace::creds::CredentialStore;
-use omnifs_workspace::ids::ProviderRef;
 use omnifs_workspace::mounts::{Auth, Name as MountName, Spec};
 use omnifs_workspace::provider::{Catalog, ProviderAuthManifest, ProviderManifest};
 
@@ -22,24 +21,17 @@ pub(crate) struct AuthSelection {
 }
 
 impl AuthSelection {
-    pub(crate) fn from_provider_default(
-        reference: &ProviderRef,
-        mount_name: &MountName,
-        manifest: &ProviderManifest,
-    ) -> Option<Self> {
-        let mut spec = Spec {
-            provider: reference.clone(),
-            mount: mount_name.to_string(),
-            auth: None,
-            limits: None,
-            config_raw: None,
+    pub(crate) fn from_provider_default(manifest: &ProviderManifest) -> Option<Self> {
+        let (scheme, default) = manifest.auth.as_ref()?.default_scheme()?;
+        let auth_type = match default {
+            AuthScheme::None => return None,
+            AuthScheme::StaticToken(_) => AuthKind::StaticToken,
+            AuthScheme::Oauth(_) => AuthKind::OAuth,
         };
-        spec.apply_auth_default(manifest);
-        let auth = spec.auth.as_ref()?;
         Some(Self {
-            auth_type: auth.kind(),
-            scheme: auth.scheme().map(str::to_owned),
-            account: auth.account().map(str::to_owned),
+            auth_type,
+            scheme: Some(scheme.to_owned()),
+            account: None,
         })
     }
 

@@ -224,18 +224,13 @@ mod tests {
     use super::AddArgs;
     use crate::auth::AuthSelection;
     use crate::commands::mount::AuthImportDecision;
-    use crate::commands::mount::mount_file::mount_spec;
-    use crate::commands::mount::spec_creation::{CreatedMountSpec, MountSpecCreator};
+    use crate::commands::mount::spec_creation::{create_config, validate_config};
     use omnifs_workspace::Workspace;
     use omnifs_workspace::authn::{AuthManifest, AuthScheme};
-    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
-    use omnifs_workspace::mounts::Registry;
-    use omnifs_workspace::mounts::{Limits as ProviderLimits, Name as MountName};
     use omnifs_workspace::provider::{
         AccessNeed, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding,
         LimitDeclarations, PreopenMode, ProviderManifest, ResourceLimit,
     };
-    use serde_json::Value;
 
     #[test]
     fn config_override_skips_default_generation_for_required_fields() {
@@ -254,19 +249,12 @@ mod tests {
             }],
         });
 
-        let reference = provider_ref("db");
-        let mount_name = MountName::try_from("db").unwrap();
         let output = crate::ui::output::Output::new(crate::ui::output::OutputMode::Human, false);
-        let creator = MountSpecCreator::new(&reference, &mount_name, &manifest);
 
-        creator
-            .create(&output, false)
+        create_config(&manifest, &output, false)
             .expect_err("default generation must fail without the required field");
 
-        let created = creator.create_for_config_override();
-        assert_eq!(created.config, None);
-        creator
-            .validate(&serde_json::json!({"path": "/data/test.db"}))
+        validate_config(&manifest, &serde_json::json!({"path": "/data/test.db"}))
             .expect("override config with the required field validates");
     }
 
@@ -284,24 +272,21 @@ mod tests {
             }],
         });
 
-        let reference = provider_ref("linear");
-        let mount_name = MountName::try_from("linear").unwrap();
         let output = crate::ui::output::Output::new(crate::ui::output::OutputMode::Human, false);
-        let created = MountSpecCreator::new(&reference, &mount_name, &manifest)
-            .create(&output, false)
-            .unwrap();
+        let config = create_config(&manifest, &output, false).unwrap();
 
         assert_eq!(
-            created.config,
+            config,
             Some(serde_json::json!({"endpoint": "unix:///var/run/docker.sock"})),
         );
-        assert_eq!(
-            created.limits.expect("limits seeded from manifest"),
-            ProviderLimits {
-                max_memory_mb: Some(128),
-                ..ProviderLimits::default()
-            }
-        );
+    }
+
+    #[test]
+    fn provider_default_auth_selection_uses_the_declared_scheme() {
+        let selection = AuthSelection::from_provider_default(&provider_manifest()).unwrap();
+        assert!(selection.is_oauth());
+        assert_eq!(selection.scheme.as_deref(), Some("oauth"));
+        assert_eq!(selection.account, None);
     }
 
     #[test]
@@ -320,38 +305,7 @@ mod tests {
             }],
         });
 
-        let reference = provider_ref("linear");
-        let mount_name = MountName::try_from("linear").unwrap();
-        assert!(MountSpecCreator::new(&reference, &mount_name, &manifest).requires_prompt());
-    }
-
-    #[test]
-    fn mount_file_includes_generated_config_without_capabilities() {
-        let dir = tempfile::tempdir().unwrap();
-        let mounts = dir.path();
-
-        let spec = mount_spec(
-            &MountName::try_from("db").unwrap(),
-            &provider_ref("db"),
-            None,
-            &[],
-            CreatedMountSpec {
-                config: Some(serde_json::json!({"path": "/data/chinook.db"})),
-                limits: Some(ProviderLimits {
-                    max_memory_mb: Some(128),
-                    ..ProviderLimits::default()
-                }),
-            },
-        );
-
-        Registry::load(mounts).unwrap().put(&spec).unwrap();
-
-        let written: Value =
-            serde_json::from_str(&std::fs::read_to_string(mounts.join("db.json")).unwrap())
-                .unwrap();
-        assert_eq!(written["config"]["path"], "/data/chinook.db");
-        assert!(!written.as_object().unwrap().contains_key("capabilities"));
-        assert_eq!(written["limits"]["max_memory_mb"], 128);
+        assert!(manifest.requires_mount_input());
     }
 
     #[test]
@@ -581,25 +535,10 @@ mod tests {
         // non-interactive run without --config-json bails asking for it rather
         // than writing a spec that can never be served.
         let manifest = web_manifest();
-        let reference = provider_ref("web");
-        let mount_name = MountName::try_from("web").unwrap();
-        let creator = MountSpecCreator::new(&reference, &mount_name, &manifest);
         assert!(
-            creator.requires_prompt(),
+            manifest.requires_mount_input(),
             "a dynamic-domain provider must require domain input"
         );
-
-        assert!(creator.create_for_config_override().config.is_none());
-    }
-
-    fn provider_ref(name: &str) -> ProviderRef {
-        ProviderRef {
-            id: ProviderId::from_wasm_bytes(name.as_bytes()),
-            meta: ProviderMeta {
-                name: ProviderName::new(name).unwrap(),
-                version: None,
-            },
-        }
     }
 
     fn provider_manifest() -> ProviderManifest {
