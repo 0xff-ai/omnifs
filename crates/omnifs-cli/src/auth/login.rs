@@ -16,7 +16,6 @@ use crate::credential_target::CredentialTarget;
 use crate::ui::style;
 use omnifs_workspace::Workspace;
 use omnifs_workspace::authn::SchemeGuidance;
-use omnifs_workspace::mounts::Spec;
 use omnifs_workspace::provider::Catalog;
 
 const MANUAL_PROMPT_CANCELED: &str = "omnifs-manual-oauth-prompt-canceled";
@@ -32,7 +31,7 @@ pub(crate) struct LoginInteractivity<'a> {
     pub(crate) scopes: &'a [String],
 }
 
-async fn login(
+pub(crate) async fn login(
     catalog: &Catalog,
     mount_auth: crate::auth::MountAuth,
     store: &dyn CredentialStore,
@@ -189,32 +188,6 @@ pub(crate) async fn login_with_workspace(
     let store = workspace.credentials();
     let mounts = crate::mount_config::load_mounts(workspace)?;
     let mount_auth = crate::auth::MountAuth::load(workspace.catalog(), &mounts, mount)?;
-    login(
-        workspace.catalog(),
-        mount_auth,
-        store,
-        account,
-        interactivity,
-        output,
-        key_width,
-    )
-    .await
-}
-
-/// Authenticate a mount that is still being created from its already-resolved
-/// spec. Mount creation must not reload this spec by name: when a live daemon persisted
-/// it in another process, this command's mount registry can still hold the
-/// snapshot from before the create.
-pub(crate) async fn login_with_spec(
-    workspace: &Workspace,
-    spec: &Spec,
-    account: Option<&str>,
-    interactivity: LoginInteractivity<'_>,
-    output: &crate::ui::output::Output,
-    key_width: usize,
-) -> anyhow::Result<CredentialTarget> {
-    let store = workspace.credentials();
-    let mount_auth = crate::auth::MountAuth::from_spec(workspace.catalog(), spec.clone());
     login(
         workspace.catalog(),
         mount_auth,
