@@ -103,11 +103,8 @@ impl RuntimeHarness {
             let manifest = provider
                 .manifest()
                 .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-            spec.apply_provider_metadata(
-                &manifest,
-                omnifs_workspace::mounts::ProviderMetadataInheritance::all(),
-            )
-            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+            spec.apply_auth_default(&manifest);
+            spec.apply_config_defaults(&manifest);
         }
         let selected_mount = specs
             .first()

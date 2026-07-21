@@ -6,7 +6,7 @@ use omnifs_workspace::authn::AuthKind;
 use omnifs_workspace::authn::{AuthManifest, AuthScheme, StaticTokenScheme};
 use omnifs_workspace::creds::CredentialStore;
 use omnifs_workspace::ids::ProviderRef;
-use omnifs_workspace::mounts::{Auth, Name as MountName, ProviderMetadataInheritance, Spec};
+use omnifs_workspace::mounts::{Auth, Name as MountName, Spec};
 use omnifs_workspace::provider::{Catalog, ProviderAuthManifest, ProviderManifest};
 
 use super::manifest_view::AuthManifestView;
@@ -34,8 +34,7 @@ impl AuthSelection {
             limits: None,
             config_raw: None,
         };
-        spec.apply_provider_metadata(manifest, ProviderMetadataInheritance::auth())
-            .ok()?;
+        spec.apply_auth_default(manifest);
         let auth = spec.auth.as_ref()?;
         Some(Self {
             auth_type: auth.kind(),
