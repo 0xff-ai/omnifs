@@ -117,10 +117,10 @@ async fn login(
     {
         output.note(format!("Open {url}"));
     }
-    // Store each target key through the workspace store.
-    for key in target.keys() {
-        store.put(key, &entry)?;
-    }
+    let credential_id = target
+        .credential_id()
+        .ok_or_else(|| anyhow::anyhow!("OAuth flow resolved without a credential target"))?;
+    store.put(credential_id, &entry)?;
     output.note(format!(
         "stored OAuth credential for `{mount}` with scopes: {}",
         format_scopes(entry.scopes())
@@ -408,7 +408,7 @@ mod tests {
         let (request, target) = mount_auth.oauth_request(None, &[]).unwrap();
 
         assert_eq!(request.scheme().key, "device");
-        assert!(target.primary_key().is_some());
+        assert!(target.credential_id().is_some());
         assert!(
             crate::mount_config::load_mounts(&workspace)
                 .unwrap()

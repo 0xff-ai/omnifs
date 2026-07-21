@@ -41,7 +41,7 @@ impl RevokeArgs {
                 .credential_target()?,
         };
         let credential_id = target
-            .primary_key()
+            .credential_id()
             .cloned()
             .ok_or_else(|| anyhow!("mount `{}` has no configured credential", self.name))?;
 
@@ -83,7 +83,7 @@ impl RevokeArgs {
                 None => MountAuth::from_spec(workspace.catalog(), mount.config.clone())
                     .credential_target()?,
             };
-            if candidate.primary_key() == Some(&credential_id) {
+            if candidate.credential_id() == Some(&credential_id) {
                 if candidate_config.kind() != auth_config.kind() {
                     anyhow::bail!(
                         "mounts `{}` and `{mount_name}` share credential `{credential_id}` but configure different auth kinds",
