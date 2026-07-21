@@ -127,6 +127,23 @@ impl FrontendId {
         Ok(Self::new(filesystem, runtime, location))
     }
 
+    fn from_status(frontend: &FrontendStatus) -> Self {
+        Self::new(
+            frontend.filesystem,
+            frontend.runtime,
+            (frontend.runtime == FrontendRuntime::Host)
+                .then(|| frontend.location.clone())
+                .flatten(),
+        )
+    }
+
+    pub(crate) fn matches_status(&self, frontend: &FrontendStatus) -> bool {
+        self.filesystem == frontend.filesystem
+            && self.runtime == frontend.runtime
+            && (self.runtime != FrontendRuntime::Host
+                || self.location.as_deref() == frontend.location.as_deref())
+    }
+
     pub const fn filesystem(&self) -> FrontendFilesystem {
         self.filesystem
     }
@@ -218,20 +235,6 @@ fn resolve_id(
         FrontendRuntime::Docker | FrontendRuntime::Libkrun => location,
     };
     FrontendId::try_new(filesystem, runtime, location)
-}
-
-fn observed_id(frontend: &FrontendStatus) -> FrontendId {
-    FrontendId::new(
-        frontend.filesystem,
-        frontend.runtime,
-        (frontend.runtime == FrontendRuntime::Host)
-            .then(|| frontend.location.clone())
-            .flatten(),
-    )
-}
-
-fn matches(frontend: &FrontendStatus, id: &FrontendId) -> bool {
-    observed_id(frontend) == *id
 }
 
 fn restart_fix(id: &FrontendId) -> String {
@@ -341,7 +344,7 @@ impl FrontendEnableArgs {
         let observed = inventory
             .frontends
             .iter()
-            .find(|row| matches(row, &id))
+            .find(|row| id.matches_status(row))
             .map(|row| row.state);
         if observed == Some(FrontendState::Attached) {
             return Ok(FrontendResult::attached(id, false));
@@ -396,7 +399,7 @@ impl FrontendDisableArgs {
             self.runtime,
             self.location,
         )?;
-        let observed = inventory.frontends.iter().any(|row| matches(row, &id));
+        let observed = inventory.frontends.iter().any(|row| id.matches_status(row));
         let running = match runner_running(workspace, &id, output.clone()).await {
             Ok(value) => value,
             Err(error) => {
@@ -448,7 +451,7 @@ impl FrontendRestartArgs {
                 .frontends
                 .iter()
                 .filter(|row| matches!(row.state, FrontendState::Attached | FrontendState::Running))
-                .map(observed_id)
+                .map(FrontendId::from_status)
                 .collect::<Vec<_>>()
         } else {
             vec![resolve_observed_selector(
@@ -542,11 +545,11 @@ fn select_disable_id(
         })
         .collect::<Vec<_>>();
     match rows.as_slice() {
-        [row] => Ok(observed_id(row)),
+        [row] => Ok(FrontendId::from_status(row)),
         [_, _, ..] => bail!(
             "selector matches multiple frontends: {}",
             rows.iter()
-                .map(|row| observed_id(row).to_string())
+                .map(|row| FrontendId::from_status(row).to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -570,7 +573,7 @@ fn resolve_observed_selector(
                 && runtime.is_none_or(|env| row.runtime == env)
                 && location.is_none_or(|path| row.location.as_deref() == Some(path))
         })
-        .map(observed_id)
+        .map(FrontendId::from_status)
         .collect::<Vec<_>>();
     match ids.as_slice() {
         [] => bail!("no frontend matches the selector"),
@@ -605,7 +608,7 @@ async fn wait_for_attachment(workspace: &Workspace, id: &FrontendId) -> bool {
             && inventory
                 .frontends
                 .iter()
-                .any(|row| matches(row, id) && row.state == FrontendState::Attached)
+                .any(|row| id.matches_status(row) && row.state == FrontendState::Attached)
         {
             return true;
         }
