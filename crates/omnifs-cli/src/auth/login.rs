@@ -55,11 +55,11 @@ async fn login(
         .and_then(|manifest| manifest.auth)
         .map(|auth| auth.guidance_for(&request.scheme().key))
         .unwrap_or_default();
-    let mode = AuthMode::from_oauth_flow(&request.scheme().flow);
+    let mode = AuthMode::from(&request.scheme().flow);
     output.note(format!(
         "requesting OAuth for `{mount}` using scheme `{}` ({})",
         request.scheme().key,
-        mode.label()
+        mode
     ));
     print_oauth_consent_summary(output, &request, &guidance);
     let client = OAuthClient::new()?;
@@ -300,7 +300,7 @@ fn print_oauth_consent_summary(
 ) {
     let stream = style::Stream::Stderr;
     let scheme = request.scheme();
-    let mode = AuthMode::from_oauth_flow(&scheme.flow);
+    let mode = AuthMode::from(&scheme.flow);
     output.note(crate::ui::style::dim(mode.experience(), stream));
     if !guidance.setup_steps.is_empty() {
         output.note(crate::ui::style::dim("Guidance:", stream));
