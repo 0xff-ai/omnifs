@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::auth::AuthSelection;
 use crate::commands::mount::mount_file::mount_spec;
-use crate::commands::mount::provider_selection::ProviderSelection;
+use crate::commands::mount::provider_selection;
 use crate::commands::mount::spec_creation::{CreatedMountSpec, MountSpecCreator};
 use crate::commands::mount::{AddArgs, AuthImportDecision, ImportOutcome};
 use crate::error::{ExitCode, WithExitCode};
@@ -192,7 +192,6 @@ pub(crate) fn spec_creation(
     let interactive = init_interactive(prompt);
     let mounts = crate::mount_config::load_mounts(workspace)?;
     let embedded = EmbeddedProviders::load()?;
-    let provider_selection = ProviderSelection::new(&mounts, &embedded);
 
     // No provider argument in an interactive output: choose one with the
     // generic single-select prompt instead of a bare list. The panel carries
@@ -219,7 +218,8 @@ pub(crate) fn spec_creation(
     } else {
         None
     };
-    let selector = provider_selection.select(
+    let selector = provider_selection::select(
+        &embedded,
         args.provider.as_deref().or(picked.as_deref()),
         interactive,
         output,
@@ -240,7 +240,8 @@ pub(crate) fn spec_creation(
         ));
     }
     let provider_name = resolved.reference.meta.name.to_string();
-    let mount_name = provider_selection.mount_name(
+    let mount_name = provider_selection::mount_name(
+        &mounts,
         &resolved.manifest.default_mount,
         args.as_name.as_deref(),
         interactive,
