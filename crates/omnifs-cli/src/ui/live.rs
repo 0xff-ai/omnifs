@@ -212,14 +212,11 @@ fn rows(count: usize) -> u16 {
     u16::try_from(count).unwrap_or(u16::MAX)
 }
 
-/// One in-flight unit inside a [`LiveRegion`]: its own spinner frame and
-/// label, settling in place to a `✓`/`!`/`✗` line without leaving the
-/// region until the whole group finishes.
+/// One in-flight unit inside a [`LiveRegion`].
 #[derive(Debug, Clone)]
 struct Unit {
     key: String,
     text: String,
-    settled: Option<Glyph>,
 }
 
 /// Render one live-region frame as plain text (no cursor control), one line
@@ -228,20 +225,19 @@ struct Unit {
 fn region_frame(units: &[Unit], frame_symbol: &str) -> Vec<String> {
     units
         .iter()
-        .map(|unit| match unit.settled {
-            Some(glyph) => format!("  {} {}", glyph.render(style::Stream::Stderr), unit.text),
-            None => format!(
+        .map(|unit| {
+            format!(
                 "  {} {}",
                 style::dim(frame_symbol, style::Stream::Stderr),
                 unit.text
-            ),
+            )
         })
         .collect()
 }
 
 /// Parallel operations rendered as one block of two-space-indented lines
 /// Non-TTY or `--quiet` never draws a region at
-/// all: `update`/`settle` become no-ops and [`LiveRegion::finish`] /
+/// all: `update` becomes a no-op and [`LiveRegion::finish`] /
 /// [`LiveRegion::cancel`] still emit exactly the one durable row a TTY run
 /// would leave behind, so both paths agree on the record that survives.
 pub(crate) struct LiveRegion {
@@ -265,7 +261,6 @@ impl LiveRegion {
                 .map(|key| Unit {
                     key: key.into(),
                     text: String::new(),
-                    settled: None,
                 })
                 .collect(),
             frame: 0,
@@ -275,29 +270,11 @@ impl LiveRegion {
         }
     }
 
-    /// Update one unit's in-flight label. A no-op once that unit has
-    /// settled, and a no-op for an unknown key (the region's key set is
-    /// fixed at construction).
+    /// Update one unit's in-flight label. A no-op for an unknown key because
+    /// the region's key set is fixed at construction.
     pub(crate) fn update(&mut self, key: &str, text: impl Into<String>) {
-        if let Some(unit) = self.units.iter_mut().find(|unit| unit.key == key)
-            && unit.settled.is_none()
-        {
-            unit.text = text.into();
-        }
-        self.redraw_if_due();
-    }
-
-    /// Settle one unit in place to a `✓`/`!`/`✗` line. It stays visible in
-    /// the region until [`LiveRegion::finish`]/[`LiveRegion::cancel`] erases
-    /// the whole group. Not yet called by a real multi-unit region: this
-    /// slice's two regions (provider warmup, frontend reattachment) each
-    /// track a single collapsed unit, so per-unit settling awaits a future
-    /// slice that fans a region out over several concurrent items.
-    #[allow(dead_code)]
-    pub(crate) fn settle(&mut self, key: &str, glyph: Glyph, text: impl Into<String>) {
         if let Some(unit) = self.units.iter_mut().find(|unit| unit.key == key) {
             unit.text = text.into();
-            unit.settled = Some(glyph);
         }
         self.redraw_if_due();
     }
@@ -446,28 +423,25 @@ mod tests {
             Unit {
                 key: "github".to_owned(),
                 text: "warming github".to_owned(),
-                settled: None,
             },
             Unit {
                 key: "linear".to_owned(),
                 text: "linear warm".to_owned(),
-                settled: Some(Glyph::Done),
             },
         ];
         let frame = region_frame(&units, "⠋");
         assert_eq!(frame.len(), 2);
         let pending = super::super::strip_ansi(&frame[0]);
         assert_eq!(pending, "  ⠋ warming github");
-        let settled = super::super::strip_ansi(&frame[1]);
-        assert_eq!(settled, "  ✓ linear warm");
+        let second = super::super::strip_ansi(&frame[1]);
+        assert_eq!(second, "  ⠋ linear warm");
     }
 
     #[test]
-    fn live_region_update_and_settle_are_no_ops_for_unknown_keys() {
+    fn live_region_update_is_a_no_op_for_unknown_keys() {
         let output = Output::new(super::super::output::OutputMode::Human, true);
         let mut region = LiveRegion::new(output, ["frontends"]);
         region.update("missing", "ignored");
-        region.settle("missing", Glyph::Done, "ignored");
         assert!(region.units.iter().all(|unit| unit.text.is_empty()));
     }
 
