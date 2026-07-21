@@ -38,8 +38,8 @@ impl MountConfig {
             .configured_target(auth, auth.account())
             .with_context(|| format!("resolve credential for mount `{}`", self.name))?;
         let key = target
-            .primary_key()
-            .expect("credential target for scheme is internal");
+            .credential_id()
+            .ok_or_else(|| anyhow!("mount `{}` has no credential target", self.name))?;
         let key_name = key.storage_key();
         let entry = target
             .lookup(store)

@@ -460,28 +460,23 @@ impl ReauthArgs {
     }
 }
 
-/// `reauth`'s second, independent ledger block: the exact credential keys
-/// just stored. Its key set is dynamic (one row per `target.keys()`) but
-/// known before this block's first row prints, so it sizes itself rather than
-/// reusing the auth-outcome block's width the caller already printed.
+/// `reauth`'s second, independent ledger block: the exact credential key just
+/// stored. It sizes itself rather than reusing the auth-outcome block's width
+/// the caller already printed.
 fn print_stored_credential_rows(output: &crate::ui::output::Output, target: &CredentialTarget) {
-    let rows: Vec<String> = target
-        .keys()
-        .into_iter()
-        .map(|key| format!("credential `{key}`"))
-        .collect();
-    let key_width =
-        Output::ledger_block_width(&rows.iter().map(String::as_str).collect::<Vec<_>>());
-    for key in &rows {
-        output.ledger_row(
-            &crate::ui::render::LedgerRow::new(
-                crate::ui::style::Glyph::Done,
-                key.clone(),
-                "stored; takes effect on the next `omnifs up` or `omnifs apply`",
-            ),
-            key_width,
-        );
-    }
+    let Some(credential_id) = target.credential_id() else {
+        return;
+    };
+    let key = format!("credential `{credential_id}`");
+    let key_width = Output::ledger_block_width(&[&key]);
+    output.ledger_row(
+        &crate::ui::render::LedgerRow::new(
+            crate::ui::style::Glyph::Done,
+            key,
+            "stored; takes effect on the next `omnifs up` or `omnifs apply`",
+        ),
+        key_width,
+    );
 }
 
 #[allow(dead_code)]

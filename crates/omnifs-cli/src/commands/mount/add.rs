@@ -207,11 +207,12 @@ pub(crate) async fn run_static_token_init(
         .static_token_scheme_key(auth.scheme.as_deref(), None)?;
     let target =
         CredentialTarget::for_static_import(&manifest.id, &scheme_key, auth.account.as_deref())?;
-    for key in target.keys() {
-        store
-            .put(key, &entry)
-            .with_context(|| "failed to store credential")?;
-    }
+    let credential_id = target
+        .credential_id()
+        .ok_or_else(|| anyhow::anyhow!("static token resolved without a credential target"))?;
+    store
+        .put(credential_id, &entry)
+        .with_context(|| "failed to store credential")?;
     output.ledger_row(
         &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "credential", "stored"),
         key_width,

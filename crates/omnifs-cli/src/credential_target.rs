@@ -56,14 +56,7 @@ impl CredentialTarget {
         )))
     }
 
-    pub(crate) fn keys(&self) -> Vec<&CredentialId> {
-        match self {
-            Self::Internal(key) => vec![key],
-            Self::None => Vec::new(),
-        }
-    }
-
-    pub(crate) fn primary_key(&self) -> Option<&CredentialId> {
+    pub(crate) fn credential_id(&self) -> Option<&CredentialId> {
         match self {
             Self::Internal(key) => Some(key),
             Self::None => None,
