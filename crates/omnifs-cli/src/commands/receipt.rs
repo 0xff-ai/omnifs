@@ -37,6 +37,13 @@ impl Verdict {
             Self::Ok
         }
     }
+
+    const fn output_verdict(self) -> ResultVerdict {
+        match self {
+            Self::Ok => ResultVerdict::Ok,
+            Self::Degraded | Self::Failed => ResultVerdict::Degraded,
+        }
+    }
 }
 
 /// `omnifs up`: the daemon, its mounts and frontends, and a verdict.
@@ -105,10 +112,7 @@ impl MountRemoveReceipt {
     }
 
     pub(crate) fn output_verdict(&self) -> ResultVerdict {
-        match self.verdict {
-            Verdict::Ok => ResultVerdict::Ok,
-            Verdict::Degraded | Verdict::Failed => ResultVerdict::Degraded,
-        }
+        self.verdict.output_verdict()
     }
 }
 
@@ -117,6 +121,18 @@ impl TeardownReceipt {
         Self {
             verdict: Verdict::from_rows(&rows),
             rows,
+        }
+    }
+
+    pub(crate) fn output_verdict(&self) -> ResultVerdict {
+        self.verdict.output_verdict()
+    }
+
+    pub(crate) fn exit_code(&self) -> crate::error::ExitCode {
+        match self.verdict {
+            Verdict::Ok => crate::error::ExitCode::Success,
+            Verdict::Degraded => crate::error::ExitCode::Degraded,
+            Verdict::Failed => crate::error::ExitCode::GenericFailure,
         }
     }
 }
@@ -203,10 +219,7 @@ impl FrontendReceipt {
     }
 
     pub(crate) fn output_verdict(&self) -> ResultVerdict {
-        match self.verdict {
-            Verdict::Ok => ResultVerdict::Ok,
-            Verdict::Degraded | Verdict::Failed => ResultVerdict::Degraded,
-        }
+        self.verdict.output_verdict()
     }
 
     pub(crate) fn exit_code(&self) -> crate::error::ExitCode {
@@ -259,6 +272,15 @@ mod tests {
 
     fn inventory_with_frontends(frontends: Vec<FrontendStatus>) -> Inventory {
         Inventory::test(DaemonHealth::Running, frontends, Vec::new())
+    }
+
+    #[test]
+    fn teardown_receipt_owns_its_terminal_result() {
+        let receipt = TeardownReceipt::new(vec![Outcome::fail("daemon", "still running")]);
+
+        assert_eq!(receipt.verdict, Verdict::Failed);
+        assert_eq!(receipt.output_verdict(), ResultVerdict::Degraded);
+        assert_eq!(receipt.exit_code(), crate::error::ExitCode::GenericFailure);
     }
 
     #[test]

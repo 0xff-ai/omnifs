@@ -11,7 +11,7 @@ use crate::commands::receipt::TeardownReceipt;
 use crate::daemon_teardown::DaemonTeardown;
 use crate::error::ExitCode;
 use crate::inventory::Inventory;
-use crate::ui::output::{Output, ResultVerdict};
+use crate::ui::output::Output;
 use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -33,22 +33,9 @@ impl DownArgs {
                 .map(crate::daemon_teardown::TeardownOutcome::outcome)
                 .collect();
             let receipt = TeardownReceipt::new(rows);
-            let failed = outcomes
-                .iter()
-                .any(crate::daemon_teardown::TeardownOutcome::is_failure);
-            output.emit_result(
-                if failed {
-                    ResultVerdict::Degraded
-                } else {
-                    ResultVerdict::Ok
-                },
-                receipt,
-            )?;
-            if failed {
-                ExitCode::GenericFailure
-            } else {
-                ExitCode::Success
-            }
+            let exit = receipt.exit_code();
+            output.emit_result(receipt.output_verdict(), receipt)?;
+            exit
         } else {
             teardown.down().await?;
             ExitCode::Success
