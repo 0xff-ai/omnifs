@@ -3,7 +3,7 @@
 use anyhow::Context as _;
 use std::io::{Cursor, Read};
 
-use omnifs_workspace::provider::{Artifact, ProviderManifest, ProviderWasm};
+use omnifs_workspace::provider::{Artifact, ProviderManifest};
 
 static EMBEDDED_PROVIDER_BUNDLE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/provider-bundle.tar.zst"));
@@ -40,12 +40,8 @@ impl EmbeddedProviders {
             entry
                 .read_to_end(&mut bytes)
                 .with_context(|| format!("read embedded provider bundle file `{name}`"))?;
-            let manifest = ProviderWasm::from_bytes(bytes.clone())
-                .metadata()
-                .with_context(|| format!("read provider metadata from `{name}`"))?
-                .with_context(|| format!("provider `{name}` has no metadata"))?;
-            let artifact = Artifact::from_bytes(name.clone(), bytes)
-                .with_context(|| format!("validate provider artifact `{name}`"))?;
+            let (artifact, manifest) = Artifact::from_bytes_with_manifest(name.clone(), bytes)
+                .with_context(|| format!("validate embedded provider artifact `{name}`"))?;
             entries.push(EmbeddedProvider { artifact, manifest });
         }
         entries.sort_by(|left, right| left.manifest.id.cmp(&right.manifest.id));

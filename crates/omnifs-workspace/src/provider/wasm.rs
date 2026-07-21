@@ -71,6 +71,13 @@ impl Artifact {
     }
 
     pub fn from_bytes(file: impl Into<String>, bytes: Vec<u8>) -> Result<Self, ArtifactError> {
+        Self::from_bytes_with_manifest(file, bytes).map(|(artifact, _manifest)| artifact)
+    }
+
+    pub fn from_bytes_with_manifest(
+        file: impl Into<String>,
+        bytes: Vec<u8>,
+    ) -> Result<(Self, ProviderManifest), ArtifactError> {
         let file = file.into();
         let wasm = ProviderWasm::from_bytes(bytes);
         let id = ProviderId::from_wasm_bytes(&wasm.bytes);
@@ -83,14 +90,17 @@ impl Artifact {
         })?;
         let meta = ProviderMeta {
             name,
-            version: manifest.version.map(ProviderVersion::new),
+            version: manifest.version.clone().map(ProviderVersion::new),
         };
-        Ok(Self {
-            file,
-            bytes: wasm.bytes,
-            id,
-            meta,
-        })
+        Ok((
+            Self {
+                file,
+                bytes: wasm.bytes,
+                id,
+                meta,
+            },
+            manifest,
+        ))
     }
 
     #[must_use]
@@ -134,12 +144,14 @@ mod tests {
     #[test]
     fn artifact_from_bytes_reads_metadata_and_hashes_bytes() {
         let bytes = wasm_with_provider_metadata(EMPTY_WASM, DEMO_METADATA);
-        let artifact = Artifact::from_bytes("demo.wasm", bytes.clone()).unwrap();
+        let (artifact, manifest) =
+            Artifact::from_bytes_with_manifest("demo.wasm", bytes.clone()).unwrap();
 
         assert_eq!(artifact.file(), "demo.wasm");
         assert_eq!(artifact.id(), ProviderId::from_wasm_bytes(&bytes));
         assert_eq!(artifact.meta().name.as_str(), "demo");
         assert!(artifact.meta().version.is_none());
+        assert_eq!(manifest.id, "demo");
     }
 
     #[test]
