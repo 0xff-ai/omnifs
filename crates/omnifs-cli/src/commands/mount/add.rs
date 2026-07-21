@@ -12,7 +12,7 @@ use omnifs_workspace::provider::ProviderManifest;
 use secrecy::{ExposeSecret, SecretString};
 use time::OffsetDateTime;
 
-use super::token_validation::StaticTokenValidator;
+use super::token_validation::validate_static_token;
 use crate::auth::AuthSelection;
 use crate::credential_target::CredentialTarget;
 use omnifs_workspace::Workspace;
@@ -160,8 +160,7 @@ pub(crate) async fn run_static_token_init(
 
     let validation = match static_token_scheme.validation.as_ref() {
         Some(v) if validate => Some(
-            StaticTokenValidator::new(v, header_name, header_prefix)
-                .validate(token.expose_secret(), output)
+            validate_static_token(v, header_name, header_prefix, token.expose_secret(), output)
                 .await?,
         ),
         Some(_) => {
