@@ -225,7 +225,7 @@ mod tests {
     use super::AddArgs;
     use crate::auth::AuthSelection;
     use crate::commands::mount::AuthImportDecision;
-    use crate::commands::mount::mount_file::MountFile;
+    use crate::commands::mount::mount_file::mount_spec;
     use crate::commands::mount::spec_creation::{CreatedMountSpec, MountSpecCreator};
     use omnifs_workspace::Workspace;
     use omnifs_workspace::authn::{AuthManifest, AuthScheme};
@@ -331,7 +331,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mounts = dir.path();
 
-        let spec = MountFile::new(
+        let spec = mount_spec(
             &MountName::try_from("db").unwrap(),
             &provider_ref("db"),
             None,
@@ -343,8 +343,7 @@ mod tests {
                     ..ProviderLimits::default()
                 }),
             },
-        )
-        .into_spec();
+        );
 
         Registry::load(mounts).unwrap().put(&spec).unwrap();
 

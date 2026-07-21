@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::auth::AuthSelection;
-use crate::commands::mount::mount_file::MountFile;
+use crate::commands::mount::mount_file::mount_spec;
 use crate::commands::mount::provider_selection::ProviderSelection;
 use crate::commands::mount::spec_creation::{CreatedMountSpec, MountSpecCreator};
 use crate::commands::mount::{AddArgs, AuthImportDecision, ImportOutcome};
@@ -339,14 +339,13 @@ pub(crate) fn spec_creation(
     };
     apply_mount_overrides(args, &manifest, &creator, &mut created)?;
 
-    let mount_file = MountFile::new(
+    let spec = mount_spec(
         &mount_name,
         &reference,
         auth.as_ref(),
         &args.scopes,
         created,
     );
-    let spec = mount_file.into_spec();
 
     Ok(MountInitPlan {
         mount_name,

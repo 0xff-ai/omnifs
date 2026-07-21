@@ -6,54 +6,31 @@ use omnifs_workspace::mounts::Name as MountName;
 use omnifs_workspace::mounts::Spec;
 use omnifs_workspace::mounts::{Auth, OAuth, StaticToken};
 
-/// Composes the [`Spec`] for a newly authored mount. The on-disk JSON is the
-/// `Spec`'s own serialization, persisted atomically by `Registry::put`; this
-/// type only assembles the in-memory value.
-pub(crate) struct MountFile<'a> {
-    mount_name: &'a MountName,
-    /// The exact retained provider reference written into the mount spec.
-    reference: &'a ProviderRef,
-    auth: Option<&'a AuthSelection>,
-    scopes: &'a [String],
+/// Compose the [`Spec`] for a newly authored mount.
+pub(crate) fn mount_spec(
+    mount_name: &MountName,
+    reference: &ProviderRef,
+    auth: Option<&AuthSelection>,
+    scopes: &[String],
     created: CreatedMountSpec,
-}
-
-impl<'a> MountFile<'a> {
-    pub(crate) fn new(
-        mount_name: &'a MountName,
-        reference: &'a ProviderRef,
-        auth: Option<&'a AuthSelection>,
-        scopes: &'a [String],
-        created: CreatedMountSpec,
-    ) -> Self {
-        Self {
-            mount_name,
-            reference,
-            auth,
-            scopes,
-            created,
-        }
-    }
-
-    pub(crate) fn into_spec(self) -> Spec {
-        Spec {
-            provider: self.reference.clone(),
-            mount: self.mount_name.to_string(),
-            auth: self.auth.map(|auth| {
-                let account = auth.account.clone();
-                let scheme = auth.scheme.clone();
-                match auth.auth_type {
-                    AuthKind::StaticToken => Auth::StaticToken(StaticToken { scheme, account }),
-                    AuthKind::OAuth => Auth::OAuth(OAuth {
-                        scheme,
-                        account,
-                        scopes: (!self.scopes.is_empty()).then(|| self.scopes.to_vec()),
-                        ..OAuth::default()
-                    }),
-                }
-            }),
-            limits: self.created.limits,
-            config_raw: self.created.config,
-        }
+) -> Spec {
+    Spec {
+        provider: reference.clone(),
+        mount: mount_name.to_string(),
+        auth: auth.map(|auth| {
+            let account = auth.account.clone();
+            let scheme = auth.scheme.clone();
+            match auth.auth_type {
+                AuthKind::StaticToken => Auth::StaticToken(StaticToken { scheme, account }),
+                AuthKind::OAuth => Auth::OAuth(OAuth {
+                    scheme,
+                    account,
+                    scopes: (!scopes.is_empty()).then(|| scopes.to_vec()),
+                    ..OAuth::default()
+                }),
+            }
+        }),
+        limits: created.limits,
+        config_raw: created.config,
     }
 }
