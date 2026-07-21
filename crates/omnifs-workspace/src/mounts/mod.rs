@@ -77,46 +77,6 @@ pub struct Spec {
     pub config_raw: Option<serde_json::Value>,
 }
 
-/// Selects which manifest-declared defaults [`Spec::apply_provider_metadata`]
-/// folds into a spec.
-#[derive(Debug, Clone, Copy)]
-pub struct ProviderMetadataInheritance {
-    auth: bool,
-    config: ConfigInheritance,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ConfigInheritance {
-    None,
-    All,
-}
-
-impl ProviderMetadataInheritance {
-    #[must_use]
-    pub const fn all() -> Self {
-        Self {
-            auth: true,
-            config: ConfigInheritance::All,
-        }
-    }
-
-    #[must_use]
-    pub const fn auth() -> Self {
-        Self {
-            auth: true,
-            config: ConfigInheritance::None,
-        }
-    }
-
-    #[must_use]
-    pub const fn config() -> Self {
-        Self {
-            auth: false,
-            config: ConfigInheritance::All,
-        }
-    }
-}
-
 impl Spec {
     pub fn parse(s: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(s)
@@ -138,17 +98,10 @@ impl Spec {
         )
     }
 
-    /// Fill manifest-declared auth-scheme and config defaults into any field the
-    /// user left unset. Runtime authority is resolved later from the pinned
-    /// manifest and the resulting bound config. Identity is never touched: the
-    /// provider name lives in `self.provider.meta.name`, not here.
-    pub fn apply_provider_metadata(
-        &mut self,
-        manifest: &crate::provider::ProviderManifest,
-        inheritance: ProviderMetadataInheritance,
-    ) -> Result<(), serde_json::Error> {
-        if inheritance.auth
-            && self.auth.is_none()
+    /// Fill the manifest's default auth scheme when the user has not selected
+    /// one. Runtime authority is resolved later from the pinned manifest.
+    pub fn apply_auth_default(&mut self, manifest: &crate::provider::ProviderManifest) {
+        if self.auth.is_none()
             && let Some(auth) = &manifest.auth
             && let Some(default_scheme) = auth.scheme(&auth.default)
         {
@@ -166,17 +119,16 @@ impl Spec {
                 crate::authn::AuthScheme::None => None,
             };
         }
-        match inheritance.config {
-            ConfigInheritance::None => {},
-            ConfigInheritance::All => {
-                if let Some(config) = manifest.config.as_ref()
-                    && self.config_raw.is_none()
-                {
-                    self.config_raw = Some(config.defaults());
-                }
-            },
+    }
+
+    /// Fill the manifest's config defaults when the user has not supplied a
+    /// config object. Provider identity and auth are left unchanged.
+    pub fn apply_config_defaults(&mut self, manifest: &crate::provider::ProviderManifest) {
+        if let Some(config) = manifest.config.as_ref()
+            && self.config_raw.is_none()
+        {
+            self.config_raw = Some(config.defaults());
         }
-        Ok(())
     }
 }
 
@@ -857,8 +809,8 @@ mod tests {
         let manifest = linear_manifest();
         let mut cfg = spec_with_provider("linear", r#"{ "mount": "linear" }"#);
 
-        cfg.apply_provider_metadata(&manifest, ProviderMetadataInheritance::all())
-            .unwrap();
+        cfg.apply_auth_default(&manifest);
+        cfg.apply_config_defaults(&manifest);
 
         assert_eq!(cfg.provider_name().as_str(), "linear");
         let auth = cfg

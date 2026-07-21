@@ -1,6 +1,6 @@
 use anyhow::{Context, anyhow};
 use omnifs_workspace::ids::ProviderRef;
-use omnifs_workspace::mounts::{Limits, Name as MountName, ProviderMetadataInheritance, Spec};
+use omnifs_workspace::mounts::{Limits, Name as MountName, Spec};
 use omnifs_workspace::provider::{
     ConfigField, ConfigMetadata, HostResourceBinding, ProviderManifest, is_hostname_only,
 };
@@ -60,8 +60,7 @@ impl<'a> MountSpecCreator<'a> {
             limits: None,
             config_raw: None,
         };
-        spec.apply_provider_metadata(self.manifest, ProviderMetadataInheritance::config())
-            .context("apply provider config defaults")?;
+        spec.apply_config_defaults(self.manifest);
         let Some(mut config) = spec.config_raw else {
             return Ok(CreatedMountSpec {
                 config: None,
