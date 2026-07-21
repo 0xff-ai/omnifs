@@ -479,18 +479,6 @@ fn print_stored_credential_rows(output: &crate::ui::output::Output, target: &Cre
     );
 }
 
-#[allow(dead_code)]
-pub fn rm(workspace: &Workspace, name: &str, yes: bool) -> anyhow::Result<()> {
-    rm_with_options(
-        workspace,
-        name,
-        yes,
-        false,
-        &Output::new(crate::ui::output::OutputMode::Human, false),
-    )
-    .map(|_| ())
-}
-
 #[allow(clippy::too_many_lines)] // plan, decision, and receipt stay linear
 fn rm_with_options(
     workspace: &Workspace,
@@ -630,7 +618,8 @@ mod tests {
     async fn rejects_invalid_mount_name() {
         let tmp = TempDir::new().unwrap();
         let workspace = fixture_workspace(tmp.path());
-        let err = rm(&workspace, "../leak", true).unwrap_err();
+        let output = Output::new(crate::ui::output::OutputMode::Human, false);
+        let err = rm_with_options(&workspace, "../leak", true, false, &output).unwrap_err();
         assert!(format!("{err:#}").contains("invalid mount name"));
     }
 
@@ -638,7 +627,8 @@ mod tests {
     async fn removing_missing_valid_mount_is_a_noop_without_credentials() {
         let tmp = TempDir::new().unwrap();
         let workspace = fixture_workspace(tmp.path());
-        rm(&workspace, "missing", true).unwrap();
+        let output = Output::new(crate::ui::output::OutputMode::Human, false);
+        rm_with_options(&workspace, "missing", true, false, &output).unwrap();
         assert!(!tmp.path().join("credentials.json").exists());
     }
 
