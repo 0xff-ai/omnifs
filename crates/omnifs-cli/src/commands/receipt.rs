@@ -285,12 +285,13 @@ mod tests {
 
     #[test]
     fn frontend_receipt_ignores_unrelated_degraded_frontends() {
-        let selected = FrontendId::new(
+        let selected = FrontendId::try_new(
             Filesystem::Nfs,
             Runtime::Host,
             Some(PathBuf::from("/mnt/omnifs")),
-        );
-        let unrelated = FrontendId::new(Filesystem::Fuse, Runtime::Docker, None);
+        )
+        .unwrap();
+        let unrelated = FrontendId::try_new(Filesystem::Fuse, Runtime::Docker, None).unwrap();
         let inventory = inventory_with_frontends(vec![
             FrontendStatus {
                 filesystem: selected.filesystem(),

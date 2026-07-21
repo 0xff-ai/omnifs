@@ -85,7 +85,7 @@ pub struct FrontendId {
 }
 
 impl FrontendId {
-    pub fn new(
+    fn new(
         filesystem: FrontendFilesystem,
         runtime: FrontendRuntime,
         location: Option<PathBuf>,
@@ -96,6 +96,37 @@ impl FrontendId {
             location,
         }
     }
+
+    pub(crate) fn try_new(
+        filesystem: FrontendFilesystem,
+        runtime: FrontendRuntime,
+        location: Option<PathBuf>,
+    ) -> Result<Self> {
+        ensure!(
+            runtime.supports(filesystem),
+            "a {filesystem}/{runtime} frontend is not supported on {}",
+            std::env::consts::OS
+        );
+        match runtime {
+            FrontendRuntime::Host => {
+                if let Some(location) = &location {
+                    ensure!(
+                        location.is_absolute(),
+                        "host frontend location must be absolute: {}",
+                        location.display()
+                    );
+                }
+            },
+            FrontendRuntime::Docker | FrontendRuntime::Libkrun => {
+                ensure!(
+                    location.is_none(),
+                    "the {runtime} runtime owns its mount; location is not allowed"
+                );
+            },
+        }
+        Ok(Self::new(filesystem, runtime, location))
+    }
+
     pub const fn filesystem(&self) -> FrontendFilesystem {
         self.filesystem
     }
@@ -180,32 +211,13 @@ fn resolve_id(
     runtime: FrontendRuntime,
     location: Option<PathBuf>,
 ) -> Result<FrontendId> {
-    ensure!(
-        runtime.supports(filesystem),
-        "a {filesystem}/{runtime} frontend is not supported on {}",
-        std::env::consts::OS
-    );
-    match runtime {
-        FrontendRuntime::Host => {
-            let location = location.unwrap_or_else(|| {
-                resolve_mount_point()
-                    .unwrap_or_else(|| workspace.frontend().default_host_location())
-            });
-            ensure!(
-                location.is_absolute(),
-                "host frontend location must be absolute: {}",
-                location.display()
-            );
-            Ok(FrontendId::new(filesystem, runtime, Some(location)))
-        },
-        FrontendRuntime::Docker | FrontendRuntime::Libkrun => {
-            ensure!(
-                location.is_none(),
-                "the {runtime} runtime owns its mount; location is not allowed"
-            );
-            Ok(FrontendId::new(filesystem, runtime, None))
-        },
-    }
+    let location = match runtime {
+        FrontendRuntime::Host => Some(location.unwrap_or_else(|| {
+            resolve_mount_point().unwrap_or_else(|| workspace.frontend().default_host_location())
+        })),
+        FrontendRuntime::Docker | FrontendRuntime::Libkrun => location,
+    };
+    FrontendId::try_new(filesystem, runtime, location)
 }
 
 fn observed_id(frontend: &FrontendStatus) -> FrontendId {
