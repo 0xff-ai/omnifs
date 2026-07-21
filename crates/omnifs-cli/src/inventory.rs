@@ -686,8 +686,8 @@ pub(crate) fn frontend_statuses(
                 FrontendState::Attached
             };
             FrontendStatus {
-                filesystem: filesystem(observed.fs_type),
-                runtime: runtime(observed.runtime),
+                filesystem: observed.fs_type.into(),
+                runtime: observed.runtime.into(),
                 location: Some(observed.mount_point.clone()),
                 state,
                 scope: "all",
@@ -986,17 +986,22 @@ fn derive_serving_state(observation: MountObservation) -> ServingState {
     }
 }
 
-fn filesystem(value: FsType) -> Filesystem {
-    match value {
-        FsType::Fuse => Filesystem::Fuse,
-        FsType::Nfs => Filesystem::Nfs,
+impl From<FsType> for Filesystem {
+    fn from(value: FsType) -> Self {
+        match value {
+            FsType::Fuse => Filesystem::Fuse,
+            FsType::Nfs => Filesystem::Nfs,
+        }
     }
 }
-fn runtime(value: FrontendRuntime) -> Runtime {
-    match value {
-        FrontendRuntime::Host => Runtime::Host,
-        FrontendRuntime::Docker => Runtime::Docker,
-        FrontendRuntime::Libkrun => Runtime::Libkrun,
+
+impl From<FrontendRuntime> for Runtime {
+    fn from(value: FrontendRuntime) -> Self {
+        match value {
+            FrontendRuntime::Host => Runtime::Host,
+            FrontendRuntime::Docker => Runtime::Docker,
+            FrontendRuntime::Libkrun => Runtime::Libkrun,
+        }
     }
 }
 fn frontend_cmp(left: &FrontendStatus, right: &FrontendStatus) -> Ordering {
