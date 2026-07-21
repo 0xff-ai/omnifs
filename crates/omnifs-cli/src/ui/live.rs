@@ -410,26 +410,6 @@ impl LiveRegion {
     }
 }
 
-/// A `done / total` byte counter with decimal units, and (only once the
-/// total is known and stable) a fixed-width bar. The renderer forbids a fake
-/// percentage, so there is no bar-only rendering: a caller with an unknown
-/// total uses the counter text alone (`Spinner::update_bytes_with` already
-/// does this). The bar primitive is built now; its first real caller
-/// (`frontend enable`'s image pull) migrates onto it in a later slice.
-#[allow(dead_code)]
-pub(crate) fn byte_progress_bar(done: u64, total: u64, width: usize) -> String {
-    if total == 0 || width == 0 {
-        return format!("{} / {}", human_bytes(done), human_bytes(total));
-    }
-    // Integer math instead of a float ratio: `done.min(total)` bounds the
-    // numerator to `total`, so `filled` is always <= `width` and the
-    // narrowing cast back to `usize` (`width`'s own type) never truncates.
-    let filled_u128 = u128::from(done.min(total)) * width as u128 / u128::from(total);
-    let filled = usize::try_from(filled_u128).unwrap_or(width);
-    let bar = format!("{}{}", "#".repeat(filled), "-".repeat(width - filled));
-    format!("[{bar}] {} / {}", human_bytes(done), human_bytes(total))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,14 +460,6 @@ mod tests {
         assert_eq!(pending, "  ⠋ warming github");
         let settled = super::super::strip_ansi(&frame[1]);
         assert_eq!(settled, "  ✓ linear warm");
-    }
-
-    #[test]
-    fn byte_progress_bar_never_claims_a_percentage_without_a_total() {
-        assert_eq!(byte_progress_bar(10, 0, 10), "10 B / 0 B");
-        let bar = byte_progress_bar(50, 100, 10);
-        assert!(bar.starts_with('['), "{bar:?}");
-        assert!(bar.contains("50 B / 100 B"), "{bar:?}");
     }
 
     #[test]
