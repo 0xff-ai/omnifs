@@ -75,12 +75,10 @@ pub(crate) fn teardown_local_frontend(
                 anyhow::anyhow!("could not unmount {}: {error}", mount_point.display())
             })?;
             if !poll_until_unmounted(&mount_point, UNMOUNT_POLL_CADENCE, UNMOUNT_POLL_ATTEMPTS) {
+                let waited = poll_wait(UNMOUNT_POLL_CADENCE, UNMOUNT_POLL_ATTEMPTS);
                 anyhow::bail!(
-                    "could not unmount {}: mount remained active after waiting {} seconds",
+                    "could not unmount {}: mount remained active after waiting {waited:?}",
                     mount_point.display(),
-                    UNMOUNT_POLL_CADENCE
-                        .as_secs()
-                        .saturating_mul(UNMOUNT_POLL_ATTEMPTS as u64)
                 );
             }
         }
@@ -101,8 +99,20 @@ pub(crate) fn teardown_local_frontend(
 }
 
 pub(crate) fn poll_until_unmounted(mount_point: &Path, cadence: Duration, attempts: usize) -> bool {
+    poll_until(
+        || !omnifs_nfs::mount_is_active(mount_point),
+        cadence,
+        attempts,
+    )
+}
+
+fn poll_until_runner_exited(pid: u32, cadence: Duration, attempts: usize) -> bool {
+    poll_until(|| !crate::process::is_alive(pid), cadence, attempts)
+}
+
+fn poll_until(mut complete: impl FnMut() -> bool, cadence: Duration, attempts: usize) -> bool {
     for attempt in 0..attempts {
-        if !omnifs_nfs::mount_is_active(mount_point) {
+        if complete() {
             return true;
         }
         if attempt + 1 < attempts {
@@ -112,16 +122,9 @@ pub(crate) fn poll_until_unmounted(mount_point: &Path, cadence: Duration, attemp
     false
 }
 
-fn poll_until_runner_exited(pid: u32, cadence: Duration, attempts: usize) -> bool {
-    for attempt in 0..attempts {
-        if !crate::process::is_alive(pid) {
-            return true;
-        }
-        if attempt + 1 < attempts {
-            std::thread::sleep(cadence);
-        }
-    }
-    false
+fn poll_wait(cadence: Duration, attempts: usize) -> Duration {
+    let sleeps = attempts.saturating_sub(1);
+    cadence.saturating_mul(u32::try_from(sleeps).unwrap_or(u32::MAX))
 }
 
 fn remove_state_file(state_file: &Path) -> Option<String> {
@@ -132,5 +135,33 @@ fn remove_state_file(state_file: &Path) -> Option<String> {
             "failed to remove mount state {}: {error}",
             state_file.display()
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_poll_stops_after_completion() {
+        let mut checks = 0;
+        assert!(poll_until(
+            || {
+                checks += 1;
+                checks == 3
+            },
+            Duration::ZERO,
+            10,
+        ));
+        assert_eq!(checks, 3);
+    }
+
+    #[test]
+    fn poll_wait_counts_sleeps_between_checks() {
+        assert_eq!(
+            poll_wait(Duration::from_millis(500), 12),
+            Duration::from_millis(5_500)
+        );
+        assert_eq!(poll_wait(Duration::from_secs(1), 0), Duration::ZERO);
     }
 }
