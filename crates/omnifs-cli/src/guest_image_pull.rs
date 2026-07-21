@@ -267,7 +267,7 @@ async fn download_and_verify(
         Ok(downloaded) => {
             row.settle_ok(format!(
                 "{}, verified (cached for next time)",
-                crate::ui::live::Spinner::human_bytes(downloaded)
+                crate::ui::live::human_bytes(downloaded)
             ));
             Ok(())
         },
