@@ -297,17 +297,19 @@ impl FrontendEnableArgs {
             .unwrap_or_else(|| self.filesystem.default_runtime());
         let id = resolve_id(workspace, self.filesystem, runtime, self.location)?;
         let inventory = Inventory::collect(workspace).await?;
-        if id.runtime() == FrontendRuntime::Host
-            && inventory.frontends.iter().any(|row| {
+        if id.runtime() == FrontendRuntime::Host {
+            let location = id.location().context("host frontend has no location")?;
+            let conflicts = inventory.frontends.iter().any(|row| {
                 row.runtime == FrontendRuntime::Host
-                    && row.location == id.location().map(Path::to_path_buf)
+                    && row.location.as_deref() == Some(location)
                     && row.filesystem != id.filesystem()
-            })
-        {
-            bail!(
-                "a host frontend is already observed at {} with a different filesystem",
-                id.location().unwrap().display()
-            );
+            });
+            if conflicts {
+                bail!(
+                    "a host frontend is already observed at {} with a different filesystem",
+                    location.display()
+                );
+            }
         }
         if inventory.daemon.status.is_none() {
             return Ok(FrontendResult::stopped_for_daemon(id));
