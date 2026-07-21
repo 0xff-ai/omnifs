@@ -176,12 +176,8 @@ impl FrontendList {
     async fn collect(inventory: &Inventory) -> Self {
         let platform = Platform::current();
         let mut supported_frontends = Vec::new();
-        for filesystem in FrontendFilesystem::ALL {
-            for runtime in FrontendRuntime::ALL {
-                if platform.supports(filesystem, runtime) {
-                    supported_frontends.push(FrontendSupport::inspect(filesystem, runtime).await);
-                }
-            }
+        for (filesystem, runtime) in available_frontends() {
+            supported_frontends.push(FrontendSupport::inspect(filesystem, runtime).await);
         }
         Self {
             platform,
