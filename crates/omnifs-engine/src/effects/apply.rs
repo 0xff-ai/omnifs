@@ -341,8 +341,6 @@ impl<'a> EffectApplier<'a> {
                             meta: entry.meta,
                         })
                         .collect(),
-                    exhaustive: listing.exhaustive,
-                    validator: listing.validator,
                     next_cursor,
                 })
             },

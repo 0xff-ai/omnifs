@@ -3,8 +3,7 @@
 //! Single hub for wire-to-view translation at the host boundary.
 
 use crate::view::{
-    BodyId, ByteSource, CachedCursor, EntryKind, EntryMeta, FileAttrsCache, FileSize, ReadMode,
-    Stability,
+    BodyId, ByteSource, CachedCursor, EntryMeta, FileAttrsCache, FileSize, ReadMode, Stability,
 };
 
 use omnifs_wit::provider::types as wit_types;
@@ -116,20 +115,5 @@ pub fn cached_cursor_to_wit(cursor: CachedCursor) -> wit_types::Cursor {
     match cursor {
         CachedCursor::Opaque(token) => wit_types::Cursor::Opaque(token),
         CachedCursor::Page(page) => wit_types::Cursor::Page(page),
-    }
-}
-
-pub fn entry_kind_to_wit(kind: &EntryKind) -> wit_types::EntryKind {
-    match kind {
-        EntryKind::Directory => wit_types::EntryKind::Directory,
-        EntryKind::File => wit_types::EntryKind::File(wit_types::FileOut {
-            attrs: wit_types::FileAttrs {
-                size: wit_types::FileSize::Unknown,
-                stability: wit_types::Stability::Dynamic,
-                version_token: None,
-            },
-            bytes: wit_types::ByteSource::Deferred(wit_types::ReadMode::Full),
-            content_type: None,
-        }),
     }
 }

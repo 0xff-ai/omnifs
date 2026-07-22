@@ -4,18 +4,10 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use crate::Runtime;
 use crate::callouts::{TestSignal, record_outcome as inner_record};
 use crate::log_redaction::{LogUrl as InternalLogUrl, WitHeaders as InternalWitHeaders};
+use crate::{EngineError, Runtime};
 use omnifs_wit::provider::types as wit_types;
-
-pub use crate::BuildError;
-pub use crate::effect_apply::{LookupEntry, LookupOutcome};
-pub use crate::ops::namespace::{
-    ChunkOutcome, DirEntry, DirListing, ListOutcome as NamespaceListOutcome, OpenOutcome,
-    ReadBytes, ReadOutcome,
-};
-pub use crate::{ComponentEngine, Engine, EngineError, GitCloner, Host, HostOpen};
 
 /// Stable compiled-component cache shared by test processes.
 ///
@@ -34,8 +26,8 @@ pub fn wasm_cache_dir() -> PathBuf {
 }
 
 pub mod auth {
-    use omnifs_auth::OAuthClient;
-    pub use omnifs_auth::{AuthBinding, CredentialService, RefreshOutcome};
+    pub use omnifs_auth::{AuthBinding, RefreshOutcome};
+    use omnifs_auth::{CredentialService, OAuthClient};
     use omnifs_workspace::authn::AuthManifest;
     use omnifs_workspace::creds::CredentialStore;
     use omnifs_workspace::mounts::Auth;
@@ -56,19 +48,9 @@ pub mod auth {
         crate::auth::binding_from_config(config, manifest, provider_name, &service)
             .expect("build test auth binding")
     }
-
-    /// A credential service over an on-disk store, matching the production
-    /// wiring in `MountTable::load_online`. For harnesses that build a `Runtime`
-    /// directly.
-    pub fn credential_service_for_file(
-        credentials_file: &std::path::Path,
-    ) -> std::sync::Arc<CredentialService> {
-        crate::auth::credential_service_for_file(credentials_file)
-            .expect("build test credential service")
-    }
 }
 
-/// Open an online [`Host`] for tests, using the shared wasm compile cache.
+/// Open an online [`crate::Host`] for tests, using the shared wasm compile cache.
 pub fn open_test_host(
     cache_dir: impl AsRef<std::path::Path>,
     providers_dir: impl AsRef<std::path::Path>,
@@ -108,38 +90,21 @@ pub mod authority {
     pub use crate::authority::RuntimeAuthority;
 }
 
-pub mod clock {
-    pub use crate::clock::{DYNAMIC_TTL_MILLIS, now_millis};
-}
-
 pub mod http {
     pub use crate::http::HttpStack;
-}
-
-pub mod pagination {
-    pub use crate::pagination::{MAX_PAGINATION_PAGES, NextPageOutcome};
-    pub use crate::tree::synthetic::{IGNORE_CONTENT, is_reserved_provider_leaf};
-}
-
-pub mod wit_protocol {
-    pub use crate::wit_protocol::*;
-}
-
-pub mod wit {
-    pub use omnifs_wit::provider::types::*;
 }
 
 /// Cache APIs used by integration tests without exposing cache internals as a
 /// normal engine surface.
 pub mod cache {
-    pub use crate::cache::mount::{Caches, MountResources};
+    pub use crate::cache::mount::Caches;
 
     pub fn mount(
         caches: &std::sync::Arc<Caches>,
         name: &omnifs_workspace::mounts::Name,
         spec_source: &[u8],
         provider_id: omnifs_workspace::ids::ProviderId,
-    ) -> anyhow::Result<std::sync::Arc<MountResources>> {
+    ) -> anyhow::Result<std::sync::Arc<crate::cache::mount::MountResources>> {
         let id = crate::cache::ProjectionId::new(spec_source, provider_id);
         caches.mount(name, id, provider_id, spec_source)
     }
