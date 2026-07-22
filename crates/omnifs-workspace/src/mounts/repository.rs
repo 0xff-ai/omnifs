@@ -622,7 +622,8 @@ fn walk(root: &Path) -> io::Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+    use crate::ids::{ProviderMeta, ProviderName, ProviderRef};
+    use omnifs_core::ProviderId;
 
     fn spec(name: &str) -> super::super::Spec {
         serde_json::from_value(serde_json::json!({

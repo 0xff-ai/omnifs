@@ -6,7 +6,8 @@
 //! artifacts by recency.
 
 use anyhow::{Context as _, anyhow, bail};
-use omnifs_workspace::ids::{ProviderId, ProviderRef};
+use omnifs_core::ProviderId;
+use omnifs_workspace::ids::ProviderRef;
 use omnifs_workspace::provider::{Catalog, ProviderManifest};
 use std::collections::BTreeMap;
 use std::fs;

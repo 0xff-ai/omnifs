@@ -4,7 +4,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::ids::{IdError, ProviderId, ProviderMeta, ProviderName, ProviderRef, ProviderVersion};
+use crate::ids::{IdError, ProviderMeta, ProviderName, ProviderRef, ProviderVersion};
+use omnifs_core::ProviderId;
 
 use crate::provider::manifest::ProviderManifest;
 use crate::provider::sections::{ProviderMetadataError, read_provider_metadata_section};

@@ -591,7 +591,7 @@ fn absolute(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::ProviderId;
+    use omnifs_core::ProviderId;
 
     fn spec(name: &str) -> Spec {
         serde_json::from_value(serde_json::json!({

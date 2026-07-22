@@ -18,7 +18,7 @@ use omnifs_api::{
     CONTROL_MAX_LINE_BYTES, CONTROL_PROTOCOL_VERSION, ControlOperation, ControlOutcome,
     ControlReply, ControlRequest,
 };
-use omnifs_workspace::ids::ProviderId;
+use omnifs_core::ProviderId;
 use omnifs_workspace::mounts::Repository;
 use omnifs_workspace::provider::{Artifact, ProviderStore};
 use tempfile::TempDir;

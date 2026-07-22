@@ -335,7 +335,7 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
         &caches,
         &name,
         b"auth-test",
-        omnifs_workspace::ids::ProviderId::from_wasm_bytes(b"auth-test-provider"),
+        omnifs_core::ProviderId::from_wasm_bytes(b"auth-test-provider"),
     )
     .unwrap();
     let executor = BlobExecutor::new(stack, resources, BlobLimits::default());

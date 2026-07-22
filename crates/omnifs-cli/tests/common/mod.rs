@@ -143,7 +143,7 @@ pub fn force_unmount(mount_point: &Path) {
 
 /// Install the test provider into the provider store under `providers_dir` and
 /// return its content id.
-pub fn install_test_provider(providers_dir: &Path) -> omnifs_workspace::ids::ProviderId {
+pub fn install_test_provider(providers_dir: &Path) -> omnifs_core::ProviderId {
     let artifact = omnifs_workspace::provider::Artifact::from_file(
         release_wasm_dir().join("test_provider.wasm"),
     )
@@ -156,7 +156,7 @@ pub fn install_test_provider(providers_dir: &Path) -> omnifs_workspace::ids::Pro
 
 /// No-auth mount spec for the test provider, pinning `id`. Serves
 /// `test/hello/message`.
-pub fn test_mount_spec(id: &omnifs_workspace::ids::ProviderId) -> String {
+pub fn test_mount_spec(id: &omnifs_core::ProviderId) -> String {
     format!(r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"test"}}"#)
 }
 
@@ -171,7 +171,7 @@ pub fn test_mount_spec(id: &omnifs_workspace::ids::ProviderId) -> String {
 pub fn install_fixture_provider(
     providers_dir: &Path,
     manifest: &serde_json::Value,
-) -> omnifs_workspace::ids::ProviderId {
+) -> omnifs_core::ProviderId {
     let id = manifest["id"].as_str().expect("manifest carries an id");
     let file = format!("omnifs_provider_{id}.wasm");
     let wasm = wasm_with_provider_metadata(manifest);

@@ -103,7 +103,7 @@ pub mod cache {
         caches: &std::sync::Arc<Caches>,
         name: &omnifs_core::MountName,
         spec_source: &[u8],
-        provider_id: omnifs_workspace::ids::ProviderId,
+        provider_id: omnifs_core::ProviderId,
     ) -> anyhow::Result<std::sync::Arc<crate::cache::mount::MountResources>> {
         let id = crate::cache::ProjectionId::new(spec_source, provider_id);
         caches.mount(name, id, provider_id, spec_source)

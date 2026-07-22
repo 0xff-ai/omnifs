@@ -16,9 +16,9 @@ use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
 use crate::tree_refs::TreeRefs;
 use omnifs_auth::{AuthBinding, CredentialHealth, CredentialService};
+use omnifs_core::ProviderId;
 use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
-use omnifs_workspace::ids::ProviderId;
 use omnifs_workspace::mounts::Spec;
 use omnifs_workspace::provider::{ConfigMetadata, ProviderAuthManifest, ProviderManifest};
 

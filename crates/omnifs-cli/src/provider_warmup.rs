@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use clap::Args;
 use futures_util::StreamExt as _;
-use omnifs_workspace::ids::ProviderId;
+use omnifs_core::ProviderId;
 use omnifs_workspace::provider::Catalog;
 use omnifs_workspace::{WarmupProgress, WarmupStore, Workspace};
 use serde::Serialize;

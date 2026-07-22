@@ -10,7 +10,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::ids::{ProviderId, ProviderMeta, ProviderRef, ProviderVersion};
+use crate::ids::{ProviderMeta, ProviderRef, ProviderVersion};
+use omnifs_core::ProviderId;
 
 use crate::provider::store::{IndexEntry, ProviderStore, StoreError};
 use crate::provider::{ProviderManifest, ProviderMetadataError, read_provider_metadata_section};
