@@ -21,7 +21,9 @@
 
 use crate::browse::Effects;
 use crate::error::{ProviderError, Result};
-use crate::file_attrs::{FileAttrs, FileProj, ProjBytes, ReadMode, Size, Stability, VersionToken};
+use crate::file_attrs::{
+    FileAttrs, FileProj, FileSize, ProjBytes, ReadMode, Stability, VersionToken,
+};
 use crate::handler::{Cursor, RangeReader};
 use crate::identity::LogicalId;
 use crate::repr::Format;
@@ -78,7 +80,7 @@ impl FileProjection {
     /// Suitable for a dir entry or a `project`-effect preload.
     pub fn inline(bytes: impl Into<Vec<u8>>) -> FileProjBuilder<Inline> {
         let bytes = bytes.into();
-        let size = Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let size = FileSize::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         FileProjBuilder::new(FileSource::Inline(bytes), size)
     }
 
@@ -100,7 +102,7 @@ impl FileProjection {
     /// answer to a read rather than a preload.
     pub fn body(bytes: impl Into<Vec<u8>>) -> FileProjBuilder<Body> {
         let bytes = bytes.into();
-        let size = Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        let size = FileSize::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         FileProjBuilder::new(FileSource::Body(bytes), size)
     }
 
@@ -120,12 +122,12 @@ impl FileProjection {
     /// Live or large; served by the ranged session path. The only source that
     /// may be `.live()`.
     pub fn ranged(reader: impl RangeReader + 'static) -> FileProjBuilder<Ranged> {
-        FileProjBuilder::new(FileSource::Ranged(Rc::new(reader)), Size::Unknown)
+        FileProjBuilder::new(FileSource::Ranged(Rc::new(reader)), FileSize::Unknown)
     }
 
     /// Host-served by handle; the bytes never cross to the provider.
     pub fn blob(blob: crate::blob::BlobId) -> FileProjBuilder<Blob> {
-        FileProjBuilder::new(FileSource::Blob(blob), Size::Unknown)
+        FileProjBuilder::new(FileSource::Blob(blob), FileSize::Unknown)
     }
 
     pub fn source(&self) -> &FileSource {
@@ -234,7 +236,7 @@ pub struct FileProjBuilder<Src> {
 }
 
 impl<Src> FileProjBuilder<Src> {
-    fn new(source: FileSource, size: Size) -> Self {
+    fn new(source: FileSource, size: FileSize) -> Self {
         Self {
             source,
             attrs: FileAttrs::new(size, Stability::Stable),
@@ -246,7 +248,7 @@ impl<Src> FileProjBuilder<Src> {
     }
 
     #[must_use]
-    pub fn size(mut self, size: Size) -> Self {
+    pub fn size(mut self, size: FileSize) -> Self {
         self.attrs.size = size;
         self
     }
@@ -645,7 +647,7 @@ impl Entry {
 /// content type defaults to `F::CT` and can be overridden.
 pub struct BlobFile<F: Format> {
     id: crate::blob::BlobId,
-    size: Size,
+    size: FileSize,
     stability: Stability,
     version: Option<VersionToken>,
     content_type: Option<ContentType>,
@@ -658,7 +660,7 @@ impl<F: Format> BlobFile<F> {
     pub fn new(id: crate::blob::BlobId) -> Self {
         Self {
             id,
-            size: Size::Unknown,
+            size: FileSize::Unknown,
             stability: Stability::Stable,
             version: None,
             content_type: None,
@@ -668,7 +670,7 @@ impl<F: Format> BlobFile<F> {
 
     /// The exact blob size, so `stat` is honest before the first read.
     #[must_use]
-    pub fn size(mut self, size: Size) -> Self {
+    pub fn size(mut self, size: FileSize) -> Self {
         self.size = size;
         self
     }
@@ -720,7 +722,7 @@ impl<F: Format> BlobFile<F> {
 /// plus declared size and stability. The only face that may be `Live`.
 pub struct StreamFile {
     reader: Rc<dyn RangeReader>,
-    size: Size,
+    size: FileSize,
     stability: Stability,
 }
 
@@ -729,7 +731,7 @@ impl StreamFile {
     pub fn new(reader: impl RangeReader + 'static) -> Self {
         Self {
             reader: Rc::new(reader),
-            size: Size::Unknown,
+            size: FileSize::Unknown,
             stability: Stability::Dynamic,
         }
     }
@@ -743,7 +745,7 @@ impl StreamFile {
 
     /// The attrs an open session reports.
     pub fn attrs(&self) -> FileAttrs {
-        FileAttrs::new(self.size.clone(), self.stability)
+        FileAttrs::new(self.size, self.stability)
     }
 
     /// The reader serving chunks.

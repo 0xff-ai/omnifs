@@ -7,7 +7,7 @@
 
 mod facade;
 pub use facade::*;
-pub use omnifs_core::FsType;
+pub use omnifs_core::{FsType, Stability};
 
 #[cfg(feature = "wire")]
 mod beacon;

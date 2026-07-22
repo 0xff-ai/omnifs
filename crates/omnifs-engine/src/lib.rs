@@ -43,7 +43,7 @@ pub use inspect::{Inspector, InspectorLayer, Subscription, init_global_from_env}
 pub use namespace::TreeNamespace;
 pub use namespace::{
     Attrs, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer, LookupState,
-    Namespace, NsError, NsEvent, NsRetryClass, ReadAnswer, ReadStyle, StabilityClass,
+    Namespace, NsError, NsEvent, NsRetryClass, ReadAnswer, ReadStyle, Stability,
 };
 #[cfg(feature = "runtime")]
 pub use runtime::registry::{MountTable, RegistryError};

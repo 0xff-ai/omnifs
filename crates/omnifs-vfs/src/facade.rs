@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use omnifs_core::path::Path;
+use omnifs_core::{Stability, path::Path};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -29,14 +29,6 @@ pub enum EntryKind {
     Directory,
     File,
     Symlink,
-}
-
-/// Freshness class of a file, plain-data mirror of `view::Stability`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StabilityClass {
-    Stable,
-    Dynamic,
-    Live,
 }
 
 /// How a frontend pulls a file's bytes, decided by the engine.
@@ -87,7 +79,7 @@ pub struct Attrs {
     pub ttl: Duration,
     pub change: u64,
     pub direct_io: bool,
-    pub stability: StabilityClass,
+    pub stability: Stability,
     /// Whether a frontend materializes the whole payload once or reads through
     /// per request. See [`ReadStyle`].
     pub read_style: ReadStyle,

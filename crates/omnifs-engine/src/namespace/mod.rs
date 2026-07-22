@@ -5,7 +5,7 @@
 
 pub use omnifs_vfs::{
     Attrs, CachedCursor, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer,
-    LookupState, Namespace, NsError, NsEvent, NsRetryClass, ReadAnswer, ReadStyle, StabilityClass,
+    LookupState, Namespace, NsError, NsEvent, NsRetryClass, ReadAnswer, ReadStyle, Stability,
 };
 
 #[cfg(feature = "runtime")]

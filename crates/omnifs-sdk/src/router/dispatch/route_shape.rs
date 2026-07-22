@@ -8,7 +8,7 @@
 use crate::browse::{List, Listing, Lookup};
 use crate::captures::Captures;
 use crate::error::Result;
-use crate::file_attrs::{FileProj, ReadMode, Size};
+use crate::file_attrs::{FileProj, FileSize, ReadMode};
 use crate::projection::{DirProjection, Entry};
 use omnifs_core::path::Path;
 
@@ -292,7 +292,11 @@ pub(in crate::router) fn merge_anchor_collection(
 /// entry whose exact size and version are already known from the loaded
 /// canonical bytes, so a cold `ls -l` reports the real size.
 fn source_leaf_shape(source: &SourceLeafAttrs) -> FileProj {
-    let shape = FileProj::deferred(Size::Exact(source.len), ReadMode::Full, source.stability);
+    let shape = FileProj::deferred(
+        FileSize::Exact(source.len),
+        ReadMode::Full,
+        source.stability,
+    );
     match &source.validator {
         Some(validator) => shape.with_version(validator.clone()),
         None => shape,

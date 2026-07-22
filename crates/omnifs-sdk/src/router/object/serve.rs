@@ -10,7 +10,9 @@ use crate::browse::{CachedCanonical, Effects, FileContent, ReadOutcome};
 use crate::captures::{Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::file_attrs::{FileAttrs, FileProj, ProjBytes, ReadMode, Size, Stability, VersionToken};
+use crate::file_attrs::{
+    FileAttrs, FileProj, FileSize, ProjBytes, ReadMode, Stability, VersionToken,
+};
 use crate::object::{FacetMetadata, Key, Load, Object};
 use crate::repr::RenderTable;
 
@@ -223,7 +225,7 @@ where
         // symmetric with how preloaded siblings are projected.
         if self.shape == AnchorShape::File {
             let mut file = FileProj::deferred(
-                Size::Exact(canonical.bytes.len() as u64),
+                FileSize::Exact(canonical.bytes.len() as u64),
                 ReadMode::Full,
                 stability,
             );
@@ -341,7 +343,7 @@ where
                     // honest size, listed in its parent dir; reads serve from the
                     // stored canonical.
                     let mut file =
-                        FileProj::deferred(Size::Exact(bytes_len), ReadMode::Full, stability);
+                        FileProj::deferred(FileSize::Exact(bytes_len), ReadMode::Full, stability);
                     if let Some(v) = &validator {
                         file = file.with_version(v.clone());
                     }
@@ -457,7 +459,7 @@ impl<O: Object> ServeCtx<'_, O> {
         match target {
             ObjectReadTarget::Canonical => Ok(ReadOutcome::Found(
                 FileContent::canonical(representation_attrs(
-                    Size::Unknown,
+                    FileSize::Unknown,
                     self.stability,
                     validator,
                 ))
@@ -467,7 +469,7 @@ impl<O: Object> ServeCtx<'_, O> {
                 if ct == self.render_table.source_ct {
                     return Ok(ReadOutcome::Found(
                         FileContent::canonical(representation_attrs(
-                            Size::Unknown,
+                            FileSize::Unknown,
                             self.stability,
                             validator,
                         ))
@@ -475,7 +477,7 @@ impl<O: Object> ServeCtx<'_, O> {
                     ));
                 }
                 let rendered = self.render_table.serve(ct, bytes)?;
-                let size = Size::Exact(u64::try_from(rendered.len()).unwrap_or(u64::MAX));
+                let size = FileSize::Exact(u64::try_from(rendered.len()).unwrap_or(u64::MAX));
                 Ok(ReadOutcome::Found(
                     FileContent::new(rendered)
                         .with_attrs(representation_attrs(size, self.stability, validator))
@@ -514,7 +516,8 @@ impl<O: Object> ServeCtx<'_, O> {
                 let size = content
                     .content()
                     .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-                let content = content.with_attrs(FileAttrs::new(Size::Exact(size), self.stability));
+                let content =
+                    content.with_attrs(FileAttrs::new(FileSize::Exact(size), self.stability));
                 return Ok(ReadOutcome::Found(content.with_effects(effects)));
             }
         }
@@ -523,7 +526,7 @@ impl<O: Object> ServeCtx<'_, O> {
 }
 
 fn representation_attrs(
-    size: Size,
+    size: FileSize,
     stability: Stability,
     validator: Option<VersionToken>,
 ) -> FileAttrs {

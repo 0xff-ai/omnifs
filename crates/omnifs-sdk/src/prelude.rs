@@ -12,7 +12,7 @@ pub use crate::endpoint::{
 };
 pub use crate::error::{ProviderError, ProviderErrorKind, Result};
 pub use crate::file_attrs::{
-    FileAttrs, MAX_PROJECTED_BYTES, MAX_VERSION_TOKEN_BYTES, Size, Stability, VersionToken,
+    FileAttrs, FileSize, MAX_PROJECTED_BYTES, MAX_VERSION_TOKEN_BYTES, Stability, VersionToken,
 };
 pub use crate::handler::{
     Cursor, DirCx, DirIntent, FileChunk, MemoryRangeReader, RangeReader, TreeRef,

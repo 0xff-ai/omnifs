@@ -11,6 +11,7 @@
 
 use crate::error::{ProviderError, Result};
 use omnifs_core::ContentType;
+pub use omnifs_core::{FileSize, ReadMode, Stability};
 use omnifs_wit::provider::types as wit_types;
 
 /// Per-projection inline byte cap (64 KiB), enforced by
@@ -30,13 +31,13 @@ pub const MAX_VERSION_TOKEN_BYTES: usize = 256;
 /// that cached bytes are still current.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileAttrs {
-    pub size: Size,
+    pub size: FileSize,
     pub stability: Stability,
     pub version: Option<VersionToken>,
 }
 
 impl FileAttrs {
-    pub fn new(size: Size, stability: Stability) -> Self {
+    pub fn new(size: FileSize, stability: Stability) -> Self {
         Self {
             size,
             stability,
@@ -51,7 +52,7 @@ impl FileAttrs {
     }
 
     /// The `st_size` value implied by the declared size; see
-    /// [`Size::st_size`] for the placeholder rule.
+    /// [`FileSize::st_size`] for the placeholder rule.
     pub fn st_size(&self) -> u64 {
         self.size.st_size()
     }
@@ -114,30 +115,6 @@ impl From<&str> for VersionToken {
 /// present) but not its size; `Unknown` otherwise. Do not fabricate exact
 /// sizes: stat-driven tools (`tail -c`, `rsync --size-only`, `wc -c` on
 /// stat-only paths) trust them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Size {
-    Exact(u64),
-    NonZero,
-    Unknown,
-}
-
-impl Size {
-    /// The `st_size` to report before any read: the exact length, or the
-    /// placeholder `1` for `NonZero` and `Unknown`.
-    ///
-    /// The placeholder is deliberately tiny and non-zero: zero would make
-    /// size-checking tools skip the file as empty, and a large fake value
-    /// (the old 256 MiB placeholder) broke `tail -n` and friends. The host
-    /// replaces it with the learned size once content has been
-    /// materialized.
-    pub fn st_size(&self) -> u64 {
-        match self {
-            Self::Exact(size) => *size,
-            Self::NonZero | Self::Unknown => 1,
-        }
-    }
-}
-
 /// A projected file: attributes plus a byte source, as it appears in
 /// directory entries and `fs` effects.
 ///
@@ -164,7 +141,7 @@ impl FileProj {
         let bytes = bytes.into();
         Self {
             attrs: FileAttrs {
-                size: Size::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
+                size: FileSize::Exact(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
                 stability,
                 version,
             },
@@ -178,7 +155,7 @@ impl FileProj {
     /// `open-file`/`read-chunk` session (`ReadMode::Ranged`). Declare
     /// honest attrs: this is the correct shape when a listing payload does
     /// not contain the leaf's full content.
-    pub fn deferred(size: Size, read: ReadMode, stability: Stability) -> Self {
+    pub fn deferred(size: FileSize, read: ReadMode, stability: Stability) -> Self {
         Self {
             attrs: FileAttrs::new(size, stability),
             bytes: ProjBytes::Deferred { read },
@@ -189,7 +166,7 @@ impl FileProj {
     /// Directory listing entry: attrs for `stat`/`ls` without inline bytes; content
     /// is loaded on `read-file` or via an object/canonical path.
     pub fn listing_shape() -> Self {
-        Self::deferred(Size::Unknown, ReadMode::Full, Stability::Stable)
+        Self::deferred(FileSize::Unknown, ReadMode::Full, Stability::Stable)
     }
 
     /// Listing entry for a route declared `ranged`: like [`Self::listing_shape`]
@@ -197,7 +174,7 @@ impl FileProj {
     /// host the file streams through `open-file`/`read-chunk` without running
     /// the handler. The real size and stability are learned at `open-file`.
     pub fn ranged_listing_shape() -> Self {
-        Self::deferred(Size::Unknown, ReadMode::Ranged, Stability::Stable)
+        Self::deferred(FileSize::Unknown, ReadMode::Ranged, Stability::Stable)
     }
 
     #[must_use]
@@ -217,7 +194,7 @@ impl FileProj {
     /// - `Stability::Live` requires `ProjBytes::Deferred { read:
     ///   ReadMode::Ranged }`: bytes that can change mid-read may only be
     ///   served through the ranged live path, never inline or full-read.
-    /// - Inline bytes require `Size::Exact` equal to the actual byte
+    /// - Inline bytes require `FileSize::Exact` equal to the actual byte
     ///   length, and at most [`MAX_PROJECTED_BYTES`].
     /// - A version token, when present, must be non-empty and within
     ///   [`MAX_VERSION_TOKEN_BYTES`].
@@ -238,7 +215,7 @@ impl FileProj {
         }
 
         match (&self.bytes, &self.attrs.size) {
-            (ProjBytes::Inline(bytes), Size::Exact(size)) => {
+            (ProjBytes::Inline(bytes), FileSize::Exact(size)) => {
                 let len = u64::try_from(bytes.len())
                     .map_err(|_| ProviderError::too_large("inline file length does not fit u64"))?;
                 if *size != len {
@@ -252,9 +229,9 @@ impl FileProj {
                     )));
                 }
             },
-            (ProjBytes::Inline(_), Size::NonZero | Size::Unknown) => {
+            (ProjBytes::Inline(_), FileSize::NonZero | FileSize::Unknown) => {
                 return Err(ProviderError::invalid_input(
-                    "inline projection bytes require Size::Exact(bytes.len())",
+                    "inline projection bytes require FileSize::Exact(bytes.len())",
                 ));
             },
             (ProjBytes::Deferred { .. }, _) => {},
@@ -281,58 +258,6 @@ pub enum ReadFileBytes {
     Blob(crate::blob::BlobId),
 }
 
-/// How deferred content is read: one whole-file `read-file`, or arbitrary
-/// `(offset, length)` chunks through an `open-file`/`read-chunk` session
-/// backed by a [`crate::handler::RangeReader`]. This declares provider
-/// capability, not cache policy; the host may still read a ranged file in
-/// full.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReadMode {
-    Full,
-    Ranged,
-}
-
-/// How the bytes behave over time for one logical identity; the host
-/// derives its caching policy from this.
-///
-/// - `Stable`: the bytes never change for this path identity (a pinned
-///   version, a content-addressed artifact). The host may cache content and
-///   learned size indefinitely.
-/// - `Dynamic`: bytes may change between reads but not during one. Durable
-///   caching is tied to version evidence and invalidations.
-/// - `Live`: bytes may change while being observed (`tail -f` shapes).
-///   The host serves it through direct I/O and the ranged live path and
-///   never caches content or learned size. Structurally requires a
-///   deferred ranged projection ([`FileProj::validate`]).
-///
-/// Declaring `Dynamic` when unsure is safe; declaring `Stable` when the
-/// content can change pins stale bytes in caches with no expiry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Stability {
-    Stable,
-    Dynamic,
-    Live,
-}
-
-impl From<Size> for wit_types::FileSize {
-    fn from(size: Size) -> Self {
-        match size {
-            Size::Exact(size) => Self::Exact(size),
-            Size::NonZero => Self::NonZero,
-            Size::Unknown => Self::Unknown,
-        }
-    }
-}
-
-impl From<ReadMode> for wit_types::ReadMode {
-    fn from(mode: ReadMode) -> Self {
-        match mode {
-            ReadMode::Full => Self::Full,
-            ReadMode::Ranged => Self::Ranged,
-        }
-    }
-}
-
 impl From<ProjBytes> for wit_types::ByteSource {
     fn from(bytes: ProjBytes) -> Self {
         match bytes {
@@ -347,16 +272,6 @@ impl From<ReadFileBytes> for wit_types::ByteSource {
         match bytes {
             ReadFileBytes::Inline(bytes) => Self::Inline(bytes),
             ReadFileBytes::Blob(blob) => Self::Blob(blob.raw()),
-        }
-    }
-}
-
-impl From<Stability> for wit_types::Stability {
-    fn from(stability: Stability) -> Self {
-        match stability {
-            Stability::Stable => Self::Stable,
-            Stability::Dynamic => Self::Dynamic,
-            Stability::Live => Self::Live,
         }
     }
 }

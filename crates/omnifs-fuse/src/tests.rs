@@ -26,7 +26,7 @@ use crate::new_notifier_handle;
 use omnifs_core::path::Path;
 use omnifs_engine::{
     Attrs, DirCursor, DirPage, EntryKind, EventStream, LookupAnswer, MountTable, Namespace,
-    NsError, ReadAnswer, ReadStyle, StabilityClass, TreeNamespace,
+    NsError, ReadAnswer, ReadStyle, Stability, TreeNamespace,
 };
 use std::future::Future;
 use std::path::{Path as StdPath, PathBuf};
@@ -315,7 +315,7 @@ impl PathNamespace {
             ttl: Duration::ZERO,
             change: 0,
             direct_io: false,
-            stability: StabilityClass::Stable,
+            stability: Stability::Stable,
             read_style: if is_file {
                 ReadStyle::Ranged
             } else {

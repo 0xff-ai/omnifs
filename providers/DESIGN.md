@@ -370,7 +370,7 @@ r.object::<PaperVersion>("/{paper}/{version}", |o| {
 
 The attribute contract includes:
 
-- `Size::Exact(n)`, `Size::NonZero`, or `Size::Unknown`;
+- `FileSize::Exact(n)`, `FileSize::NonZero`, or `FileSize::Unknown`;
 - `Stability::Stable` for immutable identities;
 - `Stability::Dynamic` for snapshot reads that may change between reads;
 - `Stability::Live` only for ranged stream faces that may change while being
@@ -468,7 +468,7 @@ filesystem behavior:
 ```rust
 o.file("logs/{container}.log")
     .stream(Pod::logs)
-    .size(Size::Unknown)
+    .size(FileSize::Unknown)
     .live()?;
 ```
 
@@ -738,7 +738,7 @@ async fn diff(cx: Cx<GitHub>, key: PullRequestKey) -> Result<BlobFile<Diff>> {
         .await?;
 
     Ok(BlobFile::new(blob.id)
-        .size(Size::Exact(blob.size))
+        .size(FileSize::Exact(blob.size))
         .content_type("text/x-diff"))
 }
 ```
