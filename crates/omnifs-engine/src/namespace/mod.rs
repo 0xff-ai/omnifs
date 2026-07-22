@@ -120,10 +120,58 @@ pub struct Attrs {
 }
 
 /// The resolved answer for a lookup.
+///
+/// `path` names the structural child even when it is missing, so protocol
+/// caches can invalidate a negative answer without rebuilding projection keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LookupAnswer {
     pub path: Path,
-    pub attrs: Attrs,
+    pub state: LookupState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LookupState {
+    Found { attrs: Attrs },
+    Missing { ttl: Duration },
+}
+
+impl LookupAnswer {
+    #[must_use]
+    pub fn found(path: Path, attrs: Attrs) -> Self {
+        Self {
+            path,
+            state: LookupState::Found { attrs },
+        }
+    }
+
+    #[must_use]
+    pub fn missing(path: Path, ttl: Duration) -> Self {
+        Self {
+            path,
+            state: LookupState::Missing { ttl },
+        }
+    }
+
+    #[must_use]
+    pub const fn is_missing(&self) -> bool {
+        matches!(self.state, LookupState::Missing { .. })
+    }
+
+    #[must_use]
+    pub const fn attrs(&self) -> Option<&Attrs> {
+        match &self.state {
+            LookupState::Found { attrs } => Some(attrs),
+            LookupState::Missing { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn ttl(&self) -> Duration {
+        match &self.state {
+            LookupState::Found { attrs } => attrs.ttl,
+            LookupState::Missing { ttl } => *ttl,
+        }
+    }
 }
 
 /// One directory child.
@@ -181,6 +229,14 @@ pub enum NsEvent {
     InvalidateSubtree { path: Path },
     /// `node`'s attributes changed in place (a live file grew).
     AttrsChanged { path: Path, attrs: Attrs },
+}
+
+impl NsEvent {
+    /// Clear all protocol-cached answers after disconnect or event loss.
+    #[must_use]
+    pub fn reset() -> Self {
+        Self::InvalidateSubtree { path: Path::root() }
+    }
 }
 
 /// Retry classification for an [`NsError`], derivable without importing the
@@ -292,9 +348,7 @@ impl futures::Stream for EventStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<NsEvent>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(event))) => Poll::Ready(Some(event)),
-            Poll::Ready(Some(Err(_))) => {
-                Poll::Ready(Some(NsEvent::InvalidateSubtree { path: Path::root() }))
-            },
+            Poll::Ready(Some(Err(_))) => Poll::Ready(Some(NsEvent::reset())),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }

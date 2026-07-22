@@ -78,8 +78,8 @@ async fn published_effects_atomically_expose_object_file_attrs_and_dirents() {
         .unwrap();
     assert!(listing.entries.iter().any(|entry| entry.name == "item"));
     let item = harness.namespace.lookup(bundle.path, "item").await.unwrap();
-    assert_eq!(item.attrs.kind, EntryKind::File);
-    assert_eq!(item.attrs.size, 4);
+    assert_eq!(item.attrs().unwrap().kind, EntryKind::File);
+    assert_eq!(item.attrs().unwrap().size, 4);
     let read = harness
         .namespace
         .read(item.path, 0, u32::MAX)

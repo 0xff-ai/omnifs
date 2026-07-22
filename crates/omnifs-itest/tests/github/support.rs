@@ -8,10 +8,8 @@ use omnifs_wit::provider::types::{ByteSource, Effects, FsKind, Stability};
 pub use omnifs_itest::{TestOpExt, project_paths};
 
 pub async fn resolve_namespace(namespace: &dyn Namespace, path: &str) -> LookupAnswer {
-    let mut answer = LookupAnswer {
-        path: Path::root(),
-        attrs: namespace.getattr(Path::root()).await.unwrap(),
-    };
+    let attrs = namespace.getattr(Path::root()).await.unwrap();
+    let mut answer = LookupAnswer::found(Path::root(), attrs);
     for segment in Path::parse(path).unwrap().segments() {
         answer = namespace.lookup(answer.path, segment).await.unwrap();
     }

@@ -93,14 +93,13 @@ impl Namespace for StubNamespace {
     ) -> BoxFuture<'a, Result<LookupAnswer, NsError>> {
         let name = name.to_string();
         async move {
-            Ok(LookupAnswer {
-                path: path(if name == "message" {
-                    "/test/message"
-                } else {
-                    "/test/child"
-                }),
-                attrs: file_attrs(13),
-            })
+            let path = path(if name == "message" {
+                "/test/message"
+            } else {
+                "/test/child"
+            });
+            let attrs = file_attrs(13);
+            Ok(LookupAnswer::found(path, attrs))
         }
         .boxed()
     }
@@ -459,7 +458,7 @@ async fn server_pushes_events() {
     assert_eq!(second.kind, KIND_EVENT);
     assert_eq!(
         postcard::from_bytes::<NsEvent>(&first.body).unwrap(),
-        NsEvent::InvalidateSubtree { path: Path::root() }
+        NsEvent::reset()
     );
     assert_eq!(
         postcard::from_bytes::<NsEvent>(&second.body).unwrap(),
@@ -1003,7 +1002,7 @@ async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
         .await
         .expect("disconnect root invalidation")
         .expect("event stream remains live");
-    assert_eq!(root, NsEvent::InvalidateSubtree { path: Path::root() });
+    assert_eq!(root, NsEvent::reset());
 
     // This request belongs to the outage epoch and must fail promptly instead
     // of waiting behind the reconnect handshake.
