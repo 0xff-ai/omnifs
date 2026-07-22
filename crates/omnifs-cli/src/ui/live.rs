@@ -356,23 +356,9 @@ impl LiveRegion {
             .ledger_row(&render::LedgerRow::new(glyph, key, value), key_width);
     }
 
-    /// Ctrl-C fired while this region was on screen: erase it and print the
-    /// caller's explicit partial-state row before propagating cancellation
-    /// through the existing cancel path (`main.rs` already renders
-    /// `canceled` and exits 130 for `prompt::Canceled`).
-    pub(crate) fn cancel(
-        self,
-        glyph: Glyph,
-        key: impl Into<String>,
-        value: impl Into<String>,
-        key_width: usize,
-    ) {
-        self.finish(glyph, key, value, key_width);
-    }
-
     /// Race a future against Ctrl-C while a live region may be on screen.
-    /// Callers render their own partial-state summary through
-    /// [`LiveRegion::cancel`] before propagating the resulting error.
+    /// Callers render their own partial-state summary before propagating the
+    /// resulting error.
     pub(crate) async fn race<T>(
         future: impl std::future::Future<Output = T>,
     ) -> Result<T, Canceled> {
