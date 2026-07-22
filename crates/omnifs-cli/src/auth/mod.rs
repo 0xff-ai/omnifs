@@ -10,7 +10,10 @@ pub(crate) mod readiness;
 
 pub(crate) use login::{LoginInteractivity, login_with_workspace};
 pub(crate) use manifest_view::AuthManifestView;
-pub(crate) use mount::{AuthSelection, MountAuth};
+pub(crate) use mount::{
+    MountAuth, auth_from_provider_default, auth_from_scheme, promote_imported_static,
+    static_token_auth, static_token_scheme,
+};
 pub(crate) use readiness::AuthReadiness;
 
 /// Keys any completed-auth receipt row may use:

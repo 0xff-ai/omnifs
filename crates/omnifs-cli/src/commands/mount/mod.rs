@@ -395,17 +395,11 @@ impl ReauthArgs {
             })?;
         let manifest = provider.manifest()?;
 
-        let selection = crate::auth::AuthSelection {
-            auth_type: auth.kind(),
-            scheme: auth.scheme().map(str::to_owned),
-            account: auth.account().map(str::to_owned),
-        };
-
         // `--no-input` must never reach an OAuth browser handoff (it would hang
         // on the browser confirm or the manual-code paste). Mirror the add-side
         // guard: bail naming the interactive and static-token alternatives.
         let interactive = prompt.interactive;
-        if !interactive && selection.is_oauth() {
+        if !interactive && auth.is_oauth() {
             return Err(anyhow!(
                 "`omnifs mount reauth {mount_name}` cannot complete OAuth without a terminal; run it interactively, or use a static-token scheme with --token - or --token-env VAR"
             ))
@@ -417,12 +411,12 @@ impl ReauthArgs {
         // `credential`), since both flows route through the same
         // `login`/`run_static_token_init` primitives.
         let auth_key_width = crate::auth::auth_receipt_key_width();
-        let target = if selection.is_oauth() {
+        let target = if auth.is_oauth() {
             output.narrate(format!("re-authenticating `{mount_name}` over OAuth"));
             crate::auth::login_with_workspace(
                 workspace,
                 mount_name,
-                selection.account.as_deref(),
+                auth.account(),
                 crate::auth::LoginInteractivity {
                     no_browser: self.no_browser,
                     no_input: prompt.no_input,
@@ -441,7 +435,7 @@ impl ReauthArgs {
             let token = source.read(output)?;
             run_static_token_init(
                 &manifest,
-                &selection,
+                auth,
                 token,
                 workspace.credentials(),
                 !self.no_validate,

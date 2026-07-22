@@ -6,13 +6,11 @@
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use omnifs_workspace::authn::AuthKind;
-use omnifs_workspace::mounts::{Auth, Limits, Name as MountName, OAuth, Spec, StaticToken};
+use omnifs_workspace::mounts::{Auth, Limits, Name as MountName, Spec};
 use omnifs_workspace::provider::{ProviderAuthManifest, ProviderManifest};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use crate::auth::AuthSelection;
 use crate::commands::mount::provider_selection;
 use crate::commands::mount::spec_creation::{create_config, validate_config};
 use crate::commands::mount::{AddArgs, AuthImportDecision, ImportOutcome};
@@ -40,7 +38,6 @@ pub(crate) enum MountInitStatus {
 pub(crate) struct MountInitPlan {
     mount_name: MountName,
     manifest: ProviderManifest,
-    effective_auth: Option<AuthSelection>,
     imported_token: Option<secrecy::SecretString>,
     spec: Spec,
     // Whether the provider needs no sign-in at all (captured from the raw
@@ -315,7 +312,7 @@ pub(crate) fn spec_creation(
     .resolve(output, mount_add_key_width())?;
     let ImportOutcome { auth, token } = import_outcome;
 
-    if !interactive && token.is_none() && auth.as_ref().is_some_and(AuthSelection::is_oauth) {
+    if !interactive && token.is_none() && auth.as_ref().is_some_and(Auth::is_oauth) {
         return Err(anyhow!(
             "cannot complete OAuth for `{provider_name}` without an interactive terminal; pass --token-env VAR with --scheme <static-token-scheme>, pass --no-auth, or run interactively"
         ))
@@ -335,22 +332,16 @@ pub(crate) fn spec_creation(
     } else {
         create_config(&manifest, output, interactive)?
     };
+    let mut auth = auth;
+    if let Some(Auth::OAuth(oauth)) = auth.as_mut()
+        && !args.scopes.is_empty()
+    {
+        oauth.scopes = Some(args.scopes.clone());
+    }
     let mut spec = Spec {
         provider: reference,
         mount: mount_name.to_string(),
-        auth: auth.as_ref().map(|auth| {
-            let account = auth.account.clone();
-            let scheme = auth.scheme.clone();
-            match auth.auth_type {
-                AuthKind::StaticToken => Auth::StaticToken(StaticToken { scheme, account }),
-                AuthKind::OAuth => Auth::OAuth(OAuth {
-                    scheme,
-                    account,
-                    scopes: (!args.scopes.is_empty()).then(|| args.scopes.clone()),
-                    ..OAuth::default()
-                }),
-            }
-        }),
+        auth,
         limits: (!manifest.limits.is_empty()).then(|| Limits::from_declarations(&manifest.limits)),
         config_raw,
     };
@@ -359,7 +350,6 @@ pub(crate) fn spec_creation(
     Ok(MountInitPlan {
         mount_name,
         manifest,
-        effective_auth: auth,
         imported_token: token,
         spec,
         no_auth_needed,
@@ -384,7 +374,7 @@ impl MountInitPlan {
             crate::commands::mount::render_consent_block(output, &self.manifest);
         }
         let plan = self;
-        let Some(auth) = plan.effective_auth.as_ref() else {
+        let Some(auth) = plan.spec.auth.as_ref() else {
             return Ok(MountInitStatus::Ready);
         };
         let interactive = init_interactive(prompt);
@@ -418,7 +408,7 @@ impl MountInitPlan {
                 workspace.catalog(),
                 crate::auth::MountAuth::from_spec(workspace.catalog(), plan.spec.clone()),
                 workspace.credentials(),
-                auth.account.as_deref(),
+                auth.account(),
                 crate::auth::LoginInteractivity {
                     no_browser: args.no_browser,
                     no_input: prompt.no_input,
@@ -437,7 +427,9 @@ impl MountInitPlan {
                 output.narrate(sign_in_failed_value(&plan.manifest.id));
             })?;
         } else {
-            if interactive && let Ok(scheme) = auth.static_token_scheme(&plan.manifest) {
+            if interactive
+                && let Ok(scheme) = crate::auth::static_token_scheme(auth, &plan.manifest)
+            {
                 let guidance = plan
                     .manifest
                     .auth
@@ -528,17 +520,18 @@ fn selected_auth(
     args: &AddArgs,
     manifest: &ProviderManifest,
     auth_manifest: Option<&omnifs_workspace::authn::AuthManifest>,
-) -> anyhow::Result<Option<AuthSelection>> {
+) -> anyhow::Result<Option<Auth>> {
     if args.no_auth {
         return Ok(None);
     }
     if args.token.is_some() || args.token_env.is_some() {
-        return AuthSelection::static_token(auth_manifest, args.scheme.as_deref(), None).map(Some);
+        return crate::auth::static_token_auth(auth_manifest, args.scheme.as_deref(), None)
+            .map(Some);
     }
     if let Some(scheme) = args.scheme.as_deref() {
-        return AuthSelection::from_scheme(auth_manifest, scheme, None).map(Some);
+        return crate::auth::auth_from_scheme(auth_manifest, scheme, None).map(Some);
     }
-    Ok(AuthSelection::from_provider_default(manifest))
+    Ok(crate::auth::auth_from_provider_default(manifest))
 }
 
 /// Write the mount spec. Silent: `configure_mount` prints the `mount ...
