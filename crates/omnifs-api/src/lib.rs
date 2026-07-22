@@ -55,53 +55,48 @@ pub struct DaemonStatus {
     pub offline: bool,
     /// Daemon-owned health for runtime subsystems. CLI status renders these
     /// entries instead of reconstructing daemon health from raw fields.
-    pub health: DaemonHealth,
+    pub health: Box<DaemonHealth>,
 }
 
 impl DaemonStatus {
     #[must_use]
     pub fn ready(&self) -> bool {
-        self.health
-            .subsystem(DaemonSubsystem::Frontend)
-            .is_some_and(|entry| entry.state == HealthState::Healthy)
+        self.health.frontend.state == HealthState::Healthy
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonHealth {
-    pub subsystems: Vec<SubsystemHealth>,
+    pub control: HealthReport,
+    pub frontend: HealthReport,
+    pub mounts: HealthReport,
 }
 
 impl DaemonHealth {
     #[must_use]
-    pub fn new(subsystems: Vec<SubsystemHealth>) -> Self {
-        Self { subsystems }
-    }
-
-    #[must_use]
-    pub fn subsystem(&self, subsystem: DaemonSubsystem) -> Option<&SubsystemHealth> {
-        self.subsystems
-            .iter()
-            .find(|entry| entry.subsystem == subsystem)
+    pub fn new(control: HealthReport, frontend: HealthReport, mounts: HealthReport) -> Self {
+        Self {
+            control,
+            frontend,
+            mounts,
+        }
     }
 
     #[must_use]
     pub fn overall_state(&self) -> HealthState {
-        if self
-            .subsystems
+        let reports = [&self.control, &self.frontend, &self.mounts];
+        if reports
             .iter()
             .any(|entry| entry.state == HealthState::Unhealthy)
         {
             HealthState::Unhealthy
-        } else if self
-            .subsystems
+        } else if reports
             .iter()
             .any(|entry| entry.state == HealthState::Degraded)
         {
             HealthState::Degraded
-        } else if self
-            .subsystems
+        } else if reports
             .iter()
             .any(|entry| entry.state == HealthState::Starting)
         {
@@ -114,29 +109,19 @@ impl DaemonHealth {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SubsystemHealth {
-    pub subsystem: DaemonSubsystem,
+pub struct HealthReport {
     pub state: HealthState,
     pub message: String,
 }
 
-impl SubsystemHealth {
+impl HealthReport {
     #[must_use]
-    pub fn new(subsystem: DaemonSubsystem, state: HealthState, message: impl Into<String>) -> Self {
+    pub fn new(state: HealthState, message: impl Into<String>) -> Self {
         Self {
-            subsystem,
             state,
             message: message.into(),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DaemonSubsystem {
-    Control,
-    Frontend,
-    Mounts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

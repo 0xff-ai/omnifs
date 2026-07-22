@@ -973,8 +973,7 @@ mod tests {
         assert!(
             status
                 .health
-                .subsystem(omnifs_api::DaemonSubsystem::Frontend)
-                .unwrap()
+                .frontend
                 .message
                 .contains("attached fuse at /guest/omnifs via docker")
         );
