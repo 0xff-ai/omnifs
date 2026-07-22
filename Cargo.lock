@@ -2869,6 +2869,7 @@ dependencies = [
  "omnifs-api",
  "omnifs-core",
  "omnifs-engine",
+ "omnifs-fuse",
  "omnifs-nfs",
  "omnifs-wit",
  "omnifs-workspace",

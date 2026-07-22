@@ -25,5 +25,8 @@ rusqlite = { version = "0.36", features = ["bundled"] }
 base64 = "0.22"
 hickory-proto = "0.26"
 
+[dev-dependencies]
+omnifs-fuse = { workspace = true }
+
 [lints]
 workspace = true
