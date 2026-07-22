@@ -6,12 +6,11 @@ use omnifs_workspace::authn::{
     AccountId, AuthManifest, AuthScheme, CredentialId, StaticTokenScheme,
 };
 use omnifs_workspace::creds::CredentialStore;
-use omnifs_workspace::mounts::{Auth, Name as MountName, OAuth, Spec, StaticToken};
+use omnifs_workspace::mounts::{Auth, Name as MountName, OAuth, Registry, Spec, StaticToken};
 use omnifs_workspace::provider::{Catalog, ProviderAuthManifest, ProviderManifest};
 
 use super::manifest_view::AuthManifestView;
 use super::readiness::AuthReadiness;
-use crate::mount_config::MountConfig;
 
 pub(crate) fn auth_from_provider_default(manifest: &ProviderManifest) -> Option<Auth> {
     let (scheme, default) = manifest.auth.as_ref()?.default_scheme()?;
@@ -116,17 +115,12 @@ pub(crate) struct MountAuth {
 }
 
 impl MountAuth {
-    pub(crate) fn load(
-        catalog: &Catalog,
-        mounts: &[MountConfig],
-        mount: &str,
-    ) -> anyhow::Result<Self> {
+    pub(crate) fn load(catalog: &Catalog, mounts: &Registry, mount: &str) -> anyhow::Result<Self> {
         let name = MountName::new(mount.to_owned())
             .with_context(|| format!("invalid mount name `{mount}`"))?;
         let spec = mounts
-            .iter()
-            .find(|configured| configured.name == name)
-            .map(|configured| configured.config.clone())
+            .get(&name)
+            .cloned()
             .ok_or_else(|| anyhow!("no mount config named `{name}`"))
             .with_context(|| format!("load mount config `{mount}`"))?;
         Ok(Self::from_spec(catalog, spec))

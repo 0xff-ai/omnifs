@@ -1,8 +1,6 @@
-use crate::mount_config::MountConfig;
 use crate::provider_bundle::EmbeddedProviders;
-use crate::provider_resolver::mount_exists;
 use anyhow::anyhow;
-use omnifs_workspace::mounts::Name as MountName;
+use omnifs_workspace::mounts::{Name as MountName, Registry};
 
 pub(crate) fn select(
     embedded: &EmbeddedProviders,
@@ -27,7 +25,7 @@ pub(crate) fn select(
 }
 
 pub(crate) fn mount_name(
-    mounts: &[MountConfig],
+    mounts: &Registry,
     default_mount: &str,
     explicit_name: Option<&str>,
     interactive: bool,
@@ -51,14 +49,14 @@ pub(crate) fn mount_name(
 }
 
 fn ensure_unique_name(
-    mounts: &[MountConfig],
+    mounts: &Registry,
     proposed: MountName,
     interactive: bool,
     yes: bool,
     output: &crate::ui::output::Output,
     key_width: usize,
 ) -> anyhow::Result<MountName> {
-    if !mount_exists(mounts, &proposed) {
+    if mounts.get(&proposed).is_none() {
         return Ok(proposed);
     }
     let suggestion = next_available(mounts, &proposed)?;
@@ -86,9 +84,9 @@ fn ensure_unique_name(
     Ok(MountName::new(name)?)
 }
 
-fn next_available(mounts: &[MountConfig], base: &MountName) -> anyhow::Result<MountName> {
+fn next_available(mounts: &Registry, base: &MountName) -> anyhow::Result<MountName> {
     (2..1000)
         .filter_map(|n| MountName::new(format!("{base}-{n}")).ok())
-        .find(|candidate| !mount_exists(mounts, candidate))
+        .find(|candidate| mounts.get(candidate).is_none())
         .ok_or_else(|| anyhow!("could not find an available mount name derived from `{base}`"))
 }

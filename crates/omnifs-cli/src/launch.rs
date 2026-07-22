@@ -13,7 +13,7 @@ use crate::client::DaemonClient;
 use crate::commands::frontend::FrontendId;
 use crate::daemon_teardown::DaemonTeardown;
 use crate::inventory::{FrontendState, FrontendStatus, Inventory};
-use crate::mount_config::MountConfig;
+use crate::mount_config::validate_host_managed_credentials;
 use crate::ui::live::LiveRegion;
 use crate::ui::output::Output;
 use crate::ui::render::LedgerRow;
@@ -102,8 +102,7 @@ impl<'a> Launcher<'a> {
             let (snapshot_dir, snapshot) = desired_state.snapshot(&repository, &revision)?;
             (revision, snapshot_dir, snapshot)
         };
-        let configs = mount_configs(&snapshot);
-        if configs.is_empty() {
+        if snapshot.iter().next().is_none() {
             anyhow::bail!(
                 "no mount configs found in {}; run `omnifs mount add <provider>` to create one",
                 desired_state.repository_display()
@@ -133,7 +132,7 @@ impl<'a> Launcher<'a> {
         // daemon resolves the pinned manifest and bound config into authority
         // before constructing any provider instance.
         preflight_mounts(
-            &configs,
+            &snapshot,
             self.workspace.catalog(),
             self.workspace.credentials(),
         )?;
@@ -143,7 +142,7 @@ impl<'a> Launcher<'a> {
             self.workspace.catalog().clone(),
         )
         .warm_for_up(
-            configs.iter().map(|config| config.config.provider.id),
+            snapshot.iter().map(|(_, spec)| spec.provider.id),
             &self.output,
             up_key_width(),
         )
@@ -364,29 +363,18 @@ fn reattach_progress(
     (expected.len() - pending.len(), pending)
 }
 
-fn mount_configs(registry: &Registry) -> Vec<MountConfig> {
-    registry
-        .iter()
-        .map(|(name, spec)| MountConfig {
-            name: name.clone(),
-            config: spec.clone(),
-            source: registry.spec_path(name),
-        })
-        .collect()
-}
-
 /// Validate every configured mount before the running daemon is touched and
 /// confirm its host-managed credential, if any, is present. Authority belongs
 /// to the new daemon startup, so this preflight stays credential-only and a
 /// failed authority resolution leaves a healthy prior revision serving.
 fn preflight_mounts(
-    configs: &[MountConfig],
+    registry: &Registry,
     catalog: &Catalog,
     store: &dyn CredentialStore,
 ) -> anyhow::Result<()> {
-    for config in configs {
-        let mount_auth = crate::auth::MountAuth::from_spec(catalog, config.config.clone());
-        config.validate_host_managed_credentials(&mount_auth, store)?;
+    for (_, spec) in registry.iter() {
+        let mount_auth = crate::auth::MountAuth::from_spec(catalog, spec.clone());
+        validate_host_managed_credentials(&mount_auth, store)?;
     }
     Ok(())
 }

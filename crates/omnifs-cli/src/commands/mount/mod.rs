@@ -191,17 +191,20 @@ pub(crate) async fn show_with_output(
     // A best-effort local-spec lookup: an observed-but-not-locally-configured
     // mount, or a workspace whose registry has an unrelated parse failure,
     // still gets a card, just without these locally-sourced facts.
-    let local = crate::mount_config::load_mounts(workspace)
-        .ok()
-        .and_then(|mounts| mounts.into_iter().find(|entry| entry.name == mount_name));
-    let spec_path = local.as_ref().map(|entry| entry.source.clone());
-    let auth_kind = local
+    let local = crate::mount_config::load_registry(workspace).ok();
+    let spec_path = local.as_ref().and_then(|registry| {
+        registry
+            .get(&mount_name)
+            .map(|_| registry.spec_path(&mount_name))
+    });
+    let local_spec = local
         .as_ref()
-        .and_then(|entry| entry.config.auth.as_ref())
+        .and_then(|registry| registry.get(&mount_name));
+    let auth_kind = local_spec
+        .and_then(|spec| spec.auth.as_ref())
         .map(omnifs_workspace::mounts::Auth::kind);
-    let config_summary = local
-        .as_ref()
-        .and_then(|entry| entry.config.config_raw.as_ref())
+    let config_summary = local_spec
+        .and_then(|spec| spec.config_raw.as_ref())
         .and_then(config_summary_line);
     Ok(MountShowResult {
         mount,
@@ -370,28 +373,21 @@ impl ReauthArgs {
         prompt: PromptMode,
     ) -> anyhow::Result<()> {
         let mount_name = self.name.as_str();
-        let mounts = crate::mount_config::load_mounts(workspace)?;
-        let mount_config = mounts
-            .iter()
-            .find(|m| m.name.as_str() == mount_name)
-            .ok_or_else(|| {
-                anyhow!(
-                    "no mount named `{mount_name}`; run `omnifs mount add <provider>` to create it"
-                )
-            })?;
-        let Some(auth) = mount_config.config.auth.as_ref() else {
+        let mounts = crate::mount_config::load_registry(workspace)?;
+        let name = MountName::new(mount_name.to_owned())?;
+        let spec = mounts.get(&name).ok_or_else(|| {
+            anyhow!("no mount named `{mount_name}`; run `omnifs mount add <provider>` to create it")
+        })?;
+        let Some(auth) = spec.auth.as_ref() else {
             anyhow::bail!("mount `{mount_name}` needs no authentication");
         };
 
-        let provider = workspace
-            .catalog()
-            .get(&mount_config.config.provider.id)?
-            .ok_or_else(|| {
-                anyhow!(
-                    "provider artifact `{}` for mount `{mount_name}` is missing",
-                    mount_config.config.provider.id
-                )
-            })?;
+        let provider = workspace.catalog().get(&spec.provider.id)?.ok_or_else(|| {
+            anyhow!(
+                "provider artifact `{}` for mount `{mount_name}` is missing",
+                spec.provider.id
+            )
+        })?;
         let manifest = provider.manifest()?;
 
         // `--no-input` must never reach an OAuth browser handoff (it would hang
@@ -477,11 +473,11 @@ fn rm_with_options(
     output: &Output,
 ) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
     let output = output.clone();
-    let mounts = crate::mount_config::load_mounts(workspace)?;
+    let mounts = crate::mount_config::load_registry(workspace)?;
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
 
-    let Some(mount) = mounts.iter().find(|m| m.name == name) else {
+    if mounts.get(&name).is_none() {
         // Removing an already-absent valid mount is an idempotent cleanup
         // operation. Emit the same plan/receipt shape as other destructive
         // commands, but never construct a credential service or touch the
@@ -498,7 +494,7 @@ fn rm_with_options(
         output.plan(&plan);
         if let Some(suggestion) = mounts
             .iter()
-            .map(|mount| mount.name.to_string())
+            .map(|(mount, _)| mount.to_string())
             .find(|candidate| candidate.starts_with(name.as_str()))
         {
             output.narrate(format!("Did you mean `{suggestion}`?"));
@@ -518,8 +514,8 @@ fn rm_with_options(
             plan,
             receipt.rows,
         ));
-    };
-    let config_path = mount.source.clone();
+    }
+    let config_path = mounts.spec_path(&name);
     // Build the plan without constructing an HTTP client or registering an
     // OAuth revocation. A dry run must stop before any apply-only work.
     let plan = mount_remove_plan(&name, &config_path);
