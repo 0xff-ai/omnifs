@@ -196,8 +196,8 @@ pub enum CredentialIdError {
 
 /// Discriminant for the two host-managed credential families.
 ///
-/// Shared by `crate::creds` (`CredentialEntry.kind`), `crate::mounts`
-/// (`Auth` / `AuthKind` accessors), and the CLI (`AuthSelection`).
+/// Shared by `crate::creds` (`CredentialEntry.kind`) and `crate::mounts`
+/// (`Auth` / `AuthKind` accessors).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, strum::Display,
 )]

@@ -8,12 +8,12 @@
 use anyhow::Context;
 use clap::Args;
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore};
+use omnifs_workspace::mounts::Auth;
 use omnifs_workspace::provider::ProviderManifest;
 use secrecy::{ExposeSecret, SecretString};
 use time::OffsetDateTime;
 
 use super::token_validation::validate_static_token;
-use crate::auth::AuthSelection;
 use crate::credential_target::CredentialTarget;
 use omnifs_workspace::Workspace;
 
@@ -143,14 +143,14 @@ pub(crate) fn render_consent_block(
 
 pub(crate) async fn run_static_token_init(
     manifest: &ProviderManifest,
-    auth: &AuthSelection,
+    auth: &Auth,
     token: SecretString,
     store: &dyn CredentialStore,
     validate: bool,
     output: &crate::ui::output::Output,
     key_width: usize,
 ) -> anyhow::Result<CredentialTarget> {
-    let static_token_scheme = auth.static_token_scheme(manifest)?;
+    let static_token_scheme = crate::auth::static_token_scheme(auth, manifest)?;
 
     let header_name = static_token_scheme
         .header_name
@@ -203,9 +203,8 @@ pub(crate) async fn run_static_token_init(
         .as_ref()
         .map(omnifs_workspace::provider::ProviderAuthManifest::wasm_auth_manifest);
     let scheme_key = crate::auth::AuthManifestView::new(auth_manifest.as_ref())
-        .static_token_scheme_key(auth.scheme.as_deref(), None)?;
-    let target =
-        CredentialTarget::for_static_import(&manifest.id, &scheme_key, auth.account.as_deref())?;
+        .static_token_scheme_key(auth.scheme(), None)?;
+    let target = CredentialTarget::for_static_import(&manifest.id, &scheme_key, auth.account())?;
     let credential_id = target
         .credential_id()
         .ok_or_else(|| anyhow::anyhow!("static token resolved without a credential target"))?;
@@ -222,7 +221,6 @@ pub(crate) async fn run_static_token_init(
 #[cfg(test)]
 mod tests {
     use super::AddArgs;
-    use crate::auth::AuthSelection;
     use crate::commands::mount::AuthImportDecision;
     use crate::commands::mount::spec_creation::{create_config, validate_config};
     use omnifs_workspace::Workspace;
@@ -282,11 +280,11 @@ mod tests {
     }
 
     #[test]
-    fn provider_default_auth_selection_uses_the_declared_scheme() {
-        let selection = AuthSelection::from_provider_default(&provider_manifest()).unwrap();
+    fn provider_default_auth_uses_the_declared_scheme() {
+        let selection = crate::auth::auth_from_provider_default(&provider_manifest()).unwrap();
         assert!(selection.is_oauth());
-        assert_eq!(selection.scheme.as_deref(), Some("oauth"));
-        assert_eq!(selection.account, None);
+        assert_eq!(selection.scheme(), Some("oauth"));
+        assert_eq!(selection.account(), None);
     }
 
     #[test]
@@ -399,11 +397,11 @@ mod tests {
                 }),
             ],
         };
-        let oauth_default = AuthSelection {
-            auth_type: omnifs_workspace::authn::AuthKind::OAuth,
-            scheme: Some("oauth".to_string()),
-            account: None,
-        };
+        let oauth_default =
+            omnifs_workspace::mounts::Auth::OAuth(omnifs_workspace::mounts::OAuth {
+                scheme: Some("oauth".to_string()),
+                ..Default::default()
+            });
 
         let outcome = AuthImportDecision::new(
             Some(oauth_default),
@@ -420,10 +418,10 @@ mod tests {
 
         let promoted = outcome.auth.expect("auth");
         assert_eq!(
-            promoted.auth_type,
+            promoted.kind(),
             omnifs_workspace::authn::AuthKind::StaticToken
         );
-        assert_eq!(promoted.scheme.as_deref(), Some("pat"));
+        assert_eq!(promoted.scheme(), Some("pat"));
         assert!(outcome.token.is_some(), "imported token should be set");
 
         // SAFETY: env mutation is isolated by the lock_env() guard above.
@@ -461,11 +459,11 @@ mod tests {
                 },
             )],
         };
-        let static_default = AuthSelection {
-            auth_type: omnifs_workspace::authn::AuthKind::StaticToken,
-            scheme: Some("pat".to_string()),
-            account: None,
-        };
+        let static_default =
+            omnifs_workspace::mounts::Auth::StaticToken(omnifs_workspace::mounts::StaticToken {
+                scheme: Some("pat".to_string()),
+                account: None,
+            });
 
         let outcome = AuthImportDecision::new(
             Some(static_default),

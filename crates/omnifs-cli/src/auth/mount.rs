@@ -2,124 +2,109 @@
 
 use anyhow::{Context, anyhow};
 use omnifs_auth::OAuthRequest;
-use omnifs_workspace::authn::AuthKind;
 use omnifs_workspace::authn::{AuthManifest, AuthScheme, StaticTokenScheme};
 use omnifs_workspace::creds::CredentialStore;
-use omnifs_workspace::mounts::{Auth, Name as MountName, Spec};
+use omnifs_workspace::mounts::{Auth, Name as MountName, OAuth, Spec, StaticToken};
 use omnifs_workspace::provider::{Catalog, ProviderAuthManifest, ProviderManifest};
 
 use super::manifest_view::AuthManifestView;
 use super::readiness::AuthReadiness;
 use crate::credential_target::CredentialTarget;
 use crate::mount_config::MountConfig;
-/// Auth mode chosen during `omnifs mount add` before a mount config exists on disk.
-#[derive(Clone, Debug)]
-pub(crate) struct AuthSelection {
-    pub(crate) auth_type: AuthKind,
-    pub(crate) scheme: Option<String>,
-    pub(crate) account: Option<String>,
+
+pub(crate) fn auth_from_provider_default(manifest: &ProviderManifest) -> Option<Auth> {
+    let (scheme, default) = manifest.auth.as_ref()?.default_scheme()?;
+    let scheme = Some(scheme.to_owned());
+    match default {
+        AuthScheme::None => None,
+        AuthScheme::StaticToken(_) => Some(Auth::StaticToken(StaticToken {
+            scheme,
+            account: None,
+        })),
+        AuthScheme::Oauth(_) => Some(Auth::OAuth(OAuth {
+            scheme,
+            ..OAuth::default()
+        })),
+    }
 }
 
-impl AuthSelection {
-    pub(crate) fn from_provider_default(manifest: &ProviderManifest) -> Option<Self> {
-        let (scheme, default) = manifest.auth.as_ref()?.default_scheme()?;
-        let auth_type = match default {
-            AuthScheme::None => return None,
-            AuthScheme::StaticToken(_) => AuthKind::StaticToken,
-            AuthScheme::Oauth(_) => AuthKind::OAuth,
-        };
-        Some(Self {
-            auth_type,
+pub(crate) fn auth_from_scheme(
+    auth_manifest: Option<&AuthManifest>,
+    scheme: &str,
+    account: Option<String>,
+) -> anyhow::Result<Auth> {
+    let manifest = auth_manifest.ok_or_else(|| anyhow!("provider has no auth manifest"))?;
+    if manifest.resolve_static_scheme(Some(scheme)).is_ok() {
+        return Ok(Auth::StaticToken(StaticToken {
             scheme: Some(scheme.to_owned()),
-            account: None,
-        })
-    }
-
-    pub(crate) fn is_oauth(&self) -> bool {
-        self.auth_type == AuthKind::OAuth
-    }
-
-    pub(crate) fn from_scheme(
-        auth_manifest: Option<&AuthManifest>,
-        scheme: &str,
-        account: Option<String>,
-    ) -> anyhow::Result<Self> {
-        let manifest = auth_manifest.ok_or_else(|| anyhow!("provider has no auth manifest"))?;
-        if manifest.resolve_static_scheme(Some(scheme)).is_ok() {
-            return Ok(Self {
-                auth_type: AuthKind::StaticToken,
-                scheme: Some(scheme.to_string()),
-                account,
-            });
-        }
-        if manifest.resolve_oauth_scheme(Some(scheme)).is_ok() {
-            return Ok(Self {
-                auth_type: AuthKind::OAuth,
-                scheme: Some(scheme.to_string()),
-                account,
-            });
-        }
-        anyhow::bail!("provider has no auth scheme `{scheme}`")
-    }
-
-    pub(crate) fn static_token(
-        auth_manifest: Option<&AuthManifest>,
-        scheme: Option<&str>,
-        account: Option<String>,
-    ) -> anyhow::Result<Self> {
-        let manifest = auth_manifest.ok_or_else(|| anyhow!("provider has no auth manifest"))?;
-        let static_scheme = manifest.resolve_static_scheme(scheme)?;
-        Ok(Self {
-            auth_type: AuthKind::StaticToken,
-            scheme: Some(static_scheme.key.clone()),
             account,
-        })
+        }));
     }
-
-    pub(crate) fn promote_imported_static(
-        mut self,
-        auth_manifest: Option<&AuthManifest>,
-        provider_id: &str,
-    ) -> anyhow::Result<Self> {
-        if !self.is_oauth() {
-            return Ok(self);
-        }
-        let account = self.account.take();
-        match AuthManifestView::new(auth_manifest).first_static_token_scheme_key() {
-            Some(scheme) => Ok(Self {
-                auth_type: AuthKind::StaticToken,
-                scheme: Some(scheme),
-                account,
-            }),
-            None => anyhow::bail!(
-                "imported a static token for `{provider_id}`, but the provider declares no static-token scheme; remove the ambient credential or run OAuth"
-            ),
-        }
+    if manifest.resolve_oauth_scheme(Some(scheme)).is_ok() {
+        return Ok(Auth::OAuth(OAuth {
+            scheme: Some(scheme.to_owned()),
+            account,
+            ..OAuth::default()
+        }));
     }
+    anyhow::bail!("provider has no auth scheme `{scheme}`")
+}
 
-    pub(crate) fn static_token_scheme<'a>(
-        &self,
-        manifest: &'a ProviderManifest,
-    ) -> anyhow::Result<&'a StaticTokenScheme> {
-        let auth_block = manifest.auth.as_ref().ok_or_else(|| {
-            anyhow!(
-                "provider `{}` has no auth block; cannot run static-token init",
-                manifest.id
-            )
-        })?;
-        let wasm_manifest = auth_block.wasm_auth_manifest();
-        let scheme_key = AuthManifestView::new(Some(&wasm_manifest))
-            .static_token_scheme_key(self.scheme.as_deref(), None)?;
-        let scheme = auth_block
-            .scheme(&scheme_key)
-            .ok_or_else(|| anyhow!("provider `{}` has no scheme `{scheme_key}`", manifest.id))?;
-        match scheme {
-            AuthScheme::StaticToken(static_token) => Ok(static_token),
-            _ => anyhow::bail!(
-                "provider `{}` scheme `{scheme_key}` is OAuth, not static-token",
-                manifest.id
-            ),
-        }
+pub(crate) fn static_token_auth(
+    auth_manifest: Option<&AuthManifest>,
+    scheme: Option<&str>,
+    account: Option<String>,
+) -> anyhow::Result<Auth> {
+    let manifest = auth_manifest.ok_or_else(|| anyhow!("provider has no auth manifest"))?;
+    let static_scheme = manifest.resolve_static_scheme(scheme)?;
+    Ok(Auth::StaticToken(StaticToken {
+        scheme: Some(static_scheme.key.clone()),
+        account,
+    }))
+}
+
+pub(crate) fn promote_imported_static(
+    auth: Auth,
+    auth_manifest: Option<&AuthManifest>,
+    provider_id: &str,
+) -> anyhow::Result<Auth> {
+    if !auth.is_oauth() {
+        return Ok(auth);
+    }
+    let account = auth.account().map(str::to_owned);
+    match AuthManifestView::new(auth_manifest).first_static_token_scheme_key() {
+        Some(scheme) => Ok(Auth::StaticToken(StaticToken {
+            scheme: Some(scheme),
+            account,
+        })),
+        None => anyhow::bail!(
+            "imported a static token for `{provider_id}`, but the provider declares no static-token scheme; remove the ambient credential or run OAuth"
+        ),
+    }
+}
+
+pub(crate) fn static_token_scheme<'a>(
+    auth: &Auth,
+    manifest: &'a ProviderManifest,
+) -> anyhow::Result<&'a StaticTokenScheme> {
+    let auth_block = manifest.auth.as_ref().ok_or_else(|| {
+        anyhow!(
+            "provider `{}` has no auth block; cannot run static-token init",
+            manifest.id
+        )
+    })?;
+    let wasm_manifest = auth_block.wasm_auth_manifest();
+    let scheme_key =
+        AuthManifestView::new(Some(&wasm_manifest)).static_token_scheme_key(auth.scheme(), None)?;
+    let scheme = auth_block
+        .scheme(&scheme_key)
+        .ok_or_else(|| anyhow!("provider `{}` has no scheme `{scheme_key}`", manifest.id))?;
+    match scheme {
+        AuthScheme::StaticToken(static_token) => Ok(static_token),
+        _ => anyhow::bail!(
+            "provider `{}` scheme `{scheme_key}` is OAuth, not static-token",
+            manifest.id
+        ),
     }
 }
 

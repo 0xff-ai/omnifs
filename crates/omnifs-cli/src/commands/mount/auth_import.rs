@@ -1,15 +1,15 @@
 use super::detect;
-use crate::auth::AuthSelection;
 use omnifs_workspace::authn::AuthManifest;
+use omnifs_workspace::mounts::Auth;
 use secrecy::SecretString;
 
 pub(crate) struct ImportOutcome {
-    pub(crate) auth: Option<AuthSelection>,
+    pub(crate) auth: Option<Auth>,
     pub(crate) token: Option<SecretString>,
 }
 
 pub(crate) struct AuthImportDecision<'a> {
-    default_auth: Option<AuthSelection>,
+    default_auth: Option<Auth>,
     auth_manifest: Option<&'a AuthManifest>,
     provider_name: &'a str,
     interactive: bool,
@@ -18,7 +18,7 @@ pub(crate) struct AuthImportDecision<'a> {
 
 impl<'a> AuthImportDecision<'a> {
     pub(crate) fn new(
-        default_auth: Option<AuthSelection>,
+        default_auth: Option<Auth>,
         auth_manifest: Option<&'a AuthManifest>,
         provider_name: &'a str,
         interactive: bool,
@@ -87,9 +87,11 @@ impl<'a> AuthImportDecision<'a> {
             .clone()
             .expect("checked default auth presence");
         Ok(ImportOutcome {
-            auth: Some(
-                default_auth.promote_imported_static(self.auth_manifest, self.provider_name)?,
-            ),
+            auth: Some(crate::auth::promote_imported_static(
+                default_auth,
+                self.auth_manifest,
+                self.provider_name,
+            )?),
             token: Some(token),
         })
     }
