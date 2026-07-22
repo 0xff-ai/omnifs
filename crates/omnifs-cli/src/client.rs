@@ -123,10 +123,10 @@ impl DaemonClient {
         })
     }
 
-    pub(crate) fn event_endpoint(&self) -> Result<Option<EventEndpoint>> {
+    pub(crate) fn event_endpoint(&self) -> Result<Option<PathBuf>> {
         Ok(match self.resolve()? {
             Target::Absent => None,
-            Target::Unix { socket, .. } => Some(EventEndpoint::Unix { socket }),
+            Target::Unix { socket, .. } => Some(socket),
         })
     }
 
@@ -353,19 +353,6 @@ fn same_path(left: &Path, right: &Path) -> bool {
     let canonical =
         |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     canonical(left) == canonical(right)
-}
-
-#[derive(Clone)]
-pub(crate) enum EventEndpoint {
-    Unix { socket: PathBuf },
-}
-
-impl EventEndpoint {
-    pub(crate) fn label(&self) -> String {
-        match self {
-            Self::Unix { socket } => format!("unix:{}", socket.display()),
-        }
-    }
 }
 
 #[derive(Debug)]

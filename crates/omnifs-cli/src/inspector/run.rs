@@ -68,7 +68,7 @@ pub fn run_tui(
     let mut terminal = Terminal::new(backend).context("create terminal")?;
 
     let addr = match &source {
-        SourceKind::Socket { endpoint, .. } => Some(endpoint.label()),
+        SourceKind::Socket { endpoint, .. } => Some(format!("unix:{}", endpoint.display())),
         SourceKind::Replay(_) => None,
     };
     // Captured before `EventSource::spawn` moves `source`, for the quit
@@ -219,7 +219,7 @@ pub fn run_plain(source: SourceKind, output: &crate::ui::output::Output) -> anyh
             }
         },
         SourceKind::Socket { endpoint, record } => {
-            let addr = endpoint.label();
+            let addr = format!("unix:{}", endpoint.display());
             output.narrate(format!("omnifs inspect: connecting to {addr}..."));
             let event_source = EventSource::spawn(SourceKind::Socket { endpoint, record });
             while let Some(message) = event_source.recv() {

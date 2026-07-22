@@ -16,7 +16,7 @@ use omnifs_api::{
 use tokio::io::AsyncWriteExt as _;
 use tokio::net::UnixStream;
 
-use crate::client::{EventEndpoint, read_control_line};
+use crate::client::read_control_line;
 
 /// Outcome of one [`EventsClient::attach`] call.
 pub enum AttachOutcome {
@@ -33,16 +33,16 @@ pub enum AttachOutcome {
 /// plain threads over the host-native Unix socket.
 pub struct EventsClient {
     rt: tokio::runtime::Runtime,
-    endpoint: EventEndpoint,
+    socket: PathBuf,
 }
 
 impl EventsClient {
-    pub fn new(endpoint: EventEndpoint) -> Result<Self> {
+    pub fn new(socket: PathBuf) -> Result<Self> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("build events client runtime")?;
-        Ok(Self { rt, endpoint })
+        Ok(Self { rt, socket })
     }
 
     /// Try to connect once. On success, call `on_connect`, then `on_line`
@@ -53,67 +53,63 @@ impl EventsClient {
         mut on_line: impl FnMut(&InspectorLine) -> std::result::Result<(), E>,
     ) -> std::result::Result<AttachOutcome, E> {
         self.rt.block_on(async {
-            match &self.endpoint {
-                EventEndpoint::Unix { socket } => {
-                    let Ok(mut stream) = UnixStream::connect(socket).await else {
-                        return Ok(AttachOutcome::Unreachable);
-                    };
-                    let request = ControlRequest {
-                        version: CONTROL_PROTOCOL_VERSION,
-                        operation: ControlOperation::SubscribeInspector,
-                    };
-                    let Ok(mut request_line) = serde_json::to_vec(&request) else {
-                        return Ok(AttachOutcome::Unreachable);
-                    };
-                    request_line.push(b'\n');
-                    if stream.write_all(&request_line).await.is_err() {
-                        return Ok(AttachOutcome::Unreachable);
-                    }
-                    let Ok(reply_line) = read_control_line(&mut stream).await else {
-                        return Ok(AttachOutcome::Unreachable);
-                    };
-                    let Ok(reply): std::result::Result<ControlReply, _> =
-                        serde_json::from_slice(&reply_line)
-                    else {
-                        return Ok(AttachOutcome::Unreachable);
-                    };
-                    if reply.version != CONTROL_PROTOCOL_VERSION {
-                        return Ok(AttachOutcome::Unreachable);
-                    }
-                    let ControlOutcome::InspectorReady { instance_id } = reply.outcome else {
-                        return Ok(AttachOutcome::Unreachable);
-                    };
-                    on_connect(instance_id);
-                    loop {
-                        let line = match read_control_line(&mut stream).await {
-                            Ok(line) => line,
-                            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-                                return Ok(AttachOutcome::Ended);
-                            },
-                            Err(error) => {
-                                return Ok(AttachOutcome::Failed(format!(
-                                    "read inspector stream: {error}"
-                                )));
-                            },
-                        };
-                        let line = match std::str::from_utf8(&line) {
-                            Ok(line) => match InspectorLine::parse_line(line) {
-                                Ok(line) => line,
-                                Err(error) => {
-                                    return Ok(AttachOutcome::Failed(format!(
-                                        "parse inspector stream: {error}"
-                                    )));
-                                },
-                            },
-                            Err(error) => {
-                                return Ok(AttachOutcome::Failed(format!(
-                                    "parse inspector stream: line is not UTF-8: {error}"
-                                )));
-                            },
-                        };
-                        on_line(&line)?;
-                    }
-                },
+            let Ok(mut stream) = UnixStream::connect(&self.socket).await else {
+                return Ok(AttachOutcome::Unreachable);
+            };
+            let request = ControlRequest {
+                version: CONTROL_PROTOCOL_VERSION,
+                operation: ControlOperation::SubscribeInspector,
+            };
+            let Ok(mut request_line) = serde_json::to_vec(&request) else {
+                return Ok(AttachOutcome::Unreachable);
+            };
+            request_line.push(b'\n');
+            if stream.write_all(&request_line).await.is_err() {
+                return Ok(AttachOutcome::Unreachable);
+            }
+            let Ok(reply_line) = read_control_line(&mut stream).await else {
+                return Ok(AttachOutcome::Unreachable);
+            };
+            let Ok(reply): std::result::Result<ControlReply, _> =
+                serde_json::from_slice(&reply_line)
+            else {
+                return Ok(AttachOutcome::Unreachable);
+            };
+            if reply.version != CONTROL_PROTOCOL_VERSION {
+                return Ok(AttachOutcome::Unreachable);
+            }
+            let ControlOutcome::InspectorReady { instance_id } = reply.outcome else {
+                return Ok(AttachOutcome::Unreachable);
+            };
+            on_connect(instance_id);
+            loop {
+                let line = match read_control_line(&mut stream).await {
+                    Ok(line) => line,
+                    Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Ok(AttachOutcome::Ended);
+                    },
+                    Err(error) => {
+                        return Ok(AttachOutcome::Failed(format!(
+                            "read inspector stream: {error}"
+                        )));
+                    },
+                };
+                let line = match std::str::from_utf8(&line) {
+                    Ok(line) => match InspectorLine::parse_line(line) {
+                        Ok(line) => line,
+                        Err(error) => {
+                            return Ok(AttachOutcome::Failed(format!(
+                                "parse inspector stream: {error}"
+                            )));
+                        },
+                    },
+                    Err(error) => {
+                        return Ok(AttachOutcome::Failed(format!(
+                            "parse inspector stream: line is not UTF-8: {error}"
+                        )));
+                    },
+                };
+                on_line(&line)?;
             }
         })
     }
@@ -124,7 +120,7 @@ pub enum SourceKind {
     /// Subscribe to the daemon's event stream. Optional `record` also
     /// appends every typed line read to a host-side file.
     Socket {
-        endpoint: EventEndpoint,
+        endpoint: PathBuf,
         record: Option<PathBuf>,
     },
 }
@@ -282,7 +278,7 @@ fn replay_path(path: &Path, tx: &Sender<SourceMessage>) {
 /// Subscribe to the daemon's event stream and forward every received typed
 /// line into `tx`. Reconnects with a short backoff if the daemon is not yet
 /// listening, which is useful for `omnifs inspect` racing `just dev`.
-fn socket_source(endpoint: EventEndpoint, record: Option<&Path>, tx: &Sender<SourceMessage>) {
+fn socket_source(endpoint: PathBuf, record: Option<&Path>, tx: &Sender<SourceMessage>) {
     let mut record_file = match record {
         Some(path) => match OpenOptions::new().create(true).append(true).open(path) {
             Ok(file) => Some(file),
