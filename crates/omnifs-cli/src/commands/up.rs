@@ -68,7 +68,7 @@ impl UpArgs {
                     }
                 },
             },
-            Err(error) => output.note(format!(
+            Err(error) => output.narrate(format!(
                 "daemon is up, but the closing summary is unavailable: {error:#}"
             )),
         }

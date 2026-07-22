@@ -430,7 +430,7 @@ impl MountInitPlan {
                 // ever written: the recovery is re-running the whole add,
                 // not `reauth` against a mount name that does not exist on
                 // disk.
-                output.note(sign_in_failed_value(&plan.manifest.id));
+                output.narrate(sign_in_failed_value(&plan.manifest.id));
             })?;
         } else {
             if interactive && let Ok(scheme) = auth.static_token_scheme(&plan.manifest) {
@@ -445,13 +445,13 @@ impl MountInitPlan {
                 let dim =
                     |text: String| crate::ui::style::dim(text, crate::ui::style::Stream::Stderr);
                 if let Some(url) = &scheme.creation_url {
-                    output.note(dim(format!("create a token at {url}")));
+                    output.narrate(dim(format!("create a token at {url}")));
                 }
                 for step in &guidance.setup_steps {
-                    output.note(dim(step.clone()));
+                    output.narrate(dim(step.clone()));
                 }
                 if let Some(url) = &guidance.docs_url {
-                    output.note(dim(url.clone()));
+                    output.narrate(dim(url.clone()));
                 }
             }
             let source = TokenSource::resolve(

@@ -126,15 +126,15 @@ pub(crate) fn render_consent_block(
         .description
         .as_deref()
         .unwrap_or(&manifest.display_name);
-    output.note(description);
+    output.narrate(description);
     if let Some(needs) = crate::capability::compact_needs(manifest) {
-        output.note(crate::ui::style::dim(
+        output.narrate(crate::ui::style::dim(
             needs,
             crate::ui::style::Stream::Stderr,
         ));
     }
     if let Some(limits) = crate::capability::compact_limits(manifest) {
-        output.note(crate::ui::style::dim(
+        output.narrate(crate::ui::style::dim(
             limits,
             crate::ui::style::Stream::Stderr,
         ));
@@ -164,7 +164,7 @@ pub(crate) async fn run_static_token_init(
                 .await?,
         ),
         Some(_) => {
-            output.note("token stored without validation (--no-validate)");
+            output.narrate("token stored without validation (--no-validate)");
             None
         },
         None => None,
@@ -185,7 +185,7 @@ pub(crate) async fn run_static_token_init(
     if let Some(outcome) = &validation
         && let Some(workspace) = &outcome.workspace
     {
-        output.note(workspace);
+        output.narrate(workspace);
     }
 
     let now = OffsetDateTime::now_utc();

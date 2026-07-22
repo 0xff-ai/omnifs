@@ -36,7 +36,7 @@ pub(super) async fn validate_static_token(
             .body(body.to_string());
     }
 
-    output.note(format!("validating against {}", validation.url));
+    output.narrate(format!("validating against {}", validation.url));
     let response = req.send().await.context("validation request failed")?;
     let status = response.status();
     if u32::from(status.as_u16()) != u32::from(validation.expect_status) {
