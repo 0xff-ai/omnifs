@@ -105,6 +105,14 @@ impl DaemonObservation {
 
     #[cfg(test)]
     pub(crate) fn test(state: DaemonHealth) -> Self {
+        let health = match state {
+            DaemonHealth::Running | DaemonHealth::Stopped | DaemonHealth::Unreachable => {
+                HealthState::Healthy
+            },
+            DaemonHealth::Starting => HealthState::Starting,
+            DaemonHealth::Degraded => HealthState::Degraded,
+            DaemonHealth::Failed => HealthState::Unhealthy,
+        };
         let probe = match state {
             DaemonHealth::Stopped => DaemonProbe::Stopped,
             DaemonHealth::Unreachable => DaemonProbe::Unreachable {
@@ -128,18 +136,11 @@ impl DaemonObservation {
                 frontends: Vec::new(),
                 mounts: Vec::new(),
                 offline: false,
-                health: omnifs_api::DaemonHealth::new(vec![omnifs_api::SubsystemHealth::new(
-                    omnifs_api::DaemonSubsystem::Control,
-                    match state {
-                        DaemonHealth::Running
-                        | DaemonHealth::Stopped
-                        | DaemonHealth::Unreachable => HealthState::Healthy,
-                        DaemonHealth::Starting => HealthState::Starting,
-                        DaemonHealth::Degraded => HealthState::Degraded,
-                        DaemonHealth::Failed => HealthState::Unhealthy,
-                    },
-                    "test",
-                )]),
+                health: Box::new(omnifs_api::DaemonHealth::new(
+                    omnifs_api::HealthReport::new(health, "test"),
+                    omnifs_api::HealthReport::new(HealthState::Healthy, "test"),
+                    omnifs_api::HealthReport::new(HealthState::Healthy, "test"),
+                )),
             }),
         };
         let runtime = (state == DaemonHealth::Unreachable).then(|| {
@@ -1214,11 +1215,11 @@ mod tests {
                 frontends: Vec::new(),
                 mounts: Vec::new(),
                 offline: false,
-                health: omnifs_api::DaemonHealth::new(vec![omnifs_api::SubsystemHealth::new(
-                    omnifs_api::DaemonSubsystem::Control,
-                    health,
-                    "test",
-                )]),
+                health: Box::new(omnifs_api::DaemonHealth::new(
+                    omnifs_api::HealthReport::new(health, "test"),
+                    omnifs_api::HealthReport::new(HealthState::Healthy, "test"),
+                    omnifs_api::HealthReport::new(HealthState::Healthy, "test"),
+                )),
             };
             assert_eq!(DaemonObservation::from(Ok(Some(status))).health(), expected);
         }

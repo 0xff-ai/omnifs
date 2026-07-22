@@ -4,8 +4,8 @@ use anyhow::Context as _;
 
 use super::app::DaemonArgs;
 use omnifs_api::{
-    CredentialHealth, DaemonHealth, DaemonStatus, DaemonSubsystem, FrontendInfo, HealthState,
-    MountInfo, SubsystemHealth,
+    CredentialHealth, DaemonHealth, DaemonStatus, FrontendInfo, HealthReport, HealthState,
+    MountInfo,
 };
 use omnifs_engine::{Host, HostOfflineOpen, HostOpen};
 use omnifs_workspace::daemon_record::{DaemonRecord, Endpoint};
@@ -232,7 +232,7 @@ impl DaemonContext {
             frontends,
             mounts,
             offline: self.offline,
-            health,
+            health: Box::new(health),
         }
     }
 
@@ -242,9 +242,8 @@ impl DaemonContext {
         frontends: &[FrontendInfo],
         mounts: &[MountInfo],
     ) -> DaemonHealth {
-        DaemonHealth::new(vec![
-            SubsystemHealth::new(
-                DaemonSubsystem::Control,
+        DaemonHealth::new(
+            HealthReport::new(
                 HealthState::Healthy,
                 format!(
                     "control socket serving on {}",
@@ -253,13 +252,13 @@ impl DaemonContext {
             ),
             Self::frontend_health(attach_serving, frontends),
             mount_health(mounts),
-        ])
+        )
     }
 
     /// Listener readiness is independent of whether a frontend is currently
     /// attached. Startup flips this subsystem healthy only after mount loading and
     /// every requested listener bind have completed.
-    fn frontend_health(attach_serving: bool, frontends: &[FrontendInfo]) -> SubsystemHealth {
+    fn frontend_health(attach_serving: bool, frontends: &[FrontendInfo]) -> HealthReport {
         let mut listed = vec!["attach socket local".to_string()];
         listed.extend(frontends.iter().map(|frontend| {
             format!(
@@ -279,11 +278,11 @@ impl DaemonContext {
         } else {
             (HealthState::Starting, format!("not serving ({listed})"))
         };
-        SubsystemHealth::new(DaemonSubsystem::Frontend, state, message)
+        HealthReport::new(state, message)
     }
 }
 
-fn mount_health(mounts: &[MountInfo]) -> SubsystemHealth {
+fn mount_health(mounts: &[MountInfo]) -> HealthReport {
     let degraded = mounts
         .iter()
         .filter(|mount| {
@@ -315,7 +314,7 @@ fn mount_health(mounts: &[MountInfo]) -> SubsystemHealth {
             crate::ui::render::count(degraded, "mount")
         );
     }
-    SubsystemHealth::new(DaemonSubsystem::Mounts, state, message)
+    HealthReport::new(state, message)
 }
 
 /// A random 16-lowercase-hex-character id identifying one daemon start, so the
