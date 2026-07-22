@@ -347,10 +347,6 @@ impl ResourceTable {
 pub(crate) struct CountLabel(String);
 
 impl CountLabel {
-    pub(crate) fn number(count: usize) -> Self {
-        Self(count.to_string())
-    }
-
     pub(crate) fn named(count: usize, noun: &'static str) -> Self {
         Self(format!("{count} {noun}"))
     }
@@ -358,7 +354,7 @@ impl CountLabel {
 
 impl From<usize> for CountLabel {
     fn from(count: usize) -> Self {
-        Self::number(count)
+        Self(count.to_string())
     }
 }
 
