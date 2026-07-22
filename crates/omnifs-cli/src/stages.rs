@@ -9,7 +9,7 @@ use anyhow::{Context, anyhow};
 use omnifs_workspace::authn::AuthKind;
 use omnifs_workspace::mounts::{Auth, Limits, Name as MountName, OAuth, Spec, StaticToken};
 use omnifs_workspace::provider::{ProviderAuthManifest, ProviderManifest};
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::auth::AuthSelection;
@@ -27,9 +27,13 @@ pub(crate) struct MountInitOutcome {
     pub(crate) status: MountInitStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum MountInitStatus {
+    /// The mount is authenticated and ready to serve.
     Ready,
+    /// The spec was written but sign-in was declined; `mount reauth` completes
+    /// it later.
     SignInDeclined,
 }
 

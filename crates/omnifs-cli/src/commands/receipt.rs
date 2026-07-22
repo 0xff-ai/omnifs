@@ -143,7 +143,7 @@ impl TeardownReceipt {
 pub(crate) struct MountAddReceipt {
     pub(crate) verdict: Verdict,
     pub(crate) mount: String,
-    pub(crate) status: MountAddStatus,
+    pub(crate) status: MountInitStatus,
 }
 
 /// `omnifs mount reauth`: the mount whose credential was refreshed.
@@ -151,25 +151,6 @@ pub(crate) struct MountAddReceipt {
 pub(crate) struct MountReauthReceipt {
     pub(crate) verdict: Verdict,
     pub(crate) mount: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum MountAddStatus {
-    /// The mount is authenticated and ready to serve.
-    Ready,
-    /// The spec was written but sign-in was declined; `mount reauth` completes
-    /// it later.
-    SignInDeclined,
-}
-
-impl From<MountInitStatus> for MountAddStatus {
-    fn from(status: MountInitStatus) -> Self {
-        match status {
-            MountInitStatus::Ready => Self::Ready,
-            MountInitStatus::SignInDeclined => Self::SignInDeclined,
-        }
-    }
 }
 
 /// The typed terminal receipt for frontend enable/disable/restart. The rows

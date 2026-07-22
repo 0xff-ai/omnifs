@@ -107,7 +107,7 @@ impl AddArgs {
                 &crate::commands::receipt::MountAddReceipt {
                     verdict: crate::commands::receipt::Verdict::Ok,
                     mount: outcome.mount_name,
-                    status: outcome.status.into(),
+                    status: outcome.status,
                 },
             )?;
         }
