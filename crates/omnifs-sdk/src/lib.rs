@@ -200,9 +200,7 @@ pub mod repr;
 pub mod router;
 
 // Re-export proc macros at the crate root so #[omnifs_sdk::provider] works.
-pub use file_attrs::{
-    FileAttrs, FileProj, ProjBytes, ReadFileBytes, ReadMode, Size, Stability, VersionToken,
-};
+pub use file_attrs::{FileAttrs, Size, Stability, VersionToken};
 pub use handler::{FileChunk, MemoryRangeReader, RangeReader};
 pub use omnifs_core::ContentType;
 pub use omnifs_sdk_macros::Endpoint;
