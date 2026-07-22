@@ -16,11 +16,12 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tracing::{info, warn};
 
 use super::context::DaemonContext;
+use crate::client::read_control_line;
 use omnifs_vfs::ListenerTarget;
 
 /// A host address approved for the namespace attach listener. Loopback is
@@ -783,44 +784,6 @@ async fn write_json_line(stream: &mut UnixStream, mut line: Vec<u8>) -> anyhow::
         .context("write control line")?;
     stream.flush().await.context("flush control line")?;
     Ok(())
-}
-
-async fn read_control_line<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<Vec<u8>> {
-    let mut line = Vec::with_capacity(256);
-    let mut chunk = [0_u8; 8192];
-    loop {
-        let read = reader.read(&mut chunk).await?;
-        if read == 0 {
-            if line.is_empty() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "control connection closed before a line was received",
-                ));
-            }
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "control line is missing its newline terminator",
-            ));
-        }
-        if let Some(end) = chunk[..read].iter().position(|byte| *byte == b'\n') {
-            let line_bytes = end + 1;
-            if line.len() + line_bytes > CONTROL_MAX_LINE_BYTES {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "control line exceeds the maximum size",
-                ));
-            }
-            line.extend_from_slice(&chunk[..line_bytes]);
-            return Ok(line);
-        }
-        if line.len() + read > CONTROL_MAX_LINE_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "control line exceeds the maximum size",
-            ));
-        }
-        line.extend_from_slice(&chunk[..read]);
-    }
 }
 
 fn api_credential_health_kind(health: &omnifs_auth::CredentialHealth) -> CredentialHealth {
