@@ -190,7 +190,9 @@ pub fn sorted_entry_names(result: ListChildrenResult) -> Vec<String> {
             names.sort();
             names
         },
-        other => panic!("expected an entries listing, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => {
+            panic!("expected an entries listing, got {other:?}")
+        },
     }
 }
 

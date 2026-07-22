@@ -709,7 +709,6 @@ pub use omnifs_vfs::CachedCursor;
 pub struct DirentsPayload {
     pub entries: Vec<DirentRecord>,
     pub exhaustive: bool,
-    pub validator: Option<String>,
     pub next_cursor: Option<CachedCursor>,
     pub paginated: bool,
 }
@@ -742,19 +741,17 @@ impl DirentsPayload {
             return Self {
                 entries: new_children.into_values().collect(),
                 exhaustive: true,
-                validator: None,
                 next_cursor: None,
                 paginated: false,
             };
         }
 
-        let (previously_exhaustive, validator, next_cursor, paginated, mut entries) =
-            existing_record.map_or_else(
-                || (false, None, None, false, Vec::new()),
+        let (previously_exhaustive, next_cursor, paginated, mut entries) = existing_record
+            .map_or_else(
+                || (false, None, false, Vec::new()),
                 |payload| {
                     (
                         payload.exhaustive,
-                        payload.validator,
                         payload.next_cursor,
                         payload.paginated,
                         payload.entries,
@@ -779,7 +776,6 @@ impl DirentsPayload {
         Self {
             entries,
             exhaustive: listing_exhaustive || (previously_exhaustive && !introduced),
-            validator,
             next_cursor,
             paginated,
         }
@@ -931,14 +927,12 @@ mod tests {
         let existing = DirentsPayload {
             entries: vec![dir_record("old-a"), dir_record("old-b")],
             exhaustive: false,
-            validator: Some("v0".to_string()),
             next_cursor: Some(CachedCursor::Page(1)),
             paginated: true,
         };
         let result = DirentsPayload::merged(Some(existing), new_children(&["new-x"]), true);
         assert!(result.exhaustive);
         assert_eq!(names(&result), vec!["new-x"]);
-        assert!(result.validator.is_none());
         assert!(result.next_cursor.is_none());
         assert!(!result.paginated);
     }
@@ -950,7 +944,6 @@ mod tests {
         let existing = DirentsPayload {
             entries: vec![dir_record("alpha"), dir_record("beta"), dir_record("gamma")],
             exhaustive: false,
-            validator: None,
             next_cursor: None,
             paginated: false,
         };
@@ -971,7 +964,6 @@ mod tests {
         let existing = DirentsPayload {
             entries: vec![dir_record("alpha"), dir_record("beta")],
             exhaustive: true,
-            validator: Some("v1".to_string()),
             next_cursor: None,
             paginated: false,
         };
@@ -981,8 +973,7 @@ mod tests {
         assert!(!result.exhaustive);
         // Existing entries first, introductions appended in name (BTreeMap) order.
         assert_eq!(names(&result), vec!["alpha", "beta", "delta", "gamma"]);
-        // Validator and pagination state are carried through.
-        assert_eq!(result.validator.as_deref(), Some("v1"));
+        // Pagination state is carried through.
     }
 
     // No-overlap merge (empty existing): all children become introductions,
@@ -1001,7 +992,6 @@ mod tests {
         let existing = DirentsPayload {
             entries: vec![dir_record("a"), dir_record("b"), dir_record("c")],
             exhaustive: false,
-            validator: None,
             next_cursor: None,
             paginated: false,
         };

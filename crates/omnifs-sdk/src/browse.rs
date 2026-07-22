@@ -245,7 +245,6 @@ pub struct Listing {
     entries: Vec<Entry>,
     exhaustive: bool,
     effects: Effects,
-    validator: Option<String>,
     next_cursor: Option<wit_types::Cursor>,
 }
 
@@ -257,7 +256,6 @@ impl Listing {
             entries: entries.into_iter().collect(),
             exhaustive: true,
             effects: Effects::new(),
-            validator: None,
             next_cursor: None,
         }
     }
@@ -270,7 +268,6 @@ impl Listing {
             entries: entries.into_iter().collect(),
             exhaustive: false,
             effects: Effects::new(),
-            validator: None,
             next_cursor: None,
         }
     }
@@ -278,14 +275,6 @@ impl Listing {
     #[must_use]
     pub fn with_effects(mut self, effects: Effects) -> Self {
         self.effects.extend(effects);
-        self
-    }
-
-    /// Carry the opaque listing validator (e.g. an `ETag`) the host echoes as
-    /// `cached-validator` on the next `list-children` for a cheap re-list.
-    #[must_use]
-    pub fn with_validator(mut self, validator: impl Into<String>) -> Self {
-        self.validator = Some(validator.into());
         self
     }
 
@@ -314,7 +303,6 @@ impl Listing {
             wit_types::DirListing {
                 entries: self.entries.into_iter().map(Into::into).collect(),
                 exhaustive: self.exhaustive,
-                validator: self.validator,
                 next_cursor: self.next_cursor,
             },
             self.effects,
@@ -452,17 +440,11 @@ impl From<Lookup> for wit_types::LookupChildResult {
     }
 }
 
-/// A list result: a listing, a subtree handoff, or an unchanged sentinel.
+/// A list result: a listing or a subtree handoff.
 #[derive(Clone, Debug)]
 pub enum List {
     Entries(Listing),
-    Subtree {
-        tree: u64,
-    },
-    /// The host's `cached-validator` still matched: the host serves its cached
-    /// dirents and the provider enumerated nothing. Lowers to
-    /// `list-children-result::unchanged`.
-    Unchanged,
+    Subtree { tree: u64 },
 }
 
 impl List {
@@ -472,12 +454,6 @@ impl List {
 
     pub fn subtree(tree: u64) -> Self {
         Self::Subtree { tree }
-    }
-
-    /// The cached-validator-matched sentinel: the host reuses its cached
-    /// dirents and the provider enumerated nothing.
-    pub fn unchanged() -> Self {
-        Self::Unchanged
     }
 
     #[doc(hidden)]
@@ -490,7 +466,6 @@ impl List {
             Self::Subtree { tree } => {
                 (wit_types::ListChildrenResult::Subtree(tree), Effects::new())
             },
-            Self::Unchanged => (wit_types::ListChildrenResult::Unchanged, Effects::new()),
         }
     }
 }

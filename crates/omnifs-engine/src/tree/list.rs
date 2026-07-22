@@ -3,8 +3,6 @@
 //! This is the renderer-neutral listing policy shared by FUSE and NFS:
 //!
 //! - the authoritative-listing cache consult (mem then unified view cache),
-//! - the `Unchanged` -> serve-cached-dirents path (a revalidated listing whose
-//!   validator still matched serves the accumulated dirents, NOT an error),
 //! - the rate-limited serve-stale path (serve the last-known listing rather than
 //!   re-calling the provider and getting EAGAIN),
 //! - the cache-populate half of a fresh provider listing (drop reserved-`@`
@@ -139,18 +137,12 @@ impl TreeNamespace {
     ) -> Result<Listing> {
         crate::inspector::cache_event(CacheKind::BrowseMiss);
         let result = runtime
-            .list_children(path, None, Some(cursor.0), captured_epoch)
+            .list_children(path, Some(cursor.0), captured_epoch)
             .await?;
         match result {
             crate::ops::namespace::ListOutcome::Entries(listing) => Ok(Listing {
                 entries: provider_entries(path, &listing.entries),
                 next_cursor: listing.next_cursor.map(Cursor),
-            }),
-            // A continuation that resolves to `unchanged` means the feed is
-            // stable; treat it as exhausted with no further entries.
-            crate::ops::namespace::ListOutcome::Unchanged => Ok(Listing {
-                entries: Vec::new(),
-                next_cursor: None,
             }),
             crate::ops::namespace::ListOutcome::Subtree(_) => Err(TreeError::internal(
                 "list continuation resolved to a host-tree handoff",
@@ -159,9 +151,8 @@ impl TreeNamespace {
     }
 
     /// Cold first-page listing through the provider, owning the cache-populate
-    /// half: revalidation validator echo + `Unchanged`-serve-cached, rate-limit
-    /// serve-stale, the reserved-`@` drop, the dirents write, and the synthetic
-    /// control / ignore append.
+    /// half: rate-limit serve-stale, the reserved-`@` drop, the dirents write,
+    /// and the synthetic control / ignore append.
     async fn list_via_provider(
         &self,
         runtime: &Runtime,
@@ -169,37 +160,15 @@ impl TreeNamespace {
         captured_epoch: u64,
     ) -> Result<ListOutcome> {
         let path = node.path();
-        // A non-exhaustive cached dirents record may carry a listing validator
-        // the provider can revalidate against; echo it so the provider can
-        // answer `unchanged`.
-        let cached_dirents = cached_dirents_for_revalidation(&runtime.resources, path)?;
-        let cached_validator = cached_dirents.as_ref().and_then(|d| d.validator.clone());
+        let cached_dirents = cached_dirents(&runtime.resources, path)?;
 
         crate::inspector::cache_event(CacheKind::BrowseMiss);
-        let result = runtime
-            .list_children(path, cached_validator, None, captured_epoch)
-            .await;
+        let result = runtime.list_children(path, None, captured_epoch).await;
 
         match result {
             Ok(crate::ops::namespace::ListOutcome::Entries(listing)) => Ok(ListOutcome::Listing(
                 snapshot_from_provider_listing(node, &listing),
             )),
-            Ok(crate::ops::namespace::ListOutcome::Unchanged) => {
-                // The cached validator still matched: serve the accumulated
-                // dirents rather than erroring (the FUSE/NFS unchanged path).
-                let Some(dirents) = cached_dirents else {
-                    warn!(
-                        path = path.as_str(),
-                        "list_children returned unchanged with no cached listing"
-                    );
-                    return Err(TreeError::internal(
-                        "list_children returned unchanged with no cached listing",
-                    ));
-                };
-                Ok(ListOutcome::Listing(listing_from_dirents(
-                    node, &dirents, false,
-                )))
-            },
             Ok(crate::ops::namespace::ListOutcome::Subtree(tref)) => {
                 runtime
                     .tree_ref(tref)
@@ -288,7 +257,7 @@ fn provider_entries(path: &omnifs_core::path::Path, entries: &[ProviderEntry]) -
 }
 
 /// Build a `Listing` from an accumulated/cached dirents record (the
-/// serve-cached, `Unchanged`, and rate-limit-stale paths). The cached record
+/// cache-hit and rate-limit-stale paths). The cached record
 /// keeps the `@next`/`@all` control records for the directory's whole
 /// paginated lifetime (`pagination.rs` never strips them, even at exhaustion,
 /// so a name a consumer resolved from an earlier listing keeps resolving).
@@ -334,7 +303,7 @@ fn consult_authoritative_listing(
     runtime: Option<&Runtime>,
     path: &omnifs_core::path::Path,
 ) -> Result<Option<DirentsPayload>> {
-    let dirents = cached_dirents_for_revalidation(resources, path)?;
+    let dirents = cached_dirents(resources, path)?;
     if dirents
         .as_ref()
         .is_some_and(|dirents| runtime.is_none_or(|_| dirents.is_authoritative_listing()))
@@ -350,10 +319,8 @@ fn consult_authoritative_listing(
     Ok(None)
 }
 
-/// The cached dirents record for `path`, exhaustive or not, used to recover the
-/// listing validator for revalidation and to serve an `unchanged` result.
-/// Mirrors `Frontend::cached_dirents_for_revalidation`.
-fn cached_dirents_for_revalidation(
+/// The cached dirents record for `path`, exhaustive or not.
+fn cached_dirents(
     resources: &MountResources,
     path: &omnifs_core::path::Path,
 ) -> Result<Option<DirentsPayload>> {

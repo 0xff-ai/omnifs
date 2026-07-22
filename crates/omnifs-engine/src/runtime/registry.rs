@@ -969,7 +969,6 @@ mod tests {
                             value: DirentsPayload {
                                 entries: root_entries,
                                 exhaustive: true,
-                                validator: None,
                                 next_cursor: None,
                                 paginated: false,
                             },
@@ -982,7 +981,6 @@ mod tests {
                                     meta: EntryMeta::file_without_attrs(),
                                 }],
                                 exhaustive: false,
-                                validator: None,
                                 next_cursor: Some(CachedCursor::Page(1)),
                                 paginated: true,
                             },

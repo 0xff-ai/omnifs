@@ -27,15 +27,10 @@ impl<S> CompiledRouter<S> {
     /// capture sibling at the next depth can bind names that cannot be
     /// enumerated. Lookup remains the authority for names a listing omitted.
     ///
-    /// `cached_validator` is accepted for the WIT contract but unused here:
-    /// the host delivers the listing validator through the context (see
-    /// [`Cx::version`]), and handlers opt in by returning
-    /// [`crate::projection::DirProjection::unchanged`] when it still holds.
     pub async fn list_children(
         &self,
         cx: &Cx<S>,
         path: &str,
-        _cached_validator: Option<String>,
         cursor: Option<Cursor>,
     ) -> Result<List> {
         debug_assert!(

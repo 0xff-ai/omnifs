@@ -42,7 +42,6 @@ impl Runtime {
         match self
             .run_list_children(
                 path,
-                None,
                 Some(crate::wit_protocol::cached_cursor_to_wit(cursor.clone())),
                 Some(cursor),
                 captured_epoch,
@@ -55,13 +54,6 @@ impl Runtime {
                 NextPageOutcome::Loaded {
                     added: listing.entries.len(),
                     more,
-                }
-            },
-            Ok(ListOutcome::Unchanged) => {
-                self.record_dir_changed(path);
-                NextPageOutcome::Loaded {
-                    added: 0,
-                    more: false,
                 }
             },
             Ok(ListOutcome::Subtree(_)) => {

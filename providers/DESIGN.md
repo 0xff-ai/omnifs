@@ -524,18 +524,14 @@ The minimal SDK surface is:
 enum Collection<T: Object, C = NoCursor> {
     Complete {
         entries: Vec<CollectionEntry<T>>,
-        validator: Option<VersionToken>,
     },
     Page {
         entries: Vec<CollectionEntry<T>>,
         next: C,
-        validator: Option<VersionToken>,
     },
     Partial {
         entries: Vec<CollectionEntry<T>>,
-        validator: Option<VersionToken>,
     },
-    Unchanged,
 }
 
 struct ListCx<C = NoCursor> {
@@ -578,16 +574,12 @@ Collection outcomes:
   worth fetching.
 - `Collection::partial(entries)` means the listing is intentionally open or
   truncated, with no cursor. Lookup remains authoritative for navigable names.
-- `Collection::unchanged()` means the host's listing validator matched and the
-  host can serve cached dirents.
 
 No next cursor is not proof of completeness. A provider may return a short
 terminal page as `Partial` when the upstream search window, cap, or domain is
 not authoritative. GitHub's search cap, Linear's item cap, DNS's unbounded
 domain space, and arXiv category pages all need these distinctions. A cursor
 resumes a list; it does not prove freshness, existence, or completeness. A
-validator proves only that the listing state matches what the provider can
-validate.
 
 Host pagination controls stay host-owned. Providers return typed cursors only.
 The host synthesizes reserved `@next` and `@all` control entries when a real
@@ -872,7 +864,7 @@ cannot be partitioned into replayable daily canonicals.
 
 The test provider is a conformance fixture. It should exercise scoped
 invalidation, deferred reads, ranged files, live files, paged directories,
-partial/open listings, listing validators, aliases, collection preloading,
+partial/open listings, aliases, collection preloading,
 object-load prefetch, registration errors, rate limits, and tree handoff. It
 should not be rewritten to match product provider aesthetics.
 

@@ -231,7 +231,6 @@ pub struct DirListing {
 #[derive(Debug, Clone)]
 pub enum ListOutcome {
     Entries(DirListing),
-    Unchanged,
     Subtree(u64),
 }
 
@@ -307,7 +306,6 @@ impl Runtime {
     pub(crate) async fn list_children(
         &self,
         path: &Path,
-        cached_validator: Option<String>,
         cursor: Option<CachedCursor>,
         captured_epoch: u64,
     ) -> Result<ListOutcome> {
@@ -322,7 +320,6 @@ impl Runtime {
             runtime
                 .run_list_children(
                     path,
-                    cached_validator,
                     cursor
                         .clone()
                         .map(crate::wit_protocol::cached_cursor_to_wit),
@@ -344,7 +341,6 @@ impl Runtime {
                         let result = runtime
                             .run_list_children(
                                 path,
-                                cached_validator,
                                 cursor.map(crate::wit_protocol::cached_cursor_to_wit),
                                 None,
                                 captured_epoch,
@@ -650,7 +646,7 @@ mod tests {
                             calls.fetch_add(1, Ordering::SeqCst);
                             started.notify_one();
                             release.notified().await;
-                            Ok(ListOutcome::Unchanged)
+                            Ok(ListOutcome::Subtree(1))
                         },
                     )
                     .await
@@ -672,11 +668,11 @@ mod tests {
         release.notify_one();
         assert!(matches!(
             leader.await.unwrap().unwrap(),
-            ListOutcome::Unchanged
+            ListOutcome::Subtree(1)
         ));
         assert!(matches!(
             follower.await.unwrap().unwrap(),
-            ListOutcome::Unchanged
+            ListOutcome::Subtree(1)
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -698,7 +694,7 @@ mod tests {
                         || async move {
                             started.notify_one();
                             release.notified().await;
-                            Ok(ListOutcome::Unchanged)
+                            Ok(ListOutcome::Subtree(1))
                         },
                     )
                     .await

@@ -527,7 +527,7 @@ impl ManifestFacts {
         if let Some(version) = &self.version {
             fields.push(("version", json_string(version)));
         }
-        fields.push(("witPackage", json_string("package omnifs:provider@0.6.0;")));
+        fields.push(("witPackage", json_string("package omnifs:provider@0.7.0;")));
         fields.push(("sdkVersion", json_string(env!("CARGO_PKG_VERSION"))));
         fields.push(("refreshIntervalSecs", refresh_interval_secs.to_string()));
         if !capabilities.is_empty() {
@@ -844,7 +844,6 @@ fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2
             async fn list_children(
                 id: u64,
                 path: String,
-                cached_validator: Option<String>,
                 cursor: Option<omnifs_sdk::omnifs::provider::types::Cursor>,
             ) -> (
                 core::result::Result<
@@ -861,12 +860,9 @@ fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2
                         omnifs_sdk::prelude::Effects::new().into_wit(),
                     );
                 };
-                let version = cached_validator
-                    .as_ref()
-                    .map(|v| omnifs_sdk::file_attrs::VersionToken::from(v.as_str()));
                 let sdk_cursor = cursor.map(omnifs_sdk::prelude::Cursor::from);
-                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state).with_version(version);
-                match router.list_children(&cx, &path, cached_validator, sdk_cursor).await {
+                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
+                match router.list_children(&cx, &path, sdk_cursor).await {
                     Ok(outcome) => {
                         let (result, effects) = outcome.into_result_and_effects();
                         (Ok(result), effects.into_wit())

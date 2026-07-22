@@ -1927,12 +1927,11 @@ fn invalidate_parent_listing(
     };
     listing.entries.retain(|entry| entry.name != name);
     // An exact child invalidation makes the parent's prior completeness claim,
-    // cursor, and validator stale. The next ordinary browse revalidates the
-    // parent; rate-limited serve-stale may retain unaffected siblings.
+    // and cursor stale. The next ordinary browse refetches the parent;
+    // rate-limited serve-stale may retain unaffected siblings.
     listing.exhaustive = false;
     listing.paginated = false;
     listing.next_cursor = None;
-    listing.validator = None;
     apply_dirents(
         tx,
         facts,
@@ -2389,7 +2388,6 @@ mod tests {
                         value: DirentsPayload {
                             entries: Vec::new(),
                             exhaustive: true,
-                            validator: None,
                             next_cursor: None,
                             paginated: false,
                         },
@@ -2559,7 +2557,6 @@ mod tests {
                         value: DirentsPayload {
                             entries: Vec::new(),
                             exhaustive: true,
-                            validator: None,
                             next_cursor: None,
                             paginated: false,
                         },
@@ -2640,7 +2637,6 @@ mod tests {
                                 meta: EntryMeta::directory(),
                             }],
                             exhaustive: true,
-                            validator: Some("validator".into()),
                             next_cursor: None,
                             paginated: false,
                         },
@@ -2661,7 +2657,6 @@ mod tests {
             .unwrap();
         let listing = store.dirents_payload(&invalidated_parent).unwrap().unwrap();
         assert!(listing.entries.is_empty());
-        assert!(listing.validator.is_none());
         assert!(!listing.is_complete_offline());
 
         let partial_parent = p("/partial");
@@ -2677,7 +2672,6 @@ mod tests {
                                 meta: EntryMeta::directory(),
                             }],
                             exhaustive: false,
-                            validator: Some("cursor-validator".into()),
                             next_cursor: Some(crate::view::CachedCursor::Opaque("cursor".into())),
                             paginated: true,
                         },
@@ -2699,7 +2693,6 @@ mod tests {
         let listing = store.dirents_payload(&partial_parent).unwrap().unwrap();
         assert_eq!(listing.entries.len(), 1);
         assert_eq!(listing.entries[0].name, "sibling");
-        assert!(listing.validator.is_none());
         assert!(listing.next_cursor.is_none());
         assert!(!listing.paginated);
         assert!(!listing.is_complete_offline());
@@ -2739,7 +2732,6 @@ mod tests {
                                 meta: EntryMeta::directory(),
                             }],
                             exhaustive: true,
-                            validator: None,
                             next_cursor: None,
                             paginated: false,
                         },

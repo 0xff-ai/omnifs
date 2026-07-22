@@ -102,7 +102,9 @@ fn web_provider_host_directories_are_enumerable_and_open() {
                 .expect("configured host entry");
             assert!(matches!(host.kind, EntryKind::Directory));
         },
-        other => panic!("expected host directory listing, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => {
+            panic!("expected host directory listing, got {other:?}")
+        },
     }
 
     let lookup = harness.lookup("/https", "example.test").unwrap();
@@ -117,7 +119,9 @@ fn web_provider_host_directories_are_enumerable_and_open() {
     let host_listing = harness.list("/https/example.test").unwrap();
     match host_listing.into_result().unwrap().unwrap() {
         ListChildrenResult::Entries(entries) => assert!(!entries.exhaustive),
-        other => panic!("expected open host listing, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => {
+            panic!("expected open host listing, got {other:?}")
+        },
     }
 }
 
@@ -208,7 +212,9 @@ fn web_provider_only_exposes_configured_hosts() {
             assert_eq!(names, ["example.test", "second.test"]);
             assert!(entries.exhaustive);
         },
-        other => panic!("expected configured host listing, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => {
+            panic!("expected configured host listing, got {other:?}")
+        },
     }
 
     let configured = harness

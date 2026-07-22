@@ -85,7 +85,7 @@ async fn db_tables_listing_exhaustive_names() {
             assert!(names.contains(&"tables"));
             assert_eq!(names.len(), 3);
         },
-        other => panic!("expected root listing, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => panic!("expected root listing, got {other:?}"),
     }
 
     let tables = harness.list("/tables").unwrap().into_ok().unwrap();
@@ -105,7 +105,7 @@ async fn db_tables_listing_exhaustive_names() {
                     .all(|entry| matches!(entry.kind, EntryKind::Directory))
             );
         },
-        other => panic!("expected tables listing, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => panic!("expected tables listing, got {other:?}"),
     }
 
     let missing = harness
