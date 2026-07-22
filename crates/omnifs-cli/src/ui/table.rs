@@ -127,7 +127,7 @@ impl ContextStrip {
             );
         }
         if let Some(action) = self.action.as_ref() {
-            let _ = writeln!(out, "  {}  {}", action.label, action.command);
+            let _ = writeln!(out, "  fix:  {}", action.command);
         }
     }
 }
@@ -231,11 +231,11 @@ impl ResourceTable {
             if let Some(action) = row.action.as_ref()
                 && !shared.contains(&action.command)
             {
-                let _ = writeln!(out, "    {}  {}", action.label, action.command);
+                let _ = writeln!(out, "    fix:  {}", action.command);
             }
         }
         for action in shared_actions_for_render(&self.rows, &shared) {
-            let _ = writeln!(out, "  {}  {}", action.label, action.command);
+            let _ = writeln!(out, "  fix:  {}", action.command);
         }
     }
 
@@ -281,11 +281,11 @@ impl ResourceTable {
             if let Some(action) = row.action.as_ref()
                 && !shared.contains(&action.command)
             {
-                let _ = writeln!(out, "    {}  {}", action.label, action.command);
+                let _ = writeln!(out, "    fix:  {}", action.command);
             }
         }
         for action in shared_actions_for_render(&self.rows, &shared) {
-            let _ = writeln!(out, "  {}  {}", action.label, action.command);
+            let _ = writeln!(out, "  fix:  {}", action.command);
         }
     }
 
@@ -436,7 +436,6 @@ impl Cell {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Action {
-    label: &'static str,
     pub(crate) command: String,
 }
 
@@ -445,7 +444,6 @@ impl Action {
     /// full width and never truncated.
     pub(crate) fn fix(command: impl Into<String>) -> Self {
         Self {
-            label: "fix:",
             command: command.into(),
         }
     }
