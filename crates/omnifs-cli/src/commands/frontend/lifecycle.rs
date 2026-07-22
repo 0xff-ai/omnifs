@@ -16,7 +16,7 @@ use crate::commands::frontend::GUEST_MOUNT;
 use crate::commands::frontend::discovery::{default_runtime, supports};
 use crate::commands::frontend::{frontend_runtime_parser, fs_type_parser};
 use crate::commands::receipt::FrontendReceipt;
-use crate::docker::{DockerClient, DockerRunner, DockerTarget};
+use crate::docker::{DockerClient, DockerTarget};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::host_runner::HostRunner;
 use crate::inventory::{FrontendState, FrontendStatus, Inventory};
@@ -606,12 +606,10 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
             let identity = workspace.identity();
             let name = frontend_container_name(identity.container_label())?;
             let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
-            Ok(
-                DockerRunner::new(DockerClient::connect_for(&target, output)?)
-                    .is_running()
-                    .await?
-                    .unwrap_or(false),
-            )
+            Ok(DockerClient::connect_for(&target, output)?
+                .is_running()
+                .await?
+                .unwrap_or(false))
         },
         FrontendRuntime::Libkrun => Ok(LibkrunRunner::new(workspace.frontend().libkrun_root())
             .is_running()?
@@ -677,12 +675,11 @@ async fn launch_docker(workspace: &Workspace, mount: Option<&str>, output: Outpu
         "daemon attach listener is bound to {}; restart daemon",
         addr.ip()
     );
-    let runner = DockerRunner::new(runtime);
     let identity = workspace.identity();
-    runner
+    runtime
         .launch(identity.container_label(), addr.port())
         .await?;
-    wait_for_mount(&runner, mount, DOCKER_TIMEOUT).await
+    wait_for_mount(&runtime, mount, DOCKER_TIMEOUT).await
 }
 
 async fn launch_libkrun(
@@ -733,7 +730,7 @@ async fn stop(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<
             let identity = workspace.identity();
             let name = frontend_container_name(identity.container_label())?;
             let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
-            DockerRunner::new(DockerClient::connect_for(&target, output)?)
+            DockerClient::connect_for(&target, output)?
                 .tear_down()
                 .await
         },
@@ -746,7 +743,7 @@ async fn stop(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<
 }
 
 async fn wait_for_mount(
-    runner: &DockerRunner,
+    runner: &DockerClient,
     mount: Option<&str>,
     timeout: Duration,
 ) -> Result<()> {

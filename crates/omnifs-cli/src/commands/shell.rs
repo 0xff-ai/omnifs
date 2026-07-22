@@ -7,7 +7,7 @@ use clap::Args;
 use omnifs_api::{FrontendRuntime, FsType};
 
 use crate::commands::frontend::{frontend_runtime_parser, fs_type_parser};
-use crate::docker::{ContainerName, DockerClient, DockerRunner, DockerTarget};
+use crate::docker::{ContainerName, DockerClient, DockerTarget};
 use crate::frontend_container::{FRONTEND_DEV_IMAGE, frontend_container_name};
 use crate::inventory::{FrontendState, Inventory};
 use crate::libkrun_runner;
@@ -70,8 +70,8 @@ impl ShellArgs {
             container_name.as_str().to_string(),
             FRONTEND_DEV_IMAGE.to_string(),
         )?;
-        let runner = DockerRunner::new(DockerClient::connect_for(&target, output)?);
-        let cmd = runner.shell_command(self.shell.as_deref(), &self.command);
+        let client = DockerClient::connect_for(&target, output)?;
+        let cmd = client.shell_command(self.shell.as_deref(), &self.command);
         spawn_and_propagate(cmd, format!("open shell in container `{container_name}`"))
     }
 
