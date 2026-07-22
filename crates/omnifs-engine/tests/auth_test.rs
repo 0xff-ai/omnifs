@@ -61,12 +61,6 @@ fn auth_binding(
 }
 
 #[tokio::test]
-async fn test_no_injection_without_config() {
-    let manager: Option<Arc<AuthBinding>> = None;
-    assert!(manager.is_none());
-}
-
-#[tokio::test]
 async fn test_missing_credential_fails_closed() {
     let manager = github_pat_binding(&github_pat_auth());
     let error = manager
@@ -195,12 +189,6 @@ async fn test_auth_manifest_backed_static_token_missing_credential_fails_closed(
 #[tokio::test]
 async fn test_provider_without_auth_manifest_behaves_as_no_auth() {
     let manager = auth_binding(None, None);
-    assert!(manager.is_none());
-}
-
-#[tokio::test]
-async fn refresh_without_applicable_strategy_reports_not_applicable() {
-    let manager: Option<Arc<AuthBinding>> = None;
     assert!(manager.is_none());
 }
 
