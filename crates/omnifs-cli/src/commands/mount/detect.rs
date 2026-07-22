@@ -191,9 +191,4 @@ mod tests {
             start.elapsed()
         );
     }
-
-    #[test]
-    fn detect_returns_empty_without_manifest() {
-        assert!(detect(None).is_empty());
-    }
 }

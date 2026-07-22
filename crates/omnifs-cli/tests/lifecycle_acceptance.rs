@@ -296,6 +296,30 @@ fn scenario_2_down_nothing_running() {
     );
 }
 
+#[test]
+fn zero_wait_does_not_publish_or_apply_a_revision() {
+    let fixture = Fixture::new();
+    fixture.write_test_spec();
+
+    let output = fixture.run(&["up", "--wait", "0s"]);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("within 0s"));
+    assert!(!fixture.daemon_record_path().exists());
+    assert_eq!(
+        omnifs_workspace::mounts::Repository::open(fixture.mounts_dir())
+            .expect("open mounts after timeout")
+            .applied()
+            .expect("read applied ref"),
+        None
+    );
+}
+
 // Full up, status, repeated up, and down lifecycle.
 
 /// Up serves the mount through an explicitly enabled host frontend, status

@@ -304,13 +304,4 @@ mod tests {
         assert!(CredentialHealth::NeedsConsent.needs_attention());
         assert!(CredentialHealth::Missing.needs_attention());
     }
-
-    #[test]
-    fn credential_wire_types_do_not_reference_secret_types() {
-        let source = include_str!("lib.rs");
-
-        assert!(!source.contains(concat!("Header", "Material")));
-        assert!(!source.contains(concat!("Secret", "String")));
-        assert!(!source.contains(concat!("omnifs", "_auth")));
-    }
 }

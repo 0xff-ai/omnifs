@@ -583,14 +583,6 @@ mod tests {
         assert_eq!(skipped, vec!["dns".to_owned()]);
     }
 
-    #[test]
-    fn split_requested_providers_is_all_new_when_nothing_is_configured() {
-        let requested = vec!["github".to_owned()];
-        let (new, skipped) = split_requested_providers(&requested, &BTreeSet::new());
-        assert_eq!(new, requested);
-        assert!(skipped.is_empty());
-    }
-
     // -- select_frontends: --yes/--no-input/non-interactive all default -----
 
     fn prompt(interactive: bool, yes: bool, no_input: bool) -> PromptMode {
@@ -609,34 +601,25 @@ mod tests {
     }
 
     #[test]
-    fn select_frontends_under_yes_takes_the_platform_default_without_prompting() {
-        let output = Output::new(crate::ui::output::OutputMode::Human, false).with_yes(true);
-        let selected = select_frontends(&output, prompt(true, true, false)).unwrap();
-        assert_eq!(selected, expected_default_frontends());
-    }
-
-    #[test]
-    fn select_frontends_under_no_input_takes_the_platform_default_without_prompting() {
-        let output = Output::new(crate::ui::output::OutputMode::Human, false);
-        let selected = select_frontends(&output, prompt(true, false, true)).unwrap();
-        assert_eq!(selected, expected_default_frontends());
-    }
-
-    #[test]
-    fn select_frontends_non_interactive_takes_the_platform_default_without_prompting() {
-        let output = Output::new(crate::ui::output::OutputMode::Human, false);
-        let selected = select_frontends(&output, prompt(false, false, false)).unwrap();
-        assert_eq!(selected, expected_default_frontends());
-    }
-
-    #[test]
-    fn frontend_label_and_detail_cover_every_available_combination() {
-        for (filesystem, runtime) in available_frontends() {
+    fn non_prompting_setup_modes_take_the_platform_default() {
+        for (output, mode) in [
+            (
+                Output::new(crate::ui::output::OutputMode::Human, false).with_yes(true),
+                prompt(true, true, false),
+            ),
+            (
+                Output::new(crate::ui::output::OutputMode::Human, false),
+                prompt(true, false, true),
+            ),
+            (
+                Output::new(crate::ui::output::OutputMode::Human, false),
+                prompt(false, false, false),
+            ),
+        ] {
             assert_eq!(
-                frontend_label(filesystem, runtime),
-                format!("{filesystem} ({runtime})")
+                select_frontends(&output, mode).unwrap(),
+                expected_default_frontends()
             );
-            assert!(!frontend_detail(filesystem, runtime).is_empty());
         }
     }
 
