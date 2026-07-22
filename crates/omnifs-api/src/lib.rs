@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub use omnifs_core::FsType;
+pub use omnifs_core::{FrontendRuntime, FsType};
 
 mod control;
 
@@ -145,38 +145,6 @@ pub struct FrontendInfo {
     /// from which listener the connection arrived on, never from anything a
     /// connecting guest claims about itself.
     pub runtime: FrontendRuntime,
-}
-
-/// How a frontend is delivered to the shared namespace. Assigned by the host
-/// at bind time per listener, never
-/// self-reported by the connecting guest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FrontendRuntime {
-    /// Attached over the fixed `frontends/local.sock` Unix domain socket.
-    Host,
-    /// Attached over the TCP namespace listener, the Docker Desktop delivery
-    /// path.
-    Docker,
-    /// Attached over the UDS vsock-proxy listener, the
-    /// libkrun-on-macOS delivery path.
-    Libkrun,
-}
-
-impl FrontendRuntime {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Host => "host",
-            Self::Docker => "docker",
-            Self::Libkrun => "libkrun",
-        }
-    }
-}
-
-impl std::fmt::Display for FrontendRuntime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -21,7 +21,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::{Namespace, NsEvent};
-use omnifs_api::{FrontendInfo, FrontendRuntime};
+use omnifs_api::FrontendInfo;
+use omnifs_core::FrontendRuntime;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc, watch};
