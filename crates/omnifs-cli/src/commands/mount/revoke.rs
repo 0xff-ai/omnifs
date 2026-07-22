@@ -22,17 +22,16 @@ impl RevokeArgs {
     #[allow(clippy::too_many_lines)] // keep consent and upstream-before-local ordering linear
     pub(crate) async fn run(self, output: Output) -> anyhow::Result<Receipt> {
         let workspace = Workspace::resolve()?;
-        let mounts = crate::mount_config::load_mounts(&workspace)?;
+        let mounts = crate::mount_config::load_registry(&workspace)?;
+        let requested_name = omnifs_workspace::mounts::Name::new(self.name.clone())?;
         let requested = mounts
-            .iter()
-            .find(|mount| mount.name.as_str() == self.name)
+            .get(&requested_name)
             .ok_or_else(|| anyhow!("no mount config named `{}`", self.name))?;
         let auth_config = requested
-            .config
             .auth
             .as_ref()
             .ok_or_else(|| anyhow!("mount `{}` has no configured credential", self.name))?;
-        let requested_auth = MountAuth::from_spec(workspace.catalog(), requested.config.clone());
+        let requested_auth = MountAuth::from_spec(workspace.catalog(), requested.clone());
         let credential_id = match auth_config.scheme() {
             Some(_) => requested_auth.configured_credential_id(auth_config)?,
             None => requested_auth
@@ -60,12 +59,12 @@ impl RevokeArgs {
         };
 
         let mut affected_mounts = Vec::new();
-        for mount in &mounts {
-            let Some(candidate_config) = mount.config.auth.as_ref() else {
+        for (mount_name, mount) in mounts.iter() {
+            let Some(candidate_config) = mount.auth.as_ref() else {
                 continue;
             };
-            let mount_name = mount.name.to_string();
-            let candidate_auth = MountAuth::from_spec(workspace.catalog(), mount.config.clone());
+            let mount_name = mount_name.to_string();
+            let candidate_auth = MountAuth::from_spec(workspace.catalog(), mount.clone());
             let candidate = match candidate_config.scheme() {
                 Some(_) => Some(candidate_auth.configured_credential_id(candidate_config)?),
                 None => candidate_auth.credential_id()?,

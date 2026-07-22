@@ -191,7 +191,7 @@ pub(crate) fn spec_creation(
     receipt_style: ReceiptStyle,
 ) -> anyhow::Result<MountInitPlan> {
     let interactive = init_interactive(prompt);
-    let mounts = crate::mount_config::load_mounts(workspace)?;
+    let mounts = crate::mount_config::load_registry(workspace)?;
     let embedded = EmbeddedProviders::load()?;
 
     // No provider argument in an interactive output: choose one with the
@@ -252,7 +252,7 @@ pub(crate) fn spec_creation(
     )?;
     let reference = resolved.reference;
     let manifest = resolved.manifest;
-    if mounts.iter().any(|mount| mount.name == mount_name) {
+    if mounts.get(&mount_name).is_some() {
         anyhow::bail!(
             "mount `{mount_name}` already exists; remove it first or choose a different name"
         );

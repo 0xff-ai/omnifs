@@ -13,7 +13,6 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::mount_config::MountConfig;
 use crate::provider_bundle::EmbeddedProviders;
 
 pub(crate) struct ResolvedProvider {
@@ -240,11 +239,6 @@ pub(crate) fn safe_for_setup(manifest: &ProviderManifest) -> bool {
         .as_ref()
         .map(omnifs_workspace::provider::ProviderAuthManifest::wasm_auth_manifest);
     !crate::commands::mount::detect::detect(auth_manifest.as_ref()).is_empty()
-}
-
-/// Returns `true` when a mount with `name` appears in `mounts`.
-pub(crate) fn mount_exists(mounts: &[MountConfig], name: &omnifs_workspace::mounts::Name) -> bool {
-    mounts.iter().any(|mount| &mount.name == name)
 }
 
 #[cfg(test)]

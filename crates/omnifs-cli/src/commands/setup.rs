@@ -87,7 +87,12 @@ impl SetupArgs {
             .await?;
         }
 
-        if !self.no_up && !crate::mount_config::load_mounts(workspace)?.is_empty() {
+        if !self.no_up
+            && crate::mount_config::load_registry(workspace)?
+                .iter()
+                .next()
+                .is_some()
+        {
             output.narrate("");
             output.heading("3. Your files");
             output.narrate("A frontend serves the tree to your OS. You can enable more than one.");
@@ -123,10 +128,10 @@ impl SetupArgs {
         prompt: PromptMode,
     ) -> Result<Vec<String>> {
         let embedded = EmbeddedProviders::load()?;
-        let mounts = crate::mount_config::load_mounts(workspace)?;
+        let mounts = crate::mount_config::load_registry(workspace)?;
         let configured_names = mounts
             .iter()
-            .map(|mount| mount.config.provider.meta.name.to_string())
+            .map(|(_, spec)| spec.provider.meta.name.to_string())
             .collect::<BTreeSet<_>>();
 
         if !self.providers.is_empty() {

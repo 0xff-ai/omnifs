@@ -183,7 +183,7 @@ pub(crate) async fn login_with_workspace(
     key_width: usize,
 ) -> anyhow::Result<CredentialId> {
     let store = workspace.credentials();
-    let mounts = crate::mount_config::load_mounts(workspace)?;
+    let mounts = crate::mount_config::load_registry(workspace)?;
     let mount_auth = crate::auth::MountAuth::load(workspace.catalog(), &mounts, mount)?;
     login(
         workspace.catalog(),
@@ -362,9 +362,11 @@ mod tests {
         let reference = install_fixture_provider(&providers_dir, "planned-oauth");
 
         assert!(
-            crate::mount_config::load_mounts(&workspace)
+            crate::mount_config::load_registry(&workspace)
                 .unwrap()
-                .is_empty()
+                .iter()
+                .next()
+                .is_none()
         );
         let spec = spec_with_reference(
             &reference,
@@ -380,9 +382,11 @@ mod tests {
         assert_eq!(request.scheme().key, "device");
         assert_eq!(target.scheme(), "device");
         assert!(
-            crate::mount_config::load_mounts(&workspace)
+            crate::mount_config::load_registry(&workspace)
                 .unwrap()
-                .is_empty()
+                .iter()
+                .next()
+                .is_none()
         );
     }
 }

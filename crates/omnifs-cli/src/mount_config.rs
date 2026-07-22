@@ -8,78 +8,50 @@
 use anyhow::{Context, anyhow};
 use omnifs_workspace::Workspace;
 use omnifs_workspace::creds::CredentialStore;
-use omnifs_workspace::mounts::Name as MountName;
-use omnifs_workspace::mounts::Spec;
-use std::path::PathBuf;
+use omnifs_workspace::mounts::Registry;
 
 use crate::{
     auth::MountAuth,
     error::{ExitCode, WithExitCode, WithHint},
 };
 
-#[derive(Debug, Clone)]
-pub(crate) struct MountConfig {
-    pub(crate) name: MountName,
-    pub(crate) config: Spec,
-    /// Source file (informational; used for error messages).
-    pub(crate) source: PathBuf,
-}
-
-impl MountConfig {
-    pub(crate) fn validate_host_managed_credentials(
-        &self,
-        mount_auth: &MountAuth,
-        store: &dyn CredentialStore,
-    ) -> anyhow::Result<()> {
-        let Some(auth) = &mount_auth.spec().auth else {
-            return Ok(());
-        };
-        let target = mount_auth
-            .configured_credential_id(auth)
-            .with_context(|| format!("resolve credential for mount `{}`", self.name))?;
-        let key_name = target.storage_key();
-        let entry = store
-            .get(&target)
-            .with_context(|| format!("fetch credential `{key_name}` for mount `{}`", self.name))?
-            .ok_or_else(|| {
-                anyhow!(
-                    "no stored credential for `{key_name}` (mount `{}`)",
-                    self.name
-                )
-            });
-        match (auth.is_oauth(), entry) {
-            (_, Ok(_)) => Ok(()),
-            (true, Err(error)) => Err(error)
-                .with_hint(format!(
-                    "Run `omnifs mount reauth {}` to authenticate",
-                    self.name
-                ))
-                .with_exit_code(ExitCode::AuthRequired),
-            (false, Err(error)) => Err(error)
-                .with_hint(format!(
-                    "Run `omnifs mount reauth {}` to configure this mount's token",
-                    self.name
-                ))
-                .with_exit_code(ExitCode::AuthRequired),
-        }
+pub(crate) fn validate_host_managed_credentials(
+    mount_auth: &MountAuth,
+    store: &dyn CredentialStore,
+) -> anyhow::Result<()> {
+    let Some(auth) = &mount_auth.spec().auth else {
+        return Ok(());
+    };
+    let name = &mount_auth.spec().mount;
+    let target = mount_auth
+        .configured_credential_id(auth)
+        .with_context(|| format!("resolve credential for mount `{name}`"))?;
+    let key_name = target.storage_key();
+    let entry = store
+        .get(&target)
+        .with_context(|| format!("fetch credential `{key_name}` for mount `{name}`"))?
+        .ok_or_else(|| anyhow!("no stored credential for `{key_name}` (mount `{name}`)"));
+    match (auth.is_oauth(), entry) {
+        (_, Ok(_)) => Ok(()),
+        (true, Err(error)) => Err(error)
+            .with_hint(format!("Run `omnifs mount reauth {name}` to authenticate"))
+            .with_exit_code(ExitCode::AuthRequired),
+        (false, Err(error)) => Err(error)
+            .with_hint(format!(
+                "Run `omnifs mount reauth {name}` to configure this mount's token"
+            ))
+            .with_exit_code(ExitCode::AuthRequired),
     }
 }
 
-/// Convert the workspace-owned registry into the CLI payload only at the
-/// command boundary that needs it.
-pub(crate) fn load_mounts(workspace: &Workspace) -> anyhow::Result<Vec<MountConfig>> {
+/// Load desired mounts strictly: one malformed spec invalidates commands that
+/// need a complete registry view.
+pub(crate) fn load_registry(workspace: &Workspace) -> anyhow::Result<Registry> {
     let registry = workspace.desired_state().registry()?;
     if let Some(failure) = registry.failures().first() {
         anyhow::bail!("{}", failure.error);
     }
-    Ok(registry
-        .iter()
-        .map(|(name, spec)| MountConfig {
-            name: name.clone(),
-            config: spec.clone(),
-            source: registry.spec_path(name),
-        })
-        .collect())
+    Ok(registry)
 }
 
 #[cfg(test)]
@@ -87,6 +59,7 @@ mod tests {
     use super::*;
     use omnifs_workspace::authn::CredentialId;
     use omnifs_workspace::creds::{CredentialEntry, CredentialStore, MemoryStore};
+    use omnifs_workspace::mounts::Spec;
     use secrecy::SecretString;
     use time::OffsetDateTime;
 
@@ -118,12 +91,12 @@ mod tests {
     /// Validate `config`'s host-managed credential. Authority belongs to daemon
     /// startup and is deliberately absent from this pre-stop preflight.
     fn preflight_and_validate(
-        config: &MountConfig,
+        config: &Spec,
         catalog: &Catalog,
         store: &dyn CredentialStore,
     ) -> anyhow::Result<()> {
-        let mount_auth = MountAuth::from_spec(catalog, config.config.clone());
-        config.validate_host_managed_credentials(&mount_auth, store)
+        let mount_auth = MountAuth::from_spec(catalog, config.clone());
+        validate_host_managed_credentials(&mount_auth, store)
     }
 
     #[test]
@@ -137,14 +110,10 @@ mod tests {
         let key = CredentialId::new("github", "pat", "default").unwrap();
         store.put(&key, &sample_entry("sk-12345")).unwrap();
 
-        let config = MountConfig {
-            name: MountName::try_from("github").unwrap(),
-            config: spec_with_reference(
-                &reference,
-                r#"{ "mount": "github", "auth": {"type":"static-token","scheme":"pat"} }"#,
-            ),
-            source: PathBuf::from("/dev/null"),
-        };
+        let config = spec_with_reference(
+            &reference,
+            r#"{ "mount": "github", "auth": {"type":"static-token","scheme":"pat"} }"#,
+        );
 
         let catalog = test_catalog(tmp.path());
         preflight_and_validate(&config, &catalog, &store).unwrap();
@@ -163,21 +132,13 @@ mod tests {
 
         let catalog = test_catalog(tmp.path());
 
-        let with_scheme = MountConfig {
-            name: MountName::try_from("github").unwrap(),
-            config: spec_with_reference(
-                &reference,
-                r#"{ "mount": "github", "auth": {"type":"oauth","scheme":"device","client_id":"client-id"} }"#,
-            ),
-            source: PathBuf::from("/dev/null"),
-        };
+        let with_scheme = spec_with_reference(
+            &reference,
+            r#"{ "mount": "github", "auth": {"type":"oauth","scheme":"device","client_id":"client-id"} }"#,
+        );
         preflight_and_validate(&with_scheme, &catalog, &store).unwrap();
 
-        let metadata_only = MountConfig {
-            name: MountName::try_from("github").unwrap(),
-            config: spec_with_reference(&reference, r#"{ "mount": "github" }"#),
-            source: PathBuf::from("/dev/null"),
-        };
+        let metadata_only = spec_with_reference(&reference, r#"{ "mount": "github" }"#);
         preflight_and_validate(&metadata_only, &catalog, &store).unwrap();
     }
 
@@ -189,14 +150,10 @@ mod tests {
         let reference = install_fixture_provider(&providers_dir, "github");
 
         let store = MemoryStore::new();
-        let config = MountConfig {
-            name: MountName::try_from("ghost").unwrap(),
-            config: spec_with_reference(
-                &reference,
-                r#"{ "mount": "ghost", "auth": {"type":"static-token","scheme":"pat"} }"#,
-            ),
-            source: PathBuf::from("/dev/null"),
-        };
+        let config = spec_with_reference(
+            &reference,
+            r#"{ "mount": "ghost", "auth": {"type":"static-token","scheme":"pat"} }"#,
+        );
         let catalog = test_catalog(tmp.path());
         let err = preflight_and_validate(&config, &catalog, &store).unwrap_err();
         let chain = format!("{err:#}");
