@@ -10,18 +10,10 @@ use anyhow::{Context as _, Result};
 use omnifs_api::FsType;
 use omnifs_mtab::{MountKind, MountState};
 use omnifs_workspace::FrontendState;
-use omnifs_workspace::daemon_record::FrontendKind;
 
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const MOUNT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const THIN_RUNNER_NAME: &str = "omnifs-thin";
-
-const fn frontend_kind(protocol: FsType) -> FrontendKind {
-    match protocol {
-        FsType::Fuse => FrontendKind::Fuse,
-        FsType::Nfs => FrontendKind::Nfs,
-    }
-}
 
 fn matches_child(protocol: FsType, state: &MountState, mount_point: &Path, pid: u32) -> bool {
     if state.mount_point != mount_point || state.pid != pid {
@@ -86,9 +78,9 @@ impl HostRunner {
     ) -> Result<Self> {
         let runner = Self::resolve_runner(protocol)?;
         Ok(Self {
-            state_dir: frontend.state_dir(frontend_kind(protocol), &mount_point),
+            state_dir: frontend.state_dir(protocol, &mount_point),
             attach_socket: frontend.local_attach_socket(),
-            log_file: frontend.host_log(frontend_kind(protocol)),
+            log_file: frontend.host_log(protocol),
             mount_point,
             protocol,
             runner,
@@ -278,11 +270,9 @@ mod tests {
         let workspace = omnifs_workspace::Workspace::under_root(root);
         HostRunner {
             runner: PathBuf::from(THIN_RUNNER_NAME),
-            state_dir: workspace
-                .frontend()
-                .state_dir(frontend_kind(protocol), mount),
+            state_dir: workspace.frontend().state_dir(protocol, mount),
             attach_socket: workspace.frontend().local_attach_socket(),
-            log_file: workspace.frontend().host_log(frontend_kind(protocol)),
+            log_file: workspace.frontend().host_log(protocol),
             mount_point: mount.to_path_buf(),
             protocol,
         }

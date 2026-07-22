@@ -13,24 +13,6 @@ use crate::mounts::Revision;
 /// Schema version this build understands. Older records are rejected outright.
 pub const DAEMON_RECORD_VERSION: u32 = 7;
 
-/// Filesystem protocol served by a host runner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FrontendKind {
-    Fuse,
-    Nfs,
-}
-
-impl FrontendKind {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Fuse => "fuse",
-            Self::Nfs => "nfs",
-        }
-    }
-}
-
 /// The strict current daemon record stored at `<config_dir>/daemon.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

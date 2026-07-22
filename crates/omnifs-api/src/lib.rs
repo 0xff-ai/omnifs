@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub use omnifs_core::FsType;
+
 mod control;
 
 pub use control::{
@@ -130,28 +132,6 @@ pub enum HealthState {
     Healthy,
     Degraded,
     Unhealthy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FsType {
-    Fuse,
-    Nfs,
-}
-
-impl FsType {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Fuse => "fuse",
-            Self::Nfs => "nfs",
-        }
-    }
-}
-
-impl std::fmt::Display for FsType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

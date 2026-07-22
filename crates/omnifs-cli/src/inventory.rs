@@ -1262,10 +1262,9 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let workspace = Workspace::under_root(tmp.path());
         let mount_point = tmp.path().join("mounted");
-        let state_dir = workspace.frontend().state_dir(
-            omnifs_workspace::daemon_record::FrontendKind::Fuse,
-            &mount_point,
-        );
+        let state_dir = workspace
+            .frontend()
+            .state_dir(omnifs_api::FsType::Fuse, &mount_point);
         let _guard = StateFile::write_fuse(&mount_point, &state_dir).unwrap();
         let frontend = workspace.frontend();
         let fallback = discovered_frontends(frontend, 1, &frontend.libkrun_root()).unwrap();

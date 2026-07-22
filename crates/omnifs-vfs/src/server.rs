@@ -21,7 +21,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::{Namespace, NsEvent};
-use omnifs_api::{FrontendInfo, FrontendRuntime, FsType};
+use omnifs_api::{FrontendInfo, FrontendRuntime};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -93,7 +93,7 @@ struct VfsState {
 
 #[derive(Debug, Clone)]
 struct AttachedFrontend {
-    kind: crate::FrontendKind,
+    kind: crate::FsType,
     mount_point: PathBuf,
     runtime: FrontendRuntime,
 }
@@ -101,15 +101,8 @@ struct AttachedFrontend {
 impl AttachedFrontend {
     fn key(&self) -> AttachmentKey {
         AttachmentKey {
-            runtime: match self.runtime {
-                FrontendRuntime::Host => 0,
-                FrontendRuntime::Docker => 1,
-                FrontendRuntime::Libkrun => 2,
-            },
-            kind: match self.kind {
-                crate::FrontendKind::Fuse => 0,
-                crate::FrontendKind::Nfs => 1,
-            },
+            runtime: self.runtime,
+            kind: self.kind,
             mount_point: self.mount_point.clone(),
         }
     }
@@ -117,8 +110,8 @@ impl AttachedFrontend {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct AttachmentKey {
-    runtime: u8,
-    kind: u8,
+    runtime: FrontendRuntime,
+    kind: crate::FsType,
     mount_point: PathBuf,
 }
 
@@ -199,10 +192,7 @@ impl Attachments {
             .entries
             .values()
             .map(|entry| FrontendInfo {
-                fs_type: match entry.frontend.kind {
-                    crate::FrontendKind::Fuse => FsType::Fuse,
-                    crate::FrontendKind::Nfs => FsType::Nfs,
-                },
+                fs_type: entry.frontend.kind,
                 mount_point: entry.frontend.mount_point.clone(),
                 runtime: entry.frontend.runtime,
             })

@@ -23,7 +23,7 @@ use crate::frame::{
     Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, MAX_FRAME, read_frame, write_frame,
 };
 use crate::{
-    AttachTarget, FrontendIdentity, FrontendKind, Handshake, ListenerTarget, PROTOCOL, VfsServer,
+    AttachTarget, FrontendIdentity, FsType, Handshake, ListenerTarget, PROTOCOL, VfsServer,
     WireError, WireNamespace, WireRequest, WireResponse, serve_connection,
 };
 
@@ -37,7 +37,7 @@ fn path(value: &str) -> Path {
 /// that a `Hello` carries one.
 fn test_identity() -> FrontendIdentity {
     FrontendIdentity {
-        kind: FrontendKind::Fuse,
+        kind: FsType::Fuse,
         mount_point: PathBuf::from("/mnt/test"),
     }
 }

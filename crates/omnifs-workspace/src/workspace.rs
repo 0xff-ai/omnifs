@@ -429,10 +429,10 @@ impl FrontendState {
         &self.state_root
     }
     #[must_use]
-    pub fn state_dir(&self, kind: crate::daemon_record::FrontendKind, mount: &Path) -> PathBuf {
+    pub fn state_dir(&self, kind: omnifs_core::FsType, mount: &Path) -> PathBuf {
         let normalized = mount.components().collect::<PathBuf>();
         let digest = blake3::hash(normalized.as_os_str().as_encoded_bytes()).to_hex();
-        self.state_root.join(kind.label()).join(digest.as_str())
+        self.state_root.join(kind.as_str()).join(digest.as_str())
     }
 
     #[must_use]
@@ -450,9 +450,9 @@ impl FrontendState {
     }
 
     #[must_use]
-    pub fn host_log(&self, kind: crate::daemon_record::FrontendKind) -> PathBuf {
+    pub fn host_log(&self, kind: omnifs_core::FsType) -> PathBuf {
         self.cache_dir
-            .join(format!("frontend-{}.log", kind.label()))
+            .join(format!("frontend-{}.log", kind.as_str()))
     }
 
     #[must_use]
