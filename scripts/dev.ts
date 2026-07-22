@@ -545,7 +545,7 @@ async function writeDevHome(
   // registry lookup. Frontend lifecycle itself is imperative and explicit.
   writeFileSync(
     join(devHome, "config.toml"),
-    [`[system]`, `frontend_image = ${JSON.stringify(frontendImage)}`, ``].join("\n"),
+    [`[frontend]`, `docker_image = ${JSON.stringify(frontendImage)}`, ``].join("\n"),
   );
 
   for (const mount of render.mounts) {

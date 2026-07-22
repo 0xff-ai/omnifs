@@ -7,15 +7,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub system: System,
     pub metrics: Metrics,
     pub frontend: FrontendAssets,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct System {
-    pub frontend_image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +26,7 @@ impl Default for Metrics {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FrontendAssets {
+    pub docker_image: Option<String>,
     pub guest_image: Option<String>,
 }
 
@@ -85,13 +79,13 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "[system]\nfrontend_image = \"example/frontend\"\n[metrics]\nenabled = false\n[frontend]\nguest_image = \"guest.ext4\"\n",
+            "[metrics]\nenabled = false\n[frontend]\ndocker_image = \"example/frontend\"\nguest_image = \"guest.ext4\"\n",
         )
         .unwrap();
 
         let config = Config::load(&path).unwrap();
         assert_eq!(
-            config.system.frontend_image.as_deref(),
+            config.frontend.docker_image.as_deref(),
             Some("example/frontend")
         );
         assert!(!config.metrics.enabled);

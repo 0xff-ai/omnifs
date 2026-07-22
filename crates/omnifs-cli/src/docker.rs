@@ -542,7 +542,7 @@ impl DockerClient {
                 Err(anyhow!(BUILD_CHANNEL.pull_refusal_reason()))
                     .context(format!("image `{image}` is not present locally"))
                     .with_hint("build it with `just frontend-image`")
-                    .with_hint("or set a specific image via the OMNIFS_FRONTEND_IMAGE env var or the `[system].frontend_image` config key")
+                    .with_hint("or set a specific image via the OMNIFS_FRONTEND_IMAGE env var or the `[frontend].docker_image` config key")
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..

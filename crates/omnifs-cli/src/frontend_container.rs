@@ -51,7 +51,7 @@ pub(crate) fn resolve_frontend_image(
 ) -> anyhow::Result<ImageRef> {
     let image = image
         .or_else(|| std::env::var(ENV_FRONTEND_IMAGE).ok())
-        .or_else(|| config.system.frontend_image.clone())
+        .or_else(|| config.frontend.docker_image.clone())
         .unwrap_or_else(|| default_frontend_image_for(BUILD_CHANNEL).to_string());
     ImageRef::new(image)
 }
@@ -154,7 +154,7 @@ fn env_var_allowed(var: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_workspace::config::System;
+    use omnifs_workspace::config::FrontendAssets;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -205,8 +205,9 @@ mod tests {
     fn frontend_image_resolution_precedence() {
         with_env(&[(ENV_FRONTEND_IMAGE, None)], || {
             let config = Config {
-                system: System {
-                    frontend_image: Some("ghcr.io/example/frontend-config:1.0.0".into()),
+                frontend: FrontendAssets {
+                    docker_image: Some("ghcr.io/example/frontend-config:1.0.0".into()),
+                    ..Default::default()
                 },
                 ..Default::default()
             };
