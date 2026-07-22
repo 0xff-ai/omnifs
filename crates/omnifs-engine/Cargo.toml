@@ -26,12 +26,9 @@ thiserror = { workspace = true }
 dashmap = { workspace = true, optional = true }
 parking_lot = { workspace = true }
 futures = "0.3"
-tokio-stream = { version = "0.1", features = ["sync"] }
 url = { version = "2", optional = true }
 wasmtime-wasi = { version = "46.0.1", default-features = false, features = ["p2"], optional = true }
-sha2 = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
-tar = { workspace = true, optional = true }
 omnifs-core = { workspace = true }
 omnifs-vfs = { workspace = true }
 omnifs-workspace = { workspace = true, optional = true }
@@ -62,8 +59,6 @@ runtime = [
     "dep:reqwest",
     "dep:reqwest-oauth2",
     "dep:serde_json",
-    "dep:sha2",
-    "dep:tar",
     "dep:tempfile",
     "dep:time",
     "dep:tracing",

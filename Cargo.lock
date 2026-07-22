@@ -2835,14 +2835,11 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "sha2",
- "tar",
  "tempfile",
  "thiserror 2.0.18",
  "time",
  "tokio",
  "tokio-rustls",
- "tokio-stream",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -2874,7 +2871,6 @@ dependencies = [
 name = "omnifs-itest"
 version = "0.2.1"
 dependencies = [
- "anyhow",
  "base64",
  "hickory-proto",
  "omnifs-api",
@@ -2890,7 +2886,6 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
- "wasmtime",
 ]
 
 [[package]]
