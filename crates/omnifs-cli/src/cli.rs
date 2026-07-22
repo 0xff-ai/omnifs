@@ -47,7 +47,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Show daemon, mount, and auth status
-    Status(commands::status::StatusArgs),
+    Status,
 
     /// Start the daemon and serve configured mounts
     ///
@@ -59,7 +59,7 @@ pub enum Commands {
     ///
     /// Stops only the daemon; independent frontend runners stay alive and
     /// reconnect when a daemon is started again.
-    Down(commands::down::DownArgs),
+    Down,
     /// Tail the daemon log
     Logs(commands::logs::LogsArgs),
     /// Stream FUSE, provider, and callout events
@@ -74,7 +74,7 @@ pub enum Commands {
     Skill(commands::skill::SkillArgs),
 
     /// Diagnose environment, auth, and daemon health
-    Doctor(commands::doctor::DoctorArgs),
+    Doctor,
 
     /// Print shell completions
     Completions(commands::completions::CompletionsArgs),
@@ -82,7 +82,7 @@ pub enum Commands {
     /// Print version information
     ///
     /// Prints the one-line build identity.
-    Version(commands::version::VersionArgs),
+    Version,
 
     /// Run the runtime daemon. Internal: launched by the host-native lifecycle
     /// command, not invoked directly. The daemon still runs as its own process
@@ -133,16 +133,16 @@ impl Cli {
 impl Commands {
     fn labels(&self) -> (Option<&'static str>, &'static str) {
         match self {
-            Self::Status(_) => (Some("status"), "status"),
+            Self::Status => (Some("status"), "status"),
             Self::Up(_) => (Some("up"), "up"),
-            Self::Down(_) => (Some("down"), "down"),
+            Self::Down => (Some("down"), "down"),
             Self::Logs(_) => (Some("logs"), "logs"),
             Self::Inspect(_) => (Some("inspect"), "inspect"),
             Self::Mount(args) => (
                 Some("mount"),
                 match &args.command {
                     commands::mount::MountCommand::Add(_) => "mount.add",
-                    commands::mount::MountCommand::Ls(_) => "mount.ls",
+                    commands::mount::MountCommand::Ls => "mount.ls",
                     commands::mount::MountCommand::Show(_) => "mount.show",
                     commands::mount::MountCommand::Reauth(_) => "mount.reauth",
                     commands::mount::MountCommand::Revoke(_) => "mount.revoke",
@@ -151,9 +151,9 @@ impl Commands {
             ),
             Self::Setup(_) => (Some("setup"), "setup"),
             Self::Skill(_) => (Some("skill"), "skill"),
-            Self::Doctor(_) => (Some("doctor"), "doctor"),
+            Self::Doctor => (Some("doctor"), "doctor"),
             Self::Completions(_) => (Some("completions"), "completions"),
-            Self::Version(_) => (Some("version"), "version"),
+            Self::Version => (Some("version"), "version"),
             Self::Daemon(_) => (None, "daemon"),
             Self::WarmProviders(_) => (None, "warm-providers"),
             // Every `frontend` subcommand shares one usage label; there is
@@ -164,7 +164,7 @@ impl Commands {
                     commands::frontend::FrontendCommand::Enable(_) => "frontend.enable",
                     commands::frontend::FrontendCommand::Disable(_) => "frontend.disable",
                     commands::frontend::FrontendCommand::Restart(_) => "frontend.restart",
-                    commands::frontend::FrontendCommand::Ls(_) => "frontend.ls",
+                    commands::frontend::FrontendCommand::Ls => "frontend.ls",
                     commands::frontend::FrontendCommand::Shell(_) => "frontend.shell",
                 },
             ),
@@ -184,20 +184,20 @@ impl Commands {
 
     pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         match self {
-            Self::Doctor(args) => {
-                let verdict = args.run(output).await?;
+            Self::Doctor => {
+                let verdict = commands::doctor::run(output).await?;
                 Ok(exit_for_verdict(verdict))
             },
-            Self::Status(args) => args.run(output).await,
+            Self::Status => commands::status::run(output).await,
             Self::Up(args) => args.run(output).await,
-            Self::Down(args) => args.run(output).await,
+            Self::Down => commands::down::run(output).await,
             Self::Logs(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),
             Self::Mount(args) => args.run(output).await,
             Self::Setup(args) => args.run(output).await,
             Self::Skill(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Completions(args) => args.run(&output).map(|()| ExitCode::Success),
-            Self::Version(args) => args.run(output).await,
+            Self::Version => commands::version::run(output).await,
             Self::Daemon(args) => crate::daemon::run(&args).await.map(|()| ExitCode::Success),
             Self::WarmProviders(args) => args.run().await.map(|()| ExitCode::Success),
             Self::Frontend(args) => args.run(output).await,

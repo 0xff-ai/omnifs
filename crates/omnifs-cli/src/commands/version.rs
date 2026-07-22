@@ -1,7 +1,6 @@
 //! `omnifs version` — print CLI and daemon version facts.
 
 use anyhow::Result;
-use clap::Args;
 use serde::Serialize;
 
 use crate::error::ExitCode;
@@ -10,24 +9,19 @@ use crate::inventory::Inventory;
 use crate::ui::output::{Output, ResultVerdict};
 use omnifs_workspace::Workspace;
 
-#[derive(Args, Debug, Clone, Default)]
-pub struct VersionArgs {}
-
-impl VersionArgs {
-    pub async fn run(self, output: Output) -> Result<ExitCode> {
-        if output.is_structured() {
-            let workspace = Workspace::resolve()?;
-            let payload = VersionJson::collect(&workspace).await?;
-            output.emit_result(ResultVerdict::Ok, payload)?;
-            return Ok(ExitCode::Success);
-        }
-        crate::ui::print_raw(&format!(
-            "omnifs {}{}\n",
-            env!("CARGO_PKG_VERSION"),
-            BUILD_CHANNEL.version_suffix()
-        ));
-        Ok(ExitCode::Success)
+pub async fn run(output: Output) -> Result<ExitCode> {
+    if output.is_structured() {
+        let workspace = Workspace::resolve()?;
+        let payload = VersionJson::collect(&workspace).await?;
+        output.emit_result(ResultVerdict::Ok, payload)?;
+        return Ok(ExitCode::Success);
     }
+    crate::ui::print_raw(&format!(
+        "omnifs {}{}\n",
+        env!("CARGO_PKG_VERSION"),
+        BUILD_CHANNEL.version_suffix()
+    ));
+    Ok(ExitCode::Success)
 }
 
 #[derive(Serialize)]

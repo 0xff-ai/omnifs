@@ -1,6 +1,5 @@
 //! Frontend support discovery and listing.
 
-use clap::Args;
 use serde::Serialize;
 
 use super::lifecycle::{FrontendFilesystem, FrontendRuntime};
@@ -10,9 +9,6 @@ use crate::inventory::{FrontendStatus, Inventory};
 use crate::libkrun_runner::LibkrunRunner;
 use crate::ui::output::{Output, ResultVerdict};
 use omnifs_workspace::Workspace;
-
-#[derive(Args, Debug, Clone, Default)]
-pub(crate) struct FrontendLsArgs {}
 
 impl FrontendFilesystem {
     const ALL: [Self; 2] = [Self::Fuse, Self::Nfs];
@@ -237,23 +233,21 @@ impl FrontendList {
     }
 }
 
-impl FrontendLsArgs {
-    pub(crate) async fn run(self, output: Output) -> anyhow::Result<crate::error::ExitCode> {
-        let workspace = Workspace::resolve()?;
-        let inventory = Inventory::collect(&workspace).await?;
-        let list = FrontendList::collect(&inventory).await;
-        let exit = if inventory.verdict() == crate::inventory::Verdict::Degraded {
-            crate::error::ExitCode::Degraded
-        } else {
-            crate::error::ExitCode::Success
-        };
-        if output.is_structured() {
-            output.emit_result(ResultVerdict::from(inventory.verdict()), &list)?;
-        } else {
-            list.render().print();
-        }
-        Ok(exit)
+pub(crate) async fn run(output: Output) -> anyhow::Result<crate::error::ExitCode> {
+    let workspace = Workspace::resolve()?;
+    let inventory = Inventory::collect(&workspace).await?;
+    let list = FrontendList::collect(&inventory).await;
+    let exit = if inventory.verdict() == crate::inventory::Verdict::Degraded {
+        crate::error::ExitCode::Degraded
+    } else {
+        crate::error::ExitCode::Success
+    };
+    if output.is_structured() {
+        output.emit_result(ResultVerdict::from(inventory.verdict()), &list)?;
+    } else {
+        list.render().print();
     }
+    Ok(exit)
 }
 
 #[cfg(test)]
