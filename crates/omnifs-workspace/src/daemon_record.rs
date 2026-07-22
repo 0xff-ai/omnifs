@@ -11,15 +11,7 @@ use crate::io::write_atomic;
 use crate::mounts::Revision;
 
 /// Schema version this build understands. Older records are rejected outright.
-pub const DAEMON_RECORD_VERSION: u32 = 6;
-
-/// How a client reaches the daemon's control socket.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
-pub enum Endpoint {
-    /// Host-native daemon serving a Unix domain socket.
-    Unix { path: PathBuf },
-}
+pub const DAEMON_RECORD_VERSION: u32 = 7;
 
 /// Filesystem protocol served by a host runner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -45,7 +37,7 @@ impl FrontendKind {
 pub struct DaemonRecord {
     pub version: u32,
     pub mount_revision: Revision,
-    pub endpoint: Endpoint,
+    pub control_socket: PathBuf,
     pub pid: u32,
     pub instance_id: String,
     pub offline: bool,
@@ -57,7 +49,7 @@ impl DaemonRecord {
     #[must_use]
     pub fn new(
         mount_revision: Revision,
-        endpoint: Endpoint,
+        control_socket: PathBuf,
         pid: u32,
         instance_id: String,
         offline: bool,
@@ -68,7 +60,7 @@ impl DaemonRecord {
         Self {
             version: DAEMON_RECORD_VERSION,
             mount_revision,
-            endpoint,
+            control_socket,
             pid,
             instance_id,
             offline,
@@ -141,9 +133,7 @@ mod tests {
     fn sample() -> DaemonRecord {
         DaemonRecord::new(
             Revision::new("0123456789abcdef0123456789abcdef01234567").unwrap(),
-            Endpoint::Unix {
-                path: PathBuf::from("/home/u/.omnifs/control.sock"),
-            },
+            PathBuf::from("/home/u/.omnifs/control.sock"),
             4321,
             "b1946ac92492d234".to_string(),
             false,

@@ -145,9 +145,7 @@ impl DaemonObservation {
         let runtime = (state == DaemonHealth::Unreachable).then(|| {
             DaemonRecord::new(
                 Revision::new("a".repeat(40)).expect("test revision"),
-                omnifs_workspace::daemon_record::Endpoint::Unix {
-                    path: "/tmp/omnifs/control.sock".into(),
-                },
+                "/tmp/omnifs/control.sock".into(),
                 1,
                 "test-instance".to_owned(),
                 false,
@@ -1172,9 +1170,7 @@ mod tests {
         let probe = Err(anyhow::anyhow!("connection refused"));
         let expected = DaemonRecord::new(
             omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
-            omnifs_workspace::daemon_record::Endpoint::Unix {
-                path: PathBuf::from("/home/.omnifs/frontends/local.sock"),
-            },
+            PathBuf::from("/home/.omnifs/frontends/local.sock"),
             42,
             "instance".into(),
             false,
