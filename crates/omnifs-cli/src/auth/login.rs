@@ -6,13 +6,13 @@ use omnifs_auth::{
     DeviceCodePrompt, LoginRequest, ManualCode, ManualCodeLoginRequest, OAuthClient, OAuthRequest,
     UrlOpener,
 };
+use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use crate::credential_target::CredentialTarget;
 use crate::ui::style;
 use omnifs_workspace::Workspace;
 use omnifs_workspace::authn::SchemeGuidance;
@@ -39,7 +39,7 @@ pub(crate) async fn login(
     interactivity: LoginInteractivity<'_>,
     output: &crate::ui::output::Output,
     key_width: usize,
-) -> anyhow::Result<CredentialTarget> {
+) -> anyhow::Result<CredentialId> {
     let LoginInteractivity {
         no_browser,
         no_input,
@@ -114,10 +114,7 @@ pub(crate) async fn login(
     {
         output.narrate(format!("Open {url}"));
     }
-    let credential_id = target
-        .credential_id()
-        .ok_or_else(|| anyhow::anyhow!("OAuth flow resolved without a credential target"))?;
-    store.put(credential_id, &entry)?;
+    store.put(&target, &entry)?;
     output.narrate(format!(
         "stored OAuth credential for `{mount}` with scopes: {}",
         format_scopes(entry.scopes())
@@ -184,7 +181,7 @@ pub(crate) async fn login_with_workspace(
     interactivity: LoginInteractivity<'_>,
     output: &crate::ui::output::Output,
     key_width: usize,
-) -> anyhow::Result<CredentialTarget> {
+) -> anyhow::Result<CredentialId> {
     let store = workspace.credentials();
     let mounts = crate::mount_config::load_mounts(workspace)?;
     let mount_auth = crate::auth::MountAuth::load(workspace.catalog(), &mounts, mount)?;
@@ -373,7 +370,7 @@ mod tests {
             &reference,
             r#"{
                 "mount": "planned-oauth",
-                "auth": { "type": "oauth", "scheme": "device" }
+                "auth": { "type": "oauth" }
             }"#,
         );
 
@@ -381,7 +378,7 @@ mod tests {
         let (request, target) = mount_auth.oauth_request(None, &[]).unwrap();
 
         assert_eq!(request.scheme().key, "device");
-        assert!(target.credential_id().is_some());
+        assert_eq!(target.scheme(), "device");
         assert!(
             crate::mount_config::load_mounts(&workspace)
                 .unwrap()

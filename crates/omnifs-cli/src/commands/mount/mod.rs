@@ -19,7 +19,6 @@ use clap::{Args, Subcommand};
 use omnifs_workspace::mounts::Name as MountName;
 use std::path::Path;
 
-use crate::credential_target::CredentialTarget;
 use crate::error::{ExitCode, WithExitCode};
 use crate::stages::PromptMode;
 use crate::token_source::TokenSource;
@@ -453,10 +452,10 @@ impl ReauthArgs {
 /// `reauth`'s second, independent ledger block: the exact credential key just
 /// stored. It sizes itself rather than reusing the auth-outcome block's width
 /// the caller already printed.
-fn print_stored_credential_rows(output: &crate::ui::output::Output, target: &CredentialTarget) {
-    let Some(credential_id) = target.credential_id() else {
-        return;
-    };
+fn print_stored_credential_rows(
+    output: &crate::ui::output::Output,
+    credential_id: &omnifs_workspace::authn::CredentialId,
+) {
     let key = format!("credential `{credential_id}`");
     let key_width = Output::ledger_block_width(&[&key]);
     output.ledger_row(

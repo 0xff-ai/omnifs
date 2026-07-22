@@ -120,8 +120,8 @@ impl CredentialId {
     /// `scheme` is the resolved scheme key: the spec's [`Auth::scheme`] value
     /// when present, otherwise the provider-manifest default resolved by the
     /// caller. The account comes from [`Auth::account`], defaulting to
-    /// [`AccountId::default_account`]. Both the CLI credential target and the
-    /// host injector use this derivation.
+    /// [`AccountId::default_account`]. Both the CLI and the host injector use
+    /// this derivation.
     ///
     /// [`Auth::scheme`]: crate::mounts::Auth::scheme
     /// [`Auth::account`]: crate::mounts::Auth::account
@@ -253,12 +253,10 @@ mod tests {
         assert!(CredentialId::new("bad name!", "pat", "default").is_err());
     }
 
-    /// Parity with the CLI derivation (`credential_target::internal_from_parts`):
-    /// provider from the spec, scheme validated through `SchemeId`, account
-    /// from `auth.account()` mapped through `AccountId::new` with
-    /// `AccountId::default_account()` as the fallback.
+    /// The configured account wins; otherwise the stable default account is
+    /// used.
     #[test]
-    fn for_mount_matches_the_cli_derivation() {
+    fn for_mount_uses_the_configured_account_or_default() {
         use crate::mounts::{Auth, StaticToken};
 
         let provider = ProviderName::new("github").unwrap();
