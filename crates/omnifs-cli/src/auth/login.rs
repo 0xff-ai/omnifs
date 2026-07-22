@@ -53,7 +53,7 @@ pub(crate) async fn login(
         .and_then(|manifest| manifest.auth)
         .map(|auth| auth.guidance_for(&request.scheme().key))
         .unwrap_or_default();
-    output.note(format!(
+    output.narrate(format!(
         "requesting OAuth for `{mount}` using scheme `{}` ({})",
         request.scheme().key,
         super::explain::label(&request.scheme().flow)
@@ -112,18 +112,18 @@ pub(crate) async fn login(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .drain(..)
     {
-        output.note(format!("Open {url}"));
+        output.narrate(format!("Open {url}"));
     }
     let credential_id = target
         .credential_id()
         .ok_or_else(|| anyhow::anyhow!("OAuth flow resolved without a credential target"))?;
     store.put(credential_id, &entry)?;
-    output.note(format!(
+    output.narrate(format!(
         "stored OAuth credential for `{mount}` with scopes: {}",
         format_scopes(entry.scopes())
     ));
     if mount == "github" && entry.scopes().is_empty() {
-        output.note(
+        output.narrate(
             "GitHub granted no scopes. Public resources will work; rerun with `--scope repo` for private repositories.",
         );
     }
@@ -148,7 +148,7 @@ async fn login_manual(
 ) -> anyhow::Result<CredentialEntry> {
     let result = client
         .login_manual_code(request, |url| {
-            output.note(format!("Open {url}"));
+            output.narrate(format!("Open {url}"));
             async move {
                 let prompt_output = output.clone();
                 let pasted = tokio::task::spawn_blocking(move || {
@@ -271,30 +271,30 @@ fn print_oauth_consent_summary(
 ) {
     let stream = style::Stream::Stderr;
     let scheme = request.scheme();
-    output.note(crate::ui::style::dim(
+    output.narrate(crate::ui::style::dim(
         super::explain::experience(&scheme.flow),
         stream,
     ));
     if !guidance.setup_steps.is_empty() {
-        output.note(crate::ui::style::dim("Guidance:", stream));
+        output.narrate(crate::ui::style::dim("Guidance:", stream));
         for (index, step) in guidance.setup_steps.iter().enumerate() {
-            output.note(format!("{}. {step}", index + 1));
+            output.narrate(format!("{}. {step}", index + 1));
         }
     }
     if let Some(url) = &guidance.docs_url {
-        output.note(format!(
+        output.narrate(format!(
             "{} {}",
             style::dim("Docs:", stream),
             style::accent(url, stream)
         ));
     }
-    output.note(format!(
+    output.narrate(format!(
         "{} {}",
         style::dim("Scopes:", stream),
         format_scopes(&scheme.default_scopes)
     ));
     if !scheme.inject_domains.is_empty() {
-        output.note(format!(
+        output.narrate(format!(
             "{} {}",
             style::dim("Applies to:", stream),
             scheme.inject_domains.join(", ")

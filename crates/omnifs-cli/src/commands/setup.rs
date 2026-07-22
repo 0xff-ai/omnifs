@@ -293,7 +293,7 @@ impl SetupArgs {
         );
         for result in &results {
             if let Some(fix) = &result.fix {
-                output.note(fix);
+                output.narrate(fix);
             }
         }
         Ok(results)

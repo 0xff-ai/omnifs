@@ -441,10 +441,6 @@ impl Output {
         ));
     }
 
-    pub(crate) fn note(&self, line: impl std::fmt::Display) {
-        self.narrate(line);
-    }
-
     /// A bold section heading line: plain bold, never the accent color, so it reads as
     /// structure rather than something the user can type. Human-only; quiet
     /// suppresses it like every other narration line.

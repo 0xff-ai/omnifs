@@ -421,7 +421,7 @@ impl ReauthArgs {
         // `login`/`run_static_token_init` primitives.
         let auth_key_width = crate::auth::auth_receipt_key_width();
         let target = if selection.is_oauth() {
-            output.note(format!("re-authenticating `{mount_name}` over OAuth"));
+            output.narrate(format!("re-authenticating `{mount_name}` over OAuth"));
             crate::auth::login_with_workspace(
                 workspace,
                 mount_name,
@@ -511,7 +511,7 @@ fn rm_with_options(
             .map(|mount| mount.name.to_string())
             .find(|candidate| candidate.starts_with(name.as_str()))
         {
-            output.note(format!("Did you mean `{suggestion}`?"));
+            output.narrate(format!("Did you mean `{suggestion}`?"));
         }
         if dry_run {
             output.outro("Dry run, nothing changed.");
