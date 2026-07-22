@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-api"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2732,7 +2732,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-auth"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "arc-swap",
  "async_singleflight",
@@ -2755,7 +2755,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anstream",
  "anyhow",
@@ -2803,7 +2803,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2811,7 +2811,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-engine"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2854,7 +2854,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-fuse"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dashmap",
  "fuser",
@@ -2873,7 +2873,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-itest"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-libkrun"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "libc",
  "libloading",
@@ -2905,7 +2905,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-mtab"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2914,7 +2914,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-nfs"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dashmap",
  "getrandom 0.3.4",
@@ -2933,7 +2933,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-arxiv"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "omnifs-sdk",
  "percent-encoding",
@@ -2945,7 +2945,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-db"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "hex",
  "omnifs-sdk",
@@ -2958,7 +2958,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-dns"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "hickory-proto",
@@ -2967,7 +2967,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-docker"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bollard-stubs",
  "omnifs-sdk",
@@ -2977,7 +2977,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-github"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "http",
  "omnifs-core",
@@ -2989,7 +2989,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-kubernetes"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "k8s-openapi",
  "omnifs-sdk",
@@ -3000,7 +3000,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-linear"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "omnifs-core",
  "omnifs-sdk",
@@ -3010,7 +3010,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-oura"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "omnifs-sdk",
  "serde",
@@ -3021,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-provider-web"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dom_smoothie",
  "omnifs-sdk",
@@ -3030,7 +3030,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-sdk"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "hashbrown 0.15.5",
  "hex",
@@ -3047,7 +3047,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-sdk-macros"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3057,7 +3057,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-thin"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3073,7 +3073,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-vfs-wire"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "constant_time_eq",
  "futures",
@@ -3095,7 +3095,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-wit"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "wasmtime",
@@ -3104,7 +3104,7 @@ dependencies = [
 
 [[package]]
 name = "omnifs-workspace"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "atomic-write-file",
  "blake3",
@@ -4624,7 +4624,7 @@ dependencies = [
 
 [[package]]
 name = "test-provider"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "omnifs-sdk",
  "serde",

@@ -1,66 +1,306 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [0.3.0] - 2026-07-22
 
-Entries are grouped by product area; each is tagged with a type (Feature, Fix, Improvement, Performance, Breaking, Deprecation, Removal, Security).
-
-## [Unreleased]
-### Providers & projected paths
-- **Feature:** The provider SDK now centers object-shaped routes and collections: providers register objects, file objects, aliases, collection captures, choice-backed captures, preloads, invalidations, and typed object render faces through the SDK instead of hand-assembling path handlers. The built-in providers have been migrated onto that model, including GitHub, arXiv, db, DNS, Docker, Kubernetes, Linear, Oura, and the test provider.
-- **Breaking:** Provider manifests are now authored from provider annotations and embedded into the WASM component at build time, replacing the checked-in `omnifs.provider.json` files. Auth modes, endpoints, host resources, provider config metadata, and provider metadata now flow through the SDK macros and build-time manifest assembly.
-- **Feature:** A read-only Kubernetes provider projects a cluster as a filesystem: namespaces, resource types, and objects are browsable under `namespaces/<ns>/<kind>/<name>/`, each object renders its `manifest.yaml`, and pods expose live `logs/<container>.log` that stream with `tail -f`. The provider holds no cluster credential and reaches the API server through a `kubectl proxy`, so all auth and TLS stay host-side.
-- **Feature:** A read-only Oura provider projects Oura Ring health data as a filesystem: each day is a directory (`<day>/`) holding per-collection JSON files such as `daily_sleep.json`, `daily_activity.json`, `daily_readiness.json`, `heart_rate.json`, and `workout.json`. It authenticates with Oura's client-side-token OAuth flow, and reading any day preloads the surrounding ±15-day window so neighboring days are already warm.
-- **Fix:** The arXiv provider no longer crashes when it fails to encode a JSON response.
-- **Fix:** A projected file's exact size, learned from a complete read, now survives a later directory listing, so `stat` and `ls -l` keep reporting the true byte size instead of reverting to the 1-byte placeholder.
-- **Improvement:** Kubernetes provider unit tests have been ported to host-driven integration tests, exercising the provider through the same code path as real consumers. (#127)
-- **Breaking:** The stability levels are renamed: `Immutable`/`Mutable`/`Volatile` are now `stable`/`dynamic`/`live`, freeing the old words for a future write model. (#132)
-- **Breaking:** Every object must now declare its stability (`o.stable()`, `o.dynamic()`, `o.live()`, or a key-dependent closure); there is no default. Omitting it is a build error, which prevents pinned identities from being silently treated as `dynamic` and given needless cache TTLs and eviction. (#132)
-- **Improvement:** When browsing a listing, many files are now served directly from the data already fetched, so reads don't need to refetch from upstream. (#146)
-
-### Runtime & mounts
-- **Improvement:** Archive extraction (mounting a stored `tar.gz`/`tar`/`zip` blob as a directory tree) now runs directly on the host instead of inside a WASM sandbox component. The `omnifs-tool-archive` component and the `omnifs:tool-archive` WIT world are removed; path sanitization and the entry/size/total-byte caps are unchanged, with a wall-clock deadline replacing the sandbox fuel limit. The `open-archive` provider callout is unchanged, so providers and consumers see no behavior change.
-- **Feature:** The daemon can now serve the projected tree over a read-only NFSv4 loopback mount as an alternative to FUSE. NFS runs behind the same daemon frontend boundary and shares the provider registry, namespace model, caches, and file-attribute handling with the FUSE path, so the host runtime can mount host-native (no kernel FUSE) where loopback NFS is available. The runtime image bundles the Linux NFS client pieces used by the container smoke tests.
-- **Feature:** `omnifs init` and `omnifs mounts rm` now apply to a running daemon without a restart: mounts load and unload live over the daemon's control API.
-- **Feature:** `omnifs dev` and `omnifs up` now bind providers' required host paths into the runtime container, so providers like the SQLite db provider can reach their backing files.
-- **Feature:** `omnifs dev` brings up a throwaway k3s cluster for the Kubernetes mount and tears it down on `omnifs down`, so contributors can browse a live cluster without provisioning one. The cluster boots concurrently with the daemon build and teardown is best-effort.
-- **Feature:** The runtime is a daemon that owns the mount and exposes an HTTP control API, driven by the `omnifs` CLI over that API. It ships as a single `omnifs` binary: the daemon runs as the internal `omnifs daemon` subcommand (its own process, same control API), not a separate `omnifsd`. `omnifs up` reads `[system].runtime` (`docker` or `native`) and starts the daemon in a Docker container or host-native over NFS, defaulting to host-native on macOS (no Docker required) and Docker on Linux; `omnifs setup` records the choice.
-- **Improvement:** A single disk provider whose metadata fails to parse is now skipped with a one-line warning, while builtins and the remaining disk providers still resolve normally. (#131)
-- **Feature:** On macOS, `omnifs up` now serves the projected filesystem over a local NFS loopback mount, no Docker required. (#134)
-- **Improvement:** The filesystem projection now runs through a single frontend-neutral core, with FUSE and NFS each serving as a thin adapter that renders the same projection into its own kernel vocabulary. (#134)
-- **Breaking:** Mounts are stored as one JSON file per mount under `~/.omnifs/mounts/`, and `config.toml` holds only system settings (image, container name). `omnifs init` writes `mounts/<name>.json` and `mounts rm` deletes it; the mount spec stays JSON from authoring through to the daemon, with no JSON-to-TOML translation. Existing inline `[[mounts]]` entries in `config.toml` are no longer read and must move to per-file specs.
-- **Breaking:** The daemon loads its mount set from `mounts/*.json` on start and reconciles to that desired state, instead of the CLI pushing specs over the wire. (#141)
-- **Feature:** A new shutdown endpoint lets the daemon unmount its own filesystem, tear down providers, and exit gracefully. (#141)
-- **Fix:** Over NFS, the root directory now refreshes when a mount is added or removed, so clients see mounts appear and disappear immediately instead of caching a stale (sometimes empty) listing. (#142)
-- **Feature:** A provider's manifest declares the capabilities it needs; a mount grants a subset, and the host checks the grant covers the need at provider start. (#145)
-- **Feature:** A mount references its provider by the hash of its WASM bytes, so a projection always runs the exact artifact it was authored against. (#145)
+### Auth & credentials
+- CredentialService owns store access, the single expiry function, and the single key derivation (#202)
+- Proactively refresh OAuth credentials before expiry (#204)
+- Provider manifests declare device-flow compat and ambient credentials (#205)
+- Upstream-rejection backstop with NeedsConsent; revoke on removal (#206)
+- Finish mount-owned credential integration
+- Close credential integration tails
+- Retain explicit credential revocation
+- Restore startup binding checks
 
 ### CLI & workflow
-- **Improvement:** `omnifs dev` now provisions credentials into a dedicated dev sub-home under `~/.omnifs/dev`, instead of in a hidden directory in the source repo.
-- **Fix:** The interactive container shell banner now recommends the implemented `omnifs auth status` credential-inspection command.
-- **Feature:** You can now see every authentication method omnifs supports with `omnifs auth modes`, and get provider-specific setup guidance with `omnifs auth explain <provider>`. (#131)
-- **Feature:** Provider manifests can now declare how the host authenticates at the token endpoint, enabling confidential-client OAuth flows like Google Workspace. (#131)
-- **Improvement:** The CLI's mount management commands are now `mounts add`, `mounts ls`, and `mounts rm`, with `init` kept as an alias for muscle memory; `setup`, `up`, and `dev` remain distinct flat verbs with cross-referencing help text. (#131)
-- **Breaking:** omnifs ships as a single binary that serves as both the CLI and the daemon, so `omnifsd` is no longer a separate artifact. (#137)
-- **Feature:** You can now run omnifs host-native on macOS: `omnifs up` serves the mount over NFS in your home directory, and `omnifs down` unmounts it. (#137)
-- **Improvement:** Released omnifs binaries now embed the provider and tool WASM and unpack it into the host on launch, so first run and upgrades install providers offline instead of downloading them from GitHub releases. (#142)
-- **Feature:** The CLI is now a thin client that always communicates with the daemon over its control API; commands like `down`, `status`, and `reset` no longer guess whether the daemon is native or Docker, making behavior consistent across runtimes. (#143)
-- **Fix:** A crashed daemon no longer hangs the `down` command; teardown now resolves quickly on both Linux and macOS by avoiding dead mounts. (#143)
+- Recommend auth status in shell banner
+- Make authentication self-explanatory and streamline the verb surface (#131)
+- Single omnifs binary with docker and host-native daemon backends (#137)
+- Embed the provider WASM bundle in the CLI binary (#142)
+- Make daemon lifecycle and mount compatibility explicit (#143)
+- Open the dev container shell with the image's zsh
+- Use host-built provider artifacts (#154)
+- Choose the default runtime during setup on any OS
+- Add `omnifs up --runtime` for a one-off runtime override
+- Install providers on demand and refine setup capability prompts
+- Always show init capability grants
+- Static-token steady state is not degraded health (#220)
+- Guided setup wizard and express init over shared stages (#222)
+- Authenticate reconcile against the bearer-gated control port
+- Guided wizard, dev-image provenance, and truthful control-plane UX
+- Default Linux/WSL setup to native kernel FUSE
+- Keep Workspace's mount registry cache coherent with its own writes
+- Drain the exec probe's output before reading its exit code
+- Rework just dev onto the host-native daemon plus the frontend container
+- Build the TLS-capable control client lazily, not at startup
+- Default the container shell to /bin/sh
+- Implement the krunkit frontend backend
+- Dispatch frontend up/down/status/shell to the krunkit backend
+- Pull the release-channel guest image from its ghcr artifact
+- Shorten inspector paths on character boundaries
+- Launch local frontend runners
+- Declare frontends in strict config and converge lifecycle commands
+- Correct six output defects from the CLI audit
+- Establish unified output toolkit
+- Add rail sessions and unified prompts
+- Show progress for long operations
+- Add destructive-operation consent kit
+- Select the shell target across live frontends
+- Render the OAuth device flow through the rail
+- Prove a first read before OAuth in setup
+- Singular-noun taxonomy and adaptive front door
+- Complete the machine contract
+- Tabulate reports, color sections, fix rail spacing
+- Collect the domain allowlist for dynamic-domain providers
+- Strip embedded color for non-color sinks
+- Detect and reap daemons whose runtime record is missing
+- Derive setup's mount location from the frontend plan
+- Call mount add in dev rendering after the init rename
+- Request the docker driver for the dev frontend
+- Unify the shared namespace experience
+- Complete shared namespace redesign
+- Use tabled to print reset actions.
+- Show reset progress and teardown causes
+- Settle mount removal output
+- Normalize frontend identity on enable
+- Align status auth scheme resolution
+- Compose setup from shared operations
+- Emit setup success result
+- Centralize workspace inventory observations
+- Reconcile imperative frontend integration
+- Complete krunkit launch rollback
+- Close output ownership gaps
+- Serialize shared output writes
+- Restore output presentation invariants
+- Surface live daemon credential health
+- Suppress structured progress
+- Add explicit mount credential revocation
+- Restore progress predicate compilation
+- Resolve revoke identities from specs
+- Restore guided setup composition
+- Add cache-only offline startup
+- Validate offline state before daemon replacement
+- Return degraded exit for doctor findings
+- Preserve dry-run for absent mounts
+- Suppress structured launch progress
+- Honor daemon readiness deadline
+- Suppress structured Docker progress
+- Authenticate mounts before persistence
+- Capture libkrun seed build output
+- Extend default daemon readiness
+- Never echo credential values
+- Wait for host runner teardown
+- Accept empty frontend state leaves
+- Clone writable libkrun root disks
+- Discover frontends and warm provider runtimes (#251)
+- Redesign the command-line experience (#253)
+- Add inspector sandbox map (#254)
+- Ship bundled native libkrun runtime (#257)
 
 ### Caching & performance
-- **Performance:** Faster reads and directory listings, with lower memory use on large directories and objects. Output is unchanged.
-- **Fix:** The negative-lookup cache no longer grows without bound on long-running mounts with many missing-path lookups.
-- **Improvement:** The cache now uses the fjall database engine instead of redb, which simplifies how data is keyed and written across mounts. (#140)
-- **Improvement:** Object cache keys are now stored without the mount prefix, as each mount gets its own dedicated storage area. (#140)
-- **Security:** Path segments now reject control characters, making the internal delimiter used in view cache keys safe from accidental collisions. (#140)
+- Async-first dispatch; a cold provider op no longer blocks the mount
+- Client-side answer memo and read windows within engine TTL policy
+- Trim the guest image (#245)
+- Own git and blob identities
+- Close identity correction gaps
+- Fail closed on cache roots
+- Complete host identity integration
+- Close host cache correction gaps
+- Reuse compiled components and native artifacts
+- Run host tests without archive round trip
 
-### Internal & maintenance
-- **Improvement:** Provider SDK guidance and system rationale have been split into binding `docs/contracts/` rules, focused `docs/architecture/` notes, and the provider-authoring skill, replacing the stale `docs/design/` stack with current ownership and validation rules.
-- **Test:** The SDK now has a WIT-boundary harness for provider exports and route behavior, and provider initialization tests assert that generated manifests compile through the host path instead of only compiling as guest code.
-- **Chore:** The Rust toolchain is now pinned to 1.95.0 across local and CI builds, and rustfmt.toml records the stable formatting options the project relies on. (#144)
-- **Improvement:** CI runner labels can now switch between Blacksmith and GitHub-hosted runners through the `CI_RUNNER_FAMILY` repository Actions variable.
-- **Improvement:** The daemon control API router now registers Axum routes and OpenAPI paths through one `utoipa-axum` surface, reducing route/spec drift.
-- **Test:** Removed or merged narrow tests across many crates, folding useful coverage into broader behavior-oriented cases. (#147)
+### Other
+- Adopt 0xff-ai/bot for changelog entries (PR-branch + merge gate) (#117)
+- Project the tree through a frontend-neutral core, host-native on macOS over NFS (#134)
+- Keep arm64 CI on the ubuntu-24.04 blacksmith runner
+- Tree/collection-capture/choices faces + migrate GitHub to object SDK
+- File_object direct form, BlobFile stability, object stream face; docker/test blockers
+- Omnifs dev.
+- Run providers on Wasmtime component async (#160)
+- Unified coalesce engine and NFS deferral
+- Latency measurement suite with first recorded report
+- Local-only dogfood counters for daemon sessions and CLI usage
+- API v2 with structured errors and a CLI hint table
+- Revalidate lazily-invalidating providers from the host
+- Mount snapshots and canonical-store export
+- Daemon-authoritative mount CRUD with enforced upgrade consent (#207)
+- Backend identity on the wire; scoped reconcile with busy signal (#213)
+- Expose credential health and provider catalog state (#216)
+- Strict top-level mount Spec and provider-store index parsing (#214)
+- Frontend conformance matrix with per-column scorecards
+- Per-column tail-f expectations and deadline-based cache wait
+- Namespace trait over the projection tree
+- Length-delimited postcard namespace wire
+- Attach sockets and the out-of-process frontend runner
+- Protocol v2 with a per-instance attach token
+- Optional TCP attach binding in the runtime record
+- TCP namespace attach listener and its control route
+- Add omnifs frontend up|down|status and rename the runner to frontend run
+- Add the omnifs-frontend container image and its local dev build path
+- Share buildx mechanics for the runtime and frontend images, add frontend build/smoke scripts
+- Build, smoke, and publish the omnifs-frontend image in the PR and release lanes
+- Run the fuse-docker acceptance gate on the amd64 frontend image
+- Bind Linux attach listener on Docker bridge
+- Pagination controls keep resolving after exhaustion (stable visibility)
+- Smoke the native daemon and frontend container instead of a runtime image
+- Delete the daemon-in-container backend, daemon runs host-native only
+- Restore inspector trace propagation across the namespace boundary
+- Delete the dead Winch compiler toggle
+- Recognize krunkit as a second virtualized frontend driver
+- Add the vsock attach transport with token-checking UDS listeners
+- Build the krunkit guest image with mkosi
+- Add dropbear ssh over vsock to the krunkit guest
+- Correct the ssh-over-vsock path proven by the live gate
+- Centralize attach-target resolution and the readiness beacon
+- Split the mkosi image into locked-down dev and release profiles
+- Build, assert, and publish the krunkit guest image
+- Bump setup-oras to v2 so the ORAS 1.3.3 pin resolves
+- Pin oras 1.3.2, the newest version setup-oras ships checksums for
+- Pin oras 1.3.1, the newest version in setup-oras v2.0.0's manifest
+- Raise the fuse-docker cold-start gate to 15s
+- Check links in tracked documentation only
+- Identify attaching frontends in the handshake
+- Report attached frontends and delivery in status
+- Close attach registry lifecycle gaps
+- Move renderers out of the daemon
+- Persist runner-owned mount state
+- Harden local runner lifecycle against stale and shared state
+- Delete the phantom root_mount feature entirely
+- Check the complete PR diff
+- Validate config before runtime setup
+- Restrict krunkit to macos
+- Disable callout redirects
+- Ignore provider socket self-grants
+- Reserve snapshot index namespace
+- Reject destination overwrites
+- Reject snapshot ancestor collisions
+- Apply mount revisions from git
+- Prove fresh mount repository bootstrap
+- Derive records from tracing
+- Validate provider entry names
+- Reject oversized provider chunks
+- Preserve coalesced provider errors
+- Narrow coalescer visibility
+- Update typed pagination fixtures
+- Update engine request fixtures
+- Refresh typed validation fixtures
+- Reconcile typed integration cleanup
+- Harden listener startup persistence
+- Preserve optional provider version identity
+- Make provider retention collision-safe
+- Harden provider store publication
+- Reconcile typed socket with current store APIs
+- Drive reads by cache freshness
+- Preserve cancelled flight state
+- Enforce current credential formats
+- Migrate current credential producers
+- Require strict control status facts
+- Enforce typed provider identities
+- Serve durable projections offline
+- Invalidate parent listing authority
+- Validate cached mount snapshot shape
+- Invalidate partial listing cursors
+- Revalidate reused offline projections
+- Keep thin projection types dependency-free
+- Reserve only host control leaves
+- Reject unknown mount limits
+- Preserve typed JSONL streams
+- Persist offline dynamic bodies
+- Enumerate partial offline snapshots
+- Complete CLI dogfood hardening
+- Repair acceptance lanes
+- Pass packaged CLI to dev smoke
+- Export packaged smoke CLI
+- Clean immutable smoke snapshots
 
+### Packaging & release
+- Promote the sha-keyed guest image to its version tag
+
+### Providers & projected paths
+- Apply file leaf modifiers to pending leaves (#110)
+- Stamp contract evidence and surface unhandled events (#112)
+- Read-only Kubernetes provider with throwaway dev cluster (#123)
+- Add Oura provider with client-side-token OAuth and preload effects (#113)
+- Project already-fetched data into listings (#146)
+- Expand default dev profile and add oura mount
+- Serve table sample.json as a whole-file body projection
+- Object trait reshape + collection/invalidation foundations
+- Object SDK core — faces, dispatch, macros, snapshot (gates green, 2 known blockers)
+- WIT-boundary harness + correct collections, file-object preload, leaf resolution
+- Migrate remaining 8 providers to object SDK (wasm-green, known fixups)
+- Mount Paper at /papers/{paper}/{version}, not root; add all-providers seal gate
+- Preloaded + just-read file-object days project as listable dirents
+- Author provider manifests from annotations (dns, arxiv)
+- Assemble the provider manifest section at build by running the component
+- Author db, docker, and kubernetes manifests from annotations
+- Author auth-provider manifests from annotations, retire the JSON path
+- Infer provider state in macros
+- Add explicit artifact installs (#157)
+- Add path segment macro (#158)
+- Grant the dev mount's preopen dynamically, matching the manifest need
+- Agent benchmark harness with deterministic fixture condition
+- Route-table export, error context, contract-version evidence, no silent event drops
+- Self-describing provider trees and the omnifs usage skill (#208)
+- PR diffs, changed files, reviews, checks, and notifications as files (#210)
+- Web provider projects allowed URLs as readable files (#211)
+- Include skills/ in the image build context (#215)
+- Grant the dynamic preopen the db manifest requires (#217)
+- Let literal file routes beat object captures in lookup_child (#218)
+- Provider manifest descriptions
+- Stream faces carry the ranged deferred placeholder (F4)
+- Preserve table metadata byte ordering
+- Keep comment preloads dynamic
+- Preserve pagination after malformed ids
+- Preserve changed-file canonical bytes
+- Retain required serialization derive
+- Scope read validators to object identity
+- Preserve day canonical integrity
+- Preserve partial discovery authority
+- Stabilize discovery resource paths
+- Paginate owner repositories and workflow runs
+- Use one REST pagination source for issues and pulls
+- Bind check pagination to one commit
+- Qualify collection cursor trait
+- Forward anchor collection cursors
+- Withdraw oversized handler ABI
+- Embed metadata directly in wasm
+
+### Runtime & mounts
+- Preserve learned file sizes (#106)
+- Live tail -f follow for volatile files (#115)
+- Add read-only NFSv4 loopback frontend to the daemon (#126)
+- Reconcile mounts from disk and own the runtime lifecycle (#141)
+- Host-enforced capability model and content-addressed provider pinning (#145)
+- Publish reconcile replacements after build
+- Pass container-native preopens through materialization
+- Make a spec file's name its mount identity, and route reset through the Registry
+- Keep the mount responsive under slow and throttled providers
+- Defer slow provider READDIR with NFS4ERR_DELAY
+- Subscribe before spawn in Coalesce::resolve
+- Demarcate test callout bursts by executor quiescence
+- Reply EINVAL instead of panicking on invalid lookup names
+- Split capability needs into access needs and resource limits
+- Bearer-token authentication on the control port (#221)
+- Unix-socket control plane and daemon-owned runtime record
+- Port the NFS frontend onto the namespace trait
+- Port the FUSE frontend onto the namespace trait
+- Multi-frontend registry over one shared namespace
+- Restartable out-of-process frontend with persisted filehandles
+- Drop the container-only --root-symlinks flag
+- Signal krunkit guest readiness over vsock once the FUSE mount serves
+- Add the slim omnifs-fuse frontend runner binary
+- Learn cold file sizes at lookup time
+- Register attached frontends in the frontend registry
+- Ship the out-of-process runner
+- Suppress macOS Spotlight indexing
+- Bound XDR bitmaps before allocation
+- Recover poisoned reconcile failures
+- Exclude operation prefix from readdir maxcount
+- Report stale readdir verifier
+- Publish listing before releasing slot
+- Persist frontend attach authority
+- Validate persisted attach authority
 ## [0.2.1] - 2026-06-08
 
 ### Fixed
