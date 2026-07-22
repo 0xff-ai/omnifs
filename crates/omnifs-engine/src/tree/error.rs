@@ -22,27 +22,6 @@ pub enum TreeErrorKind {
     Internal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RetryClass {
-    Retry,
-    Gone,
-    Terminal,
-    TooLarge,
-}
-
-impl TreeErrorKind {
-    pub fn retry_class(self) -> RetryClass {
-        match self {
-            Self::RateLimited | Self::Timeout | Self::Network => RetryClass::Retry,
-            Self::NotFound | Self::NotDirectory | Self::IsDirectory => RetryClass::Gone,
-            Self::TooLarge => RetryClass::TooLarge,
-            Self::PermissionDenied | Self::InvalidInput | Self::OfflineMiss | Self::Internal => {
-                RetryClass::Terminal
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{kind:?}: {message}")]
 pub struct TreeError {
