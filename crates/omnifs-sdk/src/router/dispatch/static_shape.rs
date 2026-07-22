@@ -8,8 +8,8 @@
 //! not advertise children it could never serve.
 
 use super::super::pattern::Pattern;
-use crate::browse::{Entry as BrowseEntry, EntryKind as BrowseEntryKind};
 use crate::file_attrs::FileProj;
+use crate::projection::{Entry, EntryKind};
 use crate::router::handlers::RouteValidator;
 use omnifs_core::path::Path;
 
@@ -29,9 +29,9 @@ impl<S> Shape<'_, S> {
     pub(in crate::router) fn static_entries_for_parent(
         &self,
         absolute_parent: &Path,
-    ) -> Vec<BrowseEntry> {
+    ) -> Vec<Entry> {
         let parent_segments: Vec<&str> = absolute_parent.segments().collect();
-        let mut entries = std::collections::BTreeMap::<String, BrowseEntry>::new();
+        let mut entries = std::collections::BTreeMap::<String, Entry>::new();
         for (pattern, validator, kind, ranged) in self.routes_extending_parent(&parent_segments) {
             let Some((name, extends_below)) = pattern.literal_child_after(&parent_segments) else {
                 continue;
@@ -47,12 +47,12 @@ impl<S> Shape<'_, S> {
                 continue;
             };
             entries.entry(name.to_string()).or_insert_with(|| {
-                if extends_below || matches!(kind, BrowseEntryKind::Directory) {
-                    BrowseEntry::dir(name)
+                if extends_below || matches!(kind, EntryKind::Directory) {
+                    Entry::dir(name)
                 } else if ranged {
-                    BrowseEntry::file(name, FileProj::ranged_listing_shape())
+                    Entry::projected_file(name, FileProj::ranged_listing_shape())
                 } else {
-                    BrowseEntry::file(name, FileProj::listing_shape())
+                    Entry::file(name)
                 }
             });
         }
@@ -84,7 +84,7 @@ impl<S> Shape<'_, S> {
         };
         self.static_entries_for_parent(&parent_abs)
             .iter()
-            .any(|entry| entry.name() == name && entry.kind() == BrowseEntryKind::Directory)
+            .any(|entry| entry.name() == name && entry.kind() == EntryKind::Directory)
     }
 
     /// Whether any route binds a capture or rest segment directly under the
@@ -102,22 +102,22 @@ impl<S> Shape<'_, S> {
     fn routes_extending_parent<'a>(
         &'a self,
         parent_segments: &'a [&'a str],
-    ) -> impl Iterator<Item = (&'a Pattern, &'a RouteValidator, BrowseEntryKind, bool)> + 'a {
+    ) -> impl Iterator<Item = (&'a Pattern, &'a RouteValidator, EntryKind, bool)> + 'a {
         let dirs = self
             .router
             .dirs
             .iter()
-            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory, false));
+            .map(|r| (&r.pattern, &r.validator, EntryKind::Directory, false));
         let files = self
             .router
             .files
             .iter()
-            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::File, r.ranged));
+            .map(|r| (&r.pattern, &r.validator, EntryKind::File, r.ranged));
         let objects = self
             .router
             .objects
             .iter()
-            .map(|r| (&r.pattern, &r.validator, BrowseEntryKind::Directory, false));
+            .map(|r| (&r.pattern, &r.validator, EntryKind::Directory, false));
         dirs.chain(files)
             .chain(objects)
             .filter(move |(pattern, _, _, _)| pattern.accepts_as_strict_ancestor(parent_segments))
