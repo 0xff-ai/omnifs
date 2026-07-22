@@ -378,13 +378,41 @@ async fn device_code_refresh_does_not_require_redirect_uri() {
 }
 
 #[tokio::test]
+async fn authorization_refreshes_credential_inside_refresh_window() {
+    let fake = FakeAuthServer::start(FakeBehavior::default()).await;
+    let (binding, _, _) = binding_with_oauth(fake.loopback_scheme(None), 30);
+
+    let authorization = binding
+        .authorization_for("https://api.example.test/resource")
+        .await
+        .unwrap();
+
+    assert_eq!(authorization.unwrap().1, "Bearer access-refresh-1");
+    assert_eq!(fake.refreshes(), 1);
+}
+
+#[tokio::test]
+async fn authorization_keeps_credential_outside_refresh_window() {
+    let fake = FakeAuthServer::start(FakeBehavior::default()).await;
+    let (binding, _, _) = binding_with_oauth(fake.loopback_scheme(None), 3600);
+
+    let authorization = binding
+        .authorization_for("https://api.example.test/resource")
+        .await
+        .unwrap();
+
+    assert_eq!(authorization.unwrap().1, "Bearer old-access");
+    assert_eq!(fake.refreshes(), 0);
+}
+
+#[tokio::test]
 async fn binding_rejection_single_flights_refresh() {
     let fake = FakeAuthServer::start(FakeBehavior {
         refresh_delay_ms: 50,
         ..FakeBehavior::default()
     })
     .await;
-    let (binding, store, id) = binding_with_oauth(fake.loopback_scheme(None));
+    let (binding, store, id) = binding_with_oauth(fake.loopback_scheme(None), 3600);
     seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
     binding
         .authorization_for("https://api.example.test/resource")
@@ -429,7 +457,7 @@ async fn binding_rejection_single_flights_refresh() {
 #[tokio::test]
 async fn report_rejected_403_bearer_invalid_token_refreshes() {
     let fake = FakeAuthServer::start(FakeBehavior::default()).await;
-    let (binding, store, id) = binding_with_oauth(fake.loopback_scheme(None));
+    let (binding, store, id) = binding_with_oauth(fake.loopback_scheme(None), 3600);
     seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
     binding
         .authorization_for("https://api.example.test/resource")
@@ -451,7 +479,7 @@ async fn report_rejected_403_bearer_invalid_token_refreshes() {
 #[tokio::test]
 async fn report_rejected_403_unrelated_challenge_does_not_refresh() {
     let fake = FakeAuthServer::start(FakeBehavior::default()).await;
-    let (binding, store, id) = binding_with_oauth(fake.loopback_scheme(None));
+    let (binding, store, id) = binding_with_oauth(fake.loopback_scheme(None), 3600);
     seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
     binding
         .authorization_for("https://api.example.test/resource")
@@ -645,7 +673,7 @@ async fn invalid_grant_refresh_needs_consent_and_keeps_stored_entry() {
         ..FakeBehavior::default()
     })
     .await;
-    let (binding, store, id) = binding_with_oauth(fake.loopback_scheme(None));
+    let (binding, store, id) = binding_with_oauth(fake.loopback_scheme(None), 3600);
     seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
     binding
         .authorization_for("https://api.example.test/resource")
@@ -709,6 +737,7 @@ fn device_code_login_request(scheme: OauthScheme) -> crate::request::DeviceCodeL
 
 fn binding_with_oauth(
     scheme: OauthScheme,
+    expires_in_seconds: i64,
 ) -> (Arc<AuthBinding>, Arc<dyn CredentialStore>, CredentialId) {
     let store: Arc<dyn CredentialStore> = Arc::new(MemoryStore::default());
     let http = reqwest::ClientBuilder::new()
@@ -721,7 +750,13 @@ fn binding_with_oauth(
         OAuthClient::from_http_client(http),
     ));
     let id = CredentialId::new("test-provider", "oauth", "default").unwrap();
-    seed_oauth(store.as_ref(), &id, "old-access", "refresh-1", 3600);
+    seed_oauth(
+        store.as_ref(),
+        &id,
+        "old-access",
+        "refresh-1",
+        expires_in_seconds,
+    );
     let binding = service
         .bind_oauth(
             id.clone(),
