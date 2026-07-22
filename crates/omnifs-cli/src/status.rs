@@ -123,8 +123,8 @@ pub(crate) fn frontend_table(frontends: &[FrontendStatus]) -> TableResources {
     for frontend in frontends {
         let mut row = TableRow::new(
             [
-                TableCell::new(frontend.filesystem.label()),
-                TableCell::new(frontend.runtime.label()),
+                TableCell::new(frontend.filesystem.as_str()),
+                TableCell::new(frontend.runtime.as_str()),
                 TableCell::new(
                     frontend
                         .location
@@ -247,8 +247,8 @@ mod tests {
         let inventory = Inventory::test(
             DaemonHealth::Running,
             vec![crate::inventory::FrontendStatus {
-                filesystem: crate::commands::frontend::FrontendFilesystem::Nfs,
-                runtime: crate::commands::frontend::FrontendRuntime::Host,
+                filesystem: omnifs_api::FsType::Nfs,
+                runtime: omnifs_api::FrontendRuntime::Host,
                 location: Some("/Users/raul/omnifs".into()),
                 state: crate::inventory::FrontendState::Attached,
                 scope: "all",
@@ -281,8 +281,8 @@ mod tests {
         let inventory = Inventory::test(
             DaemonHealth::Running,
             vec![crate::inventory::FrontendStatus {
-                filesystem: crate::commands::frontend::FrontendFilesystem::Nfs,
-                runtime: crate::commands::frontend::FrontendRuntime::Host,
+                filesystem: omnifs_api::FsType::Nfs,
+                runtime: omnifs_api::FrontendRuntime::Host,
                 location: Some("/Users/raul/omnifs".into()),
                 state: crate::inventory::FrontendState::Attached,
                 scope: "all",

@@ -4,13 +4,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use omnifs_api::DaemonStatus;
+use omnifs_api::{DaemonStatus, FrontendRuntime as Runtime, FsType as Filesystem};
 use omnifs_workspace::creds::CredentialStore;
 use omnifs_workspace::mounts::{Registry, Revision};
 use omnifs_workspace::provider::Catalog;
 
 use crate::client::DaemonClient;
-use crate::commands::frontend::{FrontendFilesystem as Filesystem, FrontendRuntime as Runtime};
 use crate::daemon_teardown::DaemonTeardown;
 use crate::inventory::{FrontendState, FrontendStatus, Inventory};
 use crate::mount_config::MountConfig;
@@ -360,14 +359,14 @@ impl FrontendTrack {
     }
 
     fn describe(&self) -> String {
-        format!("{} {}", self.filesystem.label(), self.runtime.label())
+        format!("{} {}", self.filesystem.as_str(), self.runtime.as_str())
     }
 
     fn restart_command(&self) -> String {
         format!(
             "omnifs frontend restart {} --runtime {}",
-            self.filesystem.label(),
-            self.runtime.label()
+            self.filesystem.as_str(),
+            self.runtime.as_str()
         )
     }
 }

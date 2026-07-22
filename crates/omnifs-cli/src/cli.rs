@@ -465,8 +465,8 @@ fn fresh_workspace_degradation(
         Some((
             format!(
                 "{} ({}) frontend is {}",
-                frontend.filesystem.label(),
-                frontend.runtime.label(),
+                frontend.filesystem.as_str(),
+                frontend.runtime.as_str(),
                 frontend.state.label()
             ),
             fix,
@@ -583,8 +583,8 @@ mod tests {
     #[test]
     fn fresh_workspace_screen_names_a_failed_frontend_while_daemon_is_up() {
         let frontend = crate::inventory::FrontendStatus {
-            filesystem: crate::commands::frontend::FrontendFilesystem::Fuse,
-            runtime: crate::commands::frontend::FrontendRuntime::Docker,
+            filesystem: omnifs_api::FsType::Fuse,
+            runtime: omnifs_api::FrontendRuntime::Docker,
             location: None,
             state: crate::inventory::FrontendState::Failed,
             scope: "all",

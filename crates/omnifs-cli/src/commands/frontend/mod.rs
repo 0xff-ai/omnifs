@@ -7,6 +7,30 @@
 mod discovery;
 mod lifecycle;
 
+pub(crate) fn fs_type_parser() -> impl clap::builder::TypedValueParser<Value = omnifs_api::FsType> {
+    use clap::builder::TypedValueParser as _;
+
+    clap::builder::PossibleValuesParser::new(["fuse", "nfs"]).map(|value| match value.as_str() {
+        "fuse" => omnifs_api::FsType::Fuse,
+        "nfs" => omnifs_api::FsType::Nfs,
+        _ => unreachable!("possible-values parser returned an unlisted filesystem"),
+    })
+}
+
+pub(crate) fn frontend_runtime_parser()
+-> impl clap::builder::TypedValueParser<Value = omnifs_api::FrontendRuntime> {
+    use clap::builder::TypedValueParser as _;
+
+    clap::builder::PossibleValuesParser::new(["host", "docker", "libkrun"]).map(|value| match value
+        .as_str()
+    {
+        "host" => omnifs_api::FrontendRuntime::Host,
+        "docker" => omnifs_api::FrontendRuntime::Docker,
+        "libkrun" => omnifs_api::FrontendRuntime::Libkrun,
+        _ => unreachable!("possible-values parser returned an unlisted runtime"),
+    })
+}
+
 /// Guest mount path shared by Docker and libkrun frontend runners.
 pub(crate) const GUEST_MOUNT: &str = "/omnifs";
 
@@ -47,9 +71,7 @@ impl FrontendArgs {
     }
 }
 
-pub(crate) use discovery::available_frontends;
+pub(crate) use discovery::{available_frontends, default_runtime};
 #[cfg(test)]
 pub(crate) use lifecycle::FrontendId;
-pub(crate) use lifecycle::{
-    FrontendEnableArgs, FrontendFilesystem, FrontendResult, FrontendResultState, FrontendRuntime,
-};
+pub(crate) use lifecycle::{FrontendEnableArgs, FrontendResult, FrontendResultState};

@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use clap::Args;
 
+use omnifs_api::{FrontendRuntime, FsType};
+
 use crate::commands::frontend::{
-    FrontendEnableArgs, FrontendFilesystem, FrontendResult, FrontendResultState, FrontendRuntime,
-    available_frontends,
+    FrontendEnableArgs, FrontendResult, FrontendResultState, available_frontends, default_runtime,
 };
 use crate::commands::mount::AddArgs;
 use crate::commands::up::UpArgs;
@@ -233,7 +234,7 @@ impl SetupArgs {
     async fn enable_frontends(
         workspace: &Workspace,
         output: &Output,
-        frontends: &[(FrontendFilesystem, FrontendRuntime)],
+        frontends: &[(FsType, FrontendRuntime)],
     ) -> Result<Vec<FrontendResult>> {
         let total = frontends.len();
         let key_width = Output::ledger_block_width(&["frontends"]);
@@ -351,25 +352,22 @@ fn split_requested_providers(
 
 /// Which frontends setup enables: every
 /// frontend supported on this OS, pre-checked at the platform's recommended
-/// default (`FrontendFilesystem::default_runtime`). `--yes`, `--no-input`,
+/// default (`FsType::default_runtime`). `--yes`, `--no-input`,
 /// and a non-interactive run all take that recommended default without
 /// prompting, mirroring `PromptMode::resolve`'s explicit/yes/no-input
 /// precedence even though a multi-select has no single "explicit" value to
 /// check. A free function (not a `SetupArgs` method): it needs only the
 /// invocation's output policy and prompt mode, never `SetupArgs` itself.
-fn select_frontends(
-    output: &Output,
-    prompt: PromptMode,
-) -> Result<Vec<(FrontendFilesystem, FrontendRuntime)>> {
+fn select_frontends(output: &Output, prompt: PromptMode) -> Result<Vec<(FsType, FrontendRuntime)>> {
     let available = available_frontends();
     if output.yes() || prompt.no_input || !prompt.interactive {
         return Ok(available
             .into_iter()
-            .filter(|&(filesystem, runtime)| filesystem.default_runtime() == runtime)
+            .filter(|&(filesystem, runtime)| default_runtime(filesystem) == runtime)
             .collect());
     }
     let choices = available.into_iter().map(|(filesystem, runtime)| {
-        let checked = filesystem.default_runtime() == runtime;
+        let checked = default_runtime(filesystem) == runtime;
         (
             FrontendChoice {
                 filesystem,
@@ -398,7 +396,7 @@ fn select_frontends(
 /// picker a real value type instead of a bare tuple.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FrontendChoice {
-    filesystem: FrontendFilesystem,
+    filesystem: FsType,
     runtime: FrontendRuntime,
 }
 
@@ -409,7 +407,7 @@ impl std::fmt::Display for FrontendChoice {
 }
 
 /// The frontend multi-select's option label (`nfs (host)`).
-fn frontend_label(filesystem: FrontendFilesystem, runtime: FrontendRuntime) -> String {
+fn frontend_label(filesystem: FsType, runtime: FrontendRuntime) -> String {
     format!("{filesystem} ({runtime})")
 }
 
@@ -417,19 +415,17 @@ fn frontend_label(filesystem: FrontendFilesystem, runtime: FrontendRuntime) -> S
 /// plain sentence naming what each filesystem/runtime combination actually
 /// is, since a first-run user has no other way to know the difference
 /// between, say, a libkrun and a Docker FUSE frontend.
-fn frontend_detail(filesystem: FrontendFilesystem, runtime: FrontendRuntime) -> &'static str {
+fn frontend_detail(filesystem: FsType, runtime: FrontendRuntime) -> &'static str {
     match (filesystem, runtime) {
-        (FrontendFilesystem::Nfs, FrontendRuntime::Host) => "Native mount, nothing to install.",
-        (FrontendFilesystem::Fuse, FrontendRuntime::Host) => {
-            "Native FUSE mount, nothing to install."
-        },
-        (FrontendFilesystem::Fuse, FrontendRuntime::Libkrun) => {
+        (FsType::Nfs, FrontendRuntime::Host) => "Native mount, nothing to install.",
+        (FsType::Fuse, FrontendRuntime::Host) => "Native FUSE mount, nothing to install.",
+        (FsType::Fuse, FrontendRuntime::Libkrun) => {
             "FUSE in a lightweight microVM, closest to Linux behavior."
         },
-        (FrontendFilesystem::Fuse, FrontendRuntime::Docker) => {
+        (FsType::Fuse, FrontendRuntime::Docker) => {
             "FUSE in a container, for containerized workflows."
         },
-        (FrontendFilesystem::Nfs, FrontendRuntime::Docker | FrontendRuntime::Libkrun) => {
+        (FsType::Nfs, FrontendRuntime::Docker | FrontendRuntime::Libkrun) => {
             "NFS is host-only; this combination is not offered."
         },
     }
@@ -600,10 +596,10 @@ mod tests {
         }
     }
 
-    fn expected_default_frontends() -> Vec<(FrontendFilesystem, FrontendRuntime)> {
+    fn expected_default_frontends() -> Vec<(FsType, FrontendRuntime)> {
         available_frontends()
             .into_iter()
-            .filter(|&(filesystem, runtime)| filesystem.default_runtime() == runtime)
+            .filter(|&(filesystem, runtime)| default_runtime(filesystem) == runtime)
             .collect()
     }
 
@@ -707,7 +703,7 @@ mod tests {
 
     fn host_frontend() -> crate::inventory::FrontendStatus {
         crate::inventory::FrontendStatus {
-            filesystem: FrontendFilesystem::Nfs,
+            filesystem: FsType::Nfs,
             runtime: FrontendRuntime::Host,
             location: Some(PathBuf::from("/Users/raulk/omnifs")),
             state: FrontendState::Attached,

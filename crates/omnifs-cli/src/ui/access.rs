@@ -12,9 +12,9 @@
 //! observed frontend at all names the enable command instead of claiming any
 //! path.
 
+use omnifs_api::FrontendRuntime as Runtime;
 use std::path::Path;
 
-use crate::commands::frontend::FrontendRuntime as Runtime;
 use crate::inventory::{FrontendStatus, Inventory};
 
 fn attached_frontends(inventory: &Inventory) -> Vec<&FrontendStatus> {
@@ -41,14 +41,14 @@ fn host_location_line(frontend: &FrontendStatus) -> String {
         .location
         .as_deref()
         .map_or_else(|| "~/omnifs".to_owned(), omnifs_workspace::display);
-    format!("Files at {location}  ({})", frontend.filesystem.label())
+    format!("Files at {location}  ({})", frontend.filesystem.as_str())
 }
 
 fn guest_shell_command(frontend: &FrontendStatus) -> String {
     format!(
         "omnifs frontend shell {} --runtime {}",
-        frontend.filesystem.label(),
-        frontend.runtime.label()
+        frontend.filesystem.as_str(),
+        frontend.runtime.as_str()
     )
 }
 
@@ -133,17 +133,17 @@ pub(crate) fn access_row(path: &crate::inventory::AccessPath) -> String {
     format!(
         "{}  ({} {})",
         omnifs_workspace::display(&path.path),
-        path.filesystem.label(),
-        path.runtime.label()
+        path.filesystem.as_str(),
+        path.runtime.as_str()
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::frontend::FrontendFilesystem as Filesystem;
     use crate::inventory::{AuthState, FrontendState, ServingState};
     use crate::inventory::{DaemonHealth, MountStatus, ProviderPin, ProviderPinState};
+    use omnifs_api::FsType as Filesystem;
     use omnifs_workspace::mounts::Name as MountName;
     use std::path::PathBuf;
 

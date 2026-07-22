@@ -6,10 +6,11 @@
 //! failed row. All narration stays on stderr. The commands own the side
 //! effects; this module owns the wire shape they settle into.
 
+use omnifs_api::FrontendRuntime as Runtime;
 use serde::Serialize;
 use std::path::PathBuf;
 
-use crate::commands::frontend::{FrontendResult, FrontendRuntime as Runtime};
+use crate::commands::frontend::FrontendResult;
 use crate::inventory::{AccessPath, FrontendStatus, Inventory};
 use crate::stages::MountInitStatus;
 use crate::ui::consent::{Outcome, Plan};
@@ -237,9 +238,9 @@ fn frontend_access_paths(inventory: &Inventory, rows: &[FrontendResult]) -> Vec<
 mod tests {
     use super::*;
     use crate::commands::frontend::FrontendResultState;
-    use crate::commands::frontend::{
-        FrontendFilesystem as Filesystem, FrontendId, FrontendRuntime as Runtime,
-    };
+    use omnifs_api::{FrontendRuntime as Runtime, FsType as Filesystem};
+
+    use crate::commands::frontend::FrontendId;
     use crate::inventory::{DaemonHealth, FrontendState};
 
     fn inventory_with_frontends(frontends: Vec<FrontendStatus>) -> Inventory {
