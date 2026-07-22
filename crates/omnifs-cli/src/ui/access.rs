@@ -170,7 +170,6 @@ mod tests {
             runtime,
             location: location.map(PathBuf::from),
             state,
-            scope: "all",
             mount_count: 1,
             fix: None,
         }

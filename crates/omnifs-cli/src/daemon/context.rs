@@ -228,7 +228,6 @@ impl DaemonContext {
             executable: self.process.executable.clone(),
             config_dir: self.daemon.config_dir().to_path_buf(),
             cache_dir: self.daemon.cache_dir(),
-            providers_dir: self.daemon.providers_dir(),
             frontends,
             mounts,
             offline: self.offline,

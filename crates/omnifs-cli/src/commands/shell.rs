@@ -151,7 +151,6 @@ mod tests {
                 runtime: FrontendRuntime::Docker,
                 location: Some(PathBuf::from("/omnifs")),
                 state,
-                scope: "all",
                 mount_count: 0,
                 fix: None,
             }],
@@ -236,7 +235,6 @@ mod tests {
             runtime: FrontendRuntime::Docker,
             location: Some(PathBuf::from("/omnifs-2")),
             state: FrontendState::Running,
-            scope: "all",
             mount_count: 0,
             fix: None,
         });

@@ -587,7 +587,6 @@ mod tests {
             runtime: omnifs_api::FrontendRuntime::Docker,
             location: None,
             state: crate::inventory::FrontendState::Failed,
-            scope: "all",
             mount_count: 0,
             fix: Some("omnifs logs (container exited)".to_owned()),
         };

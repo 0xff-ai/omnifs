@@ -136,7 +136,6 @@ mod tests {
             runtime: Runtime::Host,
             location: Some(PathBuf::from("/mnt/omnifs-test-home/omnifs")),
             state: FrontendState::Attached,
-            scope: "all",
             mount_count: 0,
             fix: None,
         });

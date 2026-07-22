@@ -1004,7 +1004,7 @@ fn status_and_frontend_observation_contract() {
         1,
         "expected one runner observation: {json}"
     );
-    assert_eq!(frontends[0]["scope"], "all");
+    assert!(frontends[0].get("scope").is_none());
     assert_eq!(frontends[0]["mount_count"], 0);
 
     let wide = fixture.run_with_env(
@@ -1053,7 +1053,7 @@ fn status_and_frontend_observation_contract() {
             && frontend["runtime"].as_str() == Some("host")
             && frontend["location"].as_str() == runner_location.to_str()
             && frontend["state"].as_str() == Some("running")
-            && frontend["scope"] == "all"
+            && frontend.get("scope").is_none()
             && frontend.get("source").is_none()
     }));
 
