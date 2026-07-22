@@ -79,61 +79,42 @@ fn hash8(path: &Path) -> String {
     hex::encode(&digest.as_bytes()[..4])
 }
 
-/// Everything [`FrontendContainerSpec::build_body`] needs, gathered so the
-/// no-credentials contract (see `docs/contracts/50-control-plane.md`) is
-/// visible at one call site: no binds, no `OMNIFS_HOME`, no docker.sock, no
-/// SSH agent, no published ports.
-pub(crate) struct FrontendContainerSpec<'a> {
-    pub image: &'a ImageRef,
-    /// The workspace's config dir, recorded as a label only (never bind-mounted).
-    pub home: &'a Path,
-    /// The host-native daemon's TCP namespace attach port. The container
-    /// dials it at `host.docker.internal:<port>`, the Docker-injected DNS
-    /// name for the host, not a literal address the CLI could resolve ahead
-    /// of time.
-    pub attach_port: u16,
-    /// `--add-host host.docker.internal:host-gateway`: required on Linux,
-    /// where Docker does not predefine the name; Docker Desktop (macOS)
-    /// already resolves it without this flag.
-    pub add_host_gateway: bool,
-}
+/// Build the credential-free frontend container body: no binds, `OMNIFS_HOME`,
+/// Docker socket, SSH agent, or published ports.
+pub(crate) fn build_frontend_container_body(
+    image: &ImageRef,
+    home: &Path,
+    attach_port: u16,
+    add_host_gateway: bool,
+) -> ContainerCreateBody {
+    let mut labels = HashMap::new();
+    labels.insert(FRONTEND_HOME_LABEL.to_string(), home.display().to_string());
 
-impl FrontendContainerSpec<'_> {
-    pub(crate) fn build_body(&self) -> ContainerCreateBody {
-        let mut labels = HashMap::new();
-        labels.insert(
-            FRONTEND_HOME_LABEL.to_string(),
-            self.home.display().to_string(),
-        );
+    let extra_hosts =
+        add_host_gateway.then(|| vec!["host.docker.internal:host-gateway".to_string()]);
 
-        let extra_hosts = self
-            .add_host_gateway
-            .then(|| vec!["host.docker.internal:host-gateway".to_string()]);
+    let host_config = HostConfig {
+        devices: Some(vec![DeviceMapping {
+            path_on_host: Some("/dev/fuse".to_string()),
+            path_in_container: Some("/dev/fuse".to_string()),
+            cgroup_permissions: Some("rwm".to_string()),
+        }]),
+        cap_add: Some(vec!["SYS_ADMIN".to_string()]),
+        security_opt: Some(vec!["apparmor:unconfined".to_string()]),
+        extra_hosts,
+        ..Default::default()
+    };
 
-        let host_config = HostConfig {
-            devices: Some(vec![DeviceMapping {
-                path_on_host: Some("/dev/fuse".to_string()),
-                path_in_container: Some("/dev/fuse".to_string()),
-                cgroup_permissions: Some("rwm".to_string()),
-            }]),
-            cap_add: Some(vec!["SYS_ADMIN".to_string()]),
-            security_opt: Some(vec!["apparmor:unconfined".to_string()]),
-            extra_hosts,
-            ..Default::default()
-        };
+    let env = vec![format!(
+        "{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:{attach_port}"
+    )];
 
-        let env = vec![format!(
-            "{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:{}",
-            self.attach_port
-        )];
-
-        ContainerCreateBody {
-            image: Some(self.image.as_str().to_string()),
-            env: Some(env),
-            labels: Some(labels),
-            host_config: Some(host_config),
-            ..Default::default()
-        }
+    ContainerCreateBody {
+        image: Some(image.as_str().to_string()),
+        env: Some(env),
+        labels: Some(labels),
+        host_config: Some(host_config),
+        ..Default::default()
     }
 }
 
@@ -275,13 +256,7 @@ mod tests {
     #[test]
     fn container_body_carries_no_binds_and_the_two_attach_vars() {
         let image = ImageRef::new("omnifs-frontend:dev").unwrap();
-        let spec = FrontendContainerSpec {
-            image: &image,
-            home: Path::new("/home/u/.omnifs"),
-            attach_port: 54321,
-            add_host_gateway: true,
-        };
-        let body = spec.build_body();
+        let body = build_frontend_container_body(&image, Path::new("/home/u/.omnifs"), 54321, true);
 
         assert_eq!(body.image.as_deref(), Some("omnifs-frontend:dev"));
 
@@ -319,13 +294,7 @@ mod tests {
     #[test]
     fn macos_omits_add_host_gateway() {
         let image = ImageRef::new("omnifs-frontend:dev").unwrap();
-        let spec = FrontendContainerSpec {
-            image: &image,
-            home: Path::new("/home/u/.omnifs"),
-            attach_port: 1,
-            add_host_gateway: false,
-        };
-        let body = spec.build_body();
+        let body = build_frontend_container_body(&image, Path::new("/home/u/.omnifs"), 1, false);
         assert_eq!(body.host_config.unwrap().extra_hosts, None);
     }
 

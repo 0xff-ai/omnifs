@@ -20,7 +20,7 @@ use futures_util::TryStreamExt;
 
 use crate::commands::frontend::GUEST_MOUNT;
 use crate::error::WithHint;
-use crate::frontend_container::{FrontendContainerSpec, assert_locked_down};
+use crate::frontend_container::{assert_locked_down, build_frontend_container_body};
 use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
 use crate::ui::output::{Output, OutputMode};
 
@@ -110,46 +110,34 @@ pub(crate) struct DockerClient {
     output: Output,
 }
 
-/// The Docker frontend runner, using a client already scoped to its target.
-pub(crate) struct DockerRunner {
-    client: DockerClient,
-}
-
-impl DockerRunner {
-    pub(crate) fn new(client: DockerClient) -> Self {
-        Self { client }
-    }
-
+impl DockerClient {
     pub(crate) async fn launch(&self, home: &std::path::Path, attach_port: u16) -> Result<()> {
-        let body = FrontendContainerSpec {
-            image: self.client.image(),
+        let body = build_frontend_container_body(
+            self.image(),
             home,
             attach_port,
-            add_host_gateway: cfg!(target_os = "linux"),
-        }
-        .build_body();
-        self.client.launch_frontend_container(body).await?;
+            cfg!(target_os = "linux"),
+        );
+        self.launch_frontend_container(body).await?;
 
-        let (mounts, env) = self.client.inspect_mounts_and_env().await?;
+        let (mounts, env) = self.inspect_mounts_and_env().await?;
         if let Err(violation) = assert_locked_down(&mounts, &env) {
-            let _ = self.client.remove().await;
+            let _ = self.remove().await;
             anyhow::bail!("refusing to run the frontend container: {violation}");
         }
         Ok(())
     }
 
     pub(crate) async fn mount_ready(&self, path: &str) -> Result<bool> {
-        self.client.exec_path_exists(path).await
+        self.exec_path_exists(path).await
     }
 
     pub(crate) async fn is_running(&self) -> Result<Option<bool>> {
-        self.client
-            .container_running(self.client.container_name())
-            .await
+        self.container_running(self.container_name()).await
     }
 
     pub(crate) async fn tear_down(&self) -> Result<()> {
-        self.client.remove().await
+        self.remove().await
     }
 
     pub(crate) fn shell_command(
@@ -167,7 +155,7 @@ impl DockerRunner {
         command
             .arg("-w")
             .arg(GUEST_MOUNT)
-            .arg(self.client.container_name().as_str());
+            .arg(self.container_name().as_str());
         if trailing.is_empty() {
             command.arg(shell_override.unwrap_or("/bin/sh"));
         } else {
@@ -196,10 +184,8 @@ impl DockerClient {
         })
     }
 
-    /// This runtime's own container identity, e.g. so
-    /// [`DockerRunner`] can probe/remove/shell into
-    /// the container it was constructed for without threading the name back
-    /// in from the caller.
+    /// This runtime's own container identity, so lifecycle operations do not
+    /// thread the name back in from each caller.
     pub(crate) fn container_name(&self) -> &ContainerName {
         self.target.container_name()
     }
