@@ -1,11 +1,10 @@
 //! Typestate projections: what handlers return.
 //!
 //! [`FileProjection`] is the author-facing file projection. Its byte-source
-//! constructor fixes a typestate marker (`Inline`/`Body`/`Full`/`Ranged`/
-//! `Blob`/`Deferred`) that gates which finishers are legal: `.live()`
-//! exists only on a `Ranged` source, and a `Deferred` source cannot `.build()`
-//! until its read mode is chosen. Invalid combinations (`Live+Inline`,
-//! `Live+Full`, deferred-without-read-mode) are therefore unrepresentable.
+//! constructor fixes a typestate marker (`Inline`/`Body`/`Ranged`/`Blob`)
+//! that gates which finishers are legal: `.live()` exists only on a `Ranged`
+//! source. Invalid combinations such as `Live+Inline` are therefore
+//! unrepresentable.
 //!
 //! [`DirListing`] is the author-facing raw directory listing: what an
 //! `r.dir("/path").handler(fn)` route returns for plain, non-object child
@@ -118,14 +117,6 @@ impl FileProjection {
             .build()
     }
 
-    /// Read on demand; resolve the read mode with `.full()` or `.ranged()`
-    /// before `.build()`.
-    pub fn deferred(size: Size) -> FileProjBuilder<Deferred> {
-        // Read mode is provisional until `.full()`/`.ranged()` resolves it; the
-        // `Deferred` marker withholds `Buildable` until then.
-        FileProjBuilder::new(FileSource::Deferred(ReadMode::Full), size)
-    }
-
     /// Live or large; served by the ranged session path. The only source that
     /// may be `.live()`.
     pub fn ranged(reader: impl RangeReader + 'static) -> FileProjBuilder<Ranged> {
@@ -218,21 +209,16 @@ impl FileProjection {
     }
 }
 
-// Byte-source typestate markers. Only `Ranged` is `Live`-eligible; only
-// `Buildable` states may `.build()`, so a bare `Deferred` cannot.
+// Byte-source typestate markers. Only `Ranged` is `Live`-eligible.
 pub struct Inline;
 pub struct Body;
-pub struct Full;
 pub struct Ranged;
 pub struct Blob;
-pub struct Deferred;
 
-/// Source states that may be finished with `.build()`. `Deferred` is absent: a
-/// deferred source must resolve its read mode first.
+/// Source states that may be finished with `.build()`.
 pub trait Buildable {}
 impl Buildable for Inline {}
 impl Buildable for Body {}
-impl Buildable for Full {}
 impl Buildable for Ranged {}
 impl Buildable for Blob {}
 
@@ -255,17 +241,6 @@ impl<Src> FileProjBuilder<Src> {
             content_type: None,
             effects: Effects::new(),
             extra_files: Vec::new(),
-            _src: core::marker::PhantomData,
-        }
-    }
-
-    fn retag<New>(self) -> FileProjBuilder<New> {
-        FileProjBuilder {
-            source: self.source,
-            attrs: self.attrs,
-            content_type: self.content_type,
-            effects: self.effects,
-            extra_files: self.extra_files,
             _src: core::marker::PhantomData,
         }
     }
@@ -314,19 +289,6 @@ impl<Src> FileProjBuilder<Src> {
     pub fn with_effects(mut self, effects: Effects) -> Self {
         self.effects.extend(effects);
         self
-    }
-}
-
-// A `Deferred` source must resolve its read mode before it is `Buildable`.
-impl FileProjBuilder<Deferred> {
-    pub fn full(mut self) -> FileProjBuilder<Full> {
-        self.source = FileSource::Deferred(ReadMode::Full);
-        self.retag()
-    }
-
-    pub fn ranged(mut self) -> FileProjBuilder<Ranged> {
-        self.source = FileSource::Deferred(ReadMode::Ranged);
-        self.retag()
     }
 }
 

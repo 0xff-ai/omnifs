@@ -4,7 +4,7 @@
 //! ([`crate::projection::DirListing`], [`crate::projection::FileProjection`])
 //! and the generated WIT protocol; the router lowers handler returns onto
 //! them. Most provider code only meets [`Effects`] and
-//! [`ReadOutcome`] (re-exported in the prelude); reach for [`Lookup`],
+//! [`ReadOutcome`]; reach for [`Lookup`],
 //! [`Listing`], or [`FileContent`] directly only when building custom
 //! object leaves or lowering glue.
 //!

@@ -1,5 +1,5 @@
 pub use crate::NoConfig;
-pub use crate::browse::{Effects, ReadOutcome};
+pub use crate::browse::Effects;
 pub use crate::captures::{Captures, FromCaptures, PathSegment};
 pub use crate::collection::{
     Collection, CollectionEntry, CollectionPage, Cursor as ListCursor, ListCx, NoCursor, PageCursor,
@@ -12,8 +12,7 @@ pub use crate::endpoint::{
 };
 pub use crate::error::{ProviderError, ProviderErrorKind, Result};
 pub use crate::file_attrs::{
-    FileAttrs, FileProj, MAX_PROJECTED_BYTES, MAX_VERSION_TOKEN_BYTES, ProjBytes, ReadFileBytes,
-    ReadMode, Size, Stability, VersionToken,
+    FileAttrs, MAX_PROJECTED_BYTES, MAX_VERSION_TOKEN_BYTES, Size, Stability, VersionToken,
 };
 pub use crate::handler::{
     Cursor, DirCx, DirIntent, FileChunk, MemoryRangeReader, RangeReader, TreeRef,
