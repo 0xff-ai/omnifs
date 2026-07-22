@@ -1,19 +1,10 @@
 //! Mount configuration to startup-owned auth binding.
 
-use omnifs_auth::{AuthBinding, AuthError, CredentialService, OAuthClient, OAuthRequest};
+use omnifs_auth::{AuthBinding, AuthError, CredentialService, OAuthRequest};
 use omnifs_workspace::authn::{AuthKind, AuthManifest, CredentialId, SchemeResolveError};
-use omnifs_workspace::creds::{CredentialStore, FileStore};
 use omnifs_workspace::ids::ProviderName;
 use omnifs_workspace::mounts::Auth;
-use std::path::Path;
 use std::sync::Arc;
-
-pub(crate) fn credential_service_for_file(
-    credentials_file: &Path,
-) -> Result<Arc<CredentialService>, InjectError> {
-    let store: Arc<dyn CredentialStore> = Arc::new(FileStore::new(credentials_file));
-    Ok(Arc::new(CredentialService::new(store, OAuthClient::new()?)))
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum InjectError {

@@ -225,8 +225,6 @@ pub struct DirEntry {
 #[derive(Debug, Clone)]
 pub struct DirListing {
     pub entries: Vec<DirEntry>,
-    pub exhaustive: bool,
-    pub validator: Option<String>,
     pub next_cursor: Option<CachedCursor>,
 }
 
