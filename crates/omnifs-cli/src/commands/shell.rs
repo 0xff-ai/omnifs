@@ -4,8 +4,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
+use omnifs_api::{FrontendRuntime, FsType};
 
-use crate::commands::frontend::{FrontendFilesystem, FrontendRuntime};
+use crate::commands::frontend::{frontend_runtime_parser, fs_type_parser};
 use crate::docker::{ContainerName, DockerClient, DockerRunner, DockerTarget};
 use crate::frontend_container::{FRONTEND_DEV_IMAGE, frontend_container_name};
 use crate::inventory::{FrontendState, Inventory};
@@ -16,11 +17,11 @@ use omnifs_workspace::Workspace;
 #[derive(Args, Debug, Clone)]
 pub struct ShellArgs {
     /// Filesystem exposed by the frontend.
-    #[arg(value_enum)]
-    pub filesystem: Option<FrontendFilesystem>,
+    #[arg(value_parser = fs_type_parser())]
+    pub filesystem: FsType,
     /// Guest runtime hosting the frontend.
-    #[arg(long, value_enum)]
-    pub runtime: Option<FrontendRuntime>,
+    #[arg(long, value_parser = frontend_runtime_parser())]
+    pub runtime: FrontendRuntime,
     /// Shell to launch (defaults to the guest's `/bin/sh`).
     #[arg(long)]
     pub shell: Option<String>,
@@ -34,6 +35,18 @@ impl ShellArgs {
         if output.is_structured() {
             bail!("frontend shell is a passthrough command and only supports human output");
         }
+        ensure!(
+            self.filesystem == FsType::Fuse,
+            "frontend shell currently supports only the fuse filesystem"
+        );
+        ensure!(
+            matches!(
+                self.runtime,
+                FrontendRuntime::Docker | FrontendRuntime::Libkrun
+            ),
+            "frontend shell is available only for docker and libkrun; host mounts are already available in your ordinary shell"
+        );
+
         let workspace = Workspace::resolve()?;
         let inventory = Inventory::collect(&workspace).await?;
         let (_, runtime) = resolve_observed_guest(&inventory, self.filesystem, self.runtime)?;
@@ -73,22 +86,11 @@ impl ShellArgs {
 
 fn resolve_observed_guest(
     inventory: &Inventory,
-    filesystem: Option<FrontendFilesystem>,
-    runtime: Option<FrontendRuntime>,
-) -> Result<(FrontendFilesystem, FrontendRuntime)> {
-    if runtime == Some(FrontendRuntime::Host) {
-        bail!(
-            "frontend shell is available only for docker and libkrun; host mounts are already available in your ordinary shell"
-        );
-    }
-    if let (Some(filesystem), Some(runtime)) = (filesystem, runtime) {
-        ensure!(
-            runtime.supports(filesystem),
-            "a {filesystem}/{runtime} frontend is not supported on {}",
-            std::env::consts::OS
-        );
-    }
-
+    filesystem: FsType,
+    runtime: FrontendRuntime,
+) -> Result<()> {
+    let identity = format!("{filesystem}/{runtime}");
+    let remedy = format!("omnifs frontend enable {filesystem} --runtime {runtime}");
     let matches = inventory
         .frontends
         .iter()
@@ -182,7 +184,7 @@ mod tests {
                 runtime: None,
             },
             frontends: vec![FrontendStatus {
-                filesystem: FrontendFilesystem::Fuse,
+                filesystem: FsType::Fuse,
                 runtime: FrontendRuntime::Docker,
                 location: Some(PathBuf::from("/omnifs")),
                 state,
@@ -216,8 +218,8 @@ mod tests {
         let crate::commands::frontend::FrontendCommand::Shell(args) = args.command else {
             panic!("expected frontend shell command");
         };
-        assert_eq!(args.filesystem, Some(FrontendFilesystem::Fuse));
-        assert_eq!(args.runtime, Some(FrontendRuntime::Docker));
+        assert_eq!(args.filesystem, FsType::Fuse);
+        assert_eq!(args.runtime, FrontendRuntime::Docker);
         assert_eq!(args.shell.as_deref(), Some("/bin/bash"));
         assert_eq!(args.command, vec!["pwd"]);
 
@@ -256,8 +258,8 @@ mod tests {
             assert!(
                 resolve_observed_guest(
                     &inventory_with(state),
-                    Some(FrontendFilesystem::Fuse),
-                    None,
+                    FsType::Fuse,
+                    FrontendRuntime::Docker
                 )
                 .is_ok_and(|identity| {
                     identity == (FrontendFilesystem::Fuse, FrontendRuntime::Docker)
@@ -291,10 +293,16 @@ mod tests {
             frontends: Vec::new(),
             ..inventory_with(FrontendState::Attached)
         };
-        let error = resolve_observed_guest(
-            &absent,
-            Some(FrontendFilesystem::Fuse),
-            Some(FrontendRuntime::Docker),
+        let error = ensure_observed_guest(&absent, FsType::Fuse, FrontendRuntime::Docker)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("fuse/docker"));
+        assert!(error.contains("omnifs frontend enable fuse --runtime docker"));
+
+        let failed = ensure_observed_guest(
+            &inventory_with(FrontendState::Failed),
+            FsType::Fuse,
+            FrontendRuntime::Docker,
         )
         .unwrap_err()
         .to_string();
@@ -317,7 +325,7 @@ mod tests {
 
         let mut ambiguous = inventory_with(FrontendState::Attached);
         ambiguous.frontends.push(FrontendStatus {
-            filesystem: FrontendFilesystem::Fuse,
+            filesystem: FsType::Fuse,
             runtime: FrontendRuntime::Docker,
             location: Some(PathBuf::from("/omnifs-2")),
             state: FrontendState::Running,
@@ -325,23 +333,9 @@ mod tests {
             mount_count: 0,
             fix: None,
         });
-        let error = resolve_observed_guest(&ambiguous, Some(FrontendFilesystem::Fuse), None)
+        let error = ensure_observed_guest(&ambiguous, FsType::Fuse, FrontendRuntime::Docker)
             .unwrap_err()
             .to_string();
         assert!(error.contains("ambiguous"));
-    }
-
-    #[test]
-    fn observed_selection_reports_an_unsupported_pair_before_shell_support() {
-        let error = resolve_observed_guest(
-            &inventory_with(FrontendState::Attached),
-            Some(FrontendFilesystem::Nfs),
-            Some(FrontendRuntime::Libkrun),
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("nfs/libkrun"));
-        assert!(error.contains("not supported"));
-        assert!(!error.contains("only the fuse filesystem"));
     }
 }

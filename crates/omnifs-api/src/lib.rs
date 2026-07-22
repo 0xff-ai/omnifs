@@ -148,19 +148,25 @@ pub enum HealthState {
     Unhealthy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FsType {
     Fuse,
     Nfs,
 }
 
+impl FsType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fuse => "fuse",
+            Self::Nfs => "nfs",
+        }
+    }
+}
+
 impl std::fmt::Display for FsType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Fuse => f.write_str("fuse"),
-            Self::Nfs => f.write_str("nfs"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -181,7 +187,7 @@ pub struct FrontendInfo {
 /// How a frontend is delivered to the shared namespace. Assigned by the host
 /// at bind time per listener, never
 /// self-reported by the connecting guest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FrontendRuntime {
     /// Attached over the fixed `frontends/local.sock` Unix domain socket.
@@ -194,13 +200,19 @@ pub enum FrontendRuntime {
     Libkrun,
 }
 
-impl std::fmt::Display for FrontendRuntime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+impl FrontendRuntime {
+    pub const fn as_str(self) -> &'static str {
+        match self {
             Self::Host => "host",
             Self::Docker => "docker",
             Self::Libkrun => "libkrun",
-        })
+        }
+    }
+}
+
+impl std::fmt::Display for FrontendRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

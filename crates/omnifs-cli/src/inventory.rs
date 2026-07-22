@@ -5,7 +5,7 @@
 //! verdict decisions below are pure.
 
 use anyhow::Result;
-use omnifs_api::{DaemonStatus, FrontendRuntime, FsType, HealthState};
+use omnifs_api::{DaemonStatus, FrontendRuntime as Runtime, FsType as Filesystem, HealthState};
 use omnifs_mtab::{MountKind, MountState};
 use omnifs_workspace::creds::FileStore;
 use omnifs_workspace::daemon_record::DaemonRecord;
@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 use crate::auth::{AuthReadiness, MountAuth};
 #[cfg(target_os = "macos")]
 use crate::commands::frontend::GUEST_MOUNT;
-use crate::commands::frontend::{FrontendFilesystem as Filesystem, FrontendRuntime as Runtime};
 use crate::provider_warmup::WarmupStatus;
 use omnifs_workspace::Workspace;
 
@@ -686,8 +685,8 @@ pub(crate) fn frontend_statuses(
                 FrontendState::Attached
             };
             FrontendStatus {
-                filesystem: observed.fs_type.into(),
-                runtime: observed.runtime.into(),
+                filesystem: observed.fs_type,
+                runtime: observed.runtime,
                 location: Some(observed.mount_point.clone()),
                 state,
                 scope: "all",
@@ -986,28 +985,10 @@ fn derive_serving_state(observation: MountObservation) -> ServingState {
     }
 }
 
-impl From<FsType> for Filesystem {
-    fn from(value: FsType) -> Self {
-        match value {
-            FsType::Fuse => Filesystem::Fuse,
-            FsType::Nfs => Filesystem::Nfs,
-        }
-    }
-}
-
-impl From<FrontendRuntime> for Runtime {
-    fn from(value: FrontendRuntime) -> Self {
-        match value {
-            FrontendRuntime::Host => Runtime::Host,
-            FrontendRuntime::Docker => Runtime::Docker,
-            FrontendRuntime::Libkrun => Runtime::Libkrun,
-        }
-    }
-}
 fn frontend_cmp(left: &FrontendStatus, right: &FrontendStatus) -> Ordering {
     left.runtime
         .cmp(&right.runtime)
-        .then_with(|| left.filesystem.label().cmp(right.filesystem.label()))
+        .then_with(|| left.filesystem.as_str().cmp(right.filesystem.as_str()))
         .then_with(|| left.location.cmp(&right.location))
 }
 

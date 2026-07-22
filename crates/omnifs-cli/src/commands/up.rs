@@ -117,8 +117,8 @@ async fn emit_receipt(workspace: &Workspace, output: Output) -> anyhow::Result<E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::frontend::{FrontendFilesystem as Filesystem, FrontendRuntime as Runtime};
     use crate::inventory::{DaemonHealth, FrontendState, FrontendStatus};
+    use omnifs_api::{FrontendRuntime as Runtime, FsType as Filesystem};
     use omnifs_workspace::mounts::Revision;
     use std::path::PathBuf;
 

@@ -1,52 +1,44 @@
 //! Frontend support discovery and listing.
 
+use omnifs_api::{FrontendRuntime, FsType};
 use serde::Serialize;
 
-use super::lifecycle::{FrontendFilesystem, FrontendRuntime};
 use crate::docker::DockerClient;
-use crate::host_runner::{HostRunner, LocalProtocol};
+use crate::host_runner::HostRunner;
 use crate::inventory::{FrontendStatus, Inventory};
 use crate::libkrun_runner::LibkrunRunner;
 use crate::ui::output::{Output, ResultVerdict};
 use omnifs_workspace::Workspace;
 
-impl FrontendFilesystem {
-    const ALL: [Self; 2] = [Self::Fuse, Self::Nfs];
+const FS_TYPES: [FsType; 2] = [FsType::Fuse, FsType::Nfs];
+const RUNTIMES: [FrontendRuntime; 3] = [
+    FrontendRuntime::Host,
+    FrontendRuntime::Docker,
+    FrontendRuntime::Libkrun,
+];
 
-    /// `pub(crate)`, not `pub(super)`: `omnifs setup`'s frontend multi-select
-    /// (`commands::setup`, a sibling of `commands::frontend`) reads this to
-    /// pre-check the platform's recommended default alongside every other
-    /// caller inside `commands::frontend` itself.
-    pub(crate) fn default_runtime(self) -> Option<FrontendRuntime> {
-        Platform::current().default_runtime(self)
+/// The platform's recommended runtime for one filesystem.
+pub(crate) const fn default_runtime(filesystem: FsType) -> FrontendRuntime {
+    match filesystem {
+        FsType::Fuse if cfg!(target_os = "macos") => FrontendRuntime::Libkrun,
+        FsType::Fuse | FsType::Nfs => FrontendRuntime::Host,
     }
 }
 
-impl FrontendRuntime {
-    const ALL: [Self; 3] = [Self::Host, Self::Docker, Self::Libkrun];
-
-    pub(crate) fn supports(self, filesystem: FrontendFilesystem) -> bool {
-        Platform::current().supports(filesystem, self)
-    }
-
-    const fn instances(self) -> InstancePolicy {
-        match self {
-            Self::Host => InstancePolicy::MultipleLocations,
-            Self::Docker | Self::Libkrun => InstancePolicy::OnePerWorkspace,
-        }
-    }
+pub(super) fn supports(filesystem: FsType, runtime: FrontendRuntime) -> bool {
+    Platform::current().supports(filesystem, runtime)
 }
 
-/// Every filesystem/runtime pair supported on this OS, in `FrontendFilesystem`
+/// Every filesystem/runtime pair supported on this OS, in `FsType`
 /// then `FrontendRuntime` enumeration order. The single owner of "which
 /// frontends exist on this platform": `frontend ls`'s support table and
 /// `omnifs setup`'s frontend multi-select both read this rather than each
 /// re-deriving the platform table.
-pub(crate) fn available_frontends() -> Vec<(FrontendFilesystem, FrontendRuntime)> {
+pub(crate) fn available_frontends() -> Vec<(FsType, FrontendRuntime)> {
     let platform = Platform::current();
     let mut out = Vec::new();
-    for filesystem in FrontendFilesystem::ALL {
-        for runtime in FrontendRuntime::ALL {
+    for filesystem in FS_TYPES {
+        for runtime in RUNTIMES {
             if platform.supports(filesystem, runtime) {
                 out.push((filesystem, runtime));
             }
@@ -69,28 +61,20 @@ impl Platform {
         }
     }
 
-    fn supports(self, filesystem: FrontendFilesystem, runtime: FrontendRuntime) -> bool {
-        match (self.os, filesystem, runtime) {
-            ("macos", FrontendFilesystem::Fuse, FrontendRuntime::Libkrun) => self.arch == "aarch64",
-            ("macos", FrontendFilesystem::Fuse, FrontendRuntime::Docker)
-            | ("macos", FrontendFilesystem::Nfs, FrontendRuntime::Host)
-            | (
-                "linux",
-                FrontendFilesystem::Fuse,
-                FrontendRuntime::Host | FrontendRuntime::Docker,
-            ) => true,
-            _ => false,
-        }
-    }
-
-    fn default_runtime(self, filesystem: FrontendFilesystem) -> Option<FrontendRuntime> {
-        match (self.os, self.arch, filesystem) {
-            ("macos", "aarch64", FrontendFilesystem::Fuse) => Some(FrontendRuntime::Libkrun),
-            ("macos", _, FrontendFilesystem::Nfs) | ("linux", _, FrontendFilesystem::Fuse) => {
-                Some(FrontendRuntime::Host)
-            },
-            _ => None,
-        }
+    fn supports(self, filesystem: FsType, runtime: FrontendRuntime) -> bool {
+        matches!(
+            (self.os, filesystem, runtime),
+            (
+                "macos",
+                FsType::Fuse,
+                FrontendRuntime::Docker | FrontendRuntime::Libkrun
+            ) | ("macos", FsType::Nfs, FrontendRuntime::Host)
+                | (
+                    "linux",
+                    FsType::Fuse,
+                    FrontendRuntime::Host | FrontendRuntime::Docker
+                )
+        )
     }
 
     fn label(self) -> String {
@@ -119,9 +103,16 @@ impl InstancePolicy {
     }
 }
 
+const fn instance_policy(runtime: FrontendRuntime) -> InstancePolicy {
+    match runtime {
+        FrontendRuntime::Host => InstancePolicy::MultipleLocations,
+        FrontendRuntime::Docker | FrontendRuntime::Libkrun => InstancePolicy::OnePerWorkspace,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct FrontendSupport {
-    filesystem: FrontendFilesystem,
+    filesystem: FsType,
     runtime: FrontendRuntime,
     default: bool,
     instances: InstancePolicy,
@@ -130,13 +121,10 @@ struct FrontendSupport {
 }
 
 impl FrontendSupport {
-    async fn inspect(filesystem: FrontendFilesystem, runtime: FrontendRuntime) -> Self {
-        let default = filesystem.default_runtime() == Some(runtime);
+    async fn inspect(filesystem: FsType, runtime: FrontendRuntime) -> Self {
+        let default = default_runtime(filesystem) == runtime;
         let readiness = match runtime {
-            FrontendRuntime::Host => HostRunner::probe(match filesystem {
-                FrontendFilesystem::Fuse => LocalProtocol::Fuse,
-                FrontendFilesystem::Nfs => LocalProtocol::Nfs,
-            }),
+            FrontendRuntime::Host => HostRunner::probe(filesystem),
             FrontendRuntime::Docker => DockerClient::probe().await,
             FrontendRuntime::Libkrun => LibkrunRunner::probe(),
         };
@@ -153,7 +141,7 @@ impl FrontendSupport {
             filesystem,
             runtime,
             default,
-            instances: runtime.instances(),
+            instances: instance_policy(runtime),
             available,
             detail,
         }
@@ -208,8 +196,8 @@ impl FrontendList {
             };
             table.push(ResourceRow::new(
                 [
-                    Cell::new(support.filesystem.label()),
-                    Cell::new(support.runtime.label()),
+                    Cell::new(support.filesystem.as_str()),
+                    Cell::new(support.runtime.as_str()),
                     Cell::new(if support.default { "yes" } else { "no" }),
                     Cell::new(support.instances.label()),
                     Cell::state(state.clone()),
@@ -260,45 +248,24 @@ mod tests {
             os: "macos",
             arch: "aarch64",
         };
-        assert!(macos.supports(FrontendFilesystem::Fuse, FrontendRuntime::Libkrun));
-        assert!(macos.supports(FrontendFilesystem::Fuse, FrontendRuntime::Docker));
-        assert!(macos.supports(FrontendFilesystem::Nfs, FrontendRuntime::Host));
-        assert!(!macos.supports(FrontendFilesystem::Fuse, FrontendRuntime::Host));
-        assert_eq!(
-            macos.default_runtime(FrontendFilesystem::Fuse),
-            Some(FrontendRuntime::Libkrun)
-        );
-
-        let intel_macos = Platform {
-            os: "macos",
-            arch: "x86_64",
-        };
-        assert!(!intel_macos.supports(FrontendFilesystem::Fuse, FrontendRuntime::Libkrun));
-        assert!(intel_macos.supports(FrontendFilesystem::Fuse, FrontendRuntime::Docker));
-        assert_eq!(intel_macos.default_runtime(FrontendFilesystem::Fuse), None);
+        assert!(macos.supports(FsType::Fuse, FrontendRuntime::Libkrun));
+        assert!(macos.supports(FsType::Fuse, FrontendRuntime::Docker));
+        assert!(macos.supports(FsType::Nfs, FrontendRuntime::Host));
+        assert!(!macos.supports(FsType::Fuse, FrontendRuntime::Host));
 
         let linux = Platform {
             os: "linux",
             arch: "x86_64",
         };
-        assert!(linux.supports(FrontendFilesystem::Fuse, FrontendRuntime::Host));
-        assert!(linux.supports(FrontendFilesystem::Fuse, FrontendRuntime::Docker));
-        assert!(!linux.supports(FrontendFilesystem::Nfs, FrontendRuntime::Host));
+        assert!(linux.supports(FsType::Fuse, FrontendRuntime::Host));
+        assert!(linux.supports(FsType::Fuse, FrontendRuntime::Docker));
+        assert!(!linux.supports(FsType::Nfs, FrontendRuntime::Host));
 
+        assert_eq!(default_runtime(FsType::Nfs), FrontendRuntime::Host);
         assert_eq!(
-            FrontendFilesystem::Nfs.default_runtime(),
+            default_runtime(FsType::Fuse),
             if cfg!(target_os = "macos") {
-                Some(FrontendRuntime::Host)
-            } else {
-                None
-            }
-        );
-        assert_eq!(
-            FrontendFilesystem::Fuse.default_runtime(),
-            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                Some(FrontendRuntime::Libkrun)
-            } else if cfg!(target_os = "linux") {
-                Some(FrontendRuntime::Host)
+                FrontendRuntime::Libkrun
             } else {
                 None
             }

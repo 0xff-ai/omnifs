@@ -5,13 +5,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
-use clap::{Args, ValueEnum};
+use clap::Args;
+use omnifs_api::{FrontendRuntime, FsType};
 use omnifs_mtab::{MountKind, MountState, StateError};
 use omnifs_workspace::daemon_record::FrontendKind;
 use omnifs_workspace::resolve_mount_point;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::commands::frontend::GUEST_MOUNT;
+use crate::commands::frontend::discovery::{default_runtime, supports};
+use crate::commands::frontend::{frontend_runtime_parser, fs_type_parser};
 use crate::commands::receipt::FrontendReceipt;
 use crate::docker::{DockerClient, DockerRunner, DockerTarget};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
@@ -27,69 +30,15 @@ const LIBKRUN_TIMEOUT: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(200);
 const RECONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, ValueEnum, Serialize, Deserialize,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum FrontendFilesystem {
-    Fuse,
-    Nfs,
-}
-
-impl FrontendFilesystem {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Fuse => "fuse",
-            Self::Nfs => "nfs",
-        }
-    }
-}
-
-impl std::fmt::Display for FrontendFilesystem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, ValueEnum, Serialize, Deserialize,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum FrontendRuntime {
-    Host,
-    Docker,
-    Libkrun,
-}
-
-impl FrontendRuntime {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Host => "host",
-            Self::Docker => "docker",
-            Self::Libkrun => "libkrun",
-        }
-    }
-}
-
-impl std::fmt::Display for FrontendRuntime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct FrontendId {
-    filesystem: FrontendFilesystem,
+    filesystem: FsType,
     runtime: FrontendRuntime,
     location: Option<PathBuf>,
 }
 
 impl FrontendId {
-    fn new(
-        filesystem: FrontendFilesystem,
-        runtime: FrontendRuntime,
-        location: Option<PathBuf>,
-    ) -> Self {
+    fn new(filesystem: FsType, runtime: FrontendRuntime, location: Option<PathBuf>) -> Self {
         Self {
             filesystem,
             runtime,
@@ -98,12 +47,12 @@ impl FrontendId {
     }
 
     pub(crate) fn try_new(
-        filesystem: FrontendFilesystem,
+        filesystem: FsType,
         runtime: FrontendRuntime,
         location: Option<PathBuf>,
     ) -> Result<Self> {
         ensure!(
-            runtime.supports(filesystem),
+            supports(filesystem, runtime),
             "a {filesystem}/{runtime} frontend is not supported on {}",
             std::env::consts::OS
         );
@@ -144,7 +93,7 @@ impl FrontendId {
                 || self.location.as_deref() == frontend.location.as_deref())
     }
 
-    pub const fn filesystem(&self) -> FrontendFilesystem {
+    pub const fn filesystem(&self) -> FsType {
         self.filesystem
     }
     pub const fn runtime(&self) -> FrontendRuntime {
@@ -176,10 +125,10 @@ impl Serialize for FrontendId {
 
 #[derive(Args, Debug, Clone)]
 pub struct FrontendEnableArgs {
-    #[arg(value_enum)]
-    pub filesystem: FrontendFilesystem,
-    /// Runner runtime. Defaults to libkrun for FUSE on Apple Silicon macOS and host where supported.
-    #[arg(long, value_enum)]
+    #[arg(value_parser = fs_type_parser())]
+    pub filesystem: FsType,
+    /// Runner environment. Defaults to libkrun for FUSE on macOS and host otherwise.
+    #[arg(long, value_parser = frontend_runtime_parser())]
     pub runtime: Option<FrontendRuntime>,
     #[arg(long)]
     pub location: Option<PathBuf>,
@@ -187,9 +136,9 @@ pub struct FrontendEnableArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct FrontendDisableArgs {
-    #[arg(value_enum)]
-    pub filesystem: FrontendFilesystem,
-    #[arg(long, value_enum)]
+    #[arg(value_parser = fs_type_parser())]
+    pub filesystem: FsType,
+    #[arg(long, value_parser = frontend_runtime_parser())]
     pub runtime: FrontendRuntime,
     #[arg(long)]
     pub location: Option<PathBuf>,
@@ -197,9 +146,9 @@ pub struct FrontendDisableArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct FrontendRestartArgs {
-    #[arg(value_enum)]
-    pub filesystem: Option<FrontendFilesystem>,
-    #[arg(long, value_enum)]
+    #[arg(value_parser = fs_type_parser())]
+    pub filesystem: Option<FsType>,
+    #[arg(long, value_parser = frontend_runtime_parser())]
     pub runtime: Option<FrontendRuntime>,
     #[arg(long)]
     pub location: Option<PathBuf>,
@@ -224,7 +173,7 @@ pub struct FrontendResult {
 
 fn resolve_id(
     workspace: &Workspace,
-    filesystem: FrontendFilesystem,
+    filesystem: FsType,
     runtime: FrontendRuntime,
     location: Option<PathBuf>,
 ) -> Result<FrontendId> {
@@ -309,19 +258,7 @@ impl FrontendEnableArgs {
     pub async fn enable(self, workspace: &Workspace, output: Output) -> Result<FrontendResult> {
         let runtime = self
             .runtime
-            .or_else(|| self.filesystem.default_runtime())
-            .with_context(|| {
-                if cfg!(target_os = "macos") && self.filesystem == FrontendFilesystem::Fuse {
-                    "FUSE has no implicit runtime on Intel macOS; use `--runtime docker`".to_owned()
-                } else {
-                    format!(
-                        "{} has no default runtime on {} {}; choose one with `--runtime`",
-                        self.filesystem,
-                        std::env::consts::OS,
-                        std::env::consts::ARCH
-                    )
-                }
-            })?;
+            .unwrap_or_else(|| default_runtime(self.filesystem));
         let id = resolve_id(workspace, self.filesystem, runtime, self.location)?;
         let inventory = Inventory::collect(workspace).await?;
         if id.runtime() == FrontendRuntime::Host {
@@ -527,7 +464,7 @@ impl FrontendRestartArgs {
 fn select_disable_id(
     workspace: &Workspace,
     inventory: &Inventory,
-    filesystem: FrontendFilesystem,
+    filesystem: FsType,
     runtime: FrontendRuntime,
     location: Option<PathBuf>,
 ) -> Result<FrontendId> {
@@ -562,7 +499,7 @@ fn select_disable_id(
 
 fn resolve_observed_selector(
     rows: &[FrontendStatus],
-    filesystem: Option<FrontendFilesystem>,
+    filesystem: Option<FsType>,
     runtime: Option<FrontendRuntime>,
     location: Option<&Path>,
 ) -> Result<FrontendId> {
@@ -623,8 +560,8 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
             let location = id.location().context("host frontend has no location")?;
             let state_dir = workspace.frontend().state_dir(
                 match id.filesystem() {
-                    FrontendFilesystem::Fuse => FrontendKind::Fuse,
-                    FrontendFilesystem::Nfs => FrontendKind::Nfs,
+                    FsType::Fuse => FrontendKind::Fuse,
+                    FsType::Nfs => FrontendKind::Nfs,
                 },
                 location,
             );
@@ -642,8 +579,7 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
                 [state] => {
                     let kind_matches = matches!(
                         (id.filesystem(), &state.kind),
-                        (FrontendFilesystem::Fuse, MountKind::Fuse)
-                            | (FrontendFilesystem::Nfs, MountKind::Nfs { .. })
+                        (FsType::Fuse, MountKind::Fuse) | (FsType::Nfs, MountKind::Nfs { .. })
                     );
                     Ok(kind_matches
                         && state.mount_point == location
@@ -684,11 +620,7 @@ async fn launch(
                 id.location()
                     .context("host frontend has no location")?
                     .to_path_buf(),
-                match id.filesystem() {
-                    FrontendFilesystem::Fuse => FrontendKind::Fuse,
-                    FrontendFilesystem::Nfs => FrontendKind::Nfs,
-                }
-                .into(),
+                id.filesystem(),
             )?
             .launch(mount)
             .await?;
@@ -781,7 +713,7 @@ async fn stop(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<
         FrontendRuntime::Host => crate::host_teardown::teardown_local_frontend(
             workspace.frontend().state_root(),
             id.location().context("host frontend has no location")?,
-            id.filesystem() == FrontendFilesystem::Nfs,
+            id.filesystem() == FsType::Nfs,
         ),
         FrontendRuntime::Docker => {
             let config = workspace.config()?;
@@ -919,8 +851,8 @@ fn frontend_access_table(
         };
         table.push(crate::ui::table::ResourceRow::new(
             [
-                crate::ui::table::Cell::new(path.filesystem.label()),
-                crate::ui::table::Cell::new(path.runtime.label()),
+                crate::ui::table::Cell::new(path.filesystem.as_str()),
+                crate::ui::table::Cell::new(path.runtime.as_str()),
                 crate::ui::table::Cell::new(path.path.display().to_string()),
                 crate::ui::table::Cell::state(state.clone()),
             ],
@@ -951,7 +883,7 @@ mod tests {
     fn selectors_require_one_observed_identity() {
         let rows = vec![
             FrontendStatus {
-                filesystem: FrontendFilesystem::Nfs,
+                filesystem: FsType::Nfs,
                 runtime: FrontendRuntime::Host,
                 location: Some("/a".into()),
                 state: FrontendState::Attached,
@@ -960,7 +892,7 @@ mod tests {
                 fix: None,
             },
             FrontendStatus {
-                filesystem: FrontendFilesystem::Nfs,
+                filesystem: FsType::Nfs,
                 runtime: FrontendRuntime::Host,
                 location: Some("/b".into()),
                 state: FrontendState::Attached,
@@ -970,17 +902,12 @@ mod tests {
             },
         ];
         assert!(
-            resolve_observed_selector(
-                &rows,
-                Some(FrontendFilesystem::Nfs),
-                Some(FrontendRuntime::Host),
-                None
-            )
-            .is_err()
+            resolve_observed_selector(&rows, Some(FsType::Nfs), Some(FrontendRuntime::Host), None)
+                .is_err()
         );
         let selected = resolve_observed_selector(
             &rows,
-            Some(FrontendFilesystem::Nfs),
+            Some(FsType::Nfs),
             Some(FrontendRuntime::Host),
             Some(Path::new("/b")),
         )
