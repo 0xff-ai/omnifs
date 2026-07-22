@@ -1114,7 +1114,10 @@ mod tests {
         );
         assert_eq!(lines.len(), 2);
         for line in &lines {
-            assert!(strip_ansi_local(line).starts_with('\u{2502}'), "{line:?}");
+            assert!(
+                crate::ui::strip_ansi(line).starts_with('\u{2502}'),
+                "{line:?}"
+            );
         }
     }
 
@@ -1127,8 +1130,8 @@ mod tests {
         let lines = select_frame("Pick one", &items, 1, Stream::Stderr);
         // hint line + one row per item, no panel (no detail on plain items).
         assert_eq!(lines.len(), 1 + items.len());
-        assert!(strip_ansi_local(&lines[1]).starts_with(' '));
-        assert!(strip_ansi_local(&lines[2]).starts_with('\u{203a}'));
+        assert!(crate::ui::strip_ansi(&lines[1]).starts_with(' '));
+        assert!(crate::ui::strip_ansi(&lines[2]).starts_with('\u{203a}'));
     }
 
     #[test]
@@ -1142,12 +1145,8 @@ mod tests {
             checked: vec![true, false],
         };
         let lines = multi_select_frame("Pick services", &items, &state, Stream::Stderr);
-        assert!(strip_ansi_local(&lines[1]).contains("[x]"));
-        assert!(strip_ansi_local(&lines[2]).contains("[ ]"));
-    }
-
-    fn strip_ansi_local(text: &str) -> String {
-        crate::ui::strip_ansi(text)
+        assert!(crate::ui::strip_ansi(&lines[1]).contains("[x]"));
+        assert!(crate::ui::strip_ansi(&lines[2]).contains("[ ]"));
     }
 
     #[test]
