@@ -8,11 +8,9 @@
 //! the spec itself remains a plain parsed desired-state document.
 
 pub mod auth;
-pub mod name;
 pub mod repository;
 
 pub use auth::{Auth, OAuth, StaticToken};
-pub use name::{Name, NameError};
 pub use repository::{Repository, RepositoryError, Revision};
 
 use std::collections::BTreeMap;
@@ -23,6 +21,7 @@ use std::sync::Arc;
 
 use crate::ids::{ProviderName, ProviderRef};
 use fs2::FileExt;
+use omnifs_core::{MountName, MountNameError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -148,7 +147,7 @@ pub enum SpecError {
     MountName {
         path: PathBuf,
         mount: String,
-        source: name::NameError,
+        source: MountNameError,
     },
     #[error(
         "mount spec {} declares mount `{mount}` but must be named `{mount}.json`",
@@ -224,7 +223,7 @@ pub struct Registry {
     mounts_dir: PathBuf,
     lock_path: PathBuf,
     lock_guard: Option<File>,
-    specs: BTreeMap<name::Name, LoadedSpec>,
+    specs: BTreeMap<MountName, LoadedSpec>,
     failures: Vec<SpecLoadFailure>,
 }
 
@@ -350,7 +349,7 @@ impl Registry {
                     continue;
                 },
             };
-            let name = match name::Name::new(spec.mount.clone()) {
+            let name = match MountName::new(spec.mount.clone()) {
                 Ok(name) => name,
                 Err(source) => {
                     self.failures.push(SpecLoadFailure {
@@ -397,19 +396,19 @@ impl Registry {
 
     /// The pinned spec for `name`, if loaded.
     #[must_use]
-    pub fn get(&self, name: &name::Name) -> Option<&Spec> {
+    pub fn get(&self, name: &MountName) -> Option<&Spec> {
         self.specs.get(name).map(LoadedSpec::spec)
     }
 
     /// Every loaded spec, in mount-name order.
-    pub fn iter(&self) -> impl Iterator<Item = (&name::Name, &Spec)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (&MountName, &Spec)> + '_ {
         self.specs
             .iter()
             .map(|(name, loaded)| (name, loaded.spec()))
     }
 
     /// Every loaded spec with its exact source bytes, in mount-name order.
-    pub fn loaded_iter(&self) -> impl Iterator<Item = (&name::Name, &LoadedSpec)> + '_ {
+    pub fn loaded_iter(&self) -> impl Iterator<Item = (&MountName, &LoadedSpec)> + '_ {
         self.specs.iter()
     }
 
@@ -421,7 +420,7 @@ impl Registry {
 
     /// The on-disk path a mount's spec occupies: `mounts_dir/<name>.json`.
     #[must_use]
-    pub fn spec_path(&self, name: &name::Name) -> PathBuf {
+    pub fn spec_path(&self, name: &MountName) -> PathBuf {
         self.mounts_dir.join(format!("{name}.json"))
     }
 
@@ -451,7 +450,7 @@ impl Registry {
 
     fn put_locked(&mut self, spec: &Spec) -> Result<(), SpecError> {
         self.scan()?;
-        let name = name::Name::new(spec.mount.clone()).map_err(|source| SpecError::MountName {
+        let name = MountName::new(spec.mount.clone()).map_err(|source| SpecError::MountName {
             path: self.mounts_dir.clone(),
             mount: spec.mount.clone(),
             source,
@@ -473,7 +472,7 @@ impl Registry {
 
     /// Remove a mount's spec file and drop it from the mirror. Returns whether a
     /// file was present (a missing file is not an error).
-    pub fn remove(&mut self, name: &name::Name) -> Result<bool, SpecError> {
+    pub fn remove(&mut self, name: &MountName) -> Result<bool, SpecError> {
         if self.lock_guard.is_some() {
             return self.remove_locked(name);
         }
@@ -489,7 +488,7 @@ impl Registry {
         }
     }
 
-    fn remove_locked(&mut self, name: &name::Name) -> Result<bool, SpecError> {
+    fn remove_locked(&mut self, name: &MountName) -> Result<bool, SpecError> {
         self.scan()?;
         self.specs.remove(name);
         let path = self.spec_path(name);
@@ -577,7 +576,7 @@ impl Registry {
                 path: root.join(relative),
                 source,
             })?;
-        let name = name::Name::new(spec.mount.clone()).map_err(|source| SpecError::MountName {
+        let name = MountName::new(spec.mount.clone()).map_err(|source| SpecError::MountName {
             path: root.join(relative),
             mount: spec.mount.clone(),
             source,
@@ -875,7 +874,7 @@ mod tests {
         assert_eq!(names, ["alpha", "zeta"]);
         assert!(
             registry
-                .get(&name::Name::new("alpha".to_owned()).unwrap())
+                .get(&MountName::new("alpha".to_owned()).unwrap())
                 .is_some()
         );
 
@@ -973,7 +972,7 @@ mod tests {
     fn registry_tolerates_missing_dir_and_derives_spec_path() {
         let registry = Registry::load("/no/such/mounts").expect("missing dir is not an error");
         assert!(registry.iter().next().is_none());
-        let name = name::Name::new("github".to_owned()).unwrap();
+        let name = MountName::new("github".to_owned()).unwrap();
         assert_eq!(
             registry.spec_path(&name),
             Path::new("/no/such/mounts/github.json")
@@ -1016,7 +1015,7 @@ mod tests {
         assert_eq!(value["auth"]["type"], "static-token");
 
         // The mirror and a fresh load both observe the written spec.
-        let name = name::Name::new("github".to_owned()).unwrap();
+        let name = MountName::new("github".to_owned()).unwrap();
         assert!(registry.get(&name).is_some());
         assert!(Registry::load(&mounts).unwrap().get(&name).is_some());
 

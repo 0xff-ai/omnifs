@@ -6,10 +6,11 @@
 
 use anyhow::Result;
 use omnifs_api::{DaemonStatus, FrontendRuntime as Runtime, FsType as Filesystem, HealthState};
+use omnifs_core::MountName;
 use omnifs_mtab::{MountKind, MountState};
 use omnifs_workspace::creds::FileStore;
 use omnifs_workspace::daemon_record::DaemonRecord;
-use omnifs_workspace::mounts::{Name as MountName, Registry, Revision};
+use omnifs_workspace::mounts::{Registry, Revision};
 use omnifs_workspace::provider::Catalog;
 use serde::Serialize;
 use std::cmp::Ordering;

@@ -15,7 +15,7 @@ use crate::inventory::{AccessPath, FrontendStatus, Inventory};
 use crate::stages::MountInitStatus;
 use crate::ui::consent::{Outcome, Plan};
 use crate::ui::output::ResultVerdict;
-use omnifs_workspace::mounts::Name as MountName;
+use omnifs_core::MountName;
 
 /// The overall health of a completed operation. `up` reports `degraded` (and
 /// exits 5) when any mount, frontend, or subsystem needs attention.

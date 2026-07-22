@@ -144,7 +144,7 @@ mod tests {
     use crate::inventory::{AuthState, FrontendState, ServingState};
     use crate::inventory::{DaemonHealth, MountStatus, ProviderPin, ProviderPinState};
     use omnifs_api::FsType as Filesystem;
-    use omnifs_workspace::mounts::Name as MountName;
+    use omnifs_core::MountName;
     use std::path::PathBuf;
 
     fn mount(name: &str) -> MountStatus {

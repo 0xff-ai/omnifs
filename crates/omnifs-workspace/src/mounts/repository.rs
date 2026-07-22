@@ -14,7 +14,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Name, Registry, SpecError};
+use super::{Registry, SpecError};
+use omnifs_core::MountName;
 
 /// An immutable Git commit id used for persisted mount desired state.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -181,7 +182,7 @@ impl Repository {
     }
 
     /// Remove a spec through Registry's canonical naming and file-removal path.
-    pub fn remove(&mut self, name: &Name) -> Result<bool, RepositoryError> {
+    pub fn remove(&mut self, name: &MountName) -> Result<bool, RepositoryError> {
         Ok(self.registry.remove(name)?)
     }
 
@@ -689,7 +690,7 @@ mod tests {
         assert!(
             reopened
                 .registry()
-                .get(&Name::new("extra").unwrap())
+                .get(&MountName::new("extra").unwrap())
                 .is_some()
         );
     }
@@ -712,7 +713,7 @@ mod tests {
         assert!(
             repository
                 .registry()
-                .get(&Name::new("demo").unwrap())
+                .get(&MountName::new("demo").unwrap())
                 .is_some()
         );
     }
@@ -736,7 +737,7 @@ mod tests {
         assert!(repository.applied().unwrap().is_none());
         repository.mark_applied(&second).unwrap();
         assert_eq!(repository.applied().unwrap(), Some(second.clone()));
-        let removed = repository.remove(&Name::new("demo").unwrap()).unwrap();
+        let removed = repository.remove(&MountName::new("demo").unwrap()).unwrap();
         assert!(removed);
         let third = repository.commit().unwrap();
         assert_ne!(second, third);
@@ -810,7 +811,7 @@ mod tests {
         let revision = repository.commit().unwrap();
         let cache = dir.path().join("cache");
         let (_, snapshot) = repository.snapshot(&revision, &cache).unwrap();
-        let name = Name::new("demo").unwrap();
+        let name = MountName::new("demo").unwrap();
         assert_eq!(snapshot.get(&name).unwrap().mount, "demo");
         assert!(
             cache

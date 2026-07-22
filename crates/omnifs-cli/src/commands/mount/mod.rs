@@ -16,7 +16,7 @@ pub(crate) use revoke::RevokeArgs;
 
 use anyhow::{Context, anyhow};
 use clap::{Args, Subcommand};
-use omnifs_workspace::mounts::Name as MountName;
+use omnifs_core::MountName;
 use std::path::Path;
 
 use crate::error::{ExitCode, WithExitCode};

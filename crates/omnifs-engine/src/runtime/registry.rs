@@ -7,7 +7,8 @@ use crate::cache::{Caches, MountResources, ProjectionError, ProjectionId};
 use crate::runtime::host::{Host, HostOffline, HostOnline};
 use crate::tree_refs::TreeRefs;
 use crate::{BuildError, Runtime};
-use omnifs_workspace::mounts::{LoadedSpec, Name, Registry};
+use omnifs_core::MountName;
+use omnifs_workspace::mounts::{LoadedSpec, Registry};
 use omnifs_workspace::provider::ProviderWasm;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -20,7 +21,7 @@ use tracing::{debug, info, warn};
 /// One selected mount revision. Cache-only entries deliberately have no
 /// provider runtime and never fabricate provider handles.
 pub struct MountEntry {
-    name: Name,
+    name: MountName,
     identity: LoadedSpec,
     projection_id: ProjectionId,
     resources: Arc<MountResources>,
@@ -137,7 +138,7 @@ impl MountTable {
     }
 
     fn build_online_mount(
-        name: &Name,
+        name: &MountName,
         loaded: &LoadedSpec,
         host: &HostOnline,
         capture_test_callouts: bool,
@@ -319,7 +320,7 @@ impl MountTable {
     /// The selected identity and optional provider runtime for every mount.
     pub fn selected_entries(
         &self,
-    ) -> impl Iterator<Item = (&Name, &LoadedSpec, Option<Arc<Runtime>>)> + '_ {
+    ) -> impl Iterator<Item = (&MountName, &LoadedSpec, Option<Arc<Runtime>>)> + '_ {
         self.entries
             .values()
             .map(|entry| (&entry.name, &entry.identity, entry.runtime()))
@@ -432,7 +433,7 @@ impl RegistryError {
         }
     }
 
-    fn offline_projection(mount: &Name, error: &ProjectionError) -> Self {
+    fn offline_projection(mount: &MountName, error: &ProjectionError) -> Self {
         if matches!(
             error,
             ProjectionError::Store(crate::cache::projection::ProjectionStoreError::Missing)
@@ -465,6 +466,7 @@ mod tests {
     use super::{MountTable, RegistryError};
     use crate::cloner::GitCloner;
     use crate::runtime::host::{Host, HostOfflineOpen};
+    use omnifs_core::MountName;
     use omnifs_workspace::ids::ProviderId;
     use omnifs_workspace::mounts::{Registry, Spec};
     use omnifs_workspace::provider::{Artifact, ProviderStore};
@@ -790,7 +792,7 @@ mod tests {
         let caches = Caches::open(&cache).expect("online projection owner");
         let resources = caches
             .mount(
-                &omnifs_workspace::mounts::Name::new("test").unwrap(),
+                &MountName::new("test").unwrap(),
                 projection_id,
                 provider_id,
                 loaded.source(),
@@ -804,7 +806,7 @@ mod tests {
             ProjectionId::new(root_git_loaded.source(), root_git_loaded.spec().provider.id);
         let root_git_resources = caches
             .mount(
-                &omnifs_workspace::mounts::Name::new("rootgit").unwrap(),
+                &MountName::new("rootgit").unwrap(),
                 root_git_projection,
                 root_git_loaded.spec().provider.id,
                 root_git_loaded.source(),
