@@ -8,7 +8,7 @@ use omnifs_api::{
     MountInfo,
 };
 use omnifs_engine::{Host, HostOfflineOpen, HostOpen};
-use omnifs_workspace::daemon_record::{DaemonRecord, Endpoint};
+use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::mounts::Revision;
 use omnifs_workspace::{DaemonState, FrontendState, Workspace};
 use std::fmt::Write as _;
@@ -186,9 +186,7 @@ impl DaemonContext {
     pub(crate) fn daemon_record(&self) -> DaemonRecord {
         DaemonRecord::new(
             self.mount_revision.clone(),
-            Endpoint::Unix {
-                path: self.control_socket(),
-            },
+            self.control_socket(),
             self.process.pid,
             self.instance_id.clone(),
             self.offline,

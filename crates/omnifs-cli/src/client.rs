@@ -14,7 +14,7 @@ use omnifs_api::{
     ControlErrorCode, ControlOperation, ControlOutcome, ControlReply, ControlRequest, DaemonStatus,
     TcpAttachTarget, VsockAttachTarget,
 };
-use omnifs_workspace::daemon_record::{DaemonRecord, Endpoint};
+use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::mounts::Revision;
 use omnifs_workspace::{DaemonState, Workspace};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
@@ -106,9 +106,8 @@ impl DaemonClient {
             },
         };
         if let Some(record) = record {
-            let Endpoint::Unix { path } = record.endpoint;
             return Ok(Target::Unix {
-                socket: path,
+                socket: record.control_socket,
                 instance: Some(record.instance_id),
             });
         }

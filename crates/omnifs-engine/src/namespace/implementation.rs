@@ -706,24 +706,18 @@ impl TreeNamespace {
         offset: u64,
         len: u32,
     ) -> Result<ReadAnswer, NsError> {
-        match self.read(node, &RequestCtx).await? {
-            ReadResult::Bytes { data, attrs, .. } => {
-                if let Some(attrs) = &attrs {
-                    self.store_learned(id, attrs.clone());
-                }
-                let start = usize::try_from(offset)
-                    .unwrap_or(usize::MAX)
-                    .min(data.len());
-                let end = start.saturating_add(len as usize).min(data.len());
-                let bytes = data[start..end].to_vec();
-                let eof = end >= data.len();
-                let attrs = self.attrs_for_read(id, entry_kind_from_node(node), attrs.as_ref());
-                Ok(ReadAnswer { bytes, eof, attrs })
-            },
-            // A subtree node is a directory; its files are served directly by the
-            // projection tree from the backing directory, never through this read
-            // path (provider-backed content only).
+        let ReadResult { data, attrs } = self.read(node, &RequestCtx).await?;
+        if let Some(attrs) = &attrs {
+            self.store_learned(id, attrs.clone());
         }
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(data.len());
+        let end = start.saturating_add(len as usize).min(data.len());
+        let bytes = data[start..end].to_vec();
+        let eof = end >= data.len();
+        let attrs = self.attrs_for_read(id, entry_kind_from_node(node), attrs.as_ref());
+        Ok(ReadAnswer { bytes, eof, attrs })
     }
 
     /// Compute `Attrs` for a read answer, folding in the size the read learned.

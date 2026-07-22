@@ -31,11 +31,9 @@ use omnifs_api::events::CacheKind;
 /// change attribute. On a cache hit it is the node's projected attrs (the size
 /// was already learned when the entry was first materialized).
 #[derive(Debug, Clone)]
-pub enum ReadResult {
-    Bytes {
-        data: Vec<u8>,
-        attrs: Option<FileAttrsCache>,
-    },
+pub(crate) struct ReadResult {
+    pub(crate) data: Vec<u8>,
+    pub(crate) attrs: Option<FileAttrsCache>,
 }
 
 /// One ranged chunk from a `RangedHandle`. `learned_attrs` is `Some` on an
@@ -220,7 +218,7 @@ impl TreeNamespace {
     /// learned exact size so `cat` reads the whole message.
     async fn read_synthetic(&self, node: &Node, content: &SyntheticContent) -> Result<ReadResult> {
         match content {
-            SyntheticContent::Fixed(bytes) => Ok(ReadResult::Bytes {
+            SyntheticContent::Fixed(bytes) => Ok(ReadResult {
                 data: materialized_bytes(node.path(), bytes.clone())?,
                 attrs: node.attrs().cloned(),
             }),
@@ -253,7 +251,7 @@ impl TreeNamespace {
                 let bytes = status.into_bytes();
                 enforce_observed_materialize_cap(node.path(), bytes.len())?;
                 let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                Ok(ReadResult::Bytes {
+                Ok(ReadResult {
                     data: bytes,
                     attrs: Some(super::synthetic::control_read_attrs(len)),
                 })
@@ -274,7 +272,7 @@ fn projected_read(
         && matches!(attrs.size(), view_types::FileSize::Exact(0))
         && (!offline || !matches!(attrs.byte_source(), view_types::ByteSource::Deferred(_)))
     {
-        return Ok(Some(ReadResult::Bytes {
+        return Ok(Some(ReadResult {
             data: Vec::new(),
             attrs: Some(attrs.clone()),
         }));
@@ -295,7 +293,7 @@ fn projected_read(
         if !offline {
             attr_store.publish(attrs.clone(), captured_epoch)?;
         }
-        return Ok(Some(ReadResult::Bytes {
+        return Ok(Some(ReadResult {
             data,
             attrs: Some(attrs),
         }));
@@ -315,7 +313,7 @@ fn projected_read(
                     "canonical projection for {path} contradicts its body: {error}"
                 ))
             })?;
-        return Ok(Some(ReadResult::Bytes {
+        return Ok(Some(ReadResult {
             data: canonical.bytes,
             attrs: Some(attrs),
         }));
@@ -373,7 +371,7 @@ fn cached_read(
             .read_body(body, length)
             .map_err(|error| TreeError::internal(error.to_string()))?;
         enforce_observed_materialize_cap(path, data.len())?;
-        return Ok(Some(ReadResult::Bytes {
+        return Ok(Some(ReadResult {
             data,
             attrs: Some(attrs.clone()),
         }));
@@ -411,7 +409,7 @@ fn finish_read(
                 "read for {path} returned bytes that contradict file attrs"
             ))
         })?;
-    Ok(ReadResult::Bytes {
+    Ok(ReadResult {
         data,
         attrs: Some(attrs_cache),
     })
@@ -504,7 +502,7 @@ fn read_result_from_cache(
                 })
         })
         .transpose()?;
-    Ok(ReadResult::Bytes {
+    Ok(ReadResult {
         data: payload.content,
         attrs,
     })
