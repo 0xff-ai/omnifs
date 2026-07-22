@@ -10,9 +10,9 @@ fi
 
 target="$1"
 case "$target" in
-  x86_64-apple-darwin | aarch64-apple-darwin) ;;
+  x86_64-apple-darwin) ;;
   *)
-    echo "unsupported Darwin target: $target" >&2
+    echo "unsupported Darwin cross target: $target (arm64 builds natively with its libkrun payload)" >&2
     exit 2
     ;;
 esac
@@ -56,7 +56,6 @@ docker run --rm \
     rustup target add "$TARGET"
 
     export CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS=
-    export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS=
     ulimit -n 4096 2>/dev/null || true
 
     cargo zigbuild --release \

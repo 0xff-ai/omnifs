@@ -47,9 +47,9 @@ The next version is computed from conventional commits since the last tag: `feat
 
 | Workflow | Trigger | Role |
 |----------|---------|------|
-| `ci.yml` | push / PR to `main` | preflight, host/WASM verification, and on `main`: Linux + Darwin CLI archives, frontend images, guest artifact, smoke, and `sha-<commit>` manifests |
+| `ci.yml` | push / PR to `main` | preflight, host/WASM verification, Linux and Darwin CLI archives, the native arm64 helper payload, frontend images, guest artifact, smoke, and `sha-<commit>` manifests |
 | `release-pr.yml` | push to `main` | maintain the standing release PR; tag `vX.Y.Z` when it merges |
-| `release.yml` | `workflow_run` after successful CI on `main` | if a `v*` tag points at the built commit: GitHub Release + assets → GHCR promote → npm; platform npm packages staged from `npm/platform/*` |
+| `release.yml` | `workflow_run` after successful CI on `main` | if a `v*` tag points at the built commit: sign and notarize Darwin arm64, publish GitHub assets, promote GHCR, then publish npm |
 
 ## Maintainer commands
 
@@ -62,16 +62,18 @@ The `just` surface for release-adjacent tasks is npm-only; the release itself is
 
 Day-to-day dev uses the relevant CI-shaped just lanes, `just build providers`, and `just dev`.
 
+The release environment needs `APPLE_DEVELOPER_ID_CERTIFICATE_BASE64`, `APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD`, `APPLE_DEVELOPER_ID_APPLICATION`, `APPLE_NOTARY_APPLE_ID`, `APPLE_NOTARY_PASSWORD`, and `APPLE_TEAM_ID`. The certificate must name the same Team ID and Developer ID Application identity as those two text secrets.
+
 ## What gets released
 
-- **CLI**: `omnifs-cli-linux-*.tar.xz` from `cargo-zigbuild` with glibc 2.17, and `omnifs-cli-darwin-*.tar.xz` cross-linked from Linux through the pinned `rust-cross/cargo-zigbuild` container. These binaries embed the compressed provider/tool WASM bundle and unpack it into `OMNIFS_HOME/providers`.
+- **CLI**: `omnifs-cli-linux-*.tar.xz` from `cargo-zigbuild` with glibc 2.17, Darwin x64 cross-linked from Linux, and Darwin arm64 built on native Apple Silicon. The arm64 archive also carries the private `omnifs-libkrun` helper, pinned libkrun dylib, EFI firmware, manifest, and licenses. Release signs that payload with Developer ID and publishes it only after Apple reports the one recorded submission as `Accepted`. The CLI binaries embed the compressed provider/tool WASM bundle and unpack it into `OMNIFS_HOME/providers`.
 - **Frontend**: `ghcr.io/0xff-ai/omnifs-frontend:<version>` promoted from the multi-platform `sha-<commit>` manifest (also `v<version>` on GHCR). It contains only the credential-free `omnifs-thin fuse` frontend.
 - **Guest**: `ghcr.io/0xff-ai/omnifs-guest:<version>` promoted from the arm64 `sha-<commit>` OCI artifact (also `v<version>` on GHCR). It is the compressed libkrun disk image, not a container image.
 - **npm**: `@0xff-ai/omnifs` + four platform packages.
 
 ## npm platform packages
 
-The package manifests under `npm/platform/*/package.json` are the single source of truth for platform npm packages. Each one defines the package name plus npm `os`/`cpu` metadata. The Release workflow loops over those platform package directories while staging the platform packages, so do not hand-maintain a second npm publishing matrix in `.github/workflows/release.yml`.
+The package manifests under `npm/platform/*/package.json` are the single source of truth for platform npm packages. Each one defines the package name plus npm `os`/`cpu` metadata. The Release workflow loops over those platform package directories while staging the platform packages, so do not hand-maintain a second npm publishing matrix in `.github/workflows/release.yml`. The Darwin arm64 package must preserve the accepted signed helper and `bin/libexec/omnifs` tree from the release archive.
 
 `npm/package.json` declares the private npm workspace that contains the root CLI package and the platform packages. `just npm sync` updates package versions by calling workspace-aware `npm pkg set`, using the platform package manifests to rebuild the root package's `optionalDependencies` at the Cargo workspace version.
 
@@ -163,7 +165,8 @@ Gates that must be in place:
 | Wrong version computed | Check the conventional-commit types since the last tag; a stray `feat`/`!` changes the bump. Override by editing the version in the PR |
 | Release workflow did not run | CI must succeed on the `main` push first |
 | Ship ran but skipped | `release.yml` only ships when a `v*` tag points at the built commit; confirm `release-pr.yml` tagged the merge |
-| Missing GH assets | CI must upload four `omnifs-cli-*` archives; re-run CI then Release |
+| Missing GH assets | CI must upload four `omnifs-cli-*` archives, and Release must replace Darwin arm64 with the accepted signed archive |
+| Darwin arm64 release blocked | Check the Developer ID secrets and the saved notary submission result; fix the cause and rerun Release, which submits one fresh payload once |
 | npm failed | Check the **promote** job; npm needs the GHCR tag + CI CLI artifacts |
 
 ## Configuration reference
@@ -177,7 +180,10 @@ Gates that must be in place:
 | `scripts/ci/common.sh` | Repo-root discovery shared by CI helper scripts |
 | `.github/actions/omnifs-just` | Installs the pinned `just` version in CI |
 | `scripts/ci/build-linux-zigbuild.sh` | Native Linux CLI build helper for the glibc baseline |
-| `scripts/ci/build-darwin-zigbuild.sh` | Linux-hosted Darwin cross-link helper |
+| `scripts/ci/build-darwin-zigbuild.sh` | Linux-hosted Darwin x64 cross-link helper |
+| `scripts/ci/build-libkrun-runtime.sh` | Native arm64 pinned libkrun payload builder and audit entrypoint |
+| `scripts/ci/sign-darwin-arm64-payload.sh` | Developer ID signing order and Team ID checks |
+| `scripts/ci/wait-for-notarization.sh` | Poll one saved Apple submission until it reaches a terminal status |
 | `scripts/ci/build-frontend-image.sh` | Frontend image assembly from a prebuilt CLI binary |
 | `.github/workflows/release-pr.yml` | Release coordinator: standing PR + tag |
 | `.github/workflows/release.yml` | Post-CI ship |

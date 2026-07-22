@@ -81,7 +81,7 @@ There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemo
 
 Mount desired state is the Git `HEAD` of `$OMNIFS_HOME/mounts`; no other workspace state is versioned. The CLI writes specs through `mounts::Registry`, records desired-state commits through `mounts::Repository`, and applies one complete revision through `omnifs up` or its exact `apply` alias. The daemon receives a revision-named immutable snapshot at process start, loads it completely before readiness, and exposes no mount mutation or reconcile API.
 
-The daemon has one runtime mode: host-native. It is a pure namespace server and attachment registry. Docker and libkrun run only FUSE frontends as separate processes; they are not daemon runtime modes. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home and starts the daemon on the host directly.
+The daemon has one runtime mode: host-native. It is a pure namespace server and attachment registry. Docker and libkrun run only FUSE frontends as separate processes; they are not daemon runtime modes. On Apple Silicon macOS, the CLI starts the private sibling `omnifs-libkrun`, which loads the signed packaged dylib and firmware and exposes one fixed VM shape. Its helper-owned attach bridge turns daemon target closure into guest stream closure, which lets the existing wire retry loop reconnect after daemon replacement. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` home and starts the daemon on the host directly.
 
 ## Auth and sandbox
 

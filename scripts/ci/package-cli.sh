@@ -4,13 +4,13 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 if [[ $# -lt 2 ]]; then
-  echo "usage: scripts/ci/package-cli.sh PLATFORM_ID BINARY..." >&2
+  echo "usage: scripts/ci/package-cli.sh PLATFORM_ID BINARY... | PLATFORM_ID --payload-dir DIR" >&2
   exit 2
 fi
 
 platform_id="$1"
 shift
-binaries=("$@")
+inputs=("$@")
 
 dist_dir="$root/dist/cli/$platform_id"
 payload_dir="$(mktemp -d)"
@@ -21,20 +21,35 @@ trap cleanup EXIT
 
 mkdir -p "$dist_dir"
 payload=()
-for binary in "${binaries[@]}"; do
-  if [[ ! -x "$binary" ]]; then
-    echo "missing executable binary: $binary" >&2
-    exit 1
+if [[ "${inputs[0]}" == "--payload-dir" ]]; then
+  if [[ ${#inputs[@]} -ne 2 || ! -d "${inputs[1]}" ]]; then
+    echo "--payload-dir requires one existing directory" >&2
+    exit 2
   fi
-  name="$(basename "$binary")"
-  cp "$binary" "$payload_dir/$name"
-  chmod 0755 "$payload_dir/$name"
-  payload+=("$name")
-done
+  cp -R "${inputs[1]}/." "$payload_dir/"
+  while IFS= read -r entry; do
+    payload+=("${entry#"$payload_dir/"}")
+  done < <(find "$payload_dir" -mindepth 1 -maxdepth 1 -print | sort)
+else
+  for binary in "${inputs[@]}"; do
+    if [[ ! -x "$binary" ]]; then
+      echo "missing executable binary: $binary" >&2
+      exit 1
+    fi
+    name="$(basename "$binary")"
+    cp "$binary" "$payload_dir/$name"
+    chmod 0755 "$payload_dir/$name"
+    payload+=("$name")
+  done
+fi
 
 archive="$dist_dir/omnifs-cli-$platform_id.tar.xz"
 tar -C "$payload_dir" -cJf "$archive" "${payload[@]}"
-sha256sum "$archive" >"$archive.sha256"
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum "$archive" >"$archive.sha256"
+else
+  shasum -a 256 "$archive" >"$archive.sha256"
+fi
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {

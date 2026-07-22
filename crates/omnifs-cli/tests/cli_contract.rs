@@ -172,10 +172,12 @@ fn frontend_enable_help_defaults_runtime_and_lists_live_attachments_command() {
         .expect("spawn omnifs frontend enable --help");
     assert!(enable.status.success());
     let enable_help = String::from_utf8_lossy(&enable.stdout);
+    let enable_help_compact = enable_help.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(enable_help.contains("<FILESYSTEM>"), "{enable_help}");
     assert!(enable_help.contains("--runtime <RUNTIME>"), "{enable_help}");
     assert!(
-        enable_help.contains("Defaults to libkrun for FUSE on macOS and host"),
+        enable_help_compact
+            .contains("Defaults to libkrun for FUSE on Apple Silicon macOS and host"),
         "{enable_help}"
     );
     assert!(enable_help.contains("[OPTIONS]"), "{enable_help}");
@@ -193,7 +195,7 @@ fn frontend_enable_help_defaults_runtime_and_lists_live_attachments_command() {
     assert!(shell.status.success());
     let shell_help = String::from_utf8_lossy(&shell.stdout);
     assert!(shell_help.contains("--runtime <RUNTIME>"), "{shell_help}");
-    assert!(shell_help.contains("<FILESYSTEM>"), "{shell_help}");
+    assert!(shell_help.contains("[FILESYSTEM]"), "{shell_help}");
     assert!(
         !shell_help.contains("--mount"),
         "retired frontend shell --mount in {shell_help}"

@@ -365,11 +365,11 @@ fn select_frontends(
     if output.yes() || prompt.no_input || !prompt.interactive {
         return Ok(available
             .into_iter()
-            .filter(|&(filesystem, runtime)| filesystem.default_runtime() == runtime)
+            .filter(|&(filesystem, runtime)| filesystem.default_runtime() == Some(runtime))
             .collect());
     }
     let choices = available.into_iter().map(|(filesystem, runtime)| {
-        let checked = filesystem.default_runtime() == runtime;
+        let checked = filesystem.default_runtime() == Some(runtime);
         (
             FrontendChoice {
                 filesystem,
@@ -603,7 +603,7 @@ mod tests {
     fn expected_default_frontends() -> Vec<(FrontendFilesystem, FrontendRuntime)> {
         available_frontends()
             .into_iter()
-            .filter(|&(filesystem, runtime)| filesystem.default_runtime() == runtime)
+            .filter(|&(filesystem, runtime)| filesystem.default_runtime() == Some(runtime))
             .collect()
     }
 
