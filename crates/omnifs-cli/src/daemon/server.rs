@@ -939,7 +939,7 @@ mod tests {
             addr: target.addr.clone(),
         };
         let identity = omnifs_vfs::FrontendIdentity {
-            kind: omnifs_vfs::FrontendKind::Fuse,
+            kind: omnifs_vfs::FsType::Fuse,
             mount_point: std::path::PathBuf::from("/guest/omnifs"),
         };
         let wire = omnifs_vfs::WireNamespace::attach(attach_target.clone(), identity, rt.clone())
@@ -948,7 +948,7 @@ mod tests {
         let wire2 = omnifs_vfs::WireNamespace::attach(
             attach_target,
             omnifs_vfs::FrontendIdentity {
-                kind: omnifs_vfs::FrontendKind::Fuse,
+                kind: omnifs_vfs::FsType::Fuse,
                 mount_point: std::path::PathBuf::from("/guest/omnifs"),
             },
             rt.clone(),
@@ -1037,7 +1037,7 @@ mod tests {
                 addr: target.addr.parse().unwrap(),
             },
             omnifs_vfs::FrontendIdentity {
-                kind: omnifs_vfs::FrontendKind::Fuse,
+                kind: omnifs_vfs::FsType::Fuse,
                 mount_point: std::path::PathBuf::from("/guest/omnifs"),
             },
             rt.clone(),

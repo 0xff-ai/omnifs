@@ -8,7 +8,6 @@ use anyhow::{Context as _, Result, bail, ensure};
 use clap::Args;
 use omnifs_api::{FrontendRuntime, FsType};
 use omnifs_mtab::{MountKind, MountState, StateError};
-use omnifs_workspace::daemon_record::FrontendKind;
 use omnifs_workspace::resolve_mount_point;
 use serde::Serialize;
 
@@ -570,13 +569,7 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
     match id.runtime() {
         FrontendRuntime::Host => {
             let location = id.location().context("host frontend has no location")?;
-            let state_dir = workspace.frontend().state_dir(
-                match id.filesystem() {
-                    FsType::Fuse => FrontendKind::Fuse,
-                    FsType::Nfs => FrontendKind::Nfs,
-                },
-                location,
-            );
+            let state_dir = workspace.frontend().state_dir(id.filesystem(), location);
             let states = MountState::read_all(&state_dir)?;
             match states.as_slice() {
                 [] => {

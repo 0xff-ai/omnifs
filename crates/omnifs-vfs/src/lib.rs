@@ -7,6 +7,7 @@
 
 mod facade;
 pub use facade::*;
+pub use omnifs_core::FsType;
 
 #[cfg(feature = "wire")]
 mod beacon;
@@ -45,17 +46,9 @@ pub const PROTOCOL: u32 = 7;
 #[cfg(feature = "wire")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrontendIdentity {
-    pub kind: FrontendKind,
+    pub kind: FsType,
     /// Guest-side mount point. Display-only; not host-visible authority.
     pub mount_point: PathBuf,
-}
-
-/// Protocol kind a frontend renders (FUSE or NFS).
-#[cfg(feature = "wire")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FrontendKind {
-    Fuse,
-    Nfs,
 }
 
 #[cfg(feature = "wire")]

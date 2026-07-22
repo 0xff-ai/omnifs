@@ -2712,6 +2712,7 @@ dependencies = [
 name = "omnifs-api"
 version = "0.2.1"
 dependencies = [
+ "omnifs-core",
  "serde",
  "serde_json",
  "strum 0.27.2",
@@ -3080,6 +3081,7 @@ dependencies = [
  "fs2",
  "hex",
  "jsonschema",
+ "omnifs-core",
  "schemars",
  "secrecy",
  "serde",

@@ -7,9 +7,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use clap::Args as ClapArgs;
 use omnifs_vfs::Namespace;
-use omnifs_vfs::{
-    AttachTarget, FrontendIdentity, FrontendKind, WireNamespace, resolve_ready_vsock_port,
-};
+use omnifs_vfs::{AttachTarget, FrontendIdentity, FsType, WireNamespace, resolve_ready_vsock_port};
 use tokio::runtime::Handle;
 use tracing::{info, warn};
 
@@ -44,7 +42,7 @@ pub(crate) fn run(args: Args) -> anyhow::Result<()> {
         .context("build the tokio runtime")?;
     let handle = runtime.handle().clone();
     let identity = FrontendIdentity {
-        kind: FrontendKind::Nfs,
+        kind: FsType::Nfs,
         mount_point: args.mount_point.clone(),
     };
     let namespace = runtime
