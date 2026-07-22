@@ -317,9 +317,9 @@ struct ItemCommentsListKey {
 }
 
 /// The `comments` collection: paged child `Comment` objects. Page 0 lists
-/// comment 1 with a resume cursor (typed `Page` + validator); the resumed page
-/// lists comment 2 as `Partial` (open, no cursor). Exercises typed
-/// Collection/Cursor page + partial + validator + fresh child canonical.
+/// comment 1 with a resume cursor (typed `Page`); the resumed page lists
+/// comment 2 as `Partial` (open, no cursor). Exercises typed Collection/Cursor
+/// page + partial + fresh child canonical.
 #[allow(clippy::unused_async)]
 async fn item_comments(
     key: ItemCommentsListKey,
@@ -338,9 +338,7 @@ async fn item_comments(
         canonical,
     );
     if page == 0 {
-        Ok(Collection::page([entry])
-            .next(PageCursor(1))
-            .with_validator(format!("comments-page-{page}")))
+        Ok(Collection::page([entry]).next(PageCursor(1)))
     } else {
         Ok(Collection::partial([entry]))
     }
@@ -650,8 +648,7 @@ async fn feed(cx: DirCx<State>) -> Result<DirListing> {
     if page >= 2 {
         Ok(DirListing::open(entries))
     } else {
-        Ok(DirListing::paged(entries, Cursor::Page(page + 1))
-            .with_validator(format!("feed-page-{page}")))
+        Ok(DirListing::paged(entries, Cursor::Page(page + 1)))
     }
 }
 

@@ -627,7 +627,7 @@ fn nested_collection_router() -> CompiledRouter<()> {
 fn nested_collection_stores_child_view_leaves_facet_expanded() {
     let r = nested_collection_router();
     let cx = cx();
-    let list = drive(&cx, r.list_children(&cx, "/o/r/issues/open", None, None));
+    let list = drive(&cx, r.list_children(&cx, "/o/r/issues/open", None));
     let (out, effects) = list_wit(list);
 
     let wit_types::ListChildrenResult::Entries(listing) = out else {
@@ -766,7 +766,7 @@ fn anchor_collection_router() -> CompiledRouter<()> {
 fn anchor_collection_compiles_and_merges_repo_names_with_owner_faces() {
     let r = anchor_collection_router();
     let cx = cx();
-    let list = drive(&cx, r.list_children(&cx, "/o", None, None));
+    let list = drive(&cx, r.list_children(&cx, "/o", None));
     let (out, effects) = list_wit(list);
 
     let wit_types::ListChildrenResult::Entries(listing) = out else {
@@ -831,7 +831,7 @@ fn anchor_collection_page_is_partial_and_carries_cursor() {
     let r = r.compile().unwrap();
 
     let cx = cx();
-    let list = drive(&cx, r.list_children(&cx, "/o", None, None));
+    let list = drive(&cx, r.list_children(&cx, "/o", None));
     let (out, _effects) = list_wit(list);
     let wit_types::ListChildrenResult::Entries(listing) = out else {
         panic!("owner anchor lists entries");
@@ -854,7 +854,7 @@ fn anchor_collection_page_is_partial_and_carries_cursor() {
         "the typed page cursor round-trips through the wire"
     );
 
-    let list = drive(&cx, r.list_children(&cx, "/o", None, Some(cursor.into())));
+    let list = drive(&cx, r.list_children(&cx, "/o", Some(cursor.into())));
     let (out, _effects) = list_wit(list);
     let wit_types::ListChildrenResult::Entries(listing) = out else {
         panic!("owner anchor continuation lists entries");
@@ -1070,10 +1070,7 @@ fn object_tree_face_lookup_returns_subtree_handoff() {
 fn object_tree_face_list_returns_subtree_handoff() {
     let r = tree_face_router();
     let cx = cx();
-    let list = drive(
-        &cx,
-        r.list_children(&cx, "/torvalds/linux/repo", None, None),
-    );
+    let list = drive(&cx, r.list_children(&cx, "/torvalds/linux/repo", None));
     let (out, _effects) = list.into_result_and_effects();
     assert!(
         matches!(out, wit_types::ListChildrenResult::Subtree(7)),
@@ -1091,7 +1088,7 @@ fn aliased_object_tree_face_replays_lookup_and_list_handoff() {
 
     let list = drive(
         &cx,
-        r.list_children(&cx, "/torvalds/mirrorlinux/repo", None, None),
+        r.list_children(&cx, "/torvalds/mirrorlinux/repo", None),
     );
     let (list, _) = list.into_result_and_effects();
     assert!(matches!(list, wit_types::ListChildrenResult::Subtree(7)));
@@ -1106,7 +1103,7 @@ fn nested_collection_list_varies_by_subcapture() {
     let r = nested_collection_router();
     let cx = cx();
 
-    let open = drive(&cx, r.list_children(&cx, "/o/r/issues/open", None, None));
+    let open = drive(&cx, r.list_children(&cx, "/o/r/issues/open", None));
     let (open_out, _e) = open.into_result_and_effects();
     let wit_types::ListChildrenResult::Entries(open_listing) = open_out else {
         panic!("collection lists entries");
@@ -1117,7 +1114,7 @@ fn nested_collection_list_varies_by_subcapture() {
         .map(|e| e.name.as_str())
         .collect();
 
-    let all = drive(&cx, r.list_children(&cx, "/o/r/issues/all", None, None));
+    let all = drive(&cx, r.list_children(&cx, "/o/r/issues/all", None));
     let (all_out, _e) = all.into_result_and_effects();
     let wit_types::ListChildrenResult::Entries(all_listing) = all_out else {
         panic!("collection lists entries");
@@ -1160,7 +1157,7 @@ fn choices_router() -> CompiledRouter<()> {
 fn choices_face_lists_fixed_dir_entries_exhaustive() {
     let r = choices_router();
     let cx = cx();
-    let list = drive(&cx, r.list_children(&cx, "/o/r/issues", None, None));
+    let list = drive(&cx, r.list_children(&cx, "/o/r/issues", None));
     let (out, _effects) = list.into_result_and_effects();
     let wit_types::ListChildrenResult::Entries(listing) = out else {
         panic!("the choices dir lists entries, got something else");

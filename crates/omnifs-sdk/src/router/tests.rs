@@ -157,7 +157,7 @@ fn lookup_child_entry(
 
 fn list_entries(router: &CompiledRouter<()>, path: &str) -> Vec<wit_types::DirEntry> {
     let cx = Cx::new(1, Rc::new(RefCell::new(())));
-    let list = poll_ready(router.list_children(&cx, path, None, None)).unwrap();
+    let list = poll_ready(router.list_children(&cx, path, None)).unwrap();
     let (wire, _effects) = list.into_result_and_effects();
     let wit_types::ListChildrenResult::Entries(listing) = wire else {
         panic!("expected {path} to list entries");
@@ -601,7 +601,7 @@ fn dynamic_capture_prefix_lists_route_table_children_without_stub_dir() {
     assert_eq!(entry.target.name, "42");
     assert!(matches!(entry.target.kind, wit_types::EntryKind::Directory));
 
-    let listing = poll_ready(router.list_children(&cx, "/items/42", None, None)).unwrap();
+    let listing = poll_ready(router.list_children(&cx, "/items/42", None)).unwrap();
     let (wire, _effects) = listing.into_result_and_effects();
     let wit_types::ListChildrenResult::Entries(listing) = wire else {
         panic!("dynamic capture prefix should list static route-table children");

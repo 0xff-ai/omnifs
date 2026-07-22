@@ -9,7 +9,7 @@ use crate::browse::{List, Listing, Lookup};
 use crate::captures::Captures;
 use crate::error::Result;
 use crate::file_attrs::{FileProj, ReadMode, Size};
-use crate::projection::{DirOutcome, DirProjection, Entry};
+use crate::projection::{DirProjection, Entry};
 use omnifs_core::path::Path;
 
 use super::super::compiled::CompiledRouter;
@@ -161,68 +161,42 @@ impl<S> Shape<'_, S> {
     /// projection's entries with the static siblings (projection wins name
     /// collisions), pick the target by name, and carry the rest as
     /// siblings together with the projection's preload effects, so a single
-    /// lookup warms everything the handler already computed. The
-    /// `Unchanged` outcome resolves to not-found here: it enumerates
-    /// nothing to match against.
+    /// lookup warms everything the handler already computed.
     pub(super) fn projection_lookup(
         &self,
         parent_abs: &Path,
         name: &str,
         projection: &DirProjection,
     ) -> Result<Lookup> {
-        if let DirOutcome::Entries { entries, .. } = projection.outcome() {
-            let merged = self.merge_entries(parent_abs, entries.iter().cloned());
-            let target = merged.iter().find(|entry| entry.name() == name).cloned();
-            let exhaustive = matches!(
-                projection.outcome(),
-                DirOutcome::Entries {
-                    exhaustive: true,
-                    ..
-                }
-            );
-            let siblings = merged.into_iter().filter(|entry| entry.name() != name);
-            let lookup = target.map_or_else(Lookup::not_found, Lookup::entry);
-            return Ok(lookup
-                .with_siblings(siblings)
-                .with_effects(projection.project_effects()?)
-                .exhaustive(exhaustive));
-        }
-        Ok(Lookup::not_found())
+        let merged = self.merge_entries(parent_abs, projection.entries().iter().cloned());
+        let target = merged.iter().find(|entry| entry.name() == name).cloned();
+        let siblings = merged.into_iter().filter(|entry| entry.name() != name);
+        let lookup = target.map_or_else(Lookup::not_found, Lookup::entry);
+        Ok(lookup
+            .with_siblings(siblings)
+            .with_effects(projection.project_effects()?)
+            .exhaustive(projection.exhaustive_flag()))
     }
 
     /// Lower a [`DirProjection`] to the wire listing: merge with static
     /// siblings, honor the handler's exhaustive flag, and attach the
-    /// preload effects, re-list validator, and resume cursor the projection
-    /// carries.
+    /// preload effects and resume cursor the projection carries.
     pub(super) fn dir_projection_into_list(
         &self,
         abs: &Path,
         projection: &DirProjection,
     ) -> Result<List> {
-        match projection.outcome() {
-            DirOutcome::Unchanged => Ok(List::unchanged()),
-            DirOutcome::Entries {
-                exhaustive,
-                cursor,
-                entries,
-            } => {
-                let merged = self.merge_entries(abs, entries.iter().cloned());
-
-                let mut listing = if *exhaustive {
-                    Listing::complete(merged)
-                } else {
-                    Listing::partial(merged)
-                };
-                listing = listing.with_effects(projection.project_effects()?);
-                if let Some(validator) = projection.validator() {
-                    listing = listing.with_validator(validator.0.clone());
-                }
-                if let Some(cursor) = cursor.clone() {
-                    listing = listing.with_cursor(cursor);
-                }
-                Ok(List::entries(listing))
-            },
+        let merged = self.merge_entries(abs, projection.entries().iter().cloned());
+        let mut listing = if projection.exhaustive_flag() {
+            Listing::complete(merged)
+        } else {
+            Listing::partial(merged)
+        };
+        listing = listing.with_effects(projection.project_effects()?);
+        if let Some(cursor) = projection.cursor().cloned() {
+            listing = listing.with_cursor(cursor);
         }
+        Ok(List::entries(listing))
     }
 
     /// An object anchor's listing: the precomputed leaf names merged over
@@ -293,26 +267,13 @@ pub(in crate::router) fn merge_anchor_collection(
         entries.iter().map(|e| e.name().to_string()).collect();
 
     let mut all_exhaustive = listing.exhaustive();
-    let mut next_cursor: Option<crate::handler::Cursor> = None;
-    match projection.outcome() {
-        DirOutcome::Entries {
-            entries: child_entries,
-            exhaustive,
-            cursor,
-        } => {
-            for entry in child_entries {
-                if !parent_names.contains(entry.name()) {
-                    entries.push(entry.clone());
-                }
-            }
-            all_exhaustive &= *exhaustive;
-            next_cursor.clone_from(cursor);
-        },
-        // A child listing whose validator matched: it contributes no fresh
-        // entries here, but it is not a completeness claim either.
-        DirOutcome::Unchanged => all_exhaustive = false,
+    for entry in projection.entries() {
+        if !parent_names.contains(entry.name()) {
+            entries.push(entry.clone());
+        }
     }
-    let validator = projection.validator().map(|v| v.0.clone());
+    all_exhaustive &= projection.exhaustive_flag();
+    let next_cursor = projection.cursor().cloned();
     effects.extend(projection.project_effects()?);
 
     let mut merged = if all_exhaustive {
@@ -321,9 +282,6 @@ pub(in crate::router) fn merge_anchor_collection(
         Listing::partial(entries)
     }
     .with_effects(effects);
-    if let Some(validator) = validator {
-        merged = merged.with_validator(validator);
-    }
     if let Some(cursor) = next_cursor {
         merged = merged.with_cursor(cursor);
     }

@@ -74,7 +74,6 @@ impl Runtime {
     pub(crate) async fn run_list_children(
         &self,
         path: &Path,
-        cached_validator: Option<String>,
         cursor: Option<wit_types::Cursor>,
         expected_cursor: Option<crate::view::CachedCursor>,
         captured_epoch: u64,
@@ -91,7 +90,7 @@ impl Runtime {
         async {
             let (wire_result, effects) = self
                 .instance
-                .list_children(id, path.as_str().to_string(), cached_validator, cursor)
+                .list_children(id, path.as_str().to_string(), cursor)
                 .await?;
             crate::op_validate::validate_list(&wire_result, &effects, |tree| {
                 self.tree_ref(tree).is_some()

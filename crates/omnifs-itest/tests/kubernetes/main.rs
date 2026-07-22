@@ -74,7 +74,9 @@ fn partial_discovery_stays_open_qualifies_groups_and_retries_unknown_types() {
             names.sort();
             assert_eq!(names, vec!["bars.example.io", "legacies.example.io"]);
         },
-        other => panic!("expected partial type entries, got {other:?}"),
+        other @ ListChildrenResult::Subtree(_) => {
+            panic!("expected partial type entries, got {other:?}")
+        },
     }
 
     let mut omitted_core_type = harness.list("/namespaces/demo/pods").unwrap();

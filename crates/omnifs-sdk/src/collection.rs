@@ -10,7 +10,6 @@
 
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::file_attrs::VersionToken;
 use crate::object::{Canonical, Object};
 use crate::projection::FileProjection;
 use std::ops::Deref;
@@ -143,22 +142,17 @@ impl<T: Object> CollectionEntry<T> {
 /// - `Page`: a partial page plus a typed resume cursor; more is reachable.
 /// - `Partial`: intentionally open or truncated with no cursor; lookup remains
 ///   authoritative for navigable names.
-/// - `Unchanged`: the host's listing validator matched; serve cached dirents.
 pub enum Collection<T: Object, C = NoCursor> {
     Complete {
         entries: Vec<CollectionEntry<T>>,
-        validator: Option<VersionToken>,
     },
     Page {
         entries: Vec<CollectionEntry<T>>,
         next: C,
-        validator: Option<VersionToken>,
     },
     Partial {
         entries: Vec<CollectionEntry<T>>,
-        validator: Option<VersionToken>,
     },
-    Unchanged,
 }
 
 impl<T: Object, C: Cursor> Collection<T, C> {
@@ -166,7 +160,6 @@ impl<T: Object, C: Cursor> Collection<T, C> {
     pub fn complete(entries: impl IntoIterator<Item = CollectionEntry<T>>) -> Self {
         Self::Complete {
             entries: entries.into_iter().collect(),
-            validator: None,
         }
     }
 
@@ -182,26 +175,7 @@ impl<T: Object, C: Cursor> Collection<T, C> {
     pub fn partial(entries: impl IntoIterator<Item = CollectionEntry<T>>) -> Self {
         Self::Partial {
             entries: entries.into_iter().collect(),
-            validator: None,
         }
-    }
-
-    /// The listing validator matched; serve cached dirents.
-    pub fn unchanged() -> Self {
-        Self::Unchanged
-    }
-
-    /// Record the validator the host echoes on the next list for a cheap re-list.
-    #[must_use]
-    pub fn with_validator(mut self, validator: impl Into<VersionToken>) -> Self {
-        let v = validator.into();
-        match &mut self {
-            Self::Complete { validator, .. }
-            | Self::Page { validator, .. }
-            | Self::Partial { validator, .. } => *validator = Some(v),
-            Self::Unchanged => {},
-        }
-        self
     }
 
     /// Lower this collection to the [`crate::projection::DirProjection`] the
@@ -222,15 +196,10 @@ impl<T: Object, C: Cursor> Collection<T, C> {
         use crate::object::FacetMetadata as _;
         use crate::projection::{DirProjection, Entry};
 
-        let (entries, cursor, validator, complete) = match self {
-            Self::Complete { entries, validator } => (entries, None, validator, true),
-            Self::Partial { entries, validator } => (entries, None, validator, false),
-            Self::Page {
-                entries,
-                next,
-                validator,
-            } => (entries, Some(encode_cursor(&next)), validator, false),
-            Self::Unchanged => return Ok(DirProjection::unchanged()),
+        let (entries, cursor, complete) = match self {
+            Self::Complete { entries } => (entries, None, true),
+            Self::Partial { entries } => (entries, None, false),
+            Self::Page { entries, next } => (entries, Some(encode_cursor(&next)), false),
         };
 
         let mut fresh_stores: Vec<(crate::router::EntryView, Canonical)> = Vec::new();
@@ -260,9 +229,6 @@ impl<T: Object, C: Cursor> Collection<T, C> {
         } else {
             DirProjection::open(dir_entries)
         };
-        if let Some(validator) = validator {
-            projection = projection.with_validator(validator);
-        }
         for (view, canonical) in fresh_stores {
             projection = projection.store_canonical(
                 view.id,
@@ -291,7 +257,6 @@ impl<T: Object, C: Cursor> CollectionPage<T, C> {
         Collection::Page {
             entries: self.entries,
             next: cursor,
-            validator: None,
         }
     }
 }

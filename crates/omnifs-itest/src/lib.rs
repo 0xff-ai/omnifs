@@ -174,7 +174,7 @@ impl RuntimeHarness {
         cursor: Option<&omnifs_wit::provider::types::Cursor>,
     ) -> Result<TestOp<'_, ListChildrenResult>, EngineError> {
         let path = parse_path(path);
-        self.runtime.start_list_children(&path, None, cursor)
+        self.runtime.start_list_children(&path, cursor)
     }
 
     pub fn read(&self, path: &str) -> Result<TestOp<'_, ReadFileOutcome>, EngineError> {

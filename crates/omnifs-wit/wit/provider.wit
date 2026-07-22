@@ -1,4 +1,4 @@
-package omnifs:provider@0.6.0;
+package omnifs:provider@0.7.0;
 
 // === Shared types ===
 
@@ -224,9 +224,6 @@ interface types {
     variant list-children-result {
         entries(dir-listing),
         subtree(tree-ref),
-        /// The host-supplied `cached-validator` still matches: the host
-        /// serves its cached dirents and the provider enumerated nothing.
-        unchanged,
     }
 
     /// A directory listing returned by a provider, pairing child entries
@@ -234,10 +231,6 @@ interface types {
     record dir-listing {
         entries: list<dir-entry>,
         exhaustive: bool,
-        /// Opaque validator (e.g. an ETag) the host stores with the
-        /// listing and echoes as `cached-validator` on the next
-        /// `list-children` for a cheap re-list.
-        validator: option<string>,
         /// Resume token for a paged (non-exhaustive) listing; the host
         /// echoes it back as the `cursor` argument to continue.
         next-cursor: option<cursor>,
@@ -366,7 +359,7 @@ interface namespace {
 
     lookup-child: async func(id: correlation-id, parent-path: string, name: string)
         -> tuple<result<lookup-child-result, provider-error>, effects>;
-    list-children: async func(id: correlation-id, path: string, cached-validator: option<string>, cursor: option<cursor>)
+    list-children: async func(id: correlation-id, path: string, cursor: option<cursor>)
         -> tuple<result<list-children-result, provider-error>, effects>;
     read-file: async func(id: correlation-id, path: string, content-type: string, cached-canonical: option<canonical-input>)
         -> tuple<result<read-file-outcome, provider-error>, effects>;

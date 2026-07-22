@@ -72,7 +72,6 @@ where
                 }
             },
             wit_types::ListChildrenResult::Subtree(tree) => self.subtree_tree(*tree)?,
-            wit_types::ListChildrenResult::Unchanged => {},
         }
         Ok(())
     }
@@ -469,7 +468,6 @@ mod tests {
                     )),
                 )],
                 exhaustive: true,
-                validator: None,
                 next_cursor: None,
             },
         ));
@@ -490,7 +488,6 @@ mod tests {
                     )),
                 )],
                 exhaustive: true,
-                validator: None,
                 next_cursor: None,
             },
         ));
@@ -571,7 +568,6 @@ mod tests {
                     wit_types::EntryKind::File(file),
                 )],
                 exhaustive: true,
-                validator: None,
                 next_cursor: None,
             },
         ));
@@ -644,7 +640,6 @@ mod tests {
             wit_types::DirListing {
                 entries: vec![entry("nested/name")],
                 exhaustive: true,
-                validator: None,
                 next_cursor: None,
             },
         ));
@@ -656,7 +651,6 @@ mod tests {
                 wit_types::DirListing {
                     entries: vec![entry(control)],
                     exhaustive: true,
-                    validator: None,
                     next_cursor: None,
                 },
             ));
@@ -668,7 +662,6 @@ mod tests {
             wit_types::DirListing {
                 entries: vec![entry("@cloudflare")],
                 exhaustive: true,
-                validator: None,
                 next_cursor: None,
             },
         ));

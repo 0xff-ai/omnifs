@@ -305,7 +305,6 @@ impl<'a> EffectApplier<'a> {
                 let value = DirentsPayload {
                     entries: persisted_entries,
                     exhaustive: listing.exhaustive && next_cursor.is_none(),
-                    validator: listing.validator.clone(),
                     paginated: next_cursor.is_some() || expected_cursor.is_some(),
                     next_cursor: next_cursor.clone(),
                 };
@@ -343,18 +342,6 @@ impl<'a> EffectApplier<'a> {
                         .collect(),
                     next_cursor,
                 })
-            },
-            wit_types::ListChildrenResult::Unchanged => {
-                if let Some(expected_cursor) = expected_cursor {
-                    transition.dirents.push(DirentsMutation::AppendPage {
-                        path: path.clone(),
-                        expected_cursor,
-                        entries: Vec::new(),
-                        next_cursor: None,
-                        exhaustive: true,
-                    });
-                }
-                ListOutcome::Unchanged
             },
             wit_types::ListChildrenResult::Subtree(tree) => {
                 let id = resolve_tree(tree)

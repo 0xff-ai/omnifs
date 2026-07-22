@@ -332,12 +332,11 @@ impl<Src: Buildable> FileProjBuilder<Src> {
 /// consumes. Both the author-facing [`DirListing`] and
 /// [`crate::collection::Collection`] lower into this. `exhaustive` enumerates
 /// every child; `open` is capped/non-exhaustive with no cursor; `paged` is
-/// resumable; `unchanged` is the listing analog of
-/// [`crate::object::Load::Unchanged`] (the cached validator matched, so the
-/// host serves its cached dirents).
+/// resumable.
 pub(crate) struct DirProjection {
-    outcome: DirOutcome,
-    validator: Option<VersionToken>,
+    entries: Vec<Entry>,
+    exhaustive: bool,
+    cursor: Option<Cursor>,
     extra_files: Vec<(String, FileProjection)>,
     /// Preloaded directory entries: `(path, exhaustive)`. Lowered to the
     /// `project_dir`/`project_dir_exhaustive` effect so a listing can declare
@@ -355,19 +354,6 @@ struct ExtraCanonical {
     validator: Option<VersionToken>,
     bytes: Vec<u8>,
     leaves: Vec<String>,
-}
-
-/// The listing outcome a [`DirProjection`] carries. `Unchanged` is a sentinel
-/// the router maps to the WIT `list-children-result::unchanged`; the
-/// `Entries` variant carries the entries, an exhaustiveness flag, and an
-/// optional resume cursor.
-pub(crate) enum DirOutcome {
-    Entries {
-        entries: Vec<Entry>,
-        exhaustive: bool,
-        cursor: Option<Cursor>,
-    },
-    Unchanged,
 }
 
 impl DirProjection {
@@ -395,38 +381,15 @@ impl DirProjection {
         Self::from_entries(entries.into_iter().collect(), false, Some(cursor))
     }
 
-    /// The cached validator matched: the host serves its cached dirents and the
-    /// handler enumerated nothing.
-    pub fn unchanged() -> Self {
-        Self {
-            outcome: DirOutcome::Unchanged,
-            validator: None,
-            extra_files: Vec::new(),
-            extra_dirs: Vec::new(),
-            extra_canonical: Vec::new(),
-        }
-    }
-
     fn from_entries(entries: Vec<Entry>, exhaustive: bool, cursor: Option<Cursor>) -> Self {
         Self {
-            outcome: DirOutcome::Entries {
-                entries,
-                exhaustive,
-                cursor,
-            },
-            validator: None,
+            entries,
+            exhaustive,
+            cursor,
             extra_files: Vec::new(),
             extra_dirs: Vec::new(),
             extra_canonical: Vec::new(),
         }
-    }
-
-    /// Record the validator the host echoes on the next `list-children` for a
-    /// cheap re-list.
-    #[must_use]
-    pub fn with_validator(mut self, validator: impl Into<VersionToken>) -> Self {
-        self.validator = Some(validator.into());
-        self
     }
 
     /// Preload a child file alongside the listing (the `project` effect).
@@ -439,16 +402,13 @@ impl DirProjection {
 
     /// Preload a child directory and merge `child`'s listing-time effects under
     /// `path`. Relative paths on `child` are joined to `path`; absolute paths
-    /// are left unchanged. The child's [`DirOutcome::Entries::exhaustive`]
-    /// flag selects `project_dir` vs `project_dir_exhaustive` for `path`.
+    /// are left unchanged. The child's exhaustive flag selects `project_dir`
+    /// vs `project_dir_exhaustive` for `path`.
     /// Enumerated entries on `child` are not merged into this listing.
     #[must_use]
     pub fn preload_dir(mut self, path: impl Into<String>, child: DirProjection) -> Self {
         let path = path.into();
-        let exhaustive = match child.outcome() {
-            DirOutcome::Entries { exhaustive, .. } => *exhaustive,
-            DirOutcome::Unchanged => false,
-        };
+        let exhaustive = child.exhaustive;
         self.extra_dirs.push((path.clone(), exhaustive));
         for (subdir, subdir_exhaustive) in child.extra_dirs {
             self.extra_dirs
@@ -491,12 +451,16 @@ impl DirProjection {
         self
     }
 
-    pub(crate) fn outcome(&self) -> &DirOutcome {
-        &self.outcome
+    pub(crate) fn entries(&self) -> &[Entry] {
+        &self.entries
     }
 
-    pub fn validator(&self) -> Option<&VersionToken> {
-        self.validator.as_ref()
+    pub(crate) fn exhaustive_flag(&self) -> bool {
+        self.exhaustive
+    }
+
+    pub(crate) fn cursor(&self) -> Option<&Cursor> {
+        self.cursor.as_ref()
     }
 
     /// Lower the carried extra-file preloads onto the browse [`Effects`]
@@ -540,8 +504,7 @@ impl DirProjection {
 /// listing surfaces.
 ///
 /// `exhaustive` enumerates every child; `open` is capped/non-exhaustive with no
-/// cursor; `paged` is resumable; `unchanged` serves the host's cached dirents
-/// when the listing validator still matches.
+/// cursor; `paged` is resumable.
 pub struct DirListing(DirProjection);
 
 impl DirListing {
@@ -567,19 +530,6 @@ impl DirListing {
     /// without one.
     pub fn paged(entries: impl IntoIterator<Item = Entry>, cursor: Cursor) -> Self {
         Self(DirProjection::paged(entries, cursor))
-    }
-
-    /// The cached validator matched: the host serves its cached dirents and the
-    /// handler enumerated nothing.
-    pub fn unchanged() -> Self {
-        Self(DirProjection::unchanged())
-    }
-
-    /// Record the validator the host echoes on the next `list-children` for a
-    /// cheap re-list.
-    #[must_use]
-    pub fn with_validator(self, validator: impl Into<VersionToken>) -> Self {
-        Self(self.0.with_validator(validator))
     }
 
     /// Preload a child file alongside the listing (the `project` effect).
