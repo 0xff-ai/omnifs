@@ -6,7 +6,8 @@
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use omnifs_workspace::mounts::{Auth, Limits, Name as MountName, Spec};
+use omnifs_core::MountName;
+use omnifs_workspace::mounts::{Auth, Limits, Spec};
 use omnifs_workspace::provider::{ProviderAuthManifest, ProviderManifest};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;

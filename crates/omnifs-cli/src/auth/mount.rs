@@ -2,11 +2,12 @@
 
 use anyhow::{Context, anyhow};
 use omnifs_auth::OAuthRequest;
+use omnifs_core::MountName;
 use omnifs_workspace::authn::{
     AccountId, AuthManifest, AuthScheme, CredentialId, StaticTokenScheme,
 };
 use omnifs_workspace::creds::CredentialStore;
-use omnifs_workspace::mounts::{Auth, Name as MountName, OAuth, Registry, Spec, StaticToken};
+use omnifs_workspace::mounts::{Auth, OAuth, Registry, Spec, StaticToken};
 use omnifs_workspace::provider::{Catalog, ProviderAuthManifest, ProviderManifest};
 
 use super::manifest_view::AuthManifestView;

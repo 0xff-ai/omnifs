@@ -1,6 +1,7 @@
 use crate::provider_bundle::EmbeddedProviders;
 use anyhow::anyhow;
-use omnifs_workspace::mounts::{Name as MountName, Registry};
+use omnifs_core::MountName;
+use omnifs_workspace::mounts::Registry;
 
 pub(crate) fn select(
     embedded: &EmbeddedProviders,

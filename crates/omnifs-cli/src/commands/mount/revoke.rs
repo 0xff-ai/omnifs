@@ -23,7 +23,7 @@ impl RevokeArgs {
     pub(crate) async fn run(self, output: Output) -> anyhow::Result<Receipt> {
         let workspace = Workspace::resolve()?;
         let mounts = crate::mount_config::load_registry(&workspace)?;
-        let requested_name = omnifs_workspace::mounts::Name::new(self.name.clone())?;
+        let requested_name = omnifs_core::MountName::new(self.name.clone())?;
         let requested = mounts
             .get(&requested_name)
             .ok_or_else(|| anyhow!("no mount config named `{}`", self.name))?;

@@ -16,8 +16,8 @@
 
 use fjall::OptimisticTxDatabase;
 use fjall::Readable;
+use omnifs_core::MountName;
 use omnifs_core::path::Path;
-use omnifs_workspace::mounts::Name;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path as StdPath;
@@ -377,7 +377,7 @@ impl Caches {
     /// Return the sole owner of one mount's cache and blob resources.
     pub(crate) fn mount(
         self: &Arc<Self>,
-        mount: &Name,
+        mount: &MountName,
         projection_id: ProjectionId,
         provider_id: ProviderId,
         spec_source: &[u8],
@@ -395,7 +395,7 @@ impl Caches {
     /// complete durable fact graph.
     pub(crate) fn mount_existing(
         self: &Arc<Self>,
-        mount: &Name,
+        mount: &MountName,
         projection_id: ProjectionId,
         provider_id: ProviderId,
         spec_source: &[u8],
@@ -497,7 +497,7 @@ pub struct Coherence {
 impl MountResources {
     fn new(
         caches: &Caches,
-        mount: &Name,
+        mount: &MountName,
         projection_id: ProjectionId,
         provider_id: ProviderId,
         spec_source: &[u8],
@@ -515,7 +515,7 @@ impl MountResources {
 
     fn new_existing(
         caches: &Caches,
-        mount: &Name,
+        mount: &MountName,
         projection_id: ProjectionId,
         provider_id: ProviderId,
         spec_source: &[u8],
@@ -2189,7 +2189,7 @@ mod tests {
     fn open_store(mount: &str) -> (tempfile::TempDir, Arc<Caches>, Arc<MountResources>) {
         let dir = tempfile::tempdir().unwrap();
         let caches = Caches::open(dir.path()).unwrap();
-        let name = Name::new(mount).unwrap();
+        let name = MountName::new(mount).unwrap();
         let source = mount.as_bytes();
         let provider_id = ProviderId::from_wasm_bytes(source);
         let projection_id = ProjectionId::new(source, provider_id);
@@ -2284,7 +2284,7 @@ mod tests {
             b"from-a"
         );
 
-        let name_b = Name::new("b").unwrap();
+        let name_b = MountName::new("b").unwrap();
         let source = b"b";
         let provider_id = ProviderId::from_wasm_bytes(source);
         let store_b = caches

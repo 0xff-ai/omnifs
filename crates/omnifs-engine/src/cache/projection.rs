@@ -6,8 +6,8 @@ use fjall::{
     KeyspaceCreateOptions, OptimisticTxDatabase, OptimisticTxKeyspace, OptimisticWriteTx,
     PersistMode,
 };
+use omnifs_core::MountName;
 use omnifs_workspace::ids::ProviderId;
-use omnifs_workspace::mounts::Name;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -22,13 +22,13 @@ pub const PROJECTION_MANIFEST_VERSION: u32 = 1;
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProjectionManifest {
     pub version: u32,
-    pub mount: Name,
+    pub mount: MountName,
     pub spec_digest: String,
     pub provider_id: ProviderId,
 }
 
 impl ProjectionManifest {
-    fn new(mount: &Name, spec_source: &[u8], provider_id: ProviderId) -> Self {
+    fn new(mount: &MountName, spec_source: &[u8], provider_id: ProviderId) -> Self {
         Self {
             version: PROJECTION_MANIFEST_VERSION,
             mount: mount.clone(),
@@ -39,7 +39,7 @@ impl ProjectionManifest {
 
     fn validate(
         &self,
-        mount: &Name,
+        mount: &MountName,
         spec_source: &[u8],
         provider_id: ProviderId,
     ) -> Result<(), ProjectionStoreError> {
@@ -68,7 +68,7 @@ impl ProjectionStore {
         root: impl AsRef<Path>,
         database: &OptimisticTxDatabase,
         id: ProjectionId,
-        mount: &Name,
+        mount: &MountName,
         spec_source: &[u8],
         provider_id: ProviderId,
     ) -> Result<Self, ProjectionStoreError> {
@@ -172,7 +172,7 @@ impl ProjectionStore {
         root: impl AsRef<Path>,
         database: &OptimisticTxDatabase,
         id: ProjectionId,
-        mount: &Name,
+        mount: &MountName,
         spec_source: &[u8],
         provider_id: ProviderId,
     ) -> Result<Self, ProjectionStoreError> {
@@ -201,7 +201,7 @@ impl ProjectionStore {
         root: &Path,
         database: &OptimisticTxDatabase,
         id: ProjectionId,
-        mount: &Name,
+        mount: &MountName,
         spec_source: &[u8],
         provider_id: ProviderId,
     ) -> Result<PathBuf, ProjectionStoreError> {
@@ -242,7 +242,7 @@ impl ProjectionStore {
 
     pub(crate) fn validate_existing(
         &self,
-        mount: &Name,
+        mount: &MountName,
         spec_source: &[u8],
         provider_id: ProviderId,
     ) -> Result<(), ProjectionStoreError> {
@@ -323,8 +323,8 @@ mod tests {
         PROJECTION_MANIFEST_VERSION, ProjectionManifest, ProjectionStore, ProjectionStoreError,
     };
     use crate::cache::identity::ProjectionId;
+    use omnifs_core::MountName;
     use omnifs_workspace::ids::ProviderId;
-    use omnifs_workspace::mounts::Name;
 
     #[test]
     fn manifest_rejects_wrong_identity_and_version() {
@@ -333,7 +333,7 @@ mod tests {
         let database = fjall::OptimisticTxDatabase::builder(temp.path().join("database"))
             .open()
             .unwrap();
-        let mount = Name::new("test").unwrap();
+        let mount = MountName::new("test").unwrap();
         let source = br#"{"mount":"test"}"#;
         let provider = ProviderId::from_wasm_bytes(b"provider");
         let id = ProjectionId::new(source, provider);
@@ -355,7 +355,7 @@ mod tests {
 
         let projection_root = crate::cache::canonical_directory(&root.join(id.hex())).unwrap();
         let mut manifest = ProjectionManifest::new(&mount, source, provider);
-        manifest.mount = Name::new("other").unwrap();
+        manifest.mount = MountName::new("other").unwrap();
         std::fs::write(
             projection_root.join("manifest.json"),
             serde_json::to_vec(&manifest).unwrap(),

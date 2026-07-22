@@ -14,10 +14,11 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::creds::FileStore;
-use crate::mounts::{Name, Registry, Repository, Revision, Spec, SpecError};
+use crate::mounts::{Registry, Repository, Revision, Spec, SpecError};
 use crate::provider::Catalog;
 use atomic_write_file::OpenOptions as AtomicOpenOptions;
 use fs2::FileExt as _;
+use omnifs_core::MountName;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_HOME_SUBDIR: &str = ".omnifs";
@@ -288,7 +289,10 @@ impl DesiredState {
         self.repository()?.put(spec)
     }
 
-    pub fn remove_uncommitted(&self, name: &Name) -> Result<bool, crate::mounts::RepositoryError> {
+    pub fn remove_uncommitted(
+        &self,
+        name: &MountName,
+    ) -> Result<bool, crate::mounts::RepositoryError> {
         self.repository()?.remove(name)
     }
 
@@ -316,7 +320,7 @@ impl DesiredState {
 
     /// Exact spec path at a filesystem or final output boundary.
     #[must_use]
-    pub fn spec_path(&self, name: &Name) -> PathBuf {
+    pub fn spec_path(&self, name: &MountName) -> PathBuf {
         self.mounts_dir.join(format!("{name}.json"))
     }
 }
@@ -649,7 +653,7 @@ mod tests {
 
         workspace
             .desired_state()
-            .remove_uncommitted(&Name::new("github").unwrap())
+            .remove_uncommitted(&MountName::new("github").unwrap())
             .unwrap();
         assert!(
             workspace

@@ -71,7 +71,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 
 ## Orientation
 
-- `crates/omnifs-core`: path, content type, and view primitives.
+- `crates/omnifs-core`: shared path, mount identity, frontend identity, and file-contract primitives.
 - `crates/omnifs-sdk`: provider authoring API, object model, route registration, and dispatch.
 - `crates/omnifs-wit/wit/provider.wit`: provider component contract.
 - `crates/omnifs-workspace`: every byte under `OMNIFS_HOME`: the directory layout, provider/credential identity types, the auth-scheme wire model, provider manifests and the content-addressed provider index, the mount-spec registry (sole owner of on-disk specs) with creation-time inheritance and materialization, and credential stores.
