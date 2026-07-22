@@ -76,7 +76,7 @@ impl FrontendId {
         Ok(Self::new(filesystem, runtime, location))
     }
 
-    fn from_status(frontend: &FrontendStatus) -> Self {
+    pub(crate) fn from_status(frontend: &FrontendStatus) -> Self {
         Self::new(
             frontend.filesystem,
             frontend.runtime,
@@ -101,6 +101,18 @@ impl FrontendId {
     }
     pub fn location(&self) -> Option<&Path> {
         self.location.as_deref()
+    }
+
+    pub(crate) fn describe(&self) -> String {
+        format!("{} {}", self.filesystem.as_str(), self.runtime.as_str())
+    }
+
+    pub(crate) fn restart_command(&self) -> String {
+        format!(
+            "omnifs frontend restart {} --runtime {}",
+            self.filesystem.as_str(),
+            self.runtime.as_str()
+        )
     }
 }
 

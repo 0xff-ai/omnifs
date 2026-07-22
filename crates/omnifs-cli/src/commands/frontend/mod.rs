@@ -72,6 +72,4 @@ impl FrontendArgs {
 }
 
 pub(crate) use discovery::{available_frontends, default_runtime};
-#[cfg(test)]
-pub(crate) use lifecycle::FrontendId;
-pub(crate) use lifecycle::{FrontendEnableArgs, FrontendResult, FrontendResultState};
+pub(crate) use lifecycle::{FrontendEnableArgs, FrontendId, FrontendResult, FrontendResultState};

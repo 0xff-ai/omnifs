@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use omnifs_api::{DaemonStatus, FrontendRuntime as Runtime, FsType as Filesystem};
+use omnifs_api::DaemonStatus;
 use omnifs_workspace::creds::CredentialStore;
 use omnifs_workspace::mounts::{Registry, Revision};
 use omnifs_workspace::provider::Catalog;
 
 use crate::client::DaemonClient;
+use crate::commands::frontend::FrontendId;
 use crate::daemon_teardown::DaemonTeardown;
 use crate::inventory::{FrontendState, FrontendStatus, Inventory};
 use crate::mount_config::MountConfig;
@@ -221,7 +222,7 @@ impl<'a> Launcher<'a> {
                     .frontends
                     .iter()
                     .filter(|frontend| frontend.state == FrontendState::Attached)
-                    .map(FrontendTrack::from_status)
+                    .map(FrontendId::from_status)
                     .collect();
             }
 
@@ -270,7 +271,7 @@ impl<'a> Launcher<'a> {
     /// `up` still returns `Ok`, and the caller's exit code stays 0.
     async fn wait_for_reattachment(
         &self,
-        expected: Vec<FrontendTrack>,
+        expected: Vec<FrontendId>,
         key_width: usize,
     ) -> anyhow::Result<()> {
         let total = expected.len();
@@ -291,7 +292,7 @@ impl<'a> Launcher<'a> {
             if pending.is_empty() {
                 let detail = expected
                     .iter()
-                    .map(FrontendTrack::describe)
+                    .map(FrontendId::describe)
                     .collect::<Vec<_>>()
                     .join(", ");
                 region.finish(
@@ -333,44 +334,6 @@ impl<'a> Launcher<'a> {
     }
 }
 
-/// A frontend's stable identity across a daemon replacement: enough to
-/// match a fresh [`FrontendStatus`] observation and build its restart
-/// command if it never comes back within the grace window.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FrontendTrack {
-    filesystem: Filesystem,
-    runtime: Runtime,
-    location: Option<PathBuf>,
-}
-
-impl FrontendTrack {
-    fn from_status(status: &FrontendStatus) -> Self {
-        Self {
-            filesystem: status.filesystem,
-            runtime: status.runtime,
-            location: status.location.clone(),
-        }
-    }
-
-    fn matches(&self, status: &FrontendStatus) -> bool {
-        self.filesystem == status.filesystem
-            && self.runtime == status.runtime
-            && self.location == status.location
-    }
-
-    fn describe(&self) -> String {
-        format!("{} {}", self.filesystem.as_str(), self.runtime.as_str())
-    }
-
-    fn restart_command(&self) -> String {
-        format!(
-            "omnifs frontend restart {} --runtime {}",
-            self.filesystem.as_str(),
-            self.runtime.as_str()
-        )
-    }
-}
-
 /// The settled `frontends` row value once every expected track reattached.
 fn reattached_value(reattached: usize, total: usize, detail: &str) -> String {
     format!("{reattached}/{total} reattached ({detail})")
@@ -386,15 +349,15 @@ fn pending_value(reattached: usize, total: usize, first_pending: &str) -> String
 /// tracks are still pending. Pure so the reconnect-grace state machine is
 /// unit-testable without a real daemon or real timing.
 fn reattach_progress(
-    expected: &[FrontendTrack],
+    expected: &[FrontendId],
     current: &[FrontendStatus],
-) -> (usize, Vec<FrontendTrack>) {
-    let pending: Vec<FrontendTrack> = expected
+) -> (usize, Vec<FrontendId>) {
+    let pending: Vec<FrontendId> = expected
         .iter()
         .filter(|track| {
-            !current
-                .iter()
-                .any(|status| status.state == FrontendState::Attached && track.matches(status))
+            !current.iter().any(|status| {
+                status.state == FrontendState::Attached && track.matches_status(status)
+            })
         })
         .cloned()
         .collect();
@@ -606,6 +569,7 @@ fn report_launch_status(
 mod tests {
     use super::*;
     use crate::ui::render::Capabilities;
+    use omnifs_api::{FrontendRuntime as Runtime, FsType as Filesystem};
 
     fn caps() -> Capabilities {
         Capabilities {
@@ -661,19 +625,23 @@ mod tests {
         );
     }
 
-    fn track(filesystem: Filesystem, runtime: Runtime, location: &str) -> FrontendTrack {
-        FrontendTrack {
+    fn track(filesystem: Filesystem, runtime: Runtime, location: &str) -> FrontendId {
+        FrontendId::from_status(&FrontendStatus {
             filesystem,
             runtime,
             location: Some(PathBuf::from(location)),
-        }
+            state: FrontendState::Attached,
+            scope: "all",
+            mount_count: 2,
+            fix: None,
+        })
     }
 
-    fn attached(track: &FrontendTrack) -> FrontendStatus {
+    fn attached(track: &FrontendId) -> FrontendStatus {
         FrontendStatus {
-            filesystem: track.filesystem,
-            runtime: track.runtime,
-            location: track.location.clone(),
+            filesystem: track.filesystem(),
+            runtime: track.runtime(),
+            location: track.location().map(Path::to_path_buf),
             state: FrontendState::Attached,
             scope: "all",
             mount_count: 2,
@@ -713,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn frontend_track_restart_command_names_the_exact_filesystem_and_runtime() {
+    fn frontend_restart_command_names_the_exact_filesystem_and_runtime() {
         let track = track(Filesystem::Fuse, Runtime::Libkrun, "/omnifs");
         assert_eq!(track.describe(), "fuse libkrun");
         assert_eq!(
