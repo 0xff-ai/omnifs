@@ -321,7 +321,7 @@ impl<'a> Launcher<'a> {
                 Ok(()) => {},
                 Err(canceled) => {
                     let (reattached, _) = reattach_progress(&expected, observed);
-                    region.cancel(
+                    region.finish(
                         Glyph::Warn,
                         "frontends",
                         format!("{reattached}/{total} reattached (canceled)"),
