@@ -5,11 +5,11 @@
 //! (static lookups, projection-to-listing lowering, entry merging), so the
 //! three entry points share one set of rules.
 
-use crate::browse::{Entry as BrowseEntry, List, Listing, Lookup};
+use crate::browse::{List, Listing, Lookup};
 use crate::captures::Captures;
 use crate::error::Result;
 use crate::file_attrs::{FileProj, ReadMode, Size};
-use crate::projection::{DirOutcome, DirProjection};
+use crate::projection::{DirOutcome, DirProjection, Entry};
 use omnifs_core::path::Path;
 
 use super::super::compiled::CompiledRouter;
@@ -94,7 +94,7 @@ impl<S> Shape<'_, S> {
     /// round trip warms the whole directory) and is exhaustive only when no
     /// capture sibling can bind further names at this depth.
     pub(super) fn static_dir_lookup(&self, parent_abs: &Path, name: &str) -> Lookup {
-        self.static_lookup(parent_abs, name, BrowseEntry::dir(name))
+        self.static_lookup(parent_abs, name, Entry::dir(name))
     }
 
     /// The file analog of [`Self::static_dir_lookup`]; the entry carries the
@@ -107,10 +107,10 @@ impl<S> Shape<'_, S> {
         } else {
             FileProj::listing_shape()
         };
-        self.static_lookup(parent_abs, name, BrowseEntry::file(name, shape))
+        self.static_lookup(parent_abs, name, Entry::projected_file(name, shape))
     }
 
-    fn static_lookup(&self, parent_abs: &Path, name: &str, target: BrowseEntry) -> Lookup {
+    fn static_lookup(&self, parent_abs: &Path, name: &str, target: Entry) -> Lookup {
         let siblings = self
             .static_entries_for_parent(parent_abs)
             .into_iter()
@@ -171,12 +171,7 @@ impl<S> Shape<'_, S> {
         projection: &DirProjection,
     ) -> Result<Lookup> {
         if let DirOutcome::Entries { entries, .. } = projection.outcome() {
-            let merged = self.merge_entries(
-                parent_abs,
-                entries
-                    .iter()
-                    .map(crate::projection::Entry::to_browse_entry),
-            );
+            let merged = self.merge_entries(parent_abs, entries.iter().cloned());
             let target = merged.iter().find(|entry| entry.name() == name).cloned();
             let exhaustive = matches!(
                 projection.outcome(),
@@ -211,12 +206,7 @@ impl<S> Shape<'_, S> {
                 cursor,
                 entries,
             } => {
-                let merged = self.merge_entries(
-                    abs,
-                    entries
-                        .iter()
-                        .map(crate::projection::Entry::to_browse_entry),
-                );
+                let merged = self.merge_entries(abs, entries.iter().cloned());
 
                 let mut listing = if *exhaustive {
                     Listing::complete(merged)
@@ -256,11 +246,11 @@ impl<S> Shape<'_, S> {
             if leaf.is_canonical()
                 && let Some(source) = source
             {
-                BrowseEntry::file(&leaf.name, source_leaf_shape(source))
+                Entry::projected_file(&leaf.name, source_leaf_shape(source))
             } else if leaf.is_stream() {
-                BrowseEntry::file(&leaf.name, FileProj::ranged_listing_shape())
+                Entry::projected_file(&leaf.name, FileProj::ranged_listing_shape())
             } else {
-                BrowseEntry::file(&leaf.name, FileProj::listing_shape())
+                Entry::file(&leaf.name)
             }
         });
         Listing::complete(self.merge_entries(anchor_abs, object_entries))
@@ -272,8 +262,8 @@ impl<S> Shape<'_, S> {
     fn merge_entries(
         &self,
         parent_abs: &Path,
-        dynamic_entries: impl IntoIterator<Item = BrowseEntry>,
-    ) -> Vec<BrowseEntry> {
+        dynamic_entries: impl IntoIterator<Item = Entry>,
+    ) -> Vec<Entry> {
         let mut entries = self
             .static_entries_for_parent(parent_abs)
             .into_iter()
@@ -297,7 +287,7 @@ pub(in crate::router) fn merge_anchor_collection(
     listing: &Listing,
     projection: &DirProjection,
 ) -> Result<Listing> {
-    let mut entries: Vec<BrowseEntry> = listing.entries().to_vec();
+    let mut entries: Vec<Entry> = listing.entries().to_vec();
     let mut effects = listing.effects().clone();
     let parent_names: std::collections::BTreeSet<String> =
         entries.iter().map(|e| e.name().to_string()).collect();
@@ -312,7 +302,7 @@ pub(in crate::router) fn merge_anchor_collection(
         } => {
             for entry in child_entries {
                 if !parent_names.contains(entry.name()) {
-                    entries.push(entry.to_browse_entry());
+                    entries.push(entry.clone());
                 }
             }
             all_exhaustive &= *exhaustive;

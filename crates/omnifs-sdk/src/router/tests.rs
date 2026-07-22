@@ -419,9 +419,9 @@ fn route_shape_tracks_explicit_child_routes_under_object_anchor() {
 
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].name(), "comments");
-    assert_eq!(entries[0].kind(), crate::browse::EntryKind::Directory);
+    assert_eq!(entries[0].kind(), crate::projection::EntryKind::Directory);
     assert_eq!(entries[1].name(), "summary");
-    assert_eq!(entries[1].kind(), crate::browse::EntryKind::File);
+    assert_eq!(entries[1].kind(), crate::projection::EntryKind::File);
 }
 
 // ---------------------------------------------------------------------------

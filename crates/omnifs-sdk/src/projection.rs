@@ -20,7 +20,7 @@
 //! [`DirListing::preload_dir`], [`DirListing::store_canonical`]) and the
 //! host decides what to keep, evict, and invalidate.
 
-use crate::browse::{Effects, Entry as BrowseEntry};
+use crate::browse::Effects;
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::{FileAttrs, FileProj, ProjBytes, ReadMode, Size, Stability, VersionToken};
 use crate::handler::{Cursor, RangeReader};
@@ -663,18 +663,20 @@ impl DirListing {
     }
 }
 
-/// A directory entry: a bare name plus a kind. Unlike the v1
-/// [`crate::browse::Entry`], a file entry carries no [`FileProj`] argument; it
-/// lowers to a default deferred-Full-Stable file projection.
+/// A directory entry: a bare name plus a kind. A file uses the default
+/// deferred-Full-Stable projection unless the router supplies a more specific
+/// internal listing shape.
+#[derive(Clone, Debug)]
 pub struct Entry {
     name: String,
     kind: EntryKind,
+    file: Option<FileProj>,
 }
 
 /// The kind of a [`Entry`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
-    Dir,
+    Directory,
     File,
 }
 
@@ -684,7 +686,8 @@ impl Entry {
     pub fn dir(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            kind: EntryKind::Dir,
+            kind: EntryKind::Directory,
+            file: None,
         }
     }
 
@@ -696,6 +699,15 @@ impl Entry {
         Self {
             name: name.into(),
             kind: EntryKind::File,
+            file: Some(FileProj::listing_shape()),
+        }
+    }
+
+    pub(crate) fn projected_file(name: impl Into<String>, file: FileProj) -> Self {
+        Self {
+            name: name.into(),
+            kind: EntryKind::File,
+            file: Some(file),
         }
     }
 
@@ -707,13 +719,8 @@ impl Entry {
         self.kind
     }
 
-    /// Lower to a v1 browse [`Entry`]. A file lowers to the default
-    /// deferred-Full-Stable projection.
-    pub(crate) fn to_browse_entry(&self) -> BrowseEntry {
-        match self.kind {
-            EntryKind::Dir => BrowseEntry::dir(&self.name),
-            EntryKind::File => BrowseEntry::file(&self.name, FileProj::listing_shape()),
-        }
+    pub(crate) fn into_parts(self) -> (String, EntryKind, Option<FileProj>) {
+        (self.name, self.kind, self.file)
     }
 }
 

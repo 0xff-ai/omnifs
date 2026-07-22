@@ -3,7 +3,7 @@
 //! These types sit between the provider-facing projection layer
 //! ([`crate::projection::DirListing`], [`crate::projection::FileProjection`])
 //! and the generated WIT protocol; the router lowers handler returns onto
-//! them. Most provider code only meets [`Effects`], [`EntryKind`], and
+//! them. Most provider code only meets [`Effects`] and
 //! [`ReadOutcome`] (re-exported in the prelude); reach for [`Lookup`],
 //! [`Listing`], or [`FileContent`] directly only when building custom
 //! object leaves or lowering glue.
@@ -15,6 +15,7 @@
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::{FileAttrs, FileProj, ReadFileBytes, Size, Stability, VersionToken};
 use crate::identity::LogicalId;
+use crate::projection::{Entry, EntryKind};
 use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
 
@@ -44,71 +45,19 @@ impl CachedCanonical {
     }
 }
 
-/// Lightweight entry classification used by route tables and tests.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EntryKind {
-    Directory,
-    File,
-}
-
-/// A wire-level dirent: a named file or directory, where file entries carry
-/// a [`FileProj`] (lowering to `DirEntry` panics without one). Handlers
-/// normally build [`crate::projection::Entry`] instead, which fills in
-/// [`FileProj::listing_shape`] for plain file names.
-#[derive(Clone, Debug)]
-pub struct Entry {
-    name: String,
-    kind: EntryKind,
-    file: Option<FileProj>,
-    logical_id: Option<LogicalId>,
-}
-
-impl Entry {
-    pub fn dir(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            kind: EntryKind::Directory,
-            file: None,
-            logical_id: None,
-        }
-    }
-
-    pub fn file(name: impl Into<String>, file: FileProj) -> Self {
-        Self {
-            name: name.into(),
-            kind: EntryKind::File,
-            file: Some(file),
-            logical_id: None,
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn kind(&self) -> EntryKind {
-        self.kind
-    }
-
-    pub fn attrs(&self) -> Option<&FileAttrs> {
-        self.file.as_ref().map(|file| &file.attrs)
-    }
-}
-
 impl From<Entry> for wit_types::DirEntry {
     fn from(entry: Entry) -> Self {
+        let (name, kind, file) = entry.into_parts();
         Self {
-            name: entry.name,
-            kind: match entry.kind {
+            name,
+            kind: match kind {
                 EntryKind::Directory => wit_types::EntryKind::Directory,
                 EntryKind::File => wit_types::EntryKind::File(
-                    entry
-                        .file
-                        .expect("file entries must carry file projection")
+                    file.expect("file entries must carry file projection")
                         .into(),
                 ),
             },
-            id: entry.logical_id.map(Into::into),
+            id: None,
         }
     }
 }

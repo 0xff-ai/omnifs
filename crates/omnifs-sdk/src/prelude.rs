@@ -1,5 +1,5 @@
 pub use crate::NoConfig;
-pub use crate::browse::{Effects, EntryKind, ReadOutcome};
+pub use crate::browse::{Effects, ReadOutcome};
 pub use crate::captures::{Captures, FromCaptures, PathSegment};
 pub use crate::collection::{
     Collection, CollectionEntry, CollectionPage, Cursor as ListCursor, ListCx, NoCursor, PageCursor,
