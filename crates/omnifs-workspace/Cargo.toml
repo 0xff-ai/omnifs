@@ -23,7 +23,6 @@ atomic-write-file = "0.3"
 schemars = { workspace = true }
 jsonschema = { workspace = true }
 wasmparser = { version = "0.247", default-features = false, features = ["std", "component-model"] }
-hex = { workspace = true }
 blake3 = { workspace = true }
 strum = { workspace = true }
 

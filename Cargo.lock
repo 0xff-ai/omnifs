@@ -2793,7 +2793,10 @@ dependencies = [
 name = "omnifs-core"
 version = "0.2.1"
 dependencies = [
+ "blake3",
+ "hex",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -3081,7 +3084,6 @@ dependencies = [
  "atomic-write-file",
  "blake3",
  "fs2",
- "hex",
  "jsonschema",
  "omnifs-core",
  "schemars",

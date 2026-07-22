@@ -525,7 +525,8 @@ fn is_private_or_link_local(ip: &IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{AuthorityError, RuntimeAuthority, decode_socket_endpoint};
-    use omnifs_workspace::ids::{ProviderId, ProviderMeta, ProviderName, ProviderRef};
+    use omnifs_core::ProviderId;
+    use omnifs_workspace::ids::{ProviderMeta, ProviderName, ProviderRef};
     use omnifs_workspace::mounts::Spec;
     use omnifs_workspace::provider::{
         AccessNeed, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding,

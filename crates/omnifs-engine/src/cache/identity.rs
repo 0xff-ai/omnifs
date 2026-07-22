@@ -1,7 +1,7 @@
 //! Stable, domain-separated identities for host-owned callout storage.
 
+use omnifs_core::ProviderId;
 use omnifs_workspace::authn::CredentialId;
-use omnifs_workspace::ids::ProviderId;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

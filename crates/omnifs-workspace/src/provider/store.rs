@@ -18,8 +18,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::ids::{ProviderId, ProviderName, ProviderVersion};
+use crate::ids::{ProviderName, ProviderVersion};
 use fs2::FileExt;
+use omnifs_core::ProviderId;
 use serde::{Deserialize, Serialize};
 
 use crate::provider::Artifact;

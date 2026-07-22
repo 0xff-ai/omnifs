@@ -7,7 +7,7 @@ use fjall::{
     PersistMode,
 };
 use omnifs_core::MountName;
-use omnifs_workspace::ids::ProviderId;
+use omnifs_core::ProviderId;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -324,7 +324,7 @@ mod tests {
     };
     use crate::cache::identity::ProjectionId;
     use omnifs_core::MountName;
-    use omnifs_workspace::ids::ProviderId;
+    use omnifs_core::ProviderId;
 
     #[test]
     fn manifest_rejects_wrong_identity_and_version() {

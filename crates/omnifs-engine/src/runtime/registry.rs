@@ -467,7 +467,7 @@ mod tests {
     use crate::cloner::GitCloner;
     use crate::runtime::host::{Host, HostOfflineOpen};
     use omnifs_core::MountName;
-    use omnifs_workspace::ids::ProviderId;
+    use omnifs_core::ProviderId;
     use omnifs_workspace::mounts::{Registry, Spec};
     use omnifs_workspace::provider::{Artifact, ProviderStore};
     use std::path::{Path, PathBuf};

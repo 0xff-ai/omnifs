@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use omnifs_auth::{AuthError, CredentialService, OAuthClient};
+use omnifs_core::ProviderId;
 use omnifs_workspace::creds::{CredentialStore, FileStore};
-use omnifs_workspace::ids::ProviderId;
 use omnifs_workspace::provider::Catalog;
 
 use crate::cache::Caches;

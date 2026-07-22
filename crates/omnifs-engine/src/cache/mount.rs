@@ -36,7 +36,7 @@ use crate::view::{
     AttrPayload, ByteSource, CachedCursor, DirentsPayload, EntryMeta, FileAttrsCache, FilePayload,
     FileSize, LookupPayload,
 };
-use omnifs_workspace::ids::ProviderId;
+use omnifs_core::ProviderId;
 
 /// Result of a warm canonical lookup: the object id, the canonical bytes, and
 /// the optional validator.

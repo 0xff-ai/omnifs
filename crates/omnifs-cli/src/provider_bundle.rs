@@ -56,10 +56,7 @@ impl EmbeddedProviders {
         self.entries.iter().find(|entry| entry.manifest.id == name)
     }
 
-    pub(crate) fn by_id(
-        &self,
-        id: &omnifs_workspace::ids::ProviderId,
-    ) -> Option<&EmbeddedProvider> {
+    pub(crate) fn by_id(&self, id: &omnifs_core::ProviderId) -> Option<&EmbeddedProvider> {
         self.entries.iter().find(|entry| entry.artifact.id() == *id)
     }
 

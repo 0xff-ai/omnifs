@@ -4,7 +4,7 @@ use std::path::Path;
 use std::pin::Pin;
 
 use futures::{Stream, StreamExt as _, stream};
-use omnifs_workspace::ids::ProviderId;
+use omnifs_core::ProviderId;
 use omnifs_workspace::provider::Provider;
 use wasmtime::component::Component;
 use wasmtime::{Cache, CacheConfig, Config, Engine};

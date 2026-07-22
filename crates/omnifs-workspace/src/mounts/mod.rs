@@ -622,7 +622,8 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::{ProviderId, ProviderMeta, ProviderName};
+    use crate::ids::{ProviderMeta, ProviderName};
+    use omnifs_core::ProviderId;
 
     fn linear_manifest() -> crate::provider::ProviderManifest {
         provider_manifest_from_wasm("omnifs_provider_linear.wasm")

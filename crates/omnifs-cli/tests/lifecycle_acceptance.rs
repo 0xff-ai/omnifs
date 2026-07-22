@@ -45,7 +45,7 @@ struct Fixture {
     home: tempfile::TempDir,
     mount_point: PathBuf,
     /// Content id of the test provider installed into the provider store.
-    test_provider_id: omnifs_workspace::ids::ProviderId,
+    test_provider_id: omnifs_core::ProviderId,
     /// PID to kill on drop, when a daemon was spawned via `omnifs up` rather
     /// than the daemon subcommand directly.
     daemon_pid: Option<u32>,
