@@ -6,7 +6,6 @@
 //! that module's Rust shape.
 
 use anyhow::Context as _;
-use clap::Args;
 use serde::Serialize;
 use std::path::Path;
 
@@ -23,9 +22,6 @@ use crate::ui::render::{self, Capabilities, LedgerRow};
 use crate::ui::style::{self, Glyph};
 use omnifs_workspace::Workspace;
 
-#[derive(Args, Debug, Clone, Default)]
-pub struct DoctorArgs {}
-
 /// Aggregate result of a completed diagnostic run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DoctorVerdict {
@@ -34,21 +30,19 @@ pub(crate) enum DoctorVerdict {
     Failures,
 }
 
-impl DoctorArgs {
-    pub async fn run(self, output: Output) -> anyhow::Result<DoctorVerdict> {
-        let workspace = Workspace::resolve()?;
-        let inventory = Inventory::collect(&workspace).await?;
-        let docker_target = resolve_frontend_target(&workspace)
-            .map_err(|error: anyhow::Error| format!("resolve target: {error:#}"));
-        Doctor {
-            workspace: &workspace,
-            inventory,
-            docker_target,
-            output,
-        }
-        .run()
-        .await
+pub async fn run(output: Output) -> anyhow::Result<DoctorVerdict> {
+    let workspace = Workspace::resolve()?;
+    let inventory = Inventory::collect(&workspace).await?;
+    let docker_target = resolve_frontend_target(&workspace)
+        .map_err(|error: anyhow::Error| format!("resolve target: {error:#}"));
+    Doctor {
+        workspace: &workspace,
+        inventory,
+        docker_target,
+        output,
     }
+    .run()
+    .await
 }
 
 /// The optional Docker-hosted FUSE frontend's target, probed by the

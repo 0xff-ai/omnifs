@@ -30,7 +30,7 @@ pub enum FrontendCommand {
     /// Restart matching instantiated frontends
     Restart(lifecycle::FrontendRestartArgs),
     /// Show OS support, runtime readiness, and instantiated frontends
-    Ls(discovery::FrontendLsArgs),
+    Ls,
     /// Enter an instantiated Docker or libkrun frontend
     Shell(crate::commands::shell::ShellArgs),
 }
@@ -41,7 +41,7 @@ impl FrontendArgs {
             FrontendCommand::Enable(args) => args.run(output).await,
             FrontendCommand::Disable(args) => args.run(output).await,
             FrontendCommand::Restart(args) => args.run(output).await,
-            FrontendCommand::Ls(args) => args.run(output).await,
+            FrontendCommand::Ls => discovery::run(output).await,
             FrontendCommand::Shell(args) => args.run(output).await.map(|()| ExitCode::Success),
         }
     }

@@ -38,7 +38,7 @@ pub enum MountCommand {
     /// Add and authenticate a mount.
     Add(AddArgs),
     /// List configured mounts with their provider and auth state.
-    Ls(LsArgs),
+    Ls,
     /// Show one configured mount and every derived frontend access path.
     Show(ShowArgs),
     /// Re-authenticate an existing mount.
@@ -53,9 +53,6 @@ pub enum MountCommand {
         dry_run: bool,
     },
 }
-
-#[derive(Args, Debug, Clone, Default)]
-pub struct LsArgs {}
 
 #[derive(Args, Debug, Clone)]
 pub struct ShowArgs {
@@ -90,7 +87,7 @@ impl MountArgs {
     pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         match self.command {
             MountCommand::Add(args) => args.run(output).await,
-            MountCommand::Ls(args) => ls(&args, output).await,
+            MountCommand::Ls => ls(output).await,
             MountCommand::Show(args) => show(&args, output).await,
             MountCommand::Reauth(args) => {
                 let receipt = args.run(output.clone()).await?;
@@ -140,7 +137,7 @@ pub(crate) struct MountShowResult {
     config_summary: Option<String>,
 }
 
-async fn ls(_args: &LsArgs, output: Output) -> anyhow::Result<ExitCode> {
+async fn ls(output: Output) -> anyhow::Result<ExitCode> {
     let workspace = Workspace::resolve()?;
     let result = list_with_output(&workspace).await?;
     let exit_code = match result.verdict {
