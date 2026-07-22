@@ -695,7 +695,6 @@ mod tests {
             runtime: FrontendRuntime::Host,
             location: Some(PathBuf::from("/Users/raulk/omnifs")),
             state: FrontendState::Attached,
-            scope: "all",
             mount_count: 1,
             fix: None,
         }

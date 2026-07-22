@@ -46,7 +46,6 @@ pub struct DaemonStatus {
     pub executable: PathBuf,
     pub config_dir: PathBuf,
     pub cache_dir: PathBuf,
-    pub providers_dir: PathBuf,
     /// Every filesystem frontend currently attached to the shared namespace.
     pub frontends: Vec<FrontendInfo>,
     /// Provider mounts loaded in the registry.
@@ -158,7 +157,6 @@ impl std::fmt::Display for FsType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FrontendInfo {
-    pub source: String,
     pub fs_type: FsType,
     /// The frontend-reported mount point. It is host-visible for the host
     /// runner and display-only for Docker and libkrun guests.
@@ -247,7 +245,6 @@ mod tests {
     #[test]
     fn frontend_info_round_trips_runtime() {
         let frontend: FrontendInfo = serde_json::from_value(serde_json::json!({
-            "source": "native",
             "fs_type": "nfs",
             "mount_point": "/omnifs",
             "runtime": "host"
@@ -261,7 +258,6 @@ mod tests {
 
         assert!(
             serde_json::from_value::<FrontendInfo>(serde_json::json!({
-                "source": "native",
                 "fs_type": "nfs",
                 "runtime": "host"
             }))
@@ -269,7 +265,6 @@ mod tests {
         );
         assert!(
             serde_json::from_value::<FrontendInfo>(serde_json::json!({
-                "source": "native",
                 "fs_type": "nfs",
                 "mount_point": "/omnifs",
                 "runtime": "host",

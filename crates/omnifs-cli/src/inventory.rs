@@ -132,7 +132,6 @@ impl DaemonObservation {
                 executable: "/bin/omnifs".into(),
                 config_dir: "/tmp/omnifs".into(),
                 cache_dir: "/tmp/omnifs/cache".into(),
-                providers_dir: "/tmp/omnifs/providers".into(),
                 frontends: Vec::new(),
                 mounts: Vec::new(),
                 offline: false,
@@ -207,7 +206,6 @@ pub(crate) struct FrontendStatus {
     pub(crate) runtime: Runtime,
     pub(crate) location: Option<PathBuf>,
     pub(crate) state: FrontendState,
-    pub(crate) scope: &'static str,
     pub(crate) mount_count: usize,
     pub(crate) fix: Option<String>,
 }
@@ -604,7 +602,6 @@ fn discovered_frontends(
                     runtime: Runtime::Host,
                     location: Some(state.mount_point),
                     state: FrontendState::Running,
-                    scope: "all",
                     mount_count,
                     fix: None,
                 });
@@ -628,7 +625,6 @@ fn discovered_frontends(
                     runtime: Runtime::Host,
                     location: None,
                     state: FrontendState::Failed,
-                    scope: "all",
                     mount_count,
                     fix: Some(format!("omnifs logs ({error})")),
                 });
@@ -647,7 +643,6 @@ fn discovered_frontends(
             } else {
                 FrontendState::Failed
             },
-            scope: "all",
             mount_count,
             fix: (!running).then(|| "omnifs logs (libkrun process is not running)".to_owned()),
         }),
@@ -657,7 +652,6 @@ fn discovered_frontends(
             runtime: Runtime::Libkrun,
             location: Some(PathBuf::from(GUEST_MOUNT)),
             state: FrontendState::Failed,
-            scope: "all",
             mount_count,
             fix: Some(format!("omnifs logs ({error})")),
         }),
@@ -690,7 +684,6 @@ pub(crate) fn frontend_statuses(
                 runtime: observed.runtime,
                 location: Some(observed.mount_point.clone()),
                 state,
-                scope: "all",
                 mount_count,
                 fix: state.fix().map(str::to_owned),
             }
@@ -1096,7 +1089,6 @@ mod tests {
                 runtime: Runtime::Host,
                 location: Some("/mnt".into()),
                 state: FrontendState::Attached,
-                scope: "all",
                 mount_count: 1,
                 fix: None,
             }],
@@ -1211,7 +1203,6 @@ mod tests {
                 executable: "/bin/omnifs".into(),
                 config_dir: "/home/.omnifs".into(),
                 cache_dir: "/home/.omnifs/cache".into(),
-                providers_dir: "/home/.omnifs/providers".into(),
                 frontends: Vec::new(),
                 mounts: Vec::new(),
                 offline: false,
@@ -1235,7 +1226,6 @@ mod tests {
                     runtime: Runtime::Host,
                     location: Some("/host".into()),
                     state: FrontendState::Attached,
-                    scope: "all",
                     mount_count: 1,
                     fix: None,
                 },
@@ -1244,7 +1234,6 @@ mod tests {
                     runtime: Runtime::Docker,
                     location: Some("/omnifs".into()),
                     state: FrontendState::Attached,
-                    scope: "all",
                     mount_count: 1,
                     fix: None,
                 },
@@ -1327,7 +1316,6 @@ mod tests {
             runtime: Runtime::Host,
             location: Some("/mnt".into()),
             state: FrontendState::Failed,
-            scope: "all",
             mount_count: 1,
             fix: Some("omnifs frontend disable".into()),
         });

@@ -619,7 +619,6 @@ mod tests {
             runtime,
             location: Some(PathBuf::from(location)),
             state: FrontendState::Attached,
-            scope: "all",
             mount_count: 2,
             fix: None,
         })
@@ -631,7 +630,6 @@ mod tests {
             runtime: track.runtime(),
             location: track.location().map(Path::to_path_buf),
             state: FrontendState::Attached,
-            scope: "all",
             mount_count: 2,
             fix: None,
         }

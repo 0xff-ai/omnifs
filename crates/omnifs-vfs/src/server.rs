@@ -199,7 +199,6 @@ impl Attachments {
             .entries
             .values()
             .map(|entry| FrontendInfo {
-                source: "wire".to_string(),
                 fs_type: match entry.frontend.kind {
                     crate::FrontendKind::Fuse => FsType::Fuse,
                     crate::FrontendKind::Nfs => FsType::Nfs,
