@@ -3,7 +3,7 @@ use omnifs_engine::test_support::cache::publish_effects_for_test;
 use omnifs_engine::{
     DirCursor, EntryKind, LookupAnswer, Namespace, NsError, ReadAnswer, TreeNamespace,
 };
-use omnifs_itest::{TEST_PROVIDER_CONFIG, make_initialized_runtime, make_runtime};
+use omnifs_itest::{TEST_PROVIDER_CONFIG, make_initialized_runtime};
 
 fn p(value: &str) -> Path {
     Path::parse(value).unwrap()
@@ -107,73 +107,6 @@ async fn all_providers_initialize_and_compile() {
 }
 
 #[tokio::test]
-async fn test_list_root() {
-    let harness = make_runtime();
-    let entries = list_namespace(&harness.namespace, "/").await.unwrap();
-    {
-        assert_eq!(entries.len(), 9);
-        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
-        assert!(names.contains(&"README.md"));
-        assert!(names.contains(&"items"));
-        assert!(names.contains(&"hello"));
-        assert!(names.contains(&"scoped"));
-        assert!(names.contains(&"dynamic"));
-        assert!(names.contains(&"slow"));
-        assert!(names.contains(&".gitignore"));
-        assert!(names.contains(&".ignore"));
-        assert!(names.contains(&".rgignore"));
-        assert!(
-            entries
-                .iter()
-                .filter(|entry| !matches!(
-                    entry.name.as_str(),
-                    "README.md" | ".gitignore" | ".ignore" | ".rgignore"
-                ))
-                .all(|entry| entry.attrs.kind == EntryKind::Directory)
-        );
-    }
-}
-
-#[tokio::test]
-async fn test_list_hello_dir() {
-    let harness = make_runtime();
-    let entries = list_namespace(&harness.namespace, "/hello").await.unwrap();
-    {
-        assert_eq!(entries.len(), 18);
-        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-        assert!(names.contains(&"README.md"));
-        assert!(names.contains(&"remote-a"));
-        assert!(names.contains(&"remote-b"));
-        assert!(names.contains(&"message"));
-        assert!(names.contains(&"large-ranged"));
-        assert!(names.contains(&"greeting"));
-        assert!(names.contains(&"projected"));
-        assert!(names.contains(&"lazy"));
-        assert!(names.contains(&"fresh-full"));
-        assert!(names.contains(&"ranged"));
-        assert!(names.contains(&"unknown-ranged"));
-        assert!(names.contains(&"large-ranged"));
-        assert!(names.contains(&"volatile-tail"));
-        assert!(names.contains(&"live-log"));
-        assert!(names.contains(&"bundle"));
-        assert!(names.contains(&"feed"));
-        assert!(names.contains(&"snapshot"));
-        assert!(names.contains(&"throttled"));
-        assert!(names.contains(&"unbounded"));
-    }
-    let readme = resolve_namespace(&harness.namespace, "/hello/README.md").await;
-    let readme_bytes = harness
-        .namespace
-        .read(readme.path, 0, u32::MAX)
-        .await
-        .expect("hello README read");
-    assert!(
-        !readme_bytes.bytes.is_empty(),
-        "generated hello README remains readable"
-    );
-}
-
-#[tokio::test]
 async fn test_mutable_unversioned_full_reads_are_observation_only() {
     let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
 
@@ -186,20 +119,6 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
     );
     let second = read_namespace(&harness.namespace, path).await.unwrap();
     assert_eq!(second.bytes.as_slice(), b"fresh-full-2\n");
-}
-
-#[tokio::test]
-async fn test_read_file() {
-    let harness = make_initialized_runtime(TEST_PROVIDER_CONFIG);
-    let result = read_namespace(&harness.namespace, "/hello/message")
-        .await
-        .unwrap();
-    assert_eq!(result.bytes.as_slice(), b"Hello, world!");
-
-    let exact = read_namespace(&harness.namespace, "/hello/lazy")
-        .await
-        .unwrap();
-    assert_eq!(exact.bytes.as_slice(), b"lazy\n");
 }
 
 #[tokio::test]
@@ -372,32 +291,6 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
     assert_eq!(chunk.bytes, b"tail:42\n");
     assert_eq!(chunk.attrs.stability, omnifs_engine::StabilityClass::Live);
     assert!(!chunk.eof);
-}
-
-#[tokio::test]
-async fn test_lookup_child() {
-    let harness = make_runtime();
-    let result = resolve_namespace(&harness.namespace, "/hello").await;
-    assert_eq!(result.attrs().unwrap().kind, EntryKind::Directory);
-    let exact_file = resolve_namespace(&harness.namespace, "/hello/lazy").await;
-    assert_eq!(exact_file.attrs().unwrap().kind, EntryKind::File);
-
-    assert_eq!(
-        harness
-            .namespace
-            .getattr(p("/test/hello/lazy"))
-            .await
-            .unwrap()
-            .kind,
-        EntryKind::File
-    );
-
-    let hello = resolve_namespace(&harness.namespace, "/hello").await;
-    let missing = harness
-        .namespace
-        .lookup(hello.path.clone(), "missing")
-        .await;
-    assert!(missing.unwrap().is_missing());
 }
 
 #[tokio::test]

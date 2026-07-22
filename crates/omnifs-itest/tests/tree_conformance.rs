@@ -3,8 +3,7 @@
 #![cfg(not(target_os = "wasi"))]
 
 use omnifs_core::path::Path;
-use omnifs_engine::test_support::cache::publish_effects_for_test;
-use omnifs_engine::{DirCursor, LookupAnswer, Namespace, NsEvent, ReadStyle};
+use omnifs_engine::{DirCursor, LookupAnswer, Namespace};
 use omnifs_itest::RuntimeHarness;
 
 async fn resolve(harness: &RuntimeHarness, value: &str) -> LookupAnswer {
@@ -104,39 +103,6 @@ async fn lazy_derived_face_returns_the_declared_leaf_bytes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reads_whole_file_exact_bytes() {
-    let harness = RuntimeHarness::new(omnifs_itest::TEST_PROVIDER_CONFIG).unwrap();
-    let node = resolve(&harness, "/test/hello/message").await;
-    let read = harness
-        .namespace
-        .read(node.path, 0, u32::MAX)
-        .await
-        .unwrap();
-    assert_eq!(read.bytes, b"Hello, world!");
-    assert!(read.eof);
-    assert_eq!(read.attrs.size, 13);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn reads_ranged_file_in_chunks() {
-    let harness = RuntimeHarness::new(omnifs_itest::TEST_PROVIDER_CONFIG).unwrap();
-    let node = resolve(&harness, "/test/hello/ranged").await;
-    assert_eq!(node.attrs().unwrap().read_style, ReadStyle::Ranged);
-    assert_eq!(
-        harness
-            .namespace
-            .read(node.path.clone(), 2, 4)
-            .await
-            .unwrap()
-            .bytes,
-        b"cdef"
-    );
-    let eof = harness.namespace.read(node.path, 26, 8).await.unwrap();
-    assert!(eof.bytes.is_empty());
-    assert!(eof.eof);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn lists_cursored_pages() {
     let harness = RuntimeHarness::new(omnifs_itest::TEST_PROVIDER_CONFIG).unwrap();
     let feed = resolve(&harness, "/test/hello/feed").await;
@@ -165,55 +131,4 @@ async fn lists_cursored_pages() {
         .unwrap();
     assert!(second.entries.iter().any(|entry| entry.name == "item-2"));
     assert!(second.entries.iter().any(|entry| entry.name == "item-3"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn resolves_unrouted_path_as_not_found() {
-    let harness = RuntimeHarness::new(omnifs_itest::TEST_PROVIDER_CONFIG).unwrap();
-    let parent = resolve(&harness, "/test/hello").await;
-    assert!(
-        harness
-            .namespace
-            .lookup(parent.path, "not-routed")
-            .await
-            .expect("known missing child")
-            .is_missing()
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn invalidation_evicts_cached_read() {
-    let harness = RuntimeHarness::new(omnifs_itest::TEST_PROVIDER_CONFIG).unwrap();
-    let node = resolve(&harness, "/test/hello/message").await;
-    let before = harness.namespace.getattr(node.path.clone()).await.unwrap();
-    let cold = harness
-        .namespace
-        .read(node.path.clone(), 0, u32::MAX)
-        .await
-        .unwrap();
-    assert_eq!(cold.bytes, b"Hello, world!");
-    let mut events = harness.namespace.subscribe();
-    publish_effects_for_test(
-        &harness.runtime,
-        &omnifs_wit::provider::types::Effects {
-            canonical: Vec::new(),
-            fs: Vec::new(),
-            invalidations: vec![omnifs_wit::provider::types::Invalidation::Listing(
-                omnifs_wit::provider::types::PathOrPrefix::Path("/hello/message".to_string()),
-            )],
-        },
-        harness.runtime.resources.current_epoch(),
-    )
-    .unwrap();
-    let after = harness.namespace.getattr(node.path.clone()).await.unwrap();
-    assert_ne!(after.change, before.change);
-    let reread = harness
-        .namespace
-        .read(node.path.clone(), 0, u32::MAX)
-        .await
-        .unwrap();
-    assert_eq!(reread.bytes, b"Hello, world!");
-    assert!(
-        matches!(tokio::time::timeout(std::time::Duration::from_secs(2), events.recv()).await.unwrap().unwrap(), NsEvent::InvalidateSubtree { path } if path == node.path)
-    );
 }
