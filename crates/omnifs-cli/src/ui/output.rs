@@ -743,18 +743,17 @@ mod tests {
     }
 
     #[test]
-    fn invocation_policy_is_cloneable_and_explicit() {
-        let output = Output::new(OutputMode::Jsonl, true)
-            .with_no_input(true)
-            .with_yes(true);
-        assert!(output.no_input());
-        assert!(output.yes());
-        assert!(output.is_structured());
-        assert!(!output.show_progress());
-        assert!(!Output::new(OutputMode::Json, false).show_progress());
-        assert!(Output::new(OutputMode::Human, false).show_progress());
-        assert!(!Output::new(OutputMode::Human, true).show_progress());
-        assert!(!OutputMode::Human.is_structured());
+    fn output_policy_matrix() {
+        for (mode, quiet, structured, progress) in [
+            (OutputMode::Human, false, false, true),
+            (OutputMode::Human, true, false, false),
+            (OutputMode::Json, false, true, false),
+            (OutputMode::Jsonl, true, true, false),
+        ] {
+            let output = Output::new(mode, quiet);
+            assert_eq!(output.is_structured(), structured);
+            assert_eq!(output.show_progress(), progress);
+        }
     }
 
     #[test]

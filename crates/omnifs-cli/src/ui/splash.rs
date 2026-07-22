@@ -125,27 +125,18 @@ mod tests {
     }
 
     #[test]
-    fn should_splash_only_on_a_real_interactive_human_tty() {
-        assert!(should_splash(caps(true, false), false, false));
-    }
-
-    #[test]
-    fn should_splash_is_false_for_non_tty_stderr() {
-        assert!(!should_splash(caps(false, false), false, false));
-    }
-
-    #[test]
-    fn should_splash_is_false_for_quiet() {
-        assert!(!should_splash(caps(true, true), false, false));
-    }
-
-    #[test]
-    fn should_splash_is_false_for_no_input() {
-        assert!(!should_splash(caps(true, false), true, false));
-    }
-
-    #[test]
-    fn should_splash_is_false_for_structured_output() {
-        assert!(!should_splash(caps(true, false), false, true));
+    fn splash_policy_matrix() {
+        for (is_tty, quiet, no_input, structured, expected) in [
+            (true, false, false, false, true),
+            (false, false, false, false, false),
+            (true, true, false, false, false),
+            (true, false, true, false, false),
+            (true, false, false, true, false),
+        ] {
+            assert_eq!(
+                should_splash(caps(is_tty, quiet), no_input, structured),
+                expected
+            );
+        }
     }
 }

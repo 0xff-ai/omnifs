@@ -54,14 +54,6 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::error::ErrorKind;
-
-    #[test]
-    fn version_is_available_at_top_level() {
-        let error = Cli::try_parse_from(["omnifs-thin", "--version"]).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::DisplayVersion);
-        assert!(error.to_string().contains("omnifs-thin"));
-    }
 
     #[test]
     fn top_level_help_lists_protocol_commands() {

@@ -626,32 +626,16 @@ mod tests {
     // -- physical_rows: the one owner of wrap-aware row counting ------------
 
     #[test]
-    fn physical_rows_is_one_for_a_line_exactly_at_the_width() {
-        assert_eq!(physical_rows(&"x".repeat(80), 80), 1);
-    }
+    fn physical_rows_handles_boundaries_and_display_width() {
+        for (length, width, expected) in [(80, 80, 1), (81, 80, 2), (500, 0, 1), (0, 80, 1)] {
+            assert_eq!(physical_rows(&"x".repeat(length), width), expected);
+        }
 
-    #[test]
-    fn physical_rows_wraps_a_line_one_column_over_the_width() {
-        assert_eq!(physical_rows(&"x".repeat(81), 80), 2);
-    }
-
-    #[test]
-    fn physical_rows_measures_display_width_not_byte_length_through_ansi() {
         // An 81-column line still wraps to 2 rows once colored, because the
         // ANSI escapes it gained are stripped before measuring, the same way
         // `display_width` already treats them as zero-width.
         let colored = style::accent("x".repeat(81), true);
         assert_eq!(physical_rows(&colored, 80), 2);
-    }
-
-    #[test]
-    fn physical_rows_never_wraps_when_the_terminal_width_is_unknown() {
-        assert_eq!(physical_rows(&"x".repeat(500), 0), 1);
-    }
-
-    #[test]
-    fn physical_rows_is_one_for_an_empty_line() {
-        assert_eq!(physical_rows("", 80), 1);
     }
 
     #[test]

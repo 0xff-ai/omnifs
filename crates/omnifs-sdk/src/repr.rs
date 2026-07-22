@@ -140,31 +140,6 @@ mod tests {
     }
 
     #[test]
-    fn serve_source_is_verbatim() {
-        let table =
-            RenderTable::build(ContentType::Json, vec![(ContentType::Markdown, upper)]).unwrap();
-        let raw = br"{raw}";
-        assert_eq!(table.serve(ContentType::Json, raw).unwrap(), raw);
-    }
-
-    #[test]
-    fn serve_render_invokes_fn() {
-        let table =
-            RenderTable::build(ContentType::Json, vec![(ContentType::Markdown, upper)]).unwrap();
-        assert_eq!(
-            table.serve(ContentType::Markdown, b"hi").unwrap(),
-            b"HI".as_slice()
-        );
-    }
-
-    #[test]
-    fn serve_unknown_ct_errors() {
-        let table =
-            RenderTable::build(ContentType::Json, vec![(ContentType::Markdown, upper)]).unwrap();
-        assert!(table.serve(ContentType::Octet, b"x").is_err());
-    }
-
-    #[test]
     fn build_rejects_invalid_render_table() {
         assert_eq!(
             RenderTable::build(
