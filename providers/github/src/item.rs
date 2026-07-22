@@ -773,7 +773,7 @@ impl PullRequest {
             .fetch()
             .await?;
         Ok(BlobFile::new(blob.id)
-            .size(Size::Exact(blob.size))
+            .size(FileSize::Exact(blob.size))
             .content_type(ContentType::Custom("text/x-diff")))
     }
 }

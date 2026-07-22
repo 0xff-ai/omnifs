@@ -78,7 +78,7 @@ async fn read_item_md_returns_stable_representation() {
     let item = resolve(namespace, "/test/items/open/7/item.md").await;
     let read = namespace.read(item.path, 0, u32::MAX).await.unwrap();
     assert_eq!(read.bytes, b"# Item 7\n\nBody 7\n");
-    assert_eq!(read.attrs.stability, omnifs_engine::StabilityClass::Stable);
+    assert_eq!(read.attrs.stability, omnifs_engine::Stability::Stable);
 }
 
 #[tokio::test(flavor = "multi_thread")]

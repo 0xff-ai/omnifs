@@ -13,7 +13,7 @@
 //! terminal answer to the one operation in flight.
 
 use crate::error::{ProviderError, Result};
-use crate::file_attrs::{FileAttrs, FileProj, ReadFileBytes, Size, Stability, VersionToken};
+use crate::file_attrs::{FileAttrs, FileProj, FileSize, ReadFileBytes, Stability, VersionToken};
 use crate::identity::LogicalId;
 use crate::projection::{Entry, EntryKind};
 use omnifs_core::path::Path;
@@ -525,7 +525,7 @@ impl From<ContentBytes> for wit_types::ByteSource {
 }
 
 impl FileContent {
-    /// Inline bytes with default attrs `Size::Exact(len)` plus
+    /// Inline bytes with default attrs `FileSize::Exact(len)` plus
     /// `Stability::Stable`. Override with [`Self::with_attrs`] when the
     /// content can change; the stable default licenses the host to
     /// cache it indefinitely.
@@ -534,20 +534,20 @@ impl FileContent {
         let size = u64::try_from(content.len()).unwrap_or(u64::MAX);
         Self {
             content_type: None,
-            attrs: FileAttrs::new(Size::Exact(size), Stability::Stable),
+            attrs: FileAttrs::new(FileSize::Exact(size), Stability::Stable),
             bytes: ContentBytes::Read(ReadFileBytes::Inline(content)),
             effects: Effects::new(),
         }
     }
 
     /// Serve from a host-resident blob; no bytes cross the WIT. Attrs
-    /// default to `Size::Unknown` plus `Stability::Stable`: set the real
+    /// default to `FileSize::Unknown` plus `Stability::Stable`: set the real
     /// size via [`Self::with_attrs`] when the blob fetch reported one, so
     /// `stat` is honest before the first read.
     pub fn blob(blob: impl Into<crate::blob::BlobId>) -> Self {
         Self {
             content_type: None,
-            attrs: FileAttrs::new(Size::Unknown, Stability::Stable),
+            attrs: FileAttrs::new(FileSize::Unknown, Stability::Stable),
             bytes: ContentBytes::Read(ReadFileBytes::Blob(blob.into())),
             effects: Effects::new(),
         }

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use crate::{
     Attrs, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer, Namespace, NsError,
-    NsEvent, ReadAnswer, ReadStyle, StabilityClass,
+    NsEvent, ReadAnswer, ReadStyle, Stability,
 };
 use futures::future::{BoxFuture, FutureExt};
 use omnifs_core::path::Path;
@@ -79,7 +79,7 @@ fn file_attrs(size: u64) -> Attrs {
         ttl: Duration::ZERO,
         change: 0,
         direct_io: false,
-        stability: StabilityClass::Stable,
+        stability: Stability::Stable,
         read_style: ReadStyle::Whole,
     }
 }

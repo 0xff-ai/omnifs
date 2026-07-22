@@ -9,26 +9,15 @@ use crate::view::{
 use omnifs_wit::provider::types as wit_types;
 
 pub fn file_size_from_wit(size: wit_types::FileSize) -> FileSize {
-    match size {
-        wit_types::FileSize::Exact(size) => FileSize::Exact(size),
-        wit_types::FileSize::NonZero => FileSize::NonZero,
-        wit_types::FileSize::Unknown => FileSize::Unknown,
-    }
+    size.into()
 }
 
 pub fn stability_from_wit(stability: wit_types::Stability) -> Stability {
-    match stability {
-        wit_types::Stability::Stable => Stability::Stable,
-        wit_types::Stability::Dynamic => Stability::Dynamic,
-        wit_types::Stability::Live => Stability::Live,
-    }
+    stability.into()
 }
 
 pub(crate) fn read_mode_from_wit(mode: wit_types::ReadMode) -> ReadMode {
-    match mode {
-        wit_types::ReadMode::Full => ReadMode::Full,
-        wit_types::ReadMode::Ranged => ReadMode::Ranged,
-    }
+    mode.into()
 }
 
 pub(crate) fn byte_source_from_wit(source: &wit_types::ByteSource) -> Result<ByteSource, String> {

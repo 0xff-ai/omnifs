@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 
+pub use omnifs_core::{FileSize, ReadMode, Stability};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BodyId([u8; 32]);
 
@@ -36,32 +38,12 @@ pub const MAX_INLINE_PROJECTABLE_BYTES: usize = 64 * 1024;
 pub const MAX_EAGER_RESPONSE_BYTES: usize = 512 * 1024;
 pub const MAX_VERSION_TOKEN_BYTES: usize = 256;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum FileSize {
-    Exact(u64),
-    NonZero,
-    Unknown,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ByteSource {
     Inline(Vec<u8>),
     Deferred(ReadMode),
     Canonical,
     Body(BodyId),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ReadMode {
-    Full,
-    Ranged,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Stability {
-    Stable,
-    Dynamic,
-    Live,
 }
 
 /// Version evidence validated at the untrusted provider boundary.
@@ -304,10 +286,7 @@ impl FileAttrsCache {
     }
 
     pub fn st_size(&self) -> u64 {
-        match self.size() {
-            FileSize::Exact(size) => size,
-            FileSize::NonZero | FileSize::Unknown => 1,
-        }
+        self.size().st_size()
     }
 
     pub fn should_direct_io(&self) -> bool {

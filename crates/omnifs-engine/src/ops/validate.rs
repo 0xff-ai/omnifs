@@ -554,7 +554,7 @@ mod tests {
             },
         ));
         let error = validate_read(&result, &effects(), |_| true).unwrap_err();
-        assert!(error.contains("read-file result") && error.contains("Size::NonZero"));
+        assert!(error.contains("read-file result") && error.contains("FileSize::NonZero"));
     }
 
     #[test]

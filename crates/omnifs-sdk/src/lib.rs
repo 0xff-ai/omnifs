@@ -123,7 +123,7 @@
 //! | [`captures`] | Typed segment parsing, [`captures::Captures`], choices |
 //! | [`object`] / [`identity`] | The object model: [`object::Key`], [`object::Load`], logical ids, facets |
 //! | [`projection`] | What handlers return: [`projection::DirListing`] (raw dir listings), [`projection::FileProjection`], [`projection::Entry`]; objects list through [`collection::Collection`] |
-//! | [`file_attrs`] | Size, stability, version tokens, projection validation |
+//! | [`file_attrs`] | File size, stability, version tokens, projection validation |
 //! | [`repr`] | Multi-format object representations (`item.md`, `item.json`) |
 //! | [`cx`] | Handler context: state access, callout builders, [`cx::join_all`] |
 //! | [`endpoint`] | Declared HTTP endpoints: typed request builder, conditional loads, rate-limit breaker |
@@ -200,7 +200,7 @@ pub mod repr;
 pub mod router;
 
 // Re-export proc macros at the crate root so #[omnifs_sdk::provider] works.
-pub use file_attrs::{FileAttrs, Size, Stability, VersionToken};
+pub use file_attrs::{FileAttrs, FileSize, Stability, VersionToken};
 pub use handler::{FileChunk, MemoryRangeReader, RangeReader};
 pub use omnifs_core::ContentType;
 pub use omnifs_sdk_macros::Endpoint;

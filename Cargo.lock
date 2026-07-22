@@ -3067,6 +3067,7 @@ dependencies = [
 name = "omnifs-wit"
 version = "0.2.1"
 dependencies = [
+ "omnifs-core",
  "serde",
  "wasmtime",
  "wit-bindgen",

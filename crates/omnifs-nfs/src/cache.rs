@@ -201,7 +201,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_vfs::{EntryKind, ReadStyle, StabilityClass};
+    use omnifs_vfs::{EntryKind, ReadStyle, Stability};
     use std::time::Duration;
 
     fn path(value: &str) -> Path {
@@ -223,7 +223,7 @@ mod tests {
             ttl,
             change: 0,
             direct_io: false,
-            stability: StabilityClass::Stable,
+            stability: Stability::Stable,
             read_style: ReadStyle::Whole,
         }
     }

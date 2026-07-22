@@ -18,7 +18,7 @@ use tracing::Instrument;
 
 use super::{
     Attrs, CachedCursor, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer,
-    Namespace, NsError, NsEvent, ReadAnswer, ReadStyle, StabilityClass,
+    Namespace, NsError, NsEvent, ReadAnswer, ReadStyle, Stability,
 };
 use crate::clock::DYNAMIC_TTL_MILLIS;
 use crate::inspect;
@@ -62,11 +62,7 @@ fn attrs_from_cache(kind: EntryKind, attrs: Option<&FileAttrsCache>, change: u64
                 TTL_DYNAMIC
             }
         });
-        let stability = attrs.map_or(StabilityClass::Stable, |attrs| match attrs.stability() {
-            view_types::Stability::Stable => StabilityClass::Stable,
-            view_types::Stability::Dynamic => StabilityClass::Dynamic,
-            view_types::Stability::Live => StabilityClass::Live,
-        });
+        let stability = attrs.map_or(Stability::Stable, FileAttrsCache::stability);
         let read_style = if attrs.is_some_and(FileAttrsCache::is_deferred_ranged) {
             ReadStyle::Ranged
         } else {
@@ -1253,7 +1249,7 @@ impl HostMetadata {
             ttl: TTL_STATIC,
             change,
             direct_io: false,
-            stability: StabilityClass::Stable,
+            stability: Stability::Stable,
             read_style: if self.kind == EntryKind::File {
                 ReadStyle::Ranged
             } else {

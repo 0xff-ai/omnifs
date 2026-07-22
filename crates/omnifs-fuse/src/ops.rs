@@ -82,7 +82,7 @@ impl Frontend {
                 ttl: TTL,
                 change: 0,
                 direct_io: false,
-                stability: omnifs_vfs::StabilityClass::Stable,
+                stability: omnifs_vfs::Stability::Stable,
                 read_style: omnifs_vfs::ReadStyle::Whole,
             };
             return Ok(self.ns_file_attr(ROOT_INO, &Path::root(), &attrs));
@@ -197,7 +197,7 @@ impl Frontend {
                         .map_err(|error| ns_error_errno(&error)),
                 )
                 .await?;
-            if matches!(answer.attrs.stability, omnifs_vfs::StabilityClass::Live) {
+            if matches!(answer.attrs.stability, omnifs_vfs::Stability::Live) {
                 let mut grown = self.grown_sizes.entry(node).or_insert(0);
                 *grown = (*grown).max(answer.attrs.size);
             }

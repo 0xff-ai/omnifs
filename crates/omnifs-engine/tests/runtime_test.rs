@@ -113,10 +113,7 @@ async fn test_mutable_unversioned_full_reads_are_observation_only() {
     let path = "/hello/fresh-full";
     let first = read_namespace(&harness.namespace, path).await.unwrap();
     assert_eq!(first.bytes.as_slice(), b"fresh-full-1\n");
-    assert_eq!(
-        first.attrs.stability,
-        omnifs_engine::StabilityClass::Dynamic
-    );
+    assert_eq!(first.attrs.stability, omnifs_engine::Stability::Dynamic);
     let second = read_namespace(&harness.namespace, path).await.unwrap();
     assert_eq!(second.bytes.as_slice(), b"fresh-full-2\n");
 }
@@ -244,10 +241,7 @@ async fn test_ranged_open_read_chunk_contract() {
         .unwrap();
     assert_eq!(chunk.bytes, b"cdef");
     assert_eq!(chunk.attrs.size, 26);
-    assert_eq!(
-        chunk.attrs.stability,
-        omnifs_engine::StabilityClass::Dynamic
-    );
+    assert_eq!(chunk.attrs.stability, omnifs_engine::Stability::Dynamic);
     assert!(!chunk.eof);
 
     let eof = harness
@@ -289,7 +283,7 @@ async fn test_unknown_and_volatile_ranged_eof_contracts() {
         .await
         .unwrap();
     assert_eq!(chunk.bytes, b"tail:42\n");
-    assert_eq!(chunk.attrs.stability, omnifs_engine::StabilityClass::Live);
+    assert_eq!(chunk.attrs.stability, omnifs_engine::Stability::Live);
     assert!(!chunk.eof);
 }
 

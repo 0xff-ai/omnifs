@@ -921,7 +921,7 @@ mod tests {
     use omnifs_core::path::Path;
     use omnifs_vfs::{
         Attrs, DirEntry as NamespaceDirEntry, DirPage, LookupAnswer, ReadAnswer, ReadStyle,
-        StabilityClass,
+        Stability,
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -968,7 +968,7 @@ mod tests {
             ttl: Duration::from_mins(1),
             change: 1,
             direct_io: false,
-            stability: StabilityClass::Stable,
+            stability: Stability::Stable,
             read_style: ReadStyle::Whole,
         }
     }

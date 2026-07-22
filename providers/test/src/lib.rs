@@ -541,7 +541,7 @@ async fn remote(cx: Cx<State>) -> Result<FileProjection> {
 async fn slow(_cx: Cx<State>, captures: SlowCaptures) -> Result<FileProjection> {
     let ms = captures.ms.min(10_000);
     Ok(FileProjection::ranged(SlowReader { ms })
-        .size(Size::Unknown)
+        .size(FileSize::Unknown)
         .dynamic()
         .build())
 }
@@ -585,7 +585,7 @@ async fn ranged(_cx: Cx<State>) -> Result<FileProjection> {
     Ok(FileProjection::ranged(MemoryRangeReader::new(
         b"abcdefghijklmnopqrstuvwxyz".to_vec(),
     ))
-    .size(Size::Exact(26))
+    .size(FileSize::Exact(26))
     .dynamic()
     .version("alphabet-v1")
     .build())
@@ -594,7 +594,7 @@ async fn ranged(_cx: Cx<State>) -> Result<FileProjection> {
 async fn unknown_ranged(_cx: Cx<State>) -> Result<FileProjection> {
     Ok(
         FileProjection::ranged(MemoryRangeReader::new(b"unknown-size\n".to_vec()))
-            .size(Size::Unknown)
+            .size(FileSize::Unknown)
             .stable()
             .build(),
     )
@@ -602,21 +602,21 @@ async fn unknown_ranged(_cx: Cx<State>) -> Result<FileProjection> {
 
 async fn large_ranged(_cx: Cx<State>) -> Result<FileProjection> {
     Ok(FileProjection::ranged(LargeRangedReader)
-        .size(Size::Exact(LARGE_RANGED_SIZE))
+        .size(FileSize::Exact(LARGE_RANGED_SIZE))
         .stable()
         .build())
 }
 
 async fn volatile_tail(_cx: Cx<State>) -> Result<FileProjection> {
     Ok(FileProjection::ranged(LiveTailReader)
-        .size(Size::Unknown)
+        .size(FileSize::Unknown)
         .live()
         .build())
 }
 
 async fn live_log(_cx: Cx<State>) -> Result<FileProjection> {
     Ok(FileProjection::ranged(GrowingLogReader)
-        .size(Size::Unknown)
+        .size(FileSize::Unknown)
         .live()
         .build())
 }

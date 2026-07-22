@@ -18,7 +18,7 @@ use omnifs_sdk::captures::{Captures, FromCaptures, PathSegment};
 use omnifs_sdk::collection::{Collection, CollectionEntry, ListCx, NoCursor, PageCursor};
 use omnifs_sdk::cx::Cx;
 use omnifs_sdk::error::{ProviderError, Result};
-use omnifs_sdk::file_attrs::{Size, Stability};
+use omnifs_sdk::file_attrs::{FileSize, Stability};
 use omnifs_sdk::handler::MemoryRangeReader;
 use omnifs_sdk::identity::{Facet, IdentityCaptures};
 use omnifs_sdk::object::{
@@ -1291,7 +1291,7 @@ fn object_stream_face_opens_live_session_and_serves_a_chunk() {
     );
     assert_eq!(
         opened.attrs.size,
-        Size::Unknown,
+        FileSize::Unknown,
         "a live stream's size is unknown until read"
     );
 
