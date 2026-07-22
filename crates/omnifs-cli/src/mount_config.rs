@@ -35,14 +35,11 @@ impl MountConfig {
             return Ok(());
         };
         let target = mount_auth
-            .configured_target(auth, auth.account())
+            .configured_credential_id(auth)
             .with_context(|| format!("resolve credential for mount `{}`", self.name))?;
-        let key = target
-            .credential_id()
-            .ok_or_else(|| anyhow!("mount `{}` has no credential target", self.name))?;
-        let key_name = key.storage_key();
-        let entry = target
-            .lookup(store)
+        let key_name = target.storage_key();
+        let entry = store
+            .get(&target)
             .with_context(|| format!("fetch credential `{key_name}` for mount `{}`", self.name))?
             .ok_or_else(|| {
                 anyhow!(

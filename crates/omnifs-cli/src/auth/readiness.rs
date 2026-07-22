@@ -1,10 +1,9 @@
 //! Auth readiness state for configured mounts.
 
 use omnifs_workspace::authn::AuthKind;
+use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore, Refreshability};
 use serde::Serialize;
-
-use crate::credential_target::CredentialTarget;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -26,18 +25,17 @@ pub(crate) enum AuthReadiness {
 }
 
 impl AuthReadiness {
-    pub(crate) fn from_target(
+    pub(crate) fn from_credential(
         mount_name: &str,
-        target: &CredentialTarget,
+        credential_id: Option<&CredentialId>,
         store: &dyn CredentialStore,
     ) -> Self {
-        match target {
-            CredentialTarget::None => return Self::None,
-            CredentialTarget::Internal(_) => {},
-        }
+        let Some(credential_id) = credential_id else {
+            return Self::None;
+        };
 
         let command = format!("omnifs mount reauth {mount_name}");
-        match target.lookup(store) {
+        match store.get(credential_id) {
             Ok(Some(entry)) => Self::from_entry(entry, Some(&command)),
             Ok(None) => Self::Missing { command },
             Err(error) => Self::Error {
@@ -93,7 +91,7 @@ mod tests {
     use time::OffsetDateTime;
 
     #[test]
-    fn from_target_reports_ready_credential() {
+    fn from_credential_reports_ready_credential() {
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "device", "default").unwrap();
         store
@@ -109,7 +107,7 @@ mod tests {
                 ),
             )
             .unwrap();
-        match AuthReadiness::from_target("github", &CredentialTarget::Internal(key), &store) {
+        match AuthReadiness::from_credential("github", Some(&key), &store) {
             AuthReadiness::Ready { kind, scopes, .. } => {
                 assert_eq!(kind, "oauth");
                 assert_eq!(scopes, vec!["repo".to_string()]);
@@ -119,11 +117,11 @@ mod tests {
     }
 
     #[test]
-    fn from_target_reports_missing_credential() {
+    fn from_credential_reports_missing_credential() {
         let store = MemoryStore::new();
         let key = CredentialId::new("github", "device", "default").unwrap();
         assert_eq!(
-            AuthReadiness::from_target("github", &CredentialTarget::Internal(key), &store),
+            AuthReadiness::from_credential("github", Some(&key), &store),
             AuthReadiness::Missing {
                 command: "omnifs mount reauth github".into(),
             }

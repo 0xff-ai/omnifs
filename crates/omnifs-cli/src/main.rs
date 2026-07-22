@@ -14,7 +14,6 @@ mod capability;
 mod cli;
 mod client;
 mod commands;
-mod credential_target;
 mod daemon;
 mod daemon_launch;
 mod daemon_teardown;

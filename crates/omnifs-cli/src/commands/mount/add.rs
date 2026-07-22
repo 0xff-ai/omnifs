@@ -7,6 +7,7 @@
 
 use anyhow::Context;
 use clap::Args;
+use omnifs_workspace::authn::{AccountId, CredentialId};
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore};
 use omnifs_workspace::mounts::Auth;
 use omnifs_workspace::provider::ProviderManifest;
@@ -14,7 +15,6 @@ use secrecy::{ExposeSecret, SecretString};
 use time::OffsetDateTime;
 
 use super::token_validation::validate_static_token;
-use crate::credential_target::CredentialTarget;
 use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
@@ -149,7 +149,7 @@ pub(crate) async fn run_static_token_init(
     validate: bool,
     output: &crate::ui::output::Output,
     key_width: usize,
-) -> anyhow::Result<CredentialTarget> {
+) -> anyhow::Result<CredentialId> {
     let static_token_scheme = crate::auth::static_token_scheme(auth, manifest)?;
 
     let header_name = static_token_scheme
@@ -204,18 +204,18 @@ pub(crate) async fn run_static_token_init(
         .map(omnifs_workspace::provider::ProviderAuthManifest::wasm_auth_manifest);
     let scheme_key = crate::auth::AuthManifestView::new(auth_manifest.as_ref())
         .static_token_scheme_key(auth.scheme(), None)?;
-    let target = CredentialTarget::for_static_import(&manifest.id, &scheme_key, auth.account())?;
-    let credential_id = target
-        .credential_id()
-        .ok_or_else(|| anyhow::anyhow!("static token resolved without a credential target"))?;
+    let account = auth
+        .account()
+        .map_or_else(|| AccountId::default_account().to_string(), str::to_owned);
+    let credential_id = CredentialId::new(&manifest.id, &scheme_key, account)?;
     store
-        .put(credential_id, &entry)
+        .put(&credential_id, &entry)
         .with_context(|| "failed to store credential")?;
     output.ledger_row(
         &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "credential", "stored"),
         key_width,
     );
-    Ok(target)
+    Ok(credential_id)
 }
 
 #[cfg(test)]

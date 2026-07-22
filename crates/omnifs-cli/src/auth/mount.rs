@@ -2,14 +2,15 @@
 
 use anyhow::{Context, anyhow};
 use omnifs_auth::OAuthRequest;
-use omnifs_workspace::authn::{AuthManifest, AuthScheme, StaticTokenScheme};
+use omnifs_workspace::authn::{
+    AccountId, AuthManifest, AuthScheme, CredentialId, StaticTokenScheme,
+};
 use omnifs_workspace::creds::CredentialStore;
 use omnifs_workspace::mounts::{Auth, Name as MountName, OAuth, Spec, StaticToken};
 use omnifs_workspace::provider::{Catalog, ProviderAuthManifest, ProviderManifest};
 
 use super::manifest_view::AuthManifestView;
 use super::readiness::AuthReadiness;
-use crate::credential_target::CredentialTarget;
 use crate::mount_config::MountConfig;
 
 pub(crate) fn auth_from_provider_default(manifest: &ProviderManifest) -> Option<Auth> {
@@ -158,7 +159,7 @@ impl MountAuth {
         &self,
         account: Option<&str>,
         scopes: &[String],
-    ) -> anyhow::Result<(OAuthRequest, CredentialTarget)> {
+    ) -> anyhow::Result<(OAuthRequest, CredentialId)> {
         let auth = self.primary_auth();
         let scheme = self
             .manifest_view()
@@ -173,7 +174,7 @@ impl MountAuth {
     }
 
     pub(crate) fn readiness(&self, store: &dyn CredentialStore) -> AuthReadiness {
-        let target = match self.credential_target() {
+        let target = match self.credential_id() {
             Ok(target) => target,
             Err(error) => {
                 return AuthReadiness::Error {
@@ -181,32 +182,28 @@ impl MountAuth {
                 };
             },
         };
-        AuthReadiness::from_target(&self.spec.mount, &target, store)
+        AuthReadiness::from_credential(&self.spec.mount, target.as_ref(), store)
     }
 
-    pub(crate) fn configured_target(
-        &self,
-        auth: &Auth,
-        account: Option<&str>,
-    ) -> anyhow::Result<CredentialTarget> {
+    pub(crate) fn configured_credential_id(&self, auth: &Auth) -> anyhow::Result<CredentialId> {
         let scheme = auth.scheme().ok_or_else(|| {
             anyhow!(
                 "auth config for mount `{}` must set `scheme`",
                 self.spec.mount
             )
         })?;
-        self.target_for_scheme(Some(auth), scheme, account)
+        self.target_for_scheme(Some(auth), scheme, None)
     }
 
     /// Resolve the credential identity selected by this mount's persisted auth
     /// block. The manifest remains best-effort because specs carry
     /// their selected scheme.
-    pub(crate) fn credential_target(&self) -> anyhow::Result<CredentialTarget> {
+    pub(crate) fn credential_id(&self) -> anyhow::Result<Option<CredentialId>> {
         let Some(auth) = self.primary_auth() else {
-            return Ok(CredentialTarget::None);
+            return Ok(None);
         };
         let scheme = self.manifest_view().configured_scheme_key(auth)?;
-        CredentialTarget::for_configured_auth(&self.spec, auth, Some(&scheme))
+        self.target_for_scheme(Some(auth), &scheme, None).map(Some)
     }
 
     fn primary_auth(&self) -> Option<&Auth> {
@@ -218,8 +215,22 @@ impl MountAuth {
         auth: Option<&Auth>,
         scheme: &str,
         account: Option<&str>,
-    ) -> anyhow::Result<CredentialTarget> {
-        CredentialTarget::for_scheme(&self.spec, auth, scheme, account)
+    ) -> anyhow::Result<CredentialId> {
+        match (account, auth) {
+            (Some(account), _) => {
+                CredentialId::new(self.spec.provider_name().as_str(), scheme, account)
+                    .map_err(Into::into)
+            },
+            (None, Some(auth)) => {
+                CredentialId::for_mount(self.spec.provider_name(), auth, scheme).map_err(Into::into)
+            },
+            (None, None) => CredentialId::new(
+                self.spec.provider_name().as_str(),
+                scheme,
+                AccountId::default_account().as_str(),
+            )
+            .map_err(Into::into),
+        }
     }
 
     fn manifest_view(&self) -> AuthManifestView<'_> {
