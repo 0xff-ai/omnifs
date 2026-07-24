@@ -138,7 +138,7 @@ impl Serialize for FrontendId {
 pub struct FrontendEnableArgs {
     #[arg(value_parser = fs_type_parser())]
     pub filesystem: FsType,
-    /// Runner environment. Defaults to libkrun for FUSE on macOS and host otherwise.
+    /// Runner runtime. Defaults to libkrun for FUSE on Apple Silicon macOS and host where supported.
     #[arg(long, value_parser = frontend_runtime_parser())]
     pub runtime: Option<FrontendRuntime>,
     #[arg(long)]
@@ -269,7 +269,19 @@ impl FrontendEnableArgs {
     pub async fn enable(self, workspace: &Workspace, output: Output) -> Result<FrontendResult> {
         let runtime = self
             .runtime
-            .unwrap_or_else(|| default_runtime(self.filesystem));
+            .or_else(|| default_runtime(self.filesystem))
+            .with_context(|| {
+                if cfg!(target_os = "macos") && self.filesystem == FsType::Fuse {
+                    "FUSE has no implicit runtime on Intel macOS; use `--runtime docker`".to_owned()
+                } else {
+                    format!(
+                        "{} has no default runtime on {} {}; choose one with `--runtime`",
+                        self.filesystem,
+                        std::env::consts::OS,
+                        std::env::consts::ARCH
+                    )
+                }
+            })?;
         let id = resolve_id(workspace, self.filesystem, runtime, self.location)?;
         let inventory = Inventory::collect(workspace).await?;
         if id.runtime() == FrontendRuntime::Host {
@@ -787,6 +799,11 @@ fn finish_receipt(output: &Output, receipt: &FrontendReceipt) -> Result<crate::e
         {
             output.narrate(format_failure(result));
         }
+        for frontend in receipt.frontends.iter().filter(|frontend| {
+            frontend.runtime != FrontendRuntime::Host && frontend.state.provides_access()
+        }) {
+            output.narrate(crate::ui::access::guest_shell_line(frontend));
+        }
     }
     Ok(receipt.exit_code())
 }
@@ -871,6 +888,10 @@ fn format_failure(result: &FrontendResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use crate::commands::receipt::Verdict;
+    use crate::ui::output::OutputMode;
 
     #[test]
     fn selectors_require_one_observed_identity() {
@@ -904,5 +925,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(selected.location(), Some(Path::new("/b")));
+    }
+
+    #[test]
+    fn human_receipt_ends_with_the_guest_shell_command() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let output = Output::new(OutputMode::Human, false)
+            .with_narration_sink(move |line| sink.lock().unwrap().push(line.to_owned()));
+        let receipt = FrontendReceipt {
+            verdict: Verdict::Ok,
+            changed: true,
+            rows: Vec::new(),
+            frontends: vec![FrontendStatus {
+                filesystem: FsType::Fuse,
+                runtime: FrontendRuntime::Libkrun,
+                location: Some(GUEST_MOUNT.into()),
+                state: FrontendState::Attached,
+                mount_count: 3,
+                fix: None,
+            }],
+            access_paths: Vec::new(),
+        };
+
+        finish_receipt(&output, &receipt).unwrap();
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            ["In the microVM:  `omnifs frontend shell fuse --runtime libkrun`"]
+        );
     }
 }

@@ -480,9 +480,6 @@ jobs:
           - arch: x64
             platform: darwin-x64
             target: x86_64-apple-darwin
-          - arch: arm64
-            platform: darwin-arm64
-            target: aarch64-apple-darwin
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/cli-darwin-${{ matrix.arch }}
@@ -536,6 +533,90 @@ jobs:
         with:
           name: omnifs-cli-${{ matrix.platform }}
           path: dist/cli/${{ matrix.platform }}/omnifs-cli-${{ matrix.platform }}.tar.xz*
+          retention-days: 90
+          if-no-files-found: error
+
+  cli-darwin-arm64:
+    name: cli darwin arm64
+    needs: [preflight, components]
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        (github.event.pull_request.user.login == 'raulk' ||
+         contains(github.event.pull_request.labels.*.name, 'ci-full')))
+    runs-on: macos-15
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/cli-darwin-arm64
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/omnifs-just
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cli-darwin-arm64
+          cache-on-failure: true
+
+      - name: Download WASM components
+        uses: actions/download-artifact@v8
+        with:
+          name: omnifs-wasm
+          path: target/wasm32-wasip2/release
+
+      - name: Build native Darwin arm64 binaries
+        env:
+          OMNIFS_PROVIDER_BUNDLE_DIR: ${{ github.workspace }}/target/wasm32-wasip2/release
+          OMNIFS_RELEASE: "1"
+        run: |
+          set -euo pipefail
+          cargo build --locked --release \
+            -p omnifs-cli \
+            -p omnifs-thin \
+            -p omnifs-libkrun \
+            --bin omnifs \
+            --bin omnifs-thin \
+            --bin omnifs-libkrun
+
+      - name: Stage pinned libkrun payload
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/omnifs-darwin-arm64"
+          mkdir -p "$payload"
+          cp "$CARGO_TARGET_DIR/release/omnifs" "$payload/omnifs"
+          cp "$CARGO_TARGET_DIR/release/omnifs-thin" "$payload/omnifs-thin"
+          cp "$CARGO_TARGET_DIR/release/omnifs-libkrun" "$payload/omnifs-libkrun"
+          chmod 0755 "$payload/omnifs" "$payload/omnifs-thin" "$payload/omnifs-libkrun"
+          scripts/ci/build-libkrun-runtime.sh "$payload"
+
+          codesign --force --sign - "$payload/libexec/omnifs/libkrun.1.dylib"
+          codesign --force --sign - \
+            --entitlements scripts/ci/omnifs-libkrun.entitlements.plist \
+            "$payload/omnifs-libkrun"
+          codesign --force --sign - "$payload/omnifs"
+          codesign --force --sign - "$payload/omnifs-thin"
+          scripts/ci/check-darwin-arm64-payload.sh "$payload"
+
+      - name: Package Darwin arm64 CLI archive
+        run: scripts/ci/package-cli.sh darwin-arm64 --payload-dir "$RUNNER_TEMP/omnifs-darwin-arm64"
+
+      - name: Attest Darwin arm64 CLI archive
+        if: env.CI_MAIN_PUSH == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/cli/darwin-arm64/omnifs-cli-darwin-arm64.tar.xz
+
+      - name: Upload Darwin arm64 CLI archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: omnifs-cli-darwin-arm64
+          path: dist/cli/darwin-arm64/omnifs-cli-darwin-arm64.tar.xz*
           retention-days: 90
           if-no-files-found: error
 
@@ -1073,6 +1154,7 @@ jobs:
       - cli-linux-x64
       - cli-linux-arm64
       - cli-darwin
+      - cli-darwin-arm64
       - frontend-amd64
       - frontend-arm64
       - smoke-amd64

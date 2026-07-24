@@ -171,13 +171,11 @@ pub enum Exec {
         root: String,
         scratch: String,
     },
-    /// `omnifs shell -- <cmd>` into a libkrun guest, the real CLI path
-    /// `omnifs shell` uses for the libkrun runner (ssh over a vsock-to-unix
-    /// bridge via `socat`, built by `LibkrunRunner::shell_command`). `root`
-    /// and `scratch` are guest paths, matching `DockerExec`'s shape.
-    /// `omnifs_bin`/`home` select which workspace's libkrun guest to reach:
-    /// `omnifs shell` resolves the running frontend from `OMNIFS_HOME`'s
-    /// daemon record, so no attach-socket path is threaded through here.
+    /// `omnifs frontend shell fuse --runtime libkrun -- <cmd>` into a libkrun
+    /// guest through ssh over the vsock-to-unix bridge. `root` and `scratch`
+    /// are guest paths, matching `DockerExec`'s shape. `omnifs_bin` and
+    /// `home` select which workspace's libkrun guest to reach, so no
+    /// attach-socket path is threaded through here.
     SshLibkrun {
         omnifs_bin: PathBuf,
         home: PathBuf,
@@ -254,7 +252,7 @@ impl Exec {
                     shell_single_quote(script)
                 );
                 let mut cmd = Command::new(omnifs_bin);
-                cmd.arg("shell")
+                cmd.args(["frontend", "shell", "fuse", "--runtime", "libkrun"])
                     .arg("--")
                     .arg(remote)
                     .env("OMNIFS_HOME", home);
@@ -943,7 +941,8 @@ pub const FUSE_DOCKER_FRONTEND: Column = Column {
 
 /// The libkrun guest FUSE frontend (`omnifs frontend enable fuse
 /// --runtime libkrun`), a libkrun microVM on Apple Silicon macOS, reached over
-/// ssh-over-vsock via the real `omnifs shell -- <cmd>` CLI path
+/// ssh-over-vsock via the real `omnifs frontend shell fuse --runtime libkrun
+/// -- <cmd>` CLI path
 /// (`crates/omnifs-itest/tests/frontend_libkrun`). LOCAL-ONLY: GitHub-hosted
 /// macOS runners cannot nest virtualization, so this column never runs in CI
 /// (see `docs/contracts/60-build-validation.md`).

@@ -6,6 +6,8 @@
   "files": [
     "bin/omnifs",
     "bin/omnifs-thin",
+    "bin/omnifs-libkrun",
+    "bin/libexec/omnifs/**",
     "README.md"
   ],
   "homepage": "https://github.com/0xff-ai/omnifs",

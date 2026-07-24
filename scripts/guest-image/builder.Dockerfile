@@ -7,8 +7,8 @@
 # a Debian image (systemd-repart, systemd-boot-efi, systemd-ukify, dosfstools,
 # mtools, btrfs-progs, e2fsprogs, cryptsetup-bin, ...); --no-install-recommends
 # skips its optional qemu/ovmf/virtiofsd Recommends, which this build never
-# exercises (booting happens on the host via the krunkit executable, not inside this
-# container).
+# exercises because the packaged host helper boots the image outside this
+# container.
 FROM debian:trixie-slim
 
 RUN apt-get update \

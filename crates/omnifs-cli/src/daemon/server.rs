@@ -246,6 +246,16 @@ impl Daemon {
         if !vfs.ready() {
             return Ok(AttachOutcome::NamespaceNotReady);
         }
+        self.bind_attach_tcp(bind_addr, port)
+            .map(AttachOutcome::Bound)
+    }
+
+    fn bind_attach_tcp(
+        &self,
+        bind_addr: AttachBindAddr,
+        port: u16,
+    ) -> anyhow::Result<ListenerTarget> {
+        let vfs = self.vfs.get().context("VFS server was not initialized")?;
         let (listener_target, newly_bound) = vfs
             .ensure_tcp_with_status(bind_addr.0, port)
             .context("bind namespace TCP listener")?;
@@ -264,7 +274,7 @@ impl Daemon {
             }
             return Err(error.into());
         }
-        Ok(AttachOutcome::Bound(listener_target))
+        Ok(listener_target)
     }
 
     fn ensure_attach_uds(&self) -> anyhow::Result<AttachOutcome> {
@@ -274,6 +284,11 @@ impl Daemon {
         if !vfs.ready() {
             return Ok(AttachOutcome::NamespaceNotReady);
         }
+        self.bind_attach_uds().map(AttachOutcome::Bound)
+    }
+
+    fn bind_attach_uds(&self) -> anyhow::Result<ListenerTarget> {
+        let vfs = self.vfs.get().context("VFS server was not initialized")?;
         let path = self.context.vsock_attach_socket();
         let (listener_target, newly_bound) = vfs
             .ensure_vsock_with_status(&path)
@@ -293,7 +308,7 @@ impl Daemon {
             }
             return Err(error.into());
         }
-        Ok(AttachOutcome::Bound(listener_target))
+        Ok(listener_target)
     }
 
     /// Own the daemon's complete serving lifetime. Startup binds every fixed
@@ -361,7 +376,7 @@ impl Daemon {
                             anyhow::bail!("persisted attach TCP address must be IPv4: {addr}")
                         },
                     };
-                    self.ensure_attach_tcp(AttachBindAddr::requested(Some(ip))?, addr.port())?;
+                    self.bind_attach_tcp(AttachBindAddr::requested(Some(ip))?, addr.port())?;
                 },
                 AttachTarget::Vsock { socket_path } => {
                     anyhow::ensure!(
@@ -369,14 +384,14 @@ impl Daemon {
                         "persisted vsock attach socket path {} is not the daemon-approved path",
                         socket_path.display()
                     );
-                    self.ensure_attach_uds()?;
+                    self.bind_attach_uds()?;
                 },
             }
         }
         if let Some(port) = self.context.attach_tcp_port()
             && self.vfs.get().is_some_and(|vfs| !vfs.ready())
         {
-            self.ensure_attach_tcp(AttachBindAddr::loopback(), port)?;
+            self.bind_attach_tcp(AttachBindAddr::loopback(), port)?;
         }
         Ok(())
     }

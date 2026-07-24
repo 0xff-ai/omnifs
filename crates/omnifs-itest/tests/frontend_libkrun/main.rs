@@ -68,12 +68,9 @@ fn acceptance_gated() -> bool {
 
 /// Every precondition this suite needs beyond the live-acceptance gate: an
 /// Apple Silicon host (the guest image is arm64-only), the test provider
-/// artifact, `libkrun` and `socat` on `PATH` (the driver and its ssh bridge
-/// respectively — mirrors `LibkrunRunner::ensure_libkrun_available`/
-/// `ensure_socat_available`, duplicated here as a probe rather than imported
-/// since neither is a public `omnifs-cli` API), and the locally built guest
-/// image. Returns the resolved guest image path, or `None` (skip, message
-/// already printed) when any precondition is missing.
+/// artifact, the packaged helper payload beside the CLI, `socat` on `PATH`,
+/// and the locally built guest image. Returns the resolved guest image path,
+/// or `None` (skip, message already printed) when any precondition is missing.
 fn preconditions() -> Option<PathBuf> {
     if std::env::consts::ARCH != "aarch64" {
         eprintln!(
@@ -90,9 +87,20 @@ fn preconditions() -> Option<PathBuf> {
         );
         return None;
     }
-    if !command_reachable("krunkit", &["--version"]) {
+    let omnifs_bin = live::omnifs_bin();
+    let bin_dir = omnifs_bin
+        .parent()
+        .expect("omnifs test binary has a parent directory");
+    let payload = [
+        bin_dir.join("omnifs-libkrun"),
+        bin_dir.join("libexec/omnifs/libkrun.1.dylib"),
+        bin_dir.join("libexec/omnifs/KRUN_EFI.silent.fd"),
+        bin_dir.join("libexec/omnifs/runtime-manifest.json"),
+    ];
+    if let Some(missing) = payload.iter().find(|path| !path.is_file()) {
         eprintln!(
-            "skip: the krunkit executable is not on PATH (`brew tap slp/krun && brew install krunkit`)"
+            "skip: packaged libkrun payload file missing at {} (run `just libkrun-runtime`)",
+            missing.display()
         );
         return None;
     }
@@ -201,13 +209,51 @@ impl Fixture {
     /// override so libkrun frontend enable never falls back to a
     /// cwd-relative default.
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(live::omnifs_bin())
+        self.run_with_bin(&live::omnifs_bin(), args)
+    }
+
+    fn run_with_bin(&self, omnifs: &Path, args: &[&str]) -> Output {
+        Command::new(omnifs)
             .args(args)
             .env("OMNIFS_HOME", self.home_path())
             .env(ENV_GUEST_IMAGE, &self.guest_image)
             .env("RUST_LOG", "warn")
             .output()
             .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
+    }
+
+    fn wait_for_libkrun_attachment(&self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let status = self.frontend_status();
+            let text = String::from_utf8_lossy(&status.stdout);
+            if libkrun_is_attached(&text) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "libkrun frontend did not reconnect within 30s\nstdout: {text}\nstderr: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn wait_for_libkrun_detachment(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = self.frontend_status();
+            let text = String::from_utf8_lossy(&status.stdout);
+            if !libkrun_is_attached(&text) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "libkrun frontend remained attached for 10s after helper exit\nstdout: {text}\nstderr: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// Bring up a host-native daemon, explicitly enable its host frontend, and
@@ -307,8 +353,10 @@ impl Fixture {
             "seed.iso",
             "ssh.sock",
             "ready.sock",
-            "restful.sock",
+            "control.sock",
+            "attach.sock",
             "serial.log",
+            "helper.log",
         ]
         .into_iter()
         .map(|name| dir.join(name))
@@ -337,6 +385,31 @@ impl Fixture {
             .permissions()
             .mode()
             & 0o777
+    }
+
+    fn corrupt_libkrun_payload() -> TempDir {
+        let source_bin = live::omnifs_bin();
+        let source_root = source_bin.parent().expect("omnifs binary directory");
+        let payload = tempfile::tempdir().expect("create corrupt payload directory");
+        for executable in ["omnifs", "omnifs-libkrun"] {
+            std::fs::copy(
+                source_root.join(executable),
+                payload.path().join(executable),
+            )
+            .unwrap_or_else(|error| panic!("copy {executable} into corrupt payload: {error}"));
+        }
+        let runtime = payload.path().join("libexec/omnifs");
+        std::fs::create_dir_all(&runtime).expect("create corrupt payload runtime directory");
+        std::fs::write(runtime.join("libkrun.1.dylib"), b"not a Mach-O dylib")
+            .expect("write corrupt packaged dylib");
+        for asset in ["KRUN_EFI.silent.fd", "runtime-manifest.json"] {
+            std::fs::copy(
+                source_root.join("libexec/omnifs").join(asset),
+                runtime.join(asset),
+            )
+            .unwrap_or_else(|error| panic!("copy {asset} into corrupt payload: {error}"));
+        }
+        payload
     }
 }
 
@@ -406,6 +479,76 @@ fn assert_serves(fixture: &Fixture) {
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello, world!");
+    }
+}
+
+fn assert_guest_lockdown(fixture: &Fixture) {
+    let links = fixture.run(&[
+        "frontend",
+        "shell",
+        "fuse",
+        "--runtime",
+        "libkrun",
+        "--",
+        "ls",
+        "-1",
+        "/sys/class/net",
+    ]);
+    assert!(
+        links.status.success(),
+        "inspect guest network devices: {}",
+        String::from_utf8_lossy(&links.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&links.stdout).trim(),
+        "lo",
+        "the libkrun guest must expose no Ethernet device"
+    );
+
+    let cmdline = fixture.run(&[
+        "frontend",
+        "shell",
+        "fuse",
+        "--runtime",
+        "libkrun",
+        "--",
+        "cat",
+        "/proc/cmdline",
+    ]);
+    assert!(
+        cmdline.status.success(),
+        "read guest kernel command line: {}",
+        String::from_utf8_lossy(&cmdline.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&cmdline.stdout).contains("tsi_hijack"),
+        "the libkrun guest must not enable broad TSI socket interception"
+    );
+}
+
+fn libkrun_is_attached(status: &str) -> bool {
+    status
+        .lines()
+        .any(|line| line.contains("libkrun") && line.contains("attached"))
+}
+
+fn wait_for_process_exit(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let live = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !live {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "libkrun helper {pid} remained live after SIGKILL"
+        );
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -504,6 +647,49 @@ fn libkrun_lifecycle_and_matrix() {
     );
 
     assert_serves(&fixture);
+    assert_guest_lockdown(&fixture);
+
+    // Daemon replacement does not own runner lifetime. The live guest keeps
+    // running, then reconnects through the restored vsock target.
+    let old_daemon_pid = fixture.daemon_pid_from_record().expect("live daemon pid");
+    let stopped = fixture.down();
+    assert!(
+        stopped.status.success(),
+        "omnifs down before reconnect check failed: {}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let started = fixture.run(&["up"]);
+    assert!(
+        started.status.success(),
+        "omnifs up for reconnect check failed: {}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    fixture.daemon_pid = fixture.daemon_pid_from_record();
+    assert_ne!(
+        fixture.daemon_pid,
+        Some(old_daemon_pid),
+        "daemon replacement must publish a new process"
+    );
+    fixture.wait_for_libkrun_attachment();
+    assert_serves(&fixture);
+
+    // An abrupt helper exit leaves a stale pidfile. A later explicit enable
+    // must clean that state, launch a new helper, and serve the mount again.
+    let killed_pid = fixture.libkrun_pid().expect("live libkrun helper pid");
+    let killed = Command::new("kill")
+        .args(["-KILL", &killed_pid.to_string()])
+        .status()
+        .expect("kill libkrun helper");
+    assert!(
+        killed.success(),
+        "kill -KILL failed for helper {killed_pid}"
+    );
+    wait_for_process_exit(killed_pid);
+    fixture.wait_for_libkrun_detachment();
+    let recovered = fixture.frontend_enable();
+    fixture.assert_frontend_enable_ok(&recovered, "recovery after abrupt helper exit");
+    assert_ne!(fixture.libkrun_pid(), Some(killed_pid));
+    assert_serves(&fixture);
 
     let restarted = fixture.run(&["frontend", "restart", "fuse", "--runtime", "libkrun"]);
     fixture.assert_frontend_enable_ok(&restarted, "restart");
@@ -511,10 +697,34 @@ fn libkrun_lifecycle_and_matrix() {
     assert_eq!(fixture.guest_image_mode(), base_mode);
     assert_serves(&fixture);
 
-    // The libkrun runner's own launch-time lockdown audit
-    // (`assert_libkrun_locked_down`) already proves the device set from
-    // inside `omnifs-cli`; this suite's job is the guest-visible conformance
-    // contract, not re-proving that audit from outside.
+    // A malformed packaged dylib must fail before pidfile publication, show
+    // the helper's direct loader error, and roll back every launch artifact.
+    let disabled_for_failure =
+        fixture.run(&["frontend", "disable", "fuse", "--runtime", "libkrun"]);
+    assert!(
+        disabled_for_failure.status.success(),
+        "disable before failed-launch check: {}",
+        String::from_utf8_lossy(&disabled_for_failure.stderr)
+    );
+    let corrupt_payload = Fixture::corrupt_libkrun_payload();
+    let failed = fixture.run_with_bin(
+        &corrupt_payload.path().join("omnifs"),
+        &["frontend", "enable", "fuse", "--runtime", "libkrun"],
+    );
+    assert!(!failed.status.success(), "corrupt libkrun dylib must fail");
+    let failed_stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        failed_stderr.contains("omnifs-libkrun exited")
+            && failed_stderr.contains("load packaged libkrun dylib"),
+        "failed launch must show the helper loader error: {failed_stderr}"
+    );
+    assert!(
+        fixture.libkrun_artifacts().is_empty(),
+        "failed helper launch must roll back launch artifacts"
+    );
+    let relaunched = fixture.frontend_enable();
+    fixture.assert_frontend_enable_ok(&relaunched, "launch after direct helper failure");
+    assert_serves(&fixture);
 
     let mkdir_out = fixture.run(&[
         "frontend",

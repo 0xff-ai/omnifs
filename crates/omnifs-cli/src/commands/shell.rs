@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use omnifs_api::{FrontendRuntime, FsType};
 
-use crate::commands::frontend::{frontend_runtime_parser, fs_type_parser};
+use crate::commands::frontend::{frontend_runtime_parser, fs_type_parser, supports};
 use crate::docker::{ContainerName, DockerClient, DockerTarget};
 use crate::frontend_container::{FRONTEND_DEV_IMAGE, frontend_container_name};
 use crate::inventory::{FrontendState, Inventory};
@@ -18,10 +18,10 @@ use omnifs_workspace::Workspace;
 pub struct ShellArgs {
     /// Filesystem exposed by the frontend.
     #[arg(value_parser = fs_type_parser())]
-    pub filesystem: FsType,
+    pub filesystem: Option<FsType>,
     /// Guest runtime hosting the frontend.
     #[arg(long, value_parser = frontend_runtime_parser())]
-    pub runtime: FrontendRuntime,
+    pub runtime: Option<FrontendRuntime>,
     /// Shell to launch (defaults to the guest's `/bin/sh`).
     #[arg(long)]
     pub shell: Option<String>,
@@ -35,23 +35,11 @@ impl ShellArgs {
         if output.is_structured() {
             bail!("frontend shell is a passthrough command and only supports human output");
         }
-        ensure!(
-            self.filesystem == FsType::Fuse,
-            "frontend shell currently supports only the fuse filesystem"
-        );
-        ensure!(
-            matches!(
-                self.runtime,
-                FrontendRuntime::Docker | FrontendRuntime::Libkrun
-            ),
-            "frontend shell is available only for docker and libkrun; host mounts are already available in your ordinary shell"
-        );
-
         let workspace = Workspace::resolve()?;
         let inventory = Inventory::collect(&workspace).await?;
-        ensure_observed_guest(&inventory, self.filesystem, self.runtime)?;
+        let (_, runtime) = resolve_observed_guest(&inventory, self.filesystem, self.runtime)?;
 
-        match self.runtime {
+        match runtime {
             FrontendRuntime::Docker => {
                 let identity = workspace.identity();
                 let container_name = frontend_container_name(identity.container_label())?;
@@ -84,17 +72,29 @@ impl ShellArgs {
     }
 }
 
-fn ensure_observed_guest(
+fn resolve_observed_guest(
     inventory: &Inventory,
-    filesystem: FsType,
-    runtime: FrontendRuntime,
-) -> Result<()> {
-    let identity = format!("{filesystem}/{runtime}");
-    let remedy = format!("omnifs frontend enable {filesystem} --runtime {runtime}");
+    filesystem: Option<FsType>,
+    runtime: Option<FrontendRuntime>,
+) -> Result<(FsType, FrontendRuntime)> {
+    if runtime == Some(FrontendRuntime::Host) {
+        bail!(
+            "frontend shell is available only for docker and libkrun; host mounts are already available in your ordinary shell"
+        );
+    }
+    if let (Some(filesystem), Some(runtime)) = (filesystem, runtime) {
+        ensure!(
+            supports(filesystem, runtime),
+            "a {filesystem}/{runtime} frontend is not supported on {}",
+            std::env::consts::OS
+        );
+    }
     let matches = inventory
         .frontends
         .iter()
-        .filter(|frontend| frontend.filesystem == filesystem && frontend.runtime == runtime)
+        .filter(|frontend| frontend.runtime != FrontendRuntime::Host)
+        .filter(|frontend| filesystem.is_none_or(|value| frontend.filesystem == value))
+        .filter(|frontend| runtime.is_none_or(|value| frontend.runtime == value))
         .collect::<Vec<_>>();
 
     match matches.as_slice() {
@@ -104,13 +104,48 @@ fn ensure_observed_guest(
                 FrontendState::Attached | FrontendState::Running
             ) =>
         {
-            Ok(())
+            Ok((frontend.filesystem, frontend.runtime))
         },
-        [] => bail!("frontend `{identity}` is not observed; start it with `{remedy}`"),
-        [_] => bail!("frontend `{identity}` is observed but failed; restart it or run `{remedy}`"),
-        _ => bail!(
-            "frontend `{identity}` is ambiguous in observed state; stop duplicates and run `{remedy}`"
+        [] => {
+            let (selection, remedy) = match (filesystem, runtime) {
+                (Some(filesystem), Some(runtime)) => (
+                    format!("`{filesystem}/{runtime}` frontend"),
+                    format!(
+                        "Start one with `omnifs frontend enable {filesystem} --runtime {runtime}`."
+                    ),
+                ),
+                (Some(filesystem), None) => (
+                    format!("`{filesystem}` guest frontend"),
+                    format!("Start one with `omnifs frontend enable {filesystem}`."),
+                ),
+                (None, Some(runtime)) => (
+                    format!("`{runtime}` frontend"),
+                    "Run `omnifs frontend ls` to inspect available frontends.".to_owned(),
+                ),
+                (None, None) => (
+                    "guest frontend".to_owned(),
+                    "Run `omnifs frontend ls` to inspect available frontends.".to_owned(),
+                ),
+            };
+            bail!("No running {selection} was found. {remedy}")
+        },
+        [frontend] => bail!(
+            "The `{}/{}` frontend failed. Restart it with `omnifs frontend restart {} --runtime {}`.",
+            frontend.filesystem,
+            frontend.runtime,
+            frontend.filesystem,
+            frontend.runtime
         ),
+        _ => {
+            let identities = matches
+                .iter()
+                .map(|frontend| format!("{}/{}", frontend.filesystem, frontend.runtime))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "frontend shell selection is ambiguous ({identities}); specify the filesystem and --runtime"
+            )
+        },
     }
 }
 
@@ -180,10 +215,30 @@ mod tests {
         let crate::commands::frontend::FrontendCommand::Shell(args) = args.command else {
             panic!("expected frontend shell command");
         };
-        assert_eq!(args.filesystem, FsType::Fuse);
-        assert_eq!(args.runtime, FrontendRuntime::Docker);
+        assert_eq!(args.filesystem, Some(FsType::Fuse));
+        assert_eq!(args.runtime, Some(FrontendRuntime::Docker));
         assert_eq!(args.shell.as_deref(), Some("/bin/bash"));
         assert_eq!(args.command, vec!["pwd"]);
+
+        let cli = Cli::try_parse_from(["omnifs", "frontend", "shell", "fuse"]).unwrap();
+        let Some(crate::cli::Commands::Frontend(args)) = cli.command else {
+            panic!("expected frontend command");
+        };
+        let crate::commands::frontend::FrontendCommand::Shell(args) = args.command else {
+            panic!("expected frontend shell command");
+        };
+        assert_eq!(args.filesystem, Some(FsType::Fuse));
+        assert_eq!(args.runtime, None);
+
+        let cli = Cli::try_parse_from(["omnifs", "frontend", "shell"]).unwrap();
+        let Some(crate::cli::Commands::Frontend(args)) = cli.command else {
+            panic!("expected frontend command");
+        };
+        let crate::commands::frontend::FrontendCommand::Shell(args) = args.command else {
+            panic!("expected frontend shell command");
+        };
+        assert_eq!(args.filesystem, None);
+        assert_eq!(args.runtime, None);
 
         let command = Cli::command();
         let frontend = command
@@ -195,39 +250,59 @@ mod tests {
     }
 
     #[test]
-    fn exact_observed_selection_accepts_attached_or_running() {
+    fn observed_selection_accepts_attached_or_running() {
         for state in [FrontendState::Attached, FrontendState::Running] {
             assert!(
-                ensure_observed_guest(
-                    &inventory_with(state),
-                    FsType::Fuse,
-                    FrontendRuntime::Docker
-                )
-                .is_ok()
+                resolve_observed_guest(&inventory_with(state), Some(FsType::Fuse), None,)
+                    .is_ok_and(|identity| { identity == (FsType::Fuse, FrontendRuntime::Docker) })
             );
         }
     }
 
     #[test]
-    fn exact_observed_selection_rejects_absent_failed_and_ambiguous() {
+    fn observed_selection_infers_the_only_guest_and_ignores_host_mounts() {
+        let mut inventory = inventory_with(FrontendState::Attached);
+        inventory.frontends.push(FrontendStatus {
+            filesystem: FsType::Nfs,
+            runtime: FrontendRuntime::Host,
+            location: Some(PathBuf::from("/tmp/omnifs")),
+            state: FrontendState::Attached,
+            mount_count: 0,
+            fix: None,
+        });
+
+        assert_eq!(
+            resolve_observed_guest(&inventory, None, None).unwrap(),
+            (FsType::Fuse, FrontendRuntime::Docker)
+        );
+    }
+
+    #[test]
+    fn observed_selection_rejects_absent_failed_and_ambiguous() {
         let absent = Inventory {
             frontends: Vec::new(),
             ..inventory_with(FrontendState::Attached)
         };
-        let error = ensure_observed_guest(&absent, FsType::Fuse, FrontendRuntime::Docker)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("fuse/docker"));
-        assert!(error.contains("omnifs frontend enable fuse --runtime docker"));
+        let error =
+            resolve_observed_guest(&absent, Some(FsType::Fuse), Some(FrontendRuntime::Docker))
+                .unwrap_err()
+                .to_string();
+        assert_eq!(
+            error,
+            "No running `fuse/docker` frontend was found. Start one with `omnifs frontend enable fuse --runtime docker`."
+        );
 
-        let failed = ensure_observed_guest(
+        let failed = resolve_observed_guest(
             &inventory_with(FrontendState::Failed),
-            FsType::Fuse,
-            FrontendRuntime::Docker,
+            Some(FsType::Fuse),
+            Some(FrontendRuntime::Docker),
         )
         .unwrap_err()
         .to_string();
-        assert!(failed.contains("failed"));
+        assert_eq!(
+            failed,
+            "The `fuse/docker` frontend failed. Restart it with `omnifs frontend restart fuse --runtime docker`."
+        );
 
         let mut ambiguous = inventory_with(FrontendState::Attached);
         ambiguous.frontends.push(FrontendStatus {
@@ -238,9 +313,23 @@ mod tests {
             mount_count: 0,
             fix: None,
         });
-        let error = ensure_observed_guest(&ambiguous, FsType::Fuse, FrontendRuntime::Docker)
+        let error = resolve_observed_guest(&ambiguous, Some(FsType::Fuse), None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("ambiguous"));
+    }
+
+    #[test]
+    fn observed_selection_reports_an_unsupported_pair_before_shell_support() {
+        let error = resolve_observed_guest(
+            &inventory_with(FrontendState::Attached),
+            Some(FsType::Nfs),
+            Some(FrontendRuntime::Libkrun),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("nfs/libkrun"));
+        assert!(error.contains("not supported"));
+        assert!(!error.contains("only the fuse filesystem"));
     }
 }

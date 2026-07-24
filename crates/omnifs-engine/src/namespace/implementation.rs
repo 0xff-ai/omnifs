@@ -53,48 +53,48 @@ fn entry_kind_from_meta(meta: &EntryMeta) -> EntryKind {
 }
 
 fn attrs_from_cache(kind: EntryKind, attrs: Option<&FileAttrsCache>, change: u64) -> Attrs {
-        let ttl = attrs.map_or(TTL_STATIC, |attrs| {
-            if matches!(attrs.size(), FileSize::Exact(_))
-                && matches!(attrs.stability(), view_types::Stability::Stable)
-            {
-                TTL_STATIC
-            } else {
-                TTL_DYNAMIC
-            }
-        });
-        let stability = attrs.map_or(Stability::Stable, FileAttrsCache::stability);
-        let read_style = if attrs.is_some_and(FileAttrsCache::is_deferred_ranged) {
-            ReadStyle::Ranged
+    let ttl = attrs.map_or(TTL_STATIC, |attrs| {
+        if matches!(attrs.size(), FileSize::Exact(_))
+            && matches!(attrs.stability(), view_types::Stability::Stable)
+        {
+            TTL_STATIC
         } else {
-            ReadStyle::Whole
-        };
-        let mode = match &kind {
-            EntryKind::Directory => 0o555,
-            EntryKind::File => 0o444,
-            EntryKind::Symlink => 0o777,
-        };
-        let nlink = match &kind {
-            EntryKind::Directory => 2,
-            EntryKind::File | EntryKind::Symlink => 1,
-        };
-        Attrs {
-            kind,
-            dev: 0,
-            ino: 0,
-            size: attrs.map_or(0, FileAttrsCache::st_size),
-            blocks: attrs.map_or(0, |attrs| FileAttrsCache::st_size(attrs).div_ceil(512)),
-            mode,
-            nlink,
-            accessed: None,
-            modified: None,
-            created: None,
-            ttl,
-            change,
-            direct_io: attrs.is_some_and(FileAttrsCache::should_direct_io),
-            stability,
-            read_style,
+            TTL_DYNAMIC
         }
+    });
+    let stability = attrs.map_or(Stability::Stable, FileAttrsCache::stability);
+    let read_style = if attrs.is_some_and(FileAttrsCache::is_deferred_ranged) {
+        ReadStyle::Ranged
+    } else {
+        ReadStyle::Whole
+    };
+    let mode = match &kind {
+        EntryKind::Directory => 0o555,
+        EntryKind::File => 0o444,
+        EntryKind::Symlink => 0o777,
+    };
+    let nlink = match &kind {
+        EntryKind::Directory => 2,
+        EntryKind::File | EntryKind::Symlink => 1,
+    };
+    Attrs {
+        kind,
+        dev: 0,
+        ino: 0,
+        size: attrs.map_or(0, FileAttrsCache::st_size),
+        blocks: attrs.map_or(0, |attrs| FileAttrsCache::st_size(attrs).div_ceil(512)),
+        mode,
+        nlink,
+        accessed: None,
+        modified: None,
+        created: None,
+        ttl,
+        change,
+        direct_io: attrs.is_some_and(FileAttrsCache::should_direct_io),
+        stability,
+        read_style,
     }
+}
 
 fn dir_page_with_budget(
     mut entries: Vec<DirEntry>,
