@@ -62,19 +62,23 @@ impl Platform {
     }
 
     fn supports(self, filesystem: FsType, runtime: FrontendRuntime) -> bool {
-        matches!(
-            (self.os, filesystem, runtime),
-            (
-                "macos",
-                FsType::Fuse,
-                FrontendRuntime::Docker | FrontendRuntime::Libkrun
-            ) | ("macos", FsType::Nfs, FrontendRuntime::Host)
-                | (
-                    "linux",
-                    FsType::Fuse,
-                    FrontendRuntime::Host | FrontendRuntime::Docker
-                )
-        )
+        match (self.os, filesystem, runtime) {
+            ("macos", FsType::Fuse, FrontendRuntime::Libkrun) => self.arch == "aarch64",
+            ("macos", FsType::Fuse, FrontendRuntime::Docker)
+            | ("macos" | "linux", FsType::Nfs, FrontendRuntime::Host)
+            | ("linux", FsType::Fuse, FrontendRuntime::Host | FrontendRuntime::Docker) => true,
+            _ => false,
+        }
+    }
+
+    fn default_runtime(self, filesystem: FsType) -> Option<FrontendRuntime> {
+        match (self.os, self.arch, filesystem) {
+            ("macos", "aarch64", FsType::Fuse) => Some(FrontendRuntime::Libkrun),
+            ("macos" | "linux", _, FsType::Nfs) | ("linux", _, FsType::Fuse) => {
+                Some(FrontendRuntime::Host)
+            },
+            _ => None,
+        }
     }
 
     fn label(self) -> String {
@@ -259,9 +263,20 @@ mod tests {
         };
         assert!(linux.supports(FsType::Fuse, FrontendRuntime::Host));
         assert!(linux.supports(FsType::Fuse, FrontendRuntime::Docker));
-        assert!(!linux.supports(FsType::Nfs, FrontendRuntime::Host));
+        assert!(linux.supports(FsType::Nfs, FrontendRuntime::Host));
+        assert_eq!(
+            linux.default_runtime(FsType::Nfs),
+            Some(FrontendRuntime::Host)
+        );
 
-        assert_eq!(default_runtime(FsType::Nfs), FrontendRuntime::Host);
+        assert_eq!(
+            default_runtime(FsType::Nfs),
+            if cfg!(any(target_os = "macos", target_os = "linux")) {
+                Some(FrontendRuntime::Host)
+            } else {
+                None
+            }
+        );
         assert_eq!(
             default_runtime(FsType::Fuse),
             if cfg!(target_os = "macos") {
