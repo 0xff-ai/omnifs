@@ -138,7 +138,7 @@ impl Serialize for FrontendId {
 pub struct FrontendEnableArgs {
     #[arg(value_parser = fs_type_parser())]
     pub filesystem: FsType,
-    /// Runner environment. Defaults to libkrun for FUSE on macOS and host otherwise.
+    /// Runner runtime. Defaults to libkrun for FUSE on Apple Silicon macOS and host where supported.
     #[arg(long, value_parser = frontend_runtime_parser())]
     pub runtime: Option<FrontendRuntime>,
     #[arg(long)]
@@ -269,7 +269,19 @@ impl FrontendEnableArgs {
     pub async fn enable(self, workspace: &Workspace, output: Output) -> Result<FrontendResult> {
         let runtime = self
             .runtime
-            .unwrap_or_else(|| default_runtime(self.filesystem));
+            .or_else(|| default_runtime(self.filesystem))
+            .with_context(|| {
+                if cfg!(target_os = "macos") && self.filesystem == FsType::Fuse {
+                    "FUSE has no implicit runtime on Intel macOS; use `--runtime docker`".to_owned()
+                } else {
+                    format!(
+                        "{} has no default runtime on {} {}; choose one with `--runtime`",
+                        self.filesystem,
+                        std::env::consts::OS,
+                        std::env::consts::ARCH
+                    )
+                }
+            })?;
         let id = resolve_id(workspace, self.filesystem, runtime, self.location)?;
         let inventory = Inventory::collect(workspace).await?;
         if id.runtime() == FrontendRuntime::Host {
@@ -926,11 +938,10 @@ mod tests {
             changed: true,
             rows: Vec::new(),
             frontends: vec![FrontendStatus {
-                filesystem: FrontendFilesystem::Fuse,
+                filesystem: FsType::Fuse,
                 runtime: FrontendRuntime::Libkrun,
                 location: Some(GUEST_MOUNT.into()),
                 state: FrontendState::Attached,
-                scope: "all",
                 mount_count: 3,
                 fix: None,
             }],
