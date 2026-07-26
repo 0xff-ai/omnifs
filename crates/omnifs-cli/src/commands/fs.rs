@@ -427,10 +427,10 @@ async fn stop_runtime(workspace: &Workspace, spec: &fs::Spec, output: Output) ->
         fs::Runtime::Host => crate::host_fs::stop(workspace.filesystem_state(), spec).await,
         fs::Runtime::Docker => {
             let client = docker_client(workspace, spec, output)?;
-            let identity = client
-                .confirmed_filesystem(workspace.identity().container_label(), spec)
+            let container = client
+                .confirmed_container_for_spec(workspace.identity().container_label(), spec)
                 .await?;
-            if let Some(identity) = identity {
+            if let Some((identity, _running)) = container {
                 client
                     .remove_confirmed(&identity, workspace.identity().container_label(), spec)
                     .await?;

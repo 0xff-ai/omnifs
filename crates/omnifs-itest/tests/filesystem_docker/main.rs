@@ -162,6 +162,18 @@ impl Fixture {
         Some(self.record()?.pid)
     }
 
+    fn start_daemon(&mut self) {
+        let out = self.run(&["up"]);
+        assert!(
+            out.status.success(),
+            "omnifs up failed (exit {})\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        self.daemon_pid = self.daemon_pid_from_record();
+    }
+
     /// Run a CLI subcommand with the hermetic env, including the filesystem
     /// image override so Docker attach never reaches for a registry.
     fn run(&self, args: &[&str]) -> Output {
@@ -179,15 +191,7 @@ impl Fixture {
     /// environment gap (missing wasm, unmountable platform) was already
     /// checked by [`preconditions`] before the fixture was built.
     fn up_native(&mut self) {
-        let out = self.run(&["up"]);
-        assert!(
-            out.status.success(),
-            "omnifs up failed (exit {})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-        self.daemon_pid = self.daemon_pid_from_record();
+        self.start_daemon();
 
         let filesystem = if cfg!(target_os = "linux") {
             "fuse"
@@ -256,15 +260,56 @@ impl Fixture {
         self.run(&["fs", "attach", "--name", "itest-docker", "--output", "json"])
     }
 
-    /// Assert Docker filesystem attach succeeded; on failure, dump the runner logs of
+    fn filesystem_restart(&self) -> Output {
+        self.run(&[
+            "fs",
+            "restart",
+            "--name",
+            "itest-docker",
+            "--output",
+            "json",
+        ])
+    }
+
+    fn wait_for_filesystem_attachment(&self, id: &str, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let output = self.run(&["fs", "ls", "--output", "json"]);
+            if output.status.success()
+                && serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                    .ok()
+                    .is_some_and(|value| {
+                        value["result"]["filesystems"]
+                            .as_array()
+                            .is_some_and(|filesystems| {
+                                filesystems.iter().any(|filesystem| {
+                                    filesystem["id"] == id && filesystem["state"] == "attached"
+                                })
+                            })
+                    })
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "filesystem `{id}` did not reattach within {}s\nstdout: {}\nstderr: {}",
+                timeout.as_secs(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Assert a Docker filesystem lifecycle command succeeded; on failure, dump the runner logs of
     /// every labeled container first (the fixture Drop removes them, so this
     /// is the only window to capture why the mount never served), then panic
     /// with the CLI's own output.
-    fn assert_filesystem_attach_ok(&self, out: &Output, context: &str) {
+    fn assert_filesystem_action_ok(&self, out: &Output, context: &str) {
         if out.status.success() {
             assert!(
                 out.stderr.is_empty(),
-                "structured Docker filesystem attach leaked stderr: {}",
+                "structured Docker filesystem command leaked stderr: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
             return;
@@ -274,7 +319,7 @@ impl Fixture {
             eprintln!("--- docker logs {name} (tail) ---\n{logs}\n---");
         }
         panic!(
-            "omnifs fs attach --name itest-docker failed ({context}, exit {})\nstdout: {}\nstderr: {}",
+            "Docker filesystem lifecycle command failed ({context}, exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
@@ -625,7 +670,7 @@ fn fuse_docker_lifecycle_and_matrix() {
     let started = Instant::now();
     let up_out = fixture.filesystem_attach();
     let elapsed = started.elapsed();
-    fixture.assert_filesystem_attach_ok(&up_out, "cold start");
+    fixture.assert_filesystem_action_ok(&up_out, "cold start");
     record_cold_start(elapsed);
 
     // (a) `fs ls` is truthful.
@@ -721,7 +766,7 @@ fn fuse_docker_lifecycle_and_matrix() {
         );
     }
     let reattached = fixture.filesystem_attach();
-    fixture.assert_filesystem_attach_ok(&reattached, "reattach after detach");
+    fixture.assert_filesystem_action_ok(&reattached, "reattach after detach");
     assert_serves(&fixture.container_name());
 
     // Filesystem runners have independent lifecycles. Detach Docker and the
@@ -765,11 +810,10 @@ fn fuse_docker_lifecycle_and_matrix() {
 /// 1. **Kill the container.** The FUSE mount lives entirely inside the
 ///    container's own mount namespace, so killing it leaves nothing to clean
 ///    up host-side; the only observable effect is the container going away.
-///    Docker filesystem attach again creates a fresh container that serves.
+///    Docker filesystem restart creates a fresh container that serves.
 /// 2. **Kill the daemon, leaving the container alive.** The VFS wire client
-///    reconnects with backoff forever (`omnifs-vfs`), and daemon startup
-///    restores the predecessor TCP address and token before publishing
-///    readiness. The same container therefore reattaches without replacement.
+///    reconnects with backoff forever (`omnifs-vfs`) to the fixed attach
+///    endpoint. The same container therefore reattaches without replacement.
 ///    This test deliberately avoids a filesystem read while the daemon is
 ///    absent because an unreachable FUSE attach can block in the kernel.
 #[test]
@@ -786,7 +830,7 @@ fn kill_and_reattach_fuse_semantics() {
     fixture.up_native();
 
     let up1 = fixture.filesystem_attach();
-    fixture.assert_filesystem_attach_ok(&up1, "first bring-up");
+    fixture.assert_filesystem_action_ok(&up1, "first bring-up");
     let container = fixture.container_name();
     assert_serves(&container);
     let id_1 = container_id(&container);
@@ -801,12 +845,12 @@ fn kill_and_reattach_fuse_semantics() {
     );
     wait_for_container_state(&container, "exited", Duration::from_secs(10));
 
-    let up2 = fixture.filesystem_attach();
-    fixture.assert_filesystem_attach_ok(&up2, "after a killed container");
+    let up2 = fixture.filesystem_restart();
+    fixture.assert_filesystem_action_ok(&up2, "restart after a killed container");
     let id_2 = container_id(&container);
     assert_ne!(
         id_1, id_2,
-        "filesystem attach must create a genuinely fresh container, not reuse the killed one"
+        "filesystem restart must create a genuinely fresh container, not reuse the killed one"
     );
     assert_serves(&container);
 
@@ -845,7 +889,7 @@ fn kill_and_reattach_fuse_semantics() {
     // The daemon instance changes while its approved attach authority stays
     // stable for the surviving container.
     force_unmount(&fixture.mount_point);
-    fixture.up_native();
+    fixture.start_daemon();
     let new_instance = fixture
         .record()
         .expect("daemon record present after restart")
@@ -856,10 +900,9 @@ fn kill_and_reattach_fuse_semantics() {
     );
 
     // `up` publishes daemon readiness before surviving filesystems finish their
-    // independent reconnect backoff. `filesystem attach` observes the live
-    // container and waits for its attachment without replacing it.
-    let reattached = fixture.filesystem_attach();
-    fixture.assert_filesystem_attach_ok(&reattached, "after daemon restart");
+    // independent reconnect backoff. The runner reattaches without another
+    // lifecycle command or replacement.
+    fixture.wait_for_filesystem_attachment("itest-docker", Duration::from_secs(15));
 
     let id_3 = container_id(&container);
     assert_eq!(
