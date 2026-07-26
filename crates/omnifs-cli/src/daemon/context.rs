@@ -10,8 +10,10 @@ use omnifs_api::{
 use omnifs_engine::{Host, HostOffline, HostOfflineOpen, HostOnline, HostOpen};
 use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::mounts::Revision;
-use omnifs_workspace::{DaemonState, FrontendState, Workspace};
+use omnifs_workspace::{DaemonState, Workspace};
 use std::fmt::Write as _;
+use std::net::SocketAddr;
+use std::num::NonZeroU16;
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -19,17 +21,14 @@ use std::sync::Arc;
 
 pub(crate) struct DaemonContext {
     daemon: DaemonState,
-    frontend: FrontendState,
+    attach_socket: PathBuf,
+    attach_port: NonZeroU16,
     metrics: omnifs_workspace::metrics::Store,
     host: Host,
     mount_revision: Revision,
     offline: bool,
     /// Random per-start id reported in status and written to the daemon record.
     instance_id: String,
-    /// `--attach-tcp <port>`: bind a TCP namespace attach listener eagerly at
-    /// start (`0` = ephemeral). `None` when the flag was not passed; a TCP
-    /// attach listener can still be bound later through the control socket.
-    attach_tcp: Option<u16>,
     process: ProcessInfo,
 }
 
@@ -41,8 +40,9 @@ struct ProcessInfo {
 
 impl DaemonContext {
     pub(crate) fn resolve(args: &DaemonArgs) -> anyhow::Result<Self> {
-        let attach_tcp = args.attach_tcp;
         let workspace = Workspace::resolve()?;
+        let attach_socket = workspace.frontend().attach_socket();
+        let attach_port = workspace.attach_port()?;
         let process = ProcessInfo::current();
         anyhow::ensure!(
             args.mount_snapshot.is_dir(),
@@ -66,13 +66,13 @@ impl DaemonContext {
 
         Ok(Self {
             daemon: workspace.daemon().clone(),
-            frontend: workspace.frontend().clone(),
+            attach_socket,
+            attach_port,
             metrics: workspace.metrics().clone(),
             host,
             mount_revision: args.mount_revision.clone(),
             offline: args.offline,
             instance_id: generate_instance_id(),
-            attach_tcp,
             process,
         })
     }
@@ -97,16 +97,12 @@ impl DaemonContext {
         &self.instance_id
     }
 
-    pub(crate) fn attach_store(&self) -> anyhow::Result<omnifs_workspace::attach::Store> {
-        Ok(self.frontend.attach_store()?)
+    pub(crate) fn attach_socket(&self) -> PathBuf {
+        self.attach_socket.clone()
     }
 
-    pub(crate) fn vsock_attach_socket(&self) -> PathBuf {
-        self.frontend.vsock_attach_socket()
-    }
-
-    pub(crate) fn local_attach_socket(&self) -> PathBuf {
-        self.frontend.local_attach_socket()
+    pub(crate) fn attach_port(&self) -> NonZeroU16 {
+        self.attach_port
     }
 
     /// Bind the host-native control socket at `<config_dir>/control.sock`.
@@ -206,16 +202,11 @@ impl DaemonContext {
         &self.metrics
     }
 
-    /// The `--attach-tcp` port request, if the flag was passed. `Some(0)` asks
-    /// for an ephemeral port.
-    pub(crate) fn attach_tcp_port(&self) -> Option<u16> {
-        self.attach_tcp
-    }
-
     /// Build status from the live attach registry.
     pub(crate) fn status(
         &self,
         attach_serving: bool,
+        attach_tcp: Option<SocketAddr>,
         frontends: Vec<FrontendInfo>,
         mounts: Vec<MountInfo>,
     ) -> DaemonStatus {
@@ -227,6 +218,7 @@ impl DaemonContext {
             executable: self.process.executable.clone(),
             config_dir: self.daemon.config_dir().to_path_buf(),
             cache_dir: self.daemon.cache_dir(),
+            attach_tcp,
             frontends,
             mounts,
             offline: self.offline,
@@ -360,13 +352,13 @@ mod tests {
         );
         DaemonContext {
             daemon: workspace.daemon().clone(),
-            frontend: workspace.frontend().clone(),
+            attach_socket: workspace.frontend().attach_socket(),
+            attach_port: workspace.attach_port().unwrap(),
             metrics: workspace.metrics().clone(),
             host,
             mount_revision,
             offline: false,
             instance_id: "test-instance".to_owned(),
-            attach_tcp: None,
             process: ProcessInfo {
                 pid: std::process::id(),
                 executable: PathBuf::new(),

@@ -10,7 +10,7 @@ mod provider_id;
 
 pub use content_type::ContentType;
 pub use file::{FileSize, ReadMode, Stability};
-pub use frontend_runtime::FrontendRuntime;
+pub use frontend_runtime::{FrontendRuntime, ParseFrontendRuntimeError};
 pub use fs_type::FsType;
 pub use mount_name::{MountName, MountNameError};
 pub use path::{ParseError, Path, Segment};

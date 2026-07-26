@@ -34,21 +34,44 @@ pub use beacon::spawn_ready_signal;
 #[cfg(feature = "wire")]
 pub use beacon::{ReadyPortError, resolve_ready_vsock_port};
 #[cfg(feature = "wire")]
-pub use client::{AttachTarget, AttachTargetError, WireNamespace};
+pub use client::{
+    AttachTarget, AttachTargetError, TeardownOutcome, TeardownReason, TeardownRequest,
+    WireNamespace,
+};
 #[cfg(feature = "wire")]
-pub use server::{ListenerEvent, ListenerTarget, VfsServer, serve_connection};
+pub use server::{Endpoint, ListenerEvent, VfsServer, serve_connection};
 
 /// The Omnifs VFS wire protocol version. Peers that disagree refuse to serve.
 #[cfg(feature = "wire")]
-pub const PROTOCOL: u32 = 7;
+pub const PROTOCOL: u32 = 8;
 
 /// Identity a connecting frontend presents in its handshake `Hello`.
 #[cfg(feature = "wire")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrontendIdentity {
+    pub runtime: omnifs_core::FrontendRuntime,
     pub kind: FsType,
-    /// Guest-side mount point. Display-only; not host-visible authority.
+    /// Guest-side mount point. Display-only for guest runtimes.
     pub mount_point: PathBuf,
+}
+
+#[cfg(feature = "wire")]
+impl std::fmt::Display for FrontendIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}/{} at {}",
+            self.kind,
+            self.runtime,
+            self.mount_point.display()
+        )
+    }
+}
+
+#[cfg(feature = "wire")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum ServerControl {
+    Stop,
 }
 
 #[cfg(feature = "wire")]

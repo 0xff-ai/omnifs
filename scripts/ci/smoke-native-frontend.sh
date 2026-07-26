@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Smoke the contributor dev flow's CI-relevant halves: a host-native daemon on
-# this runner (kernel FUSE on Linux) plus the Docker-hosted FUSE frontend
+# this runner (hidden `omnifs run-frontend`, kernel FUSE on Linux) plus the
+# Docker-hosted FUSE frontend
 # container attached to it over TCP. Provisions the github credential from
 # $GITHUB_TOKEN, runs the reworked scripts/dev.ts headless, then reads real
-# GitHub data through both surfaces it serves: the host mount path the native
-# daemon owns directly, and a `docker exec` into the frontend container.
+# GitHub data through both surfaces it serves: the host frontend mount path
+# and a `docker exec` into the frontend container.
 #
 # Requires FRONTEND_IMAGE (frontend container image ref), GITHUB_TOKEN, an
 # `omnifs` CLI on PATH (the omnifs-install-cli action), bun, jq, and

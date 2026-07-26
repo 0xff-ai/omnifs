@@ -10,7 +10,7 @@ npm install -g @0xff-ai/omnifs
 
 The npm package installs the native `omnifs` binary for Linux and macOS. `omnifs up` starts the hidden host-native daemon; frontends are independent runners that you start with `omnifs frontend enable`. Providers, credentials, and caching never run in a container.
 
-Frontends use the slim `omnifs-thin` runner in `fuse` or `nfs` mode, running in host, Docker, or libkrun runtimes. The Docker FUSE frontend uses the version-matched `ghcr.io/0xff-ai/omnifs-frontend:<version>` image. Local development uses `omnifs-frontend:dev` and never pulls it.
+Host frontends run through the full binary's hidden `omnifs run-frontend` command. Docker and libkrun guests use the slim `omnifs-thin` runner. The Docker FUSE frontend uses the version-matched `ghcr.io/0xff-ai/omnifs-frontend:<version>` image. Local development uses `omnifs-frontend:dev` and never pulls it.
 
 Binary releases for Linux and macOS are also attached to each [GitHub Release](https://github.com/0xff-ai/omnifs/releases).
 

@@ -3,7 +3,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod attach;
 pub mod authn;
 pub mod config;
 pub mod creds;

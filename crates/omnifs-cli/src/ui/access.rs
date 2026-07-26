@@ -4,9 +4,8 @@
 //!
 //! There is no persisted frontend desired state by design, so this module
 //! never invents a claim: every line here is derived from
-//! [`Inventory::frontends`], the same join of the daemon's live attachments
-//! with workspace runner observations that `omnifs status` renders as the
-//! Frontends table. An attached host frontend names its location; an
+//! [`Inventory::frontends`], the daemon attachment rows that `omnifs status`
+//! renders as the Frontends table. An attached host frontend names its location; an
 //! attached guest frontend (Docker, libkrun) names the shell command instead,
 //! since its wire mount point is display-only and not host-reachable; no
 //! observed frontend at all names the enable command instead of claiming any

@@ -9,7 +9,6 @@ use omnifs_api::{FrontendRuntime, FsType};
 use crate::commands::frontend::{frontend_runtime_parser, fs_type_parser, supports};
 use crate::docker::{ContainerName, DockerClient, DockerTarget};
 use crate::frontend_container::{FRONTEND_DEV_IMAGE, frontend_container_name};
-use crate::inventory::{FrontendState, Inventory};
 use crate::libkrun_runner;
 use crate::ui::output::Output;
 use omnifs_workspace::Workspace;
@@ -36,8 +35,8 @@ impl ShellArgs {
             bail!("frontend shell is a passthrough command and only supports human output");
         }
         let workspace = Workspace::resolve()?;
-        let inventory = Inventory::collect(&workspace).await?;
-        let (_, runtime) = resolve_observed_guest(&inventory, self.filesystem, self.runtime)?;
+        let probes = probe_guests(&workspace, output.clone()).await;
+        let (_, runtime) = resolve_observed_guest(&probes, self.filesystem, self.runtime)?;
 
         match runtime {
             FrontendRuntime::Docker => {
@@ -72,8 +71,51 @@ impl ShellArgs {
     }
 }
 
+#[derive(Debug, Clone)]
+struct GuestProbe {
+    filesystem: FsType,
+    runtime: FrontendRuntime,
+    running: Result<bool, String>,
+}
+
+async fn probe_guests(workspace: &Workspace, output: Output) -> Vec<GuestProbe> {
+    let mut probes = Vec::new();
+    if supports(FsType::Fuse, FrontendRuntime::Docker) {
+        let running = async {
+            let config = workspace.config()?;
+            let image = crate::frontend_container::resolve_frontend_image(None, &config)?;
+            let name = frontend_container_name(workspace.identity().container_label())?;
+            let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
+            DockerClient::connect_for(&target, output)?
+                .is_running()
+                .await
+                .map(Option::unwrap_or_default)
+        }
+        .await
+        .map_err(|error: anyhow::Error| format!("{error:#}"));
+        probes.push(GuestProbe {
+            filesystem: FsType::Fuse,
+            runtime: FrontendRuntime::Docker,
+            running,
+        });
+    }
+    if supports(FsType::Fuse, FrontendRuntime::Libkrun) {
+        let running =
+            crate::libkrun_runner::LibkrunRunner::new(workspace.frontend().libkrun_root())
+                .is_running()
+                .map(Option::unwrap_or_default)
+                .map_err(|error| format!("{error:#}"));
+        probes.push(GuestProbe {
+            filesystem: FsType::Fuse,
+            runtime: FrontendRuntime::Libkrun,
+            running,
+        });
+    }
+    probes
+}
+
 fn resolve_observed_guest(
-    inventory: &Inventory,
+    probes: &[GuestProbe],
     filesystem: Option<FsType>,
     runtime: Option<FrontendRuntime>,
 ) -> Result<(FsType, FrontendRuntime)> {
@@ -89,24 +131,34 @@ fn resolve_observed_guest(
             std::env::consts::OS
         );
     }
-    let matches = inventory
-        .frontends
+    let matches = probes
         .iter()
-        .filter(|frontend| frontend.runtime != FrontendRuntime::Host)
-        .filter(|frontend| filesystem.is_none_or(|value| frontend.filesystem == value))
-        .filter(|frontend| runtime.is_none_or(|value| frontend.runtime == value))
+        .filter(|probe| filesystem.is_none_or(|value| probe.filesystem == value))
+        .filter(|probe| runtime.is_none_or(|value| probe.runtime == value))
+        .filter(|probe| probe.running.as_ref().is_ok_and(|running| *running))
         .collect::<Vec<_>>();
 
     match matches.as_slice() {
-        [frontend]
-            if matches!(
-                frontend.state,
-                FrontendState::Attached | FrontendState::Running
-            ) =>
-        {
-            Ok((frontend.filesystem, frontend.runtime))
-        },
+        [frontend] => Ok((frontend.filesystem, frontend.runtime)),
         [] => {
+            let errors = probes
+                .iter()
+                .filter(|probe| filesystem.is_none_or(|value| probe.filesystem == value))
+                .filter(|probe| runtime.is_none_or(|value| probe.runtime == value))
+                .filter_map(|probe| {
+                    probe
+                        .running
+                        .as_ref()
+                        .err()
+                        .map(|error| format!("{}/{}: {error}", probe.filesystem, probe.runtime))
+                })
+                .collect::<Vec<_>>();
+            if !errors.is_empty() {
+                bail!(
+                    "Could not inspect the selected guest frontend: {}",
+                    errors.join("; ")
+                );
+            }
             let (selection, remedy) = match (filesystem, runtime) {
                 (Some(filesystem), Some(runtime)) => (
                     format!("`{filesystem}/{runtime}` frontend"),
@@ -129,13 +181,6 @@ fn resolve_observed_guest(
             };
             bail!("No running {selection} was found. {remedy}")
         },
-        [frontend] => bail!(
-            "The `{}/{}` frontend failed. Restart it with `omnifs frontend restart {} --runtime {}`.",
-            frontend.filesystem,
-            frontend.runtime,
-            frontend.filesystem,
-            frontend.runtime
-        ),
         _ => {
             let identities = matches
                 .iter()
@@ -166,31 +211,14 @@ fn spawn_and_propagate(mut cmd: Command, context: String) -> Result<()> {
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
-    use std::path::PathBuf;
 
     use crate::cli::Cli;
-    use crate::inventory::FrontendStatus;
 
-    fn inventory_with(state: FrontendState) -> Inventory {
-        Inventory {
-            home: PathBuf::new(),
-            mount_revision: None,
-            applied_revision: None,
-            daemon: crate::inventory::DaemonObservation {
-                status: None,
-                probe: crate::inventory::DaemonProbe::Stopped,
-                runtime: None,
-            },
-            frontends: vec![FrontendStatus {
-                filesystem: FsType::Fuse,
-                runtime: FrontendRuntime::Docker,
-                location: Some(PathBuf::from("/omnifs")),
-                state,
-                mount_count: 0,
-                fix: None,
-            }],
-            mounts: Vec::new(),
-            warmup: None,
+    fn probe(runtime: FrontendRuntime, running: Result<bool, &str>) -> GuestProbe {
+        GuestProbe {
+            filesystem: FsType::Fuse,
+            runtime,
+            running: running.map_err(str::to_owned),
         }
     }
 
@@ -250,50 +278,62 @@ mod tests {
     }
 
     #[test]
-    fn observed_selection_accepts_attached_or_running() {
-        for state in [FrontendState::Attached, FrontendState::Running] {
-            assert!(
-                resolve_observed_guest(&inventory_with(state), Some(FsType::Fuse), None,)
-                    .is_ok_and(|identity| { identity == (FsType::Fuse, FrontendRuntime::Docker) })
-            );
-        }
+    fn observed_selection_accepts_a_confirmed_runtime() {
+        assert_eq!(
+            resolve_observed_guest(
+                &[probe(FrontendRuntime::Docker, Ok(true))],
+                Some(FsType::Fuse),
+                None,
+            )
+            .unwrap(),
+            (FsType::Fuse, FrontendRuntime::Docker)
+        );
     }
 
     #[test]
-    fn observed_selection_infers_the_only_guest_and_ignores_host_mounts() {
-        let mut inventory = inventory_with(FrontendState::Attached);
-        inventory.frontends.push(FrontendStatus {
-            filesystem: FsType::Nfs,
-            runtime: FrontendRuntime::Host,
-            location: Some(PathBuf::from("/tmp/omnifs")),
-            state: FrontendState::Attached,
-            mount_count: 0,
-            fix: None,
-        });
-
+    fn one_failed_probe_does_not_block_one_confirmed_runtime() {
         assert_eq!(
-            resolve_observed_guest(&inventory, None, None).unwrap(),
+            resolve_observed_guest(
+                &[
+                    probe(FrontendRuntime::Docker, Err("docker unavailable")),
+                    probe(FrontendRuntime::Libkrun, Ok(true)),
+                ],
+                None,
+                None,
+            )
+            .unwrap(),
+            (FsType::Fuse, FrontendRuntime::Libkrun)
+        );
+        assert_eq!(
+            resolve_observed_guest(
+                &[
+                    probe(FrontendRuntime::Docker, Ok(true)),
+                    probe(FrontendRuntime::Libkrun, Err("helper unavailable")),
+                ],
+                None,
+                None,
+            )
+            .unwrap(),
             (FsType::Fuse, FrontendRuntime::Docker)
         );
     }
 
     #[test]
     fn observed_selection_rejects_absent_failed_and_ambiguous() {
-        let absent = Inventory {
-            frontends: Vec::new(),
-            ..inventory_with(FrontendState::Attached)
-        };
-        let error =
-            resolve_observed_guest(&absent, Some(FsType::Fuse), Some(FrontendRuntime::Docker))
-                .unwrap_err()
-                .to_string();
+        let error = resolve_observed_guest(
+            &[probe(FrontendRuntime::Docker, Ok(false))],
+            Some(FsType::Fuse),
+            Some(FrontendRuntime::Docker),
+        )
+        .unwrap_err()
+        .to_string();
         assert_eq!(
             error,
             "No running `fuse/docker` frontend was found. Start one with `omnifs frontend enable fuse --runtime docker`."
         );
 
         let failed = resolve_observed_guest(
-            &inventory_with(FrontendState::Failed),
+            &[probe(FrontendRuntime::Docker, Err("daemon unavailable"))],
             Some(FsType::Fuse),
             Some(FrontendRuntime::Docker),
         )
@@ -301,28 +341,26 @@ mod tests {
         .to_string();
         assert_eq!(
             failed,
-            "The `fuse/docker` frontend failed. Restart it with `omnifs frontend restart fuse --runtime docker`."
+            "Could not inspect the selected guest frontend: fuse/docker: daemon unavailable"
         );
 
-        let mut ambiguous = inventory_with(FrontendState::Attached);
-        ambiguous.frontends.push(FrontendStatus {
-            filesystem: FsType::Fuse,
-            runtime: FrontendRuntime::Docker,
-            location: Some(PathBuf::from("/omnifs-2")),
-            state: FrontendState::Running,
-            mount_count: 0,
-            fix: None,
-        });
-        let error = resolve_observed_guest(&ambiguous, Some(FsType::Fuse), None)
-            .unwrap_err()
-            .to_string();
+        let error = resolve_observed_guest(
+            &[
+                probe(FrontendRuntime::Docker, Ok(true)),
+                probe(FrontendRuntime::Libkrun, Ok(true)),
+            ],
+            Some(FsType::Fuse),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("ambiguous"));
     }
 
     #[test]
     fn observed_selection_reports_an_unsupported_pair_before_shell_support() {
         let error = resolve_observed_guest(
-            &inventory_with(FrontendState::Attached),
+            &[probe(FrontendRuntime::Libkrun, Ok(true))],
             Some(FsType::Nfs),
             Some(FrontendRuntime::Libkrun),
         )

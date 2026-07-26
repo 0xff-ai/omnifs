@@ -1,18 +1,15 @@
 //! `omnifs doctor` — runtime + auth diagnostics, presented as a grouped
-//! checklist. The only remediation doctor can execute itself is a
-//! mount reauth, spawned as a fresh `omnifs mount reauth <name>` subprocess
-//! (mirroring how `daemon_launch.rs` spawns the daemon) rather than calling
-//! into `commands::mount`'s internal API, so this module never couples to
-//! that module's Rust shape.
+//! checklist. It can run mount reauth and narrowly proved frontend cleanup.
+//! Reauth is a fresh `omnifs mount reauth <name>` subprocess rather than a
+//! call into `commands::mount`'s internal API.
 
 use anyhow::Context as _;
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use omnifs_workspace::creds::CredentialStore;
 
-use crate::docker::DockerClient;
-use crate::docker::DockerTarget;
+use crate::docker::{DockerClient, DockerContainerIdentity, DockerTarget};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
 use crate::image::ImageRef;
 use crate::inventory::{AuthState, DaemonHealth, Inventory, MountStatus, Severity};
@@ -76,18 +73,71 @@ enum Section {
     Workspace,
 }
 
-/// A remediation doctor knows how to execute itself. Today the only one is
-/// re-running the exact `omnifs mount reauth <name>` command already
-/// surfaced as a credentials finding's `fix` line.
+/// A remediation doctor knows how to execute itself.
 #[derive(Debug, Clone)]
 enum Remediation {
     MountReauth(String),
+    StopHostFrontend {
+        state_dir: PathBuf,
+        instance_id: String,
+        filesystem: omnifs_api::FsType,
+        mount_point: PathBuf,
+    },
+    CleanStaleHostRecord {
+        state_dir: PathBuf,
+        instance_id: String,
+        mount_point: PathBuf,
+    },
+    StopDockerFrontend {
+        target: DockerTarget,
+        identity: DockerContainerIdentity,
+        workspace_home: PathBuf,
+    },
+    StopLibkrunFrontend {
+        state_dir: PathBuf,
+        record: omnifs_libkrun::HelperRecord,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsentPolicy {
+    AutoAllowed,
+    InteractiveOnly,
 }
 
 impl Remediation {
     fn command_line(&self) -> String {
         match self {
             Self::MountReauth(name) => format!("omnifs mount reauth {name}"),
+            Self::StopHostFrontend {
+                filesystem,
+                mount_point,
+                ..
+            } => format!(
+                "omnifs frontend disable {filesystem} --runtime host --location {}",
+                mount_point.display()
+            ),
+            Self::CleanStaleHostRecord { mount_point, .. } => {
+                format!(
+                    "omnifs doctor (clean stale host record for {})",
+                    mount_point.display()
+                )
+            },
+            Self::StopDockerFrontend { .. } => {
+                "omnifs frontend disable fuse --runtime docker".to_owned()
+            },
+            Self::StopLibkrunFrontend { .. } => {
+                "omnifs frontend disable fuse --runtime libkrun".to_owned()
+            },
+        }
+    }
+
+    const fn consent_policy(&self) -> ConsentPolicy {
+        match self {
+            Self::MountReauth(_) | Self::CleanStaleHostRecord { .. } => ConsentPolicy::AutoAllowed,
+            Self::StopHostFrontend { .. }
+            | Self::StopDockerFrontend { .. }
+            | Self::StopLibkrunFrontend { .. } => ConsentPolicy::InteractiveOnly,
         }
     }
 
@@ -95,20 +145,72 @@ impl Remediation {
     /// arguments only, never a shell string: the mount name came from the
     /// already-collected inventory, not from re-parsing the advisory `fix`
     /// text.
-    fn apply(&self) -> anyhow::Result<()> {
+    async fn apply(&self, workspace: &Workspace) -> anyhow::Result<()> {
         let binary = std::env::current_exe().context("resolve the omnifs executable")?;
-        let status = match self {
+        match self {
             Self::MountReauth(name) => std::process::Command::new(&binary)
                 .args(["mount", "reauth", name])
                 .status()
-                .with_context(|| format!("run `{}`", self.command_line()))?,
-        };
-        anyhow::ensure!(
-            status.success(),
-            "`{}` exited with {status}",
-            self.command_line()
-        );
-        Ok(())
+                .with_context(|| format!("run `{}`", self.command_line()))
+                .and_then(|status| {
+                    anyhow::ensure!(
+                        status.success(),
+                        "`{}` exited with {status}",
+                        self.command_line()
+                    );
+                    Ok(())
+                }),
+            Self::StopHostFrontend {
+                state_dir,
+                instance_id,
+                ..
+            } => {
+                anyhow::ensure!(
+                    crate::client::DaemonClient::for_workspace(workspace)
+                        .status_optional()
+                        .await?
+                        .is_none(),
+                    "daemon is no longer cleanly stopped; refusing frontend teardown"
+                );
+                crate::host_frontend::stop_confirmed(state_dir, instance_id).await
+            },
+            Self::CleanStaleHostRecord {
+                state_dir,
+                instance_id,
+                ..
+            } => crate::host_frontend::cleanup_stale(state_dir, instance_id).await,
+            Self::StopDockerFrontend {
+                target,
+                identity,
+                workspace_home,
+            } => {
+                anyhow::ensure!(
+                    crate::client::DaemonClient::for_workspace(workspace)
+                        .status_optional()
+                        .await?
+                        .is_none(),
+                    "daemon is no longer cleanly stopped; refusing frontend teardown"
+                );
+                DockerClient::connect_for(
+                    target,
+                    Output::new(crate::ui::output::OutputMode::Human, false),
+                )?
+                .remove_confirmed(identity, workspace_home)
+                .await
+            },
+            Self::StopLibkrunFrontend { state_dir, record } => {
+                anyhow::ensure!(
+                    crate::client::DaemonClient::for_workspace(workspace)
+                        .status_optional()
+                        .await?
+                        .is_none(),
+                    "daemon is no longer cleanly stopped; refusing frontend teardown"
+                );
+                crate::libkrun_runner::LibkrunRunner::new(state_dir.clone())
+                    .tear_down_confirmed(record.clone())
+                    .await
+            },
+        }
     }
 }
 
@@ -431,43 +533,25 @@ fn render_report(
 /// warnings/failures on this run are not all fixable through a known,
 /// doctor-owned remediation.
 fn remediable_fixes(findings: &[Finding]) -> Option<Vec<&Remediation>> {
-    let actionable: Vec<&Finding> = findings
-        .iter()
-        .filter(|finding| finding.severity >= Severity::Attention)
-        .collect();
-    if actionable.is_empty() {
-        return None;
-    }
-    let remediations: Vec<&Remediation> = actionable
+    let remediations: Vec<&Remediation> = findings
         .iter()
         .filter_map(|finding| finding.remediation.as_ref())
         .collect();
-    (remediations.len() == actionable.len()).then_some(remediations)
+    (!remediations.is_empty()).then_some(remediations)
 }
 
 /// Offer to apply every remediable fix. `--no-input`, structured
 /// modes, and a non-interactive session all degrade to report-only, matching
 /// the rest of the CLI's prompt policy rather than inventing a doctor-local
 /// rule.
-fn offer_fix(output: &Output, findings: &[Finding]) -> anyhow::Result<()> {
+async fn offer_fix(
+    workspace: &Workspace,
+    output: &Output,
+    findings: &[Finding],
+) -> anyhow::Result<()> {
     let Some(remediations) = remediable_fixes(findings) else {
         return Ok(());
     };
-    let apply = if output.yes() {
-        true
-    } else if output.ensure_prompt_allowed().is_err() || !crate::ui::prompt::is_terminal() {
-        false
-    } else {
-        let question = if remediations.len() == 1 {
-            "Apply 1 fix now?".to_owned()
-        } else {
-            format!("Apply {} fixes now?", remediations.len())
-        };
-        Confirm::new(question).ask_with_output(output)?
-    };
-    if !apply {
-        return Ok(());
-    }
     let caps = render::stdout_capabilities();
     let ledger_rows: Vec<LedgerRow> = remediations
         .iter()
@@ -475,7 +559,21 @@ fn offer_fix(output: &Output, findings: &[Finding]) -> anyhow::Result<()> {
         .collect();
     let key_width = render::ledger_key_width(&ledger_rows);
     for (remediation, mut ledger_row) in remediations.into_iter().zip(ledger_rows) {
-        let outcome = remediation.apply();
+        let apply = match remediation.consent_policy() {
+            ConsentPolicy::AutoAllowed if output.yes() => true,
+            ConsentPolicy::InteractiveOnly if output.yes() => false,
+            _ if output.ensure_prompt_allowed().is_err() || !crate::ui::prompt::is_terminal() => {
+                false
+            },
+            ConsentPolicy::AutoAllowed | ConsentPolicy::InteractiveOnly => {
+                Confirm::new(format!("Apply `{}` now?", remediation.command_line()))
+                    .ask_with_output(output)?
+            },
+        };
+        if !apply {
+            continue;
+        }
+        let outcome = remediation.apply(workspace).await;
         ledger_row.glyph = if outcome.is_ok() {
             Glyph::Done
         } else {
@@ -485,75 +583,21 @@ fn offer_fix(output: &Output, findings: &[Finding]) -> anyhow::Result<()> {
             "{}\n",
             render::ledger_row_line(&ledger_row, key_width, caps)
         ));
-        outcome?;
     }
     Ok(())
 }
 
 impl Doctor<'_> {
     async fn run(self) -> anyhow::Result<DoctorVerdict> {
-        let mut findings = Vec::new();
-
-        let (runtime, docker_result) = self.probe_docker_reachable().await;
-        let docker_ok = matches!(docker_result, ProbeResult::Ok(_));
-        findings.push(Finding::from_probe(
-            Section::Environment,
-            "docker",
-            None,
-            docker_result,
-        ));
-
-        findings.push(Finding::from_probe(
-            Section::Environment,
-            "fuse",
-            None,
-            Self::probe_fuse(),
-        ));
-
-        let image_result = match (
-            docker_ok,
-            runtime.as_ref(),
-            self.docker_target.as_ref().ok(),
-        ) {
-            (true, Some(runtime), Some(target)) => {
-                self.probe_image_cached(runtime, target.image()).await
-            },
-            _ => ProbeResult::Skipped("docker unreachable"),
-        };
-        findings.push(Finding::from_probe(
-            Section::Environment,
-            "image",
-            None,
-            image_result,
-        ));
-
-        findings.push(Finding::from_probe(
-            Section::Workspace,
-            "credential store",
-            None,
-            self.probe_credential_store(),
-        ));
-        findings.push(Finding::from_probe(
-            Section::Workspace,
-            "ssh-agent",
-            None,
-            Self::probe_ssh_agent(),
-        ));
-        findings.push(Finding::from_probe(
-            Section::Workspace,
-            "config",
-            None,
-            self.probe_config_file(),
-        ));
-
-        findings.push(Finding::from_probe(
-            Section::Environment,
-            "network",
-            None,
-            self.probe_network().await,
-        ));
-
+        let (runtime, mut findings) = self.base_findings().await;
         findings.extend(self.inventory.mounts.iter().filter_map(Finding::mount_auth));
+        let daemon_health = self.inventory.daemon.health();
+        findings.extend(self.host_frontend_findings(daemon_health).await?);
+        findings.extend(
+            self.docker_frontend_findings(runtime.as_ref(), daemon_health)
+                .await,
+        );
+        findings.extend(self.libkrun_frontend_findings(daemon_health));
 
         let result = DoctorResult {
             inventory: self.inventory,
@@ -576,9 +620,254 @@ impl Doctor<'_> {
                 verdict,
                 caps,
             ));
-            offer_fix(&self.output, &result.findings)?;
+            offer_fix(self.workspace, &self.output, &result.findings).await?;
         }
         Ok(verdict)
+    }
+
+    async fn base_findings(&self) -> (Option<DockerClient>, Vec<Finding>) {
+        let mut findings = Vec::new();
+        let (runtime, docker_result) = self.probe_docker_reachable().await;
+        let docker_ok = matches!(docker_result, ProbeResult::Ok(_));
+        findings.push(Finding::from_probe(
+            Section::Environment,
+            "docker",
+            None,
+            docker_result,
+        ));
+        findings.push(Finding::from_probe(
+            Section::Environment,
+            "fuse",
+            None,
+            Self::probe_fuse(),
+        ));
+        let image_result = match (
+            docker_ok,
+            runtime.as_ref(),
+            self.docker_target.as_ref().ok(),
+        ) {
+            (true, Some(runtime), Some(target)) => {
+                self.probe_image_cached(runtime, target.image()).await
+            },
+            _ => ProbeResult::Skipped("docker unreachable"),
+        };
+        findings.push(Finding::from_probe(
+            Section::Environment,
+            "image",
+            None,
+            image_result,
+        ));
+        for (check, result) in [
+            ("credential store", self.probe_credential_store()),
+            ("ssh-agent", Self::probe_ssh_agent()),
+            ("config", self.probe_config_file()),
+        ] {
+            findings.push(Finding::from_probe(Section::Workspace, check, None, result));
+        }
+        findings.push(Finding::from_probe(
+            Section::Environment,
+            "network",
+            None,
+            self.probe_network().await,
+        ));
+        (runtime, findings)
+    }
+
+    fn attached(
+        &self,
+        filesystem: omnifs_api::FsType,
+        runtime: omnifs_api::FrontendRuntime,
+        location: Option<&Path>,
+    ) -> bool {
+        self.inventory.frontends.iter().any(|frontend| {
+            frontend.filesystem == filesystem
+                && frontend.runtime == runtime
+                && location.is_none_or(|path| frontend.location.as_deref() == Some(path))
+        })
+    }
+
+    async fn host_frontend_findings(
+        &self,
+        daemon_health: DaemonHealth,
+    ) -> anyhow::Result<Vec<Finding>> {
+        let mut findings = Vec::new();
+        let observations = match crate::host_frontend::observe(self.workspace.frontend()).await {
+            Ok(observations) => observations,
+            Err(error) => {
+                findings.push(Finding::from_probe(
+                    Section::Workspace,
+                    "frontend state",
+                    None,
+                    ProbeResult::Err(format!("{error:#}")),
+                ));
+                return Ok(findings);
+            },
+        };
+        for observation in observations {
+            let (state_dir, record, confirmed) = match observation {
+                crate::host_frontend::HostObservation::Runner {
+                    state_dir,
+                    record,
+                    confirmed,
+                } => (state_dir, record, confirmed),
+                crate::host_frontend::HostObservation::Invalid { state_dir, error } => {
+                    findings.push(Finding::from_probe(
+                        Section::Workspace,
+                        "frontend state",
+                        Some(state_dir.display().to_string()),
+                        ProbeResult::Err(error),
+                    ));
+                    continue;
+                },
+            };
+            let filesystem = record.filesystem;
+            let mount_point = record.mount_point.clone();
+            let is_attached = self.attached(
+                filesystem,
+                omnifs_api::FrontendRuntime::Host,
+                Some(&mount_point),
+            );
+            let target = Some(format!("{filesystem}/host at {}", mount_point.display()));
+            match confirmed {
+                Ok(_) if is_attached => {},
+                Ok(phase) => {
+                    let remediation = (daemon_health == DaemonHealth::Stopped).then_some(
+                        Remediation::StopHostFrontend {
+                            state_dir,
+                            instance_id: record.instance_id,
+                            filesystem,
+                            mount_point,
+                        },
+                    );
+                    findings.push(Finding {
+                        section: Section::Workspace,
+                        check: "stray frontend".to_owned(),
+                        target,
+                        severity: Severity::Attention,
+                        message: format!(
+                            "runner is confirmed in phase {phase:?} but daemon health is {daemon_health:?} and reports no matching attachment"
+                        ),
+                        fix: remediation.as_ref().map(Remediation::command_line),
+                        remediation,
+                    });
+                },
+                Err(error) => {
+                    let mount_active = omnifs_nfs::mount_is_active_checked(&mount_point)?;
+                    let remediation = (!mount_active && !is_attached).then_some(
+                        Remediation::CleanStaleHostRecord {
+                            state_dir,
+                            instance_id: record.instance_id,
+                            mount_point,
+                        },
+                    );
+                    findings.push(Finding {
+                        section: Section::Workspace,
+                        check: "stale frontend state".to_owned(),
+                        target,
+                        severity: if mount_active || is_attached {
+                            Severity::Error
+                        } else {
+                            Severity::Attention
+                        },
+                        message: if is_attached {
+                            format!(
+                                "runner control cannot be confirmed but the daemon still reports it attached: {error}"
+                            )
+                        } else if mount_active {
+                            format!("runner cannot be confirmed but its mount is active: {error}")
+                        } else {
+                            format!("runner cannot be confirmed: {error}")
+                        },
+                        fix: remediation.as_ref().map(Remediation::command_line),
+                        remediation,
+                    });
+                },
+            }
+        }
+        Ok(findings)
+    }
+
+    async fn docker_frontend_findings(
+        &self,
+        runtime: Option<&DockerClient>,
+        daemon_health: DaemonHealth,
+    ) -> Vec<Finding> {
+        let (Some(runtime), Ok(target)) = (runtime, self.docker_target.as_ref()) else {
+            return Vec::new();
+        };
+        match runtime
+            .confirmed_frontend(self.workspace.identity().container_label())
+            .await
+        {
+            Ok(Some(identity))
+                if !self.attached(
+                    omnifs_api::FsType::Fuse,
+                    omnifs_api::FrontendRuntime::Docker,
+                    None,
+                ) =>
+            {
+                let remediation = (daemon_health == DaemonHealth::Stopped).then_some(
+                    Remediation::StopDockerFrontend {
+                        target: target.clone(),
+                        identity,
+                        workspace_home: self.workspace.identity().container_label().to_path_buf(),
+                    },
+                );
+                vec![Finding {
+                    section: Section::Workspace,
+                    check: "stray frontend".to_owned(),
+                    target: Some("fuse/docker".to_owned()),
+                    severity: Severity::Attention,
+                    message: format!(
+                        "container identity is confirmed but daemon health is {daemon_health:?} and reports no matching attachment"
+                    ),
+                    fix: remediation.as_ref().map(Remediation::command_line),
+                    remediation,
+                }]
+            },
+            Ok(Some(_) | None) => Vec::new(),
+            Err(error) => vec![Finding::from_probe(
+                Section::Workspace,
+                "docker frontend ownership",
+                Some("fuse/docker".to_owned()),
+                ProbeResult::Err(format!("{error:#}")),
+            )],
+        }
+    }
+
+    fn libkrun_frontend_findings(&self, daemon_health: DaemonHealth) -> Vec<Finding> {
+        let state_dir = self.workspace.frontend().libkrun_root();
+        let runner = crate::libkrun_runner::LibkrunRunner::new(state_dir.clone());
+        match runner.confirmed_record() {
+            Ok(Some(record))
+                if !self.attached(
+                    omnifs_api::FsType::Fuse,
+                    omnifs_api::FrontendRuntime::Libkrun,
+                    None,
+                ) =>
+            {
+                let remediation = (daemon_health == DaemonHealth::Stopped)
+                    .then_some(Remediation::StopLibkrunFrontend { state_dir, record });
+                vec![Finding {
+                    section: Section::Workspace,
+                    check: "stray frontend".to_owned(),
+                    target: Some("fuse/libkrun".to_owned()),
+                    severity: Severity::Attention,
+                    message: format!(
+                        "helper identity is confirmed but daemon health is {daemon_health:?} and reports no matching attachment"
+                    ),
+                    fix: remediation.as_ref().map(Remediation::command_line),
+                    remediation,
+                }]
+            },
+            Ok(Some(_) | None) => Vec::new(),
+            Err(error) => vec![Finding::from_probe(
+                Section::Workspace,
+                "libkrun frontend ownership",
+                Some("fuse/libkrun".to_owned()),
+                ProbeResult::Err(format!("{error:#}")),
+            )],
+        }
     }
 
     async fn probe_docker_reachable(&self) -> (Option<DockerClient>, ProbeResult) {
@@ -879,7 +1168,7 @@ mod golden {
     }
 
     #[test]
-    fn remediable_fixes_requires_every_warning_to_carry_a_known_remediation() {
+    fn remediable_fixes_returns_the_actionable_subset() {
         let all_remediable = vec![targeted_finding()];
         assert!(remediable_fixes(&all_remediable).is_some());
 
@@ -895,7 +1184,7 @@ mod golden {
                 remediation: None,
             },
         ];
-        assert!(remediable_fixes(&mixed).is_none());
+        assert_eq!(remediable_fixes(&mixed).unwrap().len(), 1);
 
         assert!(remediable_fixes(&probes()).is_none());
     }

@@ -12,7 +12,6 @@ use anyhow::{Context as _, Result};
 use omnifs_api::{
     CONTROL_MAX_LINE_BYTES, CONTROL_PROTOCOL_VERSION, CONTROL_REQUEST_TIMEOUT_SECS, ControlError,
     ControlErrorCode, ControlOperation, ControlOutcome, ControlReply, ControlRequest, DaemonStatus,
-    TcpAttachTarget, VsockAttachTarget,
 };
 use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::mounts::Revision;
@@ -24,6 +23,13 @@ use crate::error::{ExitCode, WithExitCode};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
 const OFFLINE_VALIDATION_TIMEOUT: Duration = Duration::from_mins(5);
+const SHUTDOWN_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone)]
+pub(crate) struct ShutdownResult {
+    pub(crate) detached: usize,
+    pub(crate) still_attached: Vec<String>,
+}
 
 #[derive(Debug)]
 enum Target {
@@ -156,7 +162,11 @@ impl DaemonClient {
         })
         .await;
         match result {
-            Err(_) => Ok(None),
+            Err(_) => anyhow::bail!(
+                "control request to {} timed out after {}s",
+                target.label(),
+                timeout.as_secs_f64()
+            ),
             Ok(Ok(reply)) => Ok(Some(reply)),
             Ok(Err(error)) if is_connection_error(&error) => {
                 self.clean_stale_record();
@@ -283,38 +293,24 @@ impl DaemonClient {
         Ok(&reply.outcome)
     }
 
-    pub(crate) async fn frontend_attach_target(
-        &self,
-        bind_ip: Option<std::net::Ipv4Addr>,
-    ) -> Result<TcpAttachTarget> {
+    pub(crate) async fn shutdown(&self, stop_frontends: bool) -> Result<Option<ShutdownResult>> {
         let Some(reply) = self
-            .request(ControlOperation::AttachTcp { bind_ip })
+            .request_with_timeout(
+                ControlOperation::Shutdown { stop_frontends },
+                SHUTDOWN_REQUEST_TIMEOUT,
+            )
             .await?
         else {
-            return Err(self.unavailable_error());
-        };
-        match Self::reply_result(&reply, "daemon attach-target request failed")? {
-            ControlOutcome::AttachTcp(target) => Ok(target.clone()),
-            _ => Err(unexpected_reply("attach_tcp")),
-        }
-    }
-
-    pub(crate) async fn frontend_attach_target_vsock(&self) -> Result<VsockAttachTarget> {
-        let Some(reply) = self.request(ControlOperation::AttachVsock).await? else {
-            return Err(self.unavailable_error());
-        };
-        match Self::reply_result(&reply, "daemon attach-target vsock request failed")? {
-            ControlOutcome::AttachVsock(target) => Ok(target.clone()),
-            _ => Err(unexpected_reply("attach_vsock")),
-        }
-    }
-
-    pub(crate) async fn shutdown(&self) -> Result<Option<()>> {
-        let Some(reply) = self.request(ControlOperation::Shutdown).await? else {
             return Ok(None);
         };
         match Self::reply_result(&reply, "daemon shutdown request failed")? {
-            ControlOutcome::Shutdown => Ok(Some(())),
+            ControlOutcome::Shutdown {
+                detached,
+                still_attached,
+            } => Ok(Some(ShutdownResult {
+                detached: *detached,
+                still_attached: still_attached.clone(),
+            })),
             _ => Err(unexpected_reply("shutdown")),
         }
     }
@@ -443,6 +439,25 @@ pub(crate) async fn read_control_line<R: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_control_timeout_is_not_reported_as_daemon_absence() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = Workspace::under_root(home.path());
+        let socket = workspace.daemon().control_socket();
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client = DaemonClient::for_workspace(&workspace);
+        let error = client
+            .request_with_timeout(ControlOperation::Status, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        server.abort();
+    }
 
     #[test]
     fn absent_record_is_daemon_unavailable() {

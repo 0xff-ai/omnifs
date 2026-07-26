@@ -4,7 +4,6 @@ use omnifs_api::{FrontendRuntime, FsType};
 use serde::Serialize;
 
 use crate::docker::DockerClient;
-use crate::host_runner::HostRunner;
 use crate::inventory::{FrontendStatus, Inventory};
 use crate::libkrun_runner::LibkrunRunner;
 use crate::ui::output::{Output, ResultVerdict};
@@ -125,7 +124,7 @@ impl FrontendSupport {
     async fn inspect(filesystem: FsType, runtime: FrontendRuntime) -> Self {
         let default = default_runtime(filesystem) == Some(runtime);
         let readiness = match runtime {
-            FrontendRuntime::Host => HostRunner::probe(filesystem),
+            FrontendRuntime::Host => crate::host_frontend::probe(filesystem),
             FrontendRuntime::Docker => DockerClient::probe().await,
             FrontendRuntime::Libkrun => LibkrunRunner::probe(),
         };

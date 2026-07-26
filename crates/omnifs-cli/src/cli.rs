@@ -57,8 +57,8 @@ pub enum Commands {
     Up(commands::up::UpArgs),
     /// Stop the daemon and clean up
     ///
-    /// Stops only the daemon; independent frontend runners stay alive and
-    /// reconnect when a daemon is started again.
+    /// Asks attached frontends to stop, drains them for a bounded time, then
+    /// stops the daemon. Busy stragglers are reported for `omnifs doctor`.
     Down,
     /// Tail the daemon log
     Logs(commands::logs::LogsArgs),
@@ -93,6 +93,10 @@ pub enum Commands {
     /// Warm retained providers. Internal: launched as detached cache work.
     #[command(hide = true)]
     WarmProviders(crate::provider_warmup::WarmProvidersArgs),
+
+    /// Run a host frontend. Internal: launched by frontend lifecycle commands.
+    #[command(hide = true)]
+    RunFrontend(omnifs_thin::RunFrontendArgs),
 
     /// Manage filesystem frontends attached to the host-native daemon
     ///
@@ -156,6 +160,7 @@ impl Commands {
             Self::Version => (Some("version"), "version"),
             Self::Daemon(_) => (None, "daemon"),
             Self::WarmProviders(_) => (None, "warm-providers"),
+            Self::RunFrontend(_) => (None, "run-frontend"),
             // Every `frontend` subcommand shares one usage label; there is
             // no longer a hidden internal one (like `daemon`'s) to exclude.
             Self::Frontend(args) => (
@@ -200,6 +205,9 @@ impl Commands {
             Self::Version => commands::version::run(output).await,
             Self::Daemon(args) => crate::daemon::run(&args).await.map(|()| ExitCode::Success),
             Self::WarmProviders(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::RunFrontend(_) => {
+                anyhow::bail!("run-frontend must be dispatched before the CLI runtime starts")
+            },
             Self::Frontend(args) => args.run(output).await,
         }
     }

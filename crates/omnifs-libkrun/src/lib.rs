@@ -8,11 +8,13 @@ mod api;
 mod launch;
 
 use std::ffi::OsString;
-use std::io::{Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 pub use launch::run;
 
@@ -36,8 +38,68 @@ const READINESS_PORT: u32 = 1025;
 const SSH_PORT: u32 = 22;
 const VCPUS: u8 = 2;
 const MEMORY_MIB: u32 = 2048;
-const SHUTDOWN_REQUEST: &[u8] = b"shutdown\n";
-const SHUTDOWN_REPLY: &[u8] = b"ok\n";
+const HELPER_RECORD_VERSION: u8 = 1;
+const CONTROL_MAX_LINE_BYTES: u64 = 128;
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HelperRecord {
+    pub version: u8,
+    pub pid: u32,
+    pub instance_id: String,
+}
+
+impl HelperRecord {
+    pub fn new(pid: u32, instance_id: impl Into<String>) -> Result<Self, Error> {
+        let record = Self {
+            version: HELPER_RECORD_VERSION,
+            pid,
+            instance_id: instance_id.into(),
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    pub fn read(path: &Path) -> Result<Option<Self>, Error> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(Error::io("read helper record", path, error)),
+        };
+        let record: Self = serde_json::from_slice(&bytes).map_err(|error| {
+            Error::Control(format!(
+                "parse strict helper record {}: {error}",
+                path.display()
+            ))
+        })?;
+        record.validate()?;
+        Ok(Some(record))
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        if self.version != HELPER_RECORD_VERSION {
+            return Err(Error::Control(format!(
+                "unsupported helper record version {}",
+                self.version
+            )));
+        }
+        validate_instance_id(&self.instance_id)
+    }
+}
+
+fn validate_instance_id(instance_id: &str) -> Result<(), Error> {
+    if instance_id.len() != 32
+        || !instance_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(Error::Config(
+            "instance id must be exactly 32 lowercase hexadecimal characters".to_owned(),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -179,12 +241,14 @@ pub struct Config {
     ssh_port: u32,
     vcpus: u8,
     memory_mib: u32,
+    instance_id: String,
 }
 
 impl Config {
     pub fn omnifs(
         state_dir: impl AsRef<Path>,
         attach_socket: impl AsRef<Path>,
+        instance_id: impl Into<String>,
         installation: &Installation,
     ) -> Result<Self, Error> {
         let state_dir = state_dir.as_ref();
@@ -207,6 +271,7 @@ impl Config {
             ssh_port: SSH_PORT,
             vcpus: VCPUS,
             memory_mib: MEMORY_MIB,
+            instance_id: instance_id.into(),
         };
         config.validate()?;
         Ok(config)
@@ -220,19 +285,31 @@ impl Config {
 
     pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Self, Error> {
         let arguments = arguments.into_iter().collect::<Vec<_>>();
-        let [state_flag, state_dir, attach_flag, attach_socket] = arguments.as_slice() else {
+        let [
+            state_flag,
+            state_dir,
+            attach_flag,
+            attach_socket,
+            instance_flag,
+            instance_id,
+        ] = arguments.as_slice()
+        else {
             return Err(Error::Arguments(
-                "expected `--state-dir PATH --attach-socket PATH`".to_owned(),
+                "expected `--state-dir PATH --attach-socket PATH --instance-id ID`".to_owned(),
             ));
         };
-        if state_flag != "--state-dir" || attach_flag != "--attach-socket" {
+        if state_flag != "--state-dir"
+            || attach_flag != "--attach-socket"
+            || instance_flag != "--instance-id"
+        {
             return Err(Error::Arguments(
-                "expected `--state-dir PATH --attach-socket PATH`".to_owned(),
+                "expected `--state-dir PATH --attach-socket PATH --instance-id ID`".to_owned(),
             ));
         }
         Self::omnifs(
             PathBuf::from(state_dir),
             PathBuf::from(attach_socket),
+            instance_id.to_string_lossy(),
             &Installation::current()?,
         )
     }
@@ -241,13 +318,14 @@ impl Config {
         &self.diagnostic_log
     }
 
-    fn arguments(&self) -> [(&'static str, OsString); 2] {
+    fn arguments(&self) -> [(&'static str, OsString); 3] {
         [
             ("--state-dir", self.state_dir.clone().into_os_string()),
             (
                 "--attach-socket",
                 self.attach_socket.clone().into_os_string(),
             ),
+            ("--instance-id", OsString::from(&self.instance_id)),
         ]
     }
 
@@ -286,6 +364,7 @@ impl Config {
                 "resources must be {VCPUS} vCPUs and {MEMORY_MIB} MiB"
             )));
         }
+        validate_instance_id(&self.instance_id)?;
         Ok(())
     }
 }
@@ -312,31 +391,75 @@ impl ControlSocket {
         Self { path }
     }
 
-    pub fn request_shutdown(&self) -> Result<(), Error> {
-        let mut stream = UnixStream::connect(&self.path)
-            .map_err(|error| Error::io("connect to control socket", &self.path, error))?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .map_err(|error| Error::io("set control socket read timeout for", &self.path, error))?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(1)))
-            .map_err(|error| {
-                Error::io("set control socket write timeout for", &self.path, error)
-            })?;
-        stream
-            .write_all(SHUTDOWN_REQUEST)
-            .map_err(|error| Error::io("write shutdown request to", &self.path, error))?;
-        let mut reply = [0_u8; SHUTDOWN_REPLY.len()];
-        stream
-            .read_exact(&mut reply)
-            .map_err(|error| Error::io("read shutdown reply from", &self.path, error))?;
-        if reply != SHUTDOWN_REPLY {
+    pub fn ping(&self, expected_instance_id: &str) -> Result<HelperRecord, Error> {
+        validate_instance_id(expected_instance_id)?;
+        let reply = self.request(&format!("ping {expected_instance_id}\n"))?;
+        let mut fields = reply.trim_end().split(' ');
+        let record = match (fields.next(), fields.next(), fields.next(), fields.next()) {
+            (Some("pong"), Some(pid), Some(instance_id), None) => HelperRecord::new(
+                pid.parse().map_err(|_| {
+                    Error::Control("control Ping returned an invalid pid".to_owned())
+                })?,
+                instance_id,
+            )?,
+            _ => {
+                return Err(Error::Control(format!(
+                    "unexpected Ping reply from {}",
+                    self.path.display()
+                )));
+            },
+        };
+        if record.instance_id != expected_instance_id {
             return Err(Error::Control(format!(
-                "unexpected reply from {}",
+                "control Ping identity mismatch at {}",
+                self.path.display()
+            )));
+        }
+        Ok(record)
+    }
+
+    pub fn request_shutdown(&self, expected: &HelperRecord) -> Result<(), Error> {
+        expected.validate()?;
+        let reply = self.request(&format!("shutdown {}\n", expected.instance_id))?;
+        let expected_reply = format!("ok {} {}\n", expected.pid, expected.instance_id);
+        if reply != expected_reply {
+            return Err(Error::Control(format!(
+                "unexpected shutdown reply from {}",
                 self.path.display()
             )));
         }
         Ok(())
+    }
+
+    fn request(&self, request: &str) -> Result<String, Error> {
+        let mut stream = UnixStream::connect(&self.path)
+            .map_err(|error| Error::io("connect to control socket", &self.path, error))?;
+        stream
+            .set_read_timeout(Some(CONTROL_TIMEOUT))
+            .map_err(|error| Error::io("set control socket read timeout for", &self.path, error))?;
+        stream
+            .set_write_timeout(Some(CONTROL_TIMEOUT))
+            .map_err(|error| {
+                Error::io("set control socket write timeout for", &self.path, error)
+            })?;
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| Error::io("write control request to", &self.path, error))?;
+        stream
+            .flush()
+            .map_err(|error| Error::io("flush control request to", &self.path, error))?;
+        let mut reply = String::new();
+        let mut reader = BufReader::new(stream).take(CONTROL_MAX_LINE_BYTES);
+        let read = reader
+            .read_line(&mut reply)
+            .map_err(|error| Error::io("read control reply from", &self.path, error))?;
+        if read == 0 || !reply.ends_with('\n') || read as u64 == CONTROL_MAX_LINE_BYTES {
+            return Err(Error::Control(format!(
+                "invalid or oversized control reply from {}",
+                self.path.display()
+            )));
+        }
+        Ok(reply)
     }
 }
 
@@ -346,8 +469,13 @@ mod tests {
 
     fn fixture() -> (Installation, Config) {
         let install = Installation::for_executable("/opt/omnifs/omnifs").unwrap();
-        let config =
-            Config::omnifs("/tmp/omnifs/libkrun", "/tmp/omnifs/attach.sock", &install).unwrap();
+        let config = Config::omnifs(
+            "/tmp/omnifs/libkrun",
+            "/tmp/omnifs/attach.sock",
+            "0123456789abcdef0123456789abcdef",
+            &install,
+        )
+        .unwrap();
         (install, config)
     }
 
@@ -394,7 +522,27 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("expected `--state-dir PATH --attach-socket PATH`")
+                .contains("expected `--state-dir PATH --attach-socket PATH --instance-id ID`")
         );
+    }
+
+    #[test]
+    fn helper_record_is_strict_and_requires_a_128_bit_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PID_FILE_NAME);
+        std::fs::write(
+            &path,
+            r#"{"version":1,"pid":42,"instance_id":"0123456789abcdef0123456789abcdef"}"#,
+        )
+        .unwrap();
+        assert_eq!(HelperRecord::read(&path).unwrap().unwrap().pid, 42);
+
+        std::fs::write(
+            &path,
+            r#"{"version":1,"pid":42,"instance_id":"0123456789abcdef0123456789abcdef","extra":true}"#,
+        )
+        .unwrap();
+        assert!(HelperRecord::read(&path).is_err());
+        assert!(HelperRecord::new(42, "short").is_err());
     }
 }

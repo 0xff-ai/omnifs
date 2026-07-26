@@ -23,8 +23,8 @@ pub use export::{
     StatusResult,
 };
 pub use mount::{
-    NfsMountOptions, mount_blocking, mount_is_active, mount_is_active_checked, mount_is_omnifs,
-    unmount,
+    NfsMountOptions, mount_blocking, mount_blocking_cancellable, mount_is_active,
+    mount_is_active_checked, mount_is_omnifs, unmount,
 };
 pub use protocol::consts::{
     NFS4_OK, NFS4ERR_ACCESS, NFS4ERR_INVAL, NFS4ERR_IO, NFS4ERR_ISDIR, NFS4ERR_NOENT,

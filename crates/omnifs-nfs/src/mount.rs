@@ -12,6 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -97,6 +98,16 @@ pub fn mount_blocking(
     rt: Handle,
     options: &NfsMountOptions,
 ) -> Result<(), NfsFrontendError> {
+    mount_blocking_cancellable(mount_point, namespace, rt, options, &AtomicBool::new(false))
+}
+
+pub fn mount_blocking_cancellable(
+    mount_point: &Path,
+    namespace: Arc<dyn Namespace>,
+    rt: Handle,
+    options: &NfsMountOptions,
+    cancelled: &AtomicBool,
+) -> Result<(), NfsFrontendError> {
     std::fs::create_dir_all(mount_point)?;
     ensure_private_state_dir(&options.state_dir)?;
     let bind = options.bind_for_mount(mount_point)?;
@@ -135,8 +146,37 @@ pub fn mount_blocking(
             addr = %server.addr(),
             "NFS mount already active; serving the export without remounting (restart path)"
         );
-    } else {
-        mount_client(mount_point, server.addr())?;
+    } else if let Err(error) = mount_client(mount_point, server.addr(), cancelled) {
+        if !cancelled.load(Ordering::Acquire) {
+            return Err(error);
+        }
+        if mount_is_active_checked(mount_point)?
+            && let Err(unmount_error) = unmount(mount_point)
+        {
+            tracing::warn!(
+                error = %unmount_error,
+                "NFS mount completed while cancellation won; keeping the server alive until teardown succeeds"
+            );
+            wait_for_mount_exit(mount_point);
+        }
+        return Err(NfsFrontendError::Mount(
+            "mount startup was canceled".to_owned(),
+        ));
+    }
+
+    if cancelled.load(Ordering::Acquire) {
+        if mount_is_active_checked(mount_point)?
+            && let Err(error) = unmount(mount_point)
+        {
+            tracing::warn!(
+                %error,
+                "NFS startup cancellation could not unmount; keeping the server alive until teardown succeeds"
+            );
+            wait_for_mount_exit(mount_point);
+        }
+        return Err(NfsFrontendError::Mount(
+            "mount startup was canceled".to_owned(),
+        ));
     }
 
     disable_spotlight(mount_point);
@@ -158,15 +198,19 @@ pub fn unmount(mount_point: &Path) -> Result<(), NfsFrontendError> {
         .map_err(|error| NfsFrontendError::Unmount(error.to_string()))
 }
 
-fn mount_client(mount_point: &Path, addr: SocketAddr) -> Result<(), NfsFrontendError> {
+fn mount_client(
+    mount_point: &Path,
+    addr: SocketAddr,
+    cancelled: &AtomicBool,
+) -> Result<(), NfsFrontendError> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        MountCommand::for_platform(mount_point, addr).run()
+        MountCommand::for_platform(mount_point, addr).run(cancelled)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (mount_point, addr);
+        let _ = (mount_point, addr, cancelled);
         Err(NfsFrontendError::Mount(
             "automatic NFSv4 mount is not implemented on this platform".to_string(),
         ))
@@ -224,11 +268,27 @@ impl MountCommand {
         }
     }
 
-    fn run(&self) -> Result<(), NfsFrontendError> {
-        let status = Command::new(self.program)
+    fn run(&self, cancelled: &AtomicBool) -> Result<(), NfsFrontendError> {
+        let mut child = Command::new(self.program)
             .args(&self.args)
-            .status()
+            .spawn()
             .map_err(|error| NfsFrontendError::Mount(error.to_string()))?;
+        let status = loop {
+            if cancelled.load(Ordering::Acquire) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(NfsFrontendError::Mount(
+                    "mount startup was canceled".to_owned(),
+                ));
+            }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| NfsFrontendError::Mount(error.to_string()))?
+            {
+                break status;
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
 
         if status.success() {
             Ok(())

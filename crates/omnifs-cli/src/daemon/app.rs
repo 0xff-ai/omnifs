@@ -29,14 +29,6 @@ pub(crate) struct DaemonArgs {
     /// Serve only validated durable projection facts, without provider startup.
     #[arg(long)]
     pub(crate) offline: bool,
-    /// Additionally serve the shared namespace over a TCP loopback listener at
-    /// `127.0.0.1:<port>` (`0` asks the OS for an ephemeral port). This is the
-    /// Docker Desktop path: a containerized frontend cannot share a host Unix
-    /// socket into the Linux VM it runs in, so it dials TCP instead. Absent:
-    /// no TCP attach listener at start (one can still be bound later on a
-    /// running daemon through the local control socket).
-    #[arg(long = "attach-tcp", value_name = "PORT")]
-    pub(crate) attach_tcp: Option<u16>,
 }
 
 /// Bring up immutable runtime state, then hand the complete serving lifetime to
@@ -80,17 +72,11 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     let daemon_record = context.daemon_record();
     let daemon_record =
         server::DaemonRecordStore::new(context.daemon_state().clone(), daemon_record);
-    let attach_store = Arc::new(
-        context
-            .attach_store()
-            .with_context(|| "open durable frontend attach targets")?,
-    );
     let daemon = Arc::new(server::Daemon::new(
         context,
         Arc::clone(&registry),
         inspector,
         Arc::clone(&daemon_record),
-        attach_store,
     ));
     // Build the one shared namespace after atomic startup loading, so its root
     // record reflects the complete mount set.
@@ -99,8 +85,8 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     } else {
         omnifs_engine::TreeNamespace::online(Arc::clone(&registry), rt.clone())
     };
-    // Give the daemon's VfsServer a handle to the namespace so typed attach
-    // requests can bind a TCP listener on a running daemon without a restart.
+    // Give the daemon's VfsServer a handle to the namespace before fixed
+    // endpoint startup.
     daemon.set_namespace(Arc::clone(&namespace));
     let result = daemon.run().await;
     let served_mounts = registry.mounts().len();

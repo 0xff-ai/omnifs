@@ -15,7 +15,7 @@ fn workspace_under_root_owns_component_paths() {
 
     assert_eq!(workspace.daemon().record_file(), root.join("daemon.json"));
     assert_eq!(
-        workspace.frontend().local_attach_socket(),
+        workspace.frontend().attach_socket(),
         root.join("frontends/local.sock")
     );
     assert_eq!(

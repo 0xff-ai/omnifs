@@ -67,13 +67,13 @@ Unknown and non-zero sizes use truthful sentinel behavior until exact size is le
 
 ## Frontends
 
-FUSE and NFS are protocol adapters over the same projected tree. Every frontend is a separate slim `omnifs-thin` runner selected with `fuse` or `nfs`; it contains protocol mechanics only and attaches to the daemon over the Omnifs VFS wire protocol. The CLI owns launch and teardown through the `host`, `docker`, and `libkrun` runtimes; the daemon is only a namespace server and attachment registry and never mounts or supervises a frontend.
+FUSE and NFS are protocol adapters over the same projected tree. Every frontend is a separate process. Host frontends use hidden `omnifs run-frontend`; Docker and libkrun guests use the slim `omnifs-thin` binary. Both attach over the Omnifs VFS wire protocol.
 
-FUSE owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply construction. NFSv4.0 loopback (macOS host-native) owns filehandles, stateids, leases, NFS protocol errors, mount readiness, and teardown. Mount discovery and NFS filehandle state live under per-mount leaves under `cache/frontends/<kind>/<hash>`.
+FUSE owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply construction. NFSv4.0 loopback (macOS host-native) owns filehandles, stateids, leases, NFS protocol errors, mount readiness, and teardown. Mount discovery and NFS filehandle state live under per-mount leaves under `cache/frontends/<hash>`. The mount location alone selects the leaf and its process-held lock, so different frontend kinds cannot claim the same location.
 
 Neither frontend owns projection semantics, provider WIT calls, cache schema, root enumeration, learned-size rules, preload policy, inline-byte policy, or negative lookup policy.
 
-A frontend (always out-of-process) consumes the same `omnifs_vfs::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the projection owner; `omnifs-vfs` owns the facade and postcard serialization, framing, the strict handshake, attach target resolution and reconnect, readiness signaling, direct validated `Path` requests, terminal `OfflineMiss`, and ordered invalidation events. Local UDS, local TCP, and vsock are attach transports for this one internal protocol. The wire carries no semantic cache and does not define another projection model. Listener ownership assigns runtime identity at the daemon: local UDS means `host`, TCP means `docker`, and the vsock proxy means `libkrun`. The guest never self-reports its runtime.
+A frontend consumes the same `omnifs_vfs::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the projection owner; `omnifs-vfs` owns the facade and postcard serialization, framing, the strict handshake, attach target resolution and reconnect, server-pushed stop, direct validated `Path` requests, terminal `OfflineMiss`, and ordered invalidation events. The fixed Unix and TCP endpoints serve this one internal protocol. The launcher supplies runtime identity in every handshake; transport never infers it.
 
 ## Control plane
 

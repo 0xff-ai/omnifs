@@ -26,6 +26,7 @@ impl Default for Metrics {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FrontendAssets {
+    pub attach_port: Option<u16>,
     pub docker_image: Option<String>,
     pub guest_image: Option<String>,
 }

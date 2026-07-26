@@ -18,6 +18,7 @@ omnifs-core = { workspace = true }
 omnifs-api = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
 omnifs-nfs = { workspace = true }
+omnifs-thin = { workspace = true }
 omnifs-mtab = { workspace = true }
 omnifs-libkrun = { workspace = true }
 omnifs-workspace = { workspace = true }

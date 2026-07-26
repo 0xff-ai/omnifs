@@ -9,6 +9,7 @@
 use std::cell::{OnceCell, RefCell, RefMut};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use crate::config::Config;
 use crate::creds::FileStore;
 use crate::mounts::{Registry, Repository, Revision, Spec, SpecError};
 use crate::provider::Catalog;
+use anyhow::Context as _;
 use atomic_write_file::OpenOptions as AtomicOpenOptions;
 use fs2::FileExt as _;
 use omnifs_core::MountName;
@@ -36,23 +38,13 @@ pub(crate) const CACHE_SUBDIR: &str = "cache";
 pub(crate) const MOUNT_REVISIONS_SUBDIR: &str = "mount-revisions";
 /// Subdirectory of `cache_dir` holding local frontend state.
 pub(crate) const FRONTEND_STATE_SUBDIR: &str = "frontends";
-/// Subdirectory of `config_dir` holding the daemon's namespace attach sockets
-/// served to out-of-process frontend runners: the fixed local socket
-/// (`<config_dir>/frontends/local.sock`) and, on demand, the vsock-proxy
-/// listener below.
+/// Subdirectory of `config_dir` holding the daemon's fixed namespace attach
+/// socket served to host-side frontend clients.
 pub(crate) const FRONTENDS_SUBDIR: &str = "frontends";
 /// Filename of the daemon's fixed namespace attach socket for local frontend
 /// runners (`<config_dir>/frontends/local.sock`). One socket, always at this
 /// name; auth is filesystem permissions on the socket.
 pub(crate) const LOCAL_ATTACH_SOCKET_NAME: &str = "local.sock";
-/// Filename of the UDS namespace attach listener under `frontends/`
-/// (`<config_dir>/frontends/vsock-attach.sock`). Bound on demand via the
-/// daemon's `AttachVsock` control operation, one per daemon instance. Libkrun's
-/// vsock-proxy path terminates every guest vsock dial on this socket as the
-/// same local peer; bind locality is the auth, same as TCP loopback/docker0.
-pub(crate) const VSOCK_ATTACH_SOCKET_NAME: &str = "vsock-attach.sock";
-/// Durable TCP and vsock listener authority.
-pub(crate) const ATTACH_TARGETS_FILE: &str = "targets.json";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
 /// Overrides the host-visible mount point the daemon serves at.
 pub const OMNIFS_MOUNT_POINT_ENV: &str = "OMNIFS_MOUNT_POINT";
@@ -156,6 +148,20 @@ impl Workspace {
     /// Load the workspace configuration lazily from its owned file.
     pub fn config(&self) -> Result<Config, crate::config::ConfigError> {
         Config::load(&self.config_file)
+    }
+
+    /// Stable, nonzero namespace attach port for this workspace.
+    ///
+    /// The default is derived from workspace identity so a replacement daemon
+    /// rebinds the address that live guest frontends keep dialing.
+    pub fn attach_port(&self) -> anyhow::Result<NonZeroU16> {
+        if let Some(configured) = self.config()?.frontend.attach_port {
+            return NonZeroU16::new(configured).context("[frontend] attach_port must not be 0");
+        }
+        let digest = blake3::hash(self.daemon.config_dir().as_os_str().as_encoded_bytes());
+        let bytes = digest.as_bytes();
+        let derived = 20_000 + (u16::from_le_bytes([bytes[0], bytes[1]]) % 10_000);
+        Ok(NonZeroU16::new(derived).expect("the derived port is never zero"))
     }
 
     /// Diagnostic information for the final CLI presentation boundary.
@@ -394,8 +400,8 @@ impl DaemonState {
 
 /// Frontend lifecycle state and launch resources for one workspace.
 ///
-/// The component owns durable attach authority, runner discovery leaves, and
-/// frontend-specific runtime locations. It derives a concrete path only when a
+/// The component owns runner discovery leaves and frontend-specific runtime
+/// locations. It derives a concrete path only when a
 /// frontend process, state scan, teardown, or output boundary consumes it.
 #[derive(Debug, Clone)]
 pub struct FrontendState {
@@ -414,37 +420,27 @@ impl FrontendState {
         }
     }
 
-    pub fn attach_store(&self) -> io::Result<crate::attach::Store> {
-        crate::attach::Store::open(
-            self.config_dir
-                .join(FRONTENDS_SUBDIR)
-                .join(ATTACH_TARGETS_FILE),
-        )
-    }
-
     #[must_use]
     pub fn state_root(&self) -> &Path {
         &self.state_root
     }
+
+    /// Return the sole runner-state leaf for a host mount location.
+    ///
+    /// Filesystem kind is intentionally absent: one mount location admits one
+    /// runner and one process-held claim across all frontend kinds.
     #[must_use]
-    pub fn state_dir(&self, kind: omnifs_core::FsType, mount: &Path) -> PathBuf {
+    pub fn state_dir(&self, mount: &Path) -> PathBuf {
         let normalized = mount.components().collect::<PathBuf>();
         let digest = blake3::hash(normalized.as_os_str().as_encoded_bytes()).to_hex();
-        self.state_root.join(kind.as_str()).join(digest.as_str())
+        self.state_root.join(digest.as_str())
     }
 
     #[must_use]
-    pub fn local_attach_socket(&self) -> PathBuf {
+    pub fn attach_socket(&self) -> PathBuf {
         self.config_dir
             .join(FRONTENDS_SUBDIR)
             .join(LOCAL_ATTACH_SOCKET_NAME)
-    }
-
-    #[must_use]
-    pub fn vsock_attach_socket(&self) -> PathBuf {
-        self.config_dir
-            .join(FRONTENDS_SUBDIR)
-            .join(VSOCK_ATTACH_SOCKET_NAME)
     }
 
     #[must_use]
@@ -606,6 +602,21 @@ mod tests {
     }
 
     #[test]
+    fn frontend_state_has_one_leaf_per_mount_location() {
+        let workspace = Workspace::under_root(Path::new("/tmp/omnifs-test"));
+        let frontend = workspace.frontend();
+
+        assert_eq!(
+            frontend.state_dir(Path::new("/mnt/omnifs")),
+            frontend.state_dir(Path::new("/mnt/./omnifs"))
+        );
+        assert_ne!(
+            frontend.state_dir(Path::new("/mnt/omnifs")),
+            frontend.state_dir(Path::new("/mnt/other"))
+        );
+    }
+
+    #[test]
     fn daemon_state_resolves_the_requested_mount_snapshot() {
         let workspace = Workspace::under_root(Path::new("/tmp/omnifs-test"));
         let first = Revision::new("a".repeat(40)).unwrap();
@@ -657,6 +668,46 @@ mod tests {
                 .iter()
                 .next()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn attach_port_is_stable_bounded_and_configurable() {
+        let first = Workspace::under_root(Path::new("/tmp/omnifs-port-a"));
+        let same = Workspace::under_root(Path::new("/tmp/omnifs-port-a"));
+        let derived = first.attach_port().unwrap();
+        assert_eq!(derived, same.attach_port().unwrap());
+        assert!((20_000..=29_999).contains(&derived.get()));
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(CONFIG_FILE),
+            "[frontend]\nattach_port = 32123\n",
+        )
+        .unwrap();
+        assert_eq!(
+            Workspace::under_root(temp.path())
+                .attach_port()
+                .unwrap()
+                .get(),
+            32_123
+        );
+    }
+
+    #[test]
+    fn attach_port_rejects_zero() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(CONFIG_FILE),
+            "[frontend]\nattach_port = 0\n",
+        )
+        .unwrap();
+        assert!(
+            Workspace::under_root(temp.path())
+                .attach_port()
+                .unwrap_err()
+                .to_string()
+                .contains("must not be 0")
         );
     }
 }

@@ -13,6 +13,7 @@ use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, MountPoint
 use omnifs_api::OMNIFS_ATTACH_ADDR_ENV;
 use omnifs_workspace::OMNIFS_HOME_ENV;
 
+const OMNIFS_RUNTIME_ENV: &str = "OMNIFS_RUNTIME";
 use crate::docker::ContainerName;
 use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
 use omnifs_workspace::config::Config;
@@ -80,7 +81,8 @@ fn hash8(path: &Path) -> String {
 }
 
 /// Build the credential-free frontend container body: no binds, `OMNIFS_HOME`,
-/// Docker socket, SSH agent, or published ports.
+/// Docker socket, SSH agent, or published ports. Only attach address and
+/// launcher-supplied runtime identity are injected.
 pub(crate) fn build_frontend_container_body(
     image: &ImageRef,
     home: &Path,
@@ -105,9 +107,10 @@ pub(crate) fn build_frontend_container_body(
         ..Default::default()
     };
 
-    let env = vec![format!(
-        "{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:{attach_port}"
-    )];
+    let env = vec![
+        format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:{attach_port}"),
+        format!("{OMNIFS_RUNTIME_ENV}=docker"),
+    ];
 
     ContainerCreateBody {
         image: Some(image.as_str().to_string()),
@@ -119,7 +122,7 @@ pub(crate) fn build_frontend_container_body(
 }
 
 /// Env var names the frontend container's image may set on its own (its
-/// `Dockerfile` `ENV`/base-image defaults), beyond the attach addr this
+/// `Dockerfile` `ENV`/base-image defaults), beyond the two values this
 /// launcher injects. Anything else on a freshly started container means
 /// something leaked onto this credential-free container.
 const IMAGE_DEFAULT_ENV_NAMES: [&str; 2] = ["PATH", "HOME"];
@@ -138,7 +141,7 @@ pub(crate) fn assert_locked_down(mounts: &[MountPoint], env: &[String]) -> Resul
     if let Some(bad) = env.iter().find(|var| !env_var_allowed(var)) {
         return Err(format!(
             "frontend container has unexpected env var `{bad}`; the no-credentials contract \
-             allows only {OMNIFS_ATTACH_ADDR_ENV} and the image's own defaults"
+             allows only {OMNIFS_ATTACH_ADDR_ENV}, {OMNIFS_RUNTIME_ENV}, and the image's own defaults"
         ));
     }
     Ok(())
@@ -148,7 +151,9 @@ fn env_var_allowed(var: &str) -> bool {
     let Some((name, _)) = var.split_once('=') else {
         return false;
     };
-    name == OMNIFS_ATTACH_ADDR_ENV || IMAGE_DEFAULT_ENV_NAMES.contains(&name)
+    name == OMNIFS_ATTACH_ADDR_ENV
+        || name == OMNIFS_RUNTIME_ENV
+        || IMAGE_DEFAULT_ENV_NAMES.contains(&name)
 }
 
 #[cfg(test)]
@@ -280,9 +285,10 @@ mod tests {
         let env = body.env.expect("env");
         assert_eq!(
             env,
-            vec![format!(
-                "{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:54321"
-            )]
+            vec![
+                format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:54321"),
+                format!("{OMNIFS_RUNTIME_ENV}=docker"),
+            ]
         );
 
         let labels = body.labels.expect("labels");
@@ -313,6 +319,7 @@ mod tests {
                 "PATH=/usr/bin".to_string(),
                 "HOME=/root".to_string(),
                 format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:1"),
+                format!("{OMNIFS_RUNTIME_ENV}=docker"),
             ],
         )
         .expect("the exact allowed set must pass");

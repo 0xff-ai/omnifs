@@ -1,6 +1,7 @@
 //! Shared control-plane domain and wire types for the `omnifs` CLI and daemon.
 
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 pub use omnifs_core::{FrontendRuntime, FsType};
@@ -10,18 +11,16 @@ mod control;
 pub use control::{
     CONTROL_MAX_LINE_BYTES, CONTROL_PROTOCOL_VERSION, CONTROL_REQUEST_TIMEOUT_SECS, ControlError,
     ControlErrorCode, ControlOperation, ControlOutcome, ControlReply, ControlRequest,
-    TcpAttachTarget, VsockAttachTarget,
 };
 
 /// JSONL activity-event schema and redaction for the inspector observability
 /// subsystem.
 pub mod events;
 
-/// TCP namespace attach address, injected by the frontend container launcher
-/// and read by the out-of-process `omnifs-thin fuse` runner when no `--attach`
-/// unix path is given. Carries `host.docker.internal:<port>` so a
-/// containerized frontend reaches the host-native daemon's TCP attach
-/// listener. Bind policy (loopback or verified docker0) is the auth.
+/// TCP namespace attach address, injected by a guest frontend launcher and
+/// read by `omnifs-thin` when no local `--attach` path is given. Docker uses
+/// `host.docker.internal:<port>` to reach the host-native daemon's fixed TCP
+/// listener. The listener currently has no authentication.
 pub const OMNIFS_ATTACH_ADDR_ENV: &str = "OMNIFS_ATTACH_ADDR";
 
 /// Guest vsock port the frontend runner dials on host CID (`VMADDR_CID_HOST`)
@@ -48,6 +47,8 @@ pub struct DaemonStatus {
     pub executable: PathBuf,
     pub config_dir: PathBuf,
     pub cache_dir: PathBuf,
+    /// TCP namespace endpoint this daemon bound for guest frontends.
+    pub attach_tcp: Option<SocketAddr>,
     /// Every filesystem frontend currently attached to the shared namespace.
     pub frontends: Vec<FrontendInfo>,
     /// Provider mounts loaded in the registry.
@@ -141,9 +142,8 @@ pub struct FrontendInfo {
     /// The frontend-reported mount point. It is host-visible for the host
     /// runner and display-only for Docker and libkrun guests.
     pub mount_point: PathBuf,
-    /// How this frontend reaches the shared namespace. The host assigns this
-    /// from which listener the connection arrived on, never from anything a
-    /// connecting guest claims about itself.
+    /// How the launcher delivered this frontend. The frontend carries it in
+    /// every namespace handshake.
     pub runtime: FrontendRuntime,
 }
 

@@ -7,7 +7,6 @@
 use anyhow::Result;
 use omnifs_api::{DaemonStatus, FrontendRuntime as Runtime, FsType as Filesystem, HealthState};
 use omnifs_core::MountName;
-use omnifs_mtab::{MountKind, MountState};
 use omnifs_workspace::creds::FileStore;
 use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::mounts::{Registry, Revision};
@@ -15,11 +14,9 @@ use omnifs_workspace::provider::Catalog;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::auth::{AuthReadiness, MountAuth};
-#[cfg(target_os = "macos")]
-use crate::commands::frontend::GUEST_MOUNT;
 use crate::provider_warmup::WarmupStatus;
 use omnifs_workspace::Workspace;
 
@@ -133,6 +130,7 @@ impl DaemonObservation {
                 executable: "/bin/omnifs".into(),
                 config_dir: "/tmp/omnifs".into(),
                 cache_dir: "/tmp/omnifs/cache".into(),
+                attach_tcp: None,
                 frontends: Vec::new(),
                 mounts: Vec::new(),
                 offline: false,
@@ -442,7 +440,6 @@ impl AccessState {
 
 impl Inventory {
     pub(crate) async fn collect(workspace: &Workspace) -> Result<Self> {
-        let frontend = workspace.frontend();
         let repository = workspace.desired_state().observe_repository()?;
         let registry = repository.registry();
         let mount_revision = repository.head_revision()?;
@@ -458,8 +455,7 @@ impl Inventory {
             online_mount_statuses(registry, catalog, workspace.credentials(), daemon_status)
         };
         let mount_count = mounts.len();
-        let discovered = discovered_frontends(frontend, mount_count, &frontend.libkrun_root())?;
-        let frontends = frontend_statuses(daemon_status, mount_count, discovered);
+        let frontends = frontend_statuses(daemon_status, mount_count);
         let warmup = crate::provider_warmup::ProviderWarmup::new(
             workspace.warmup().clone(),
             workspace.catalog().clone(),
@@ -577,95 +573,10 @@ pub(crate) enum Verdict {
     Degraded,
 }
 
-/// Discover runner-owned frontend observations. A daemon-down inventory keeps
-/// these rows because runner and attachment lifetimes are independent.
-// `_libkrun_root` is genuinely unused off macOS (only the libkrun cfg branch
-// below reads it), which is what earns it the leading underscore; on macOS
-// that same branch does read it, which is what earns this the narrow allow.
-#[cfg_attr(target_os = "macos", allow(clippy::used_underscore_binding))]
-fn discovered_frontends(
-    frontend: &omnifs_workspace::FrontendState,
-    mount_count: usize,
-    _libkrun_root: &Path,
-) -> Result<Vec<FrontendStatus>> {
-    let mut rows = Vec::new();
-    for path in MountState::files_under(frontend.state_root())? {
-        match MountState::read_file(&path) {
-            Ok(state) => {
-                let filesystem = match state.kind {
-                    MountKind::Fuse => Filesystem::Fuse,
-                    MountKind::Nfs { .. } => Filesystem::Nfs,
-                };
-                rows.push(FrontendStatus {
-                    filesystem,
-                    runtime: Runtime::Host,
-                    location: Some(state.mount_point),
-                    state: FrontendState::Running,
-                    mount_count,
-                    fix: None,
-                });
-            },
-            Err(error) => {
-                // Keep a corrupt leaf visible as its own degraded row. A bad
-                // record must not hide healthy sibling leaves.
-                let filesystem = path
-                    .parent()
-                    .and_then(Path::parent)
-                    .and_then(Path::file_name)
-                    .and_then(|name| name.to_str())
-                    .and_then(|name| match name {
-                        "fuse" => Some(Filesystem::Fuse),
-                        "nfs" => Some(Filesystem::Nfs),
-                        _ => None,
-                    })
-                    .unwrap_or(Filesystem::Fuse);
-                rows.push(FrontendStatus {
-                    filesystem,
-                    runtime: Runtime::Host,
-                    location: None,
-                    state: FrontendState::Failed,
-                    mount_count,
-                    fix: Some(format!("omnifs logs ({error})")),
-                });
-            },
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    match crate::libkrun_runner::LibkrunRunner::new(_libkrun_root.to_path_buf()).is_running() {
-        Ok(Some(running)) => rows.push(FrontendStatus {
-            filesystem: Filesystem::Fuse,
-            runtime: Runtime::Libkrun,
-            location: Some(PathBuf::from(GUEST_MOUNT)),
-            state: if running {
-                FrontendState::Running
-            } else {
-                FrontendState::Failed
-            },
-            mount_count,
-            fix: (!running).then(|| "omnifs logs (libkrun process is not running)".to_owned()),
-        }),
-        Ok(None) => {},
-        Err(error) => rows.push(FrontendStatus {
-            filesystem: Filesystem::Fuse,
-            runtime: Runtime::Libkrun,
-            location: Some(PathBuf::from(GUEST_MOUNT)),
-            state: FrontendState::Failed,
-            mount_count,
-            fix: Some(format!("omnifs logs ({error})")),
-        }),
-    }
-    Ok(rows)
-}
-
-/// Join the daemon's live attachments with workspace runner observations.
-/// Also the cheap path for a caller that only needs the attachment-derived
-/// rows (`launch.rs`'s reconnect-grace poll passes no discovered runners and
-/// a zero mount count rather than re-collecting the whole [`Inventory`]).
+/// Build canonical frontend rows from the daemon's live attachments.
 pub(crate) fn frontend_statuses(
     daemon: Option<&DaemonStatus>,
     mount_count: usize,
-    discovered: Vec<FrontendStatus>,
 ) -> Vec<FrontendStatus> {
     let mut rows = daemon
         .into_iter()
@@ -689,16 +600,6 @@ pub(crate) fn frontend_statuses(
         })
         .collect::<Vec<_>>();
 
-    for runner in discovered {
-        let matched = rows.iter().any(|row| {
-            row.filesystem == runner.filesystem
-                && row.runtime == runner.runtime
-                && row.location == runner.location
-        });
-        if !matched {
-            rows.push(runner);
-        }
-    }
     rows.sort_by(frontend_cmp);
     rows
 }
@@ -988,7 +889,6 @@ fn frontend_cmp(left: &FrontendStatus, right: &FrontendStatus) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_mtab::StateFile;
 
     #[test]
     fn human_state_labels_are_readable_without_changing_wire_names() {
@@ -1200,6 +1100,7 @@ mod tests {
                 executable: "/bin/omnifs".into(),
                 config_dir: "/home/.omnifs".into(),
                 cache_dir: "/home/.omnifs/cache".into(),
+                attach_tcp: None,
                 frontends: Vec::new(),
                 mounts: Vec::new(),
                 offline: false,
@@ -1259,20 +1160,9 @@ mod tests {
     }
 
     #[test]
-    fn daemon_down_keeps_runner_owned_local_frontend_visible() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = Workspace::under_root(tmp.path());
-        let mount_point = tmp.path().join("mounted");
-        let state_dir = workspace
-            .frontend()
-            .state_dir(omnifs_api::FsType::Fuse, &mount_point);
-        let _guard = StateFile::write_fuse(&mount_point, &state_dir).unwrap();
-        let frontend = workspace.frontend();
-        let fallback = discovered_frontends(frontend, 1, &frontend.libkrun_root()).unwrap();
-        let rows = frontend_statuses(None, 1, fallback);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].state, FrontendState::Running);
-        assert_eq!(rows[0].location, Some(mount_point));
+    fn daemon_down_inventory_has_no_frontend_rows() {
+        let rows = frontend_statuses(None, 1);
+        assert!(rows.is_empty());
     }
 
     #[test]

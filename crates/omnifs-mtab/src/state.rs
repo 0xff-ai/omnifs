@@ -256,15 +256,18 @@ mod tests {
     use serde_json::Value;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn temp_state_dir() -> PathBuf {
+        static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "omnifs-mtab-state-{}-{}",
+            "omnifs-mtab-state-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
-                .as_nanos()
+                .as_nanos(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).expect("create temp state dir");
         dir

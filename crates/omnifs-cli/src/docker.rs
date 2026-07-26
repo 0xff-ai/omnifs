@@ -20,7 +20,9 @@ use futures_util::TryStreamExt;
 
 use crate::commands::frontend::GUEST_MOUNT;
 use crate::error::WithHint;
-use crate::frontend_container::{assert_locked_down, build_frontend_container_body};
+use crate::frontend_container::{
+    FRONTEND_HOME_LABEL, assert_locked_down, build_frontend_container_body,
+};
 use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
 use crate::ui::output::{Output, OutputMode};
 
@@ -110,6 +112,11 @@ pub(crate) struct DockerClient {
     output: Output,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DockerContainerIdentity {
+    pub(crate) id: String,
+}
+
 impl DockerClient {
     pub(crate) async fn launch(&self, home: &std::path::Path, attach_port: u16) -> Result<()> {
         let body = build_frontend_container_body(
@@ -129,11 +136,78 @@ impl DockerClient {
     }
 
     pub(crate) async fn mount_ready(&self, path: &str) -> Result<bool> {
-        self.exec_path_exists(path).await
+        tokio::time::timeout(Duration::from_secs(2), self.exec_path_exists(path))
+            .await
+            .context("Docker frontend mount probe timed out")?
     }
 
     pub(crate) async fn is_running(&self) -> Result<Option<bool>> {
         self.container_running(self.container_name()).await
+    }
+
+    /// Prove that the stable workspace name still resolves to one running
+    /// container with the expected workspace label, and return Docker's
+    /// immutable container ID for later revalidation.
+    pub(crate) async fn confirmed_frontend(
+        &self,
+        expected_home: &std::path::Path,
+    ) -> Result<Option<DockerContainerIdentity>> {
+        let inspect = match self
+            .docker
+            .inspect_container(
+                self.container_name().as_str(),
+                None::<InspectContainerOptions>,
+            )
+            .await
+        {
+            Ok(inspect) => inspect,
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect container `{}`", self.container_name()));
+            },
+        };
+        if !inspect
+            .state
+            .as_ref()
+            .and_then(|state| state.running)
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        let label = inspect
+            .config
+            .as_ref()
+            .and_then(|config| config.labels.as_ref())
+            .and_then(|labels| labels.get(FRONTEND_HOME_LABEL))
+            .context("frontend container has no workspace ownership label")?;
+        anyhow::ensure!(
+            label == &expected_home.display().to_string(),
+            "frontend container workspace label `{label}` does not match `{}`",
+            expected_home.display()
+        );
+        let id = inspect
+            .id
+            .context("Docker inspect returned no immutable container ID")?;
+        Ok(Some(DockerContainerIdentity { id }))
+    }
+
+    pub(crate) async fn remove_confirmed(
+        &self,
+        expected: &DockerContainerIdentity,
+        expected_home: &std::path::Path,
+    ) -> Result<()> {
+        let current = self
+            .confirmed_frontend(expected_home)
+            .await?
+            .context("the confirmed frontend container is no longer running")?;
+        anyhow::ensure!(
+            current == *expected,
+            "frontend container identity changed; refusing to remove its replacement"
+        );
+        self.stop_and_remove_id(&expected.id).await
     }
 
     pub(crate) async fn tear_down(&self) -> Result<()> {
@@ -415,6 +489,32 @@ impl DockerClient {
             },
         }
         Ok(())
+    }
+
+    async fn stop_and_remove_id(&self, id: &str) -> Result<()> {
+        self.output
+            .narrate(format!("Stopping confirmed frontend container `{id}`"));
+        let _ = self
+            .docker
+            .stop_container(
+                id,
+                Some(StopContainerOptions {
+                    signal: None,
+                    t: Some(1),
+                }),
+            )
+            .await;
+        self.docker
+            .remove_container(
+                id,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    v: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .with_context(|| format!("remove confirmed frontend container `{id}`"))
     }
 
     /// Launch the frontend container from `body`, replacing any existing

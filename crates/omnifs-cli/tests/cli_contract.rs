@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 use common::{
     free_port, install_fixture_provider, install_test_provider, omnifs_bin, release_wasm_dir,
 };
+use omnifs_workspace::Workspace;
 use omnifs_workspace::authn::CredentialId;
 use omnifs_workspace::creds::{CredentialEntry, CredentialStore, FileStore};
 use omnifs_workspace::mounts::Repository;
@@ -138,15 +139,20 @@ fn stdout_json(output: &Output) -> serde_json::Value {
 }
 
 fn write_runner_observation(fixture: &Fixture, location: &Path) {
-    let state_dir = fixture.home_path().join("cache/frontends/fuse/observed");
+    let state_dir = Workspace::under_root(fixture.home_path())
+        .frontend()
+        .state_dir(location);
     std::fs::create_dir_all(&state_dir).expect("frontend state directory");
     std::fs::write(
-        state_dir.join("mount-observed.json"),
+        state_dir.join("runner.json"),
         serde_json::json!({
-            "version": 2,
+            "version": 1,
+            "instance_id": "0123456789abcdef0123456789abcdef",
+            "pid": 424_242,
+            "process_group": 424_242,
+            "filesystem": "fuse",
             "mount_point": location.to_string_lossy().into_owned(),
-            "pid": std::process::id(),
-            "kind": "fuse"
+            "control_socket": state_dir.join("runner.sock"),
         })
         .to_string(),
     )
@@ -979,7 +985,7 @@ fn mount_add_invalid_dynamic_domain_config_never_writes_spec() {
 }
 
 #[test]
-fn status_and_frontend_observation_contract() {
+fn status_and_frontend_listing_ignore_runner_records() {
     let fixture = Fixture::new();
 
     let stopped = fixture.run(&["status", "--output", "human"]);
@@ -1001,48 +1007,9 @@ fn status_and_frontend_observation_contract() {
     let status = fixture.run(&["status", "--output", "json"]);
     let json = stdout_json(&status);
     let frontends = json["result"]["frontends"].as_array().expect("frontends");
-    assert_eq!(
-        frontends.len(),
-        1,
-        "expected one runner observation: {json}"
-    );
-    assert!(frontends[0].get("scope").is_none());
-    assert_eq!(frontends[0]["mount_count"], 0);
-
-    let wide = fixture.run_with_env(
-        &["status", "--output", "human"],
-        &[("COLUMNS", "120"), ("TERM", "dumb")],
-    );
-    let wide_text = String::from_utf8_lossy(&wide.stdout);
-    let filesystem = wide_text.find("Filesystem").expect("filesystem header");
-    let runtime = wide_text.find("Runtime").expect("runtime header");
-    let location = wide_text.find("Location").expect("location header");
-    let coverage = wide_text.find("Coverage").expect("coverage header");
-    let state = wide_text.find("State").expect("state header");
-    assert!(filesystem < runtime && runtime < location);
-    assert!(location < coverage && coverage < state);
-    assert!(!wide_text.contains("FILESYSTEM"));
-    assert!(!wide_text.contains('|'));
-    assert!(!wide_text.contains("---"));
-    let state_rows = wide_text
-        .lines()
-        .filter(|line| line.contains("all 0 mounts"))
-        .collect::<Vec<_>>();
-    assert!(!state_rows.is_empty(), "{wide_text}");
-    assert!(state_rows.iter().all(|line| {
-        line.contains("○ stopped") || line.contains("● attached") || line.contains("● running")
-    }));
-
-    let narrow = fixture.run_with_env(
-        &["status", "--output", "human"],
-        &[("COLUMNS", "71"), ("TERM", "dumb")],
-    );
-    let narrow_text = String::from_utf8_lossy(&narrow.stdout);
-    assert!(narrow_text.contains("Filesystem  Runtime  Location"));
-    assert!(narrow_text.contains("Mounts  "), "{narrow_text}");
     assert!(
-        narrow_text.contains("  /"),
-        "identity field missing from {narrow_text}"
+        frontends.is_empty(),
+        "status leaked a runner record: {json}"
     );
 
     let frontend_list = fixture.run(&["frontend", "ls", "--output", "json"]);
@@ -1050,14 +1017,10 @@ fn status_and_frontend_observation_contract() {
     let listed = list_json["result"]["frontends"]
         .as_array()
         .expect("listed frontends");
-    assert!(listed.iter().any(|frontend| {
-        frontend["filesystem"].as_str() == Some("fuse")
-            && frontend["runtime"].as_str() == Some("host")
-            && frontend["location"].as_str() == runner_location.to_str()
-            && frontend["state"].as_str() == Some("running")
-            && frontend.get("scope").is_none()
-            && frontend.get("source").is_none()
-    }));
+    assert!(
+        listed.is_empty(),
+        "frontend ls leaked a runner record: {list_json}"
+    );
 
     let support = fixture.run(&["frontend", "ls", "--output", "human"]);
     let support_text = String::from_utf8_lossy(&support.stdout);
@@ -1069,7 +1032,7 @@ fn status_and_frontend_observation_contract() {
         std::env::consts::OS
     };
     assert!(support_text.contains(&format!("Supported frontends on {os}")));
-    assert!(support_text.contains("Instantiated frontends  1"));
+    assert!(support_text.contains("Instantiated frontends  0"));
     if cfg!(any(target_os = "macos", target_os = "linux")) {
         assert!(support_text.contains("multiple locations"));
         assert!(support_text.contains("one per workspace"));
@@ -1084,21 +1047,13 @@ fn status_and_frontend_observation_contract() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn status_reports_a_detached_libkrun_runner() {
+fn status_ignores_a_detached_libkrun_record() {
     let fixture = Fixture::new();
     write_libkrun_observation(&fixture);
 
     let output = fixture.run(&["status", "--output", "json"]);
     let json = stdout_json(&output);
-    let libkrun = json["result"]["frontends"]
-        .as_array()
-        .expect("frontends")
-        .iter()
-        .find(|frontend| frontend["runtime"] == "libkrun")
-        .unwrap_or_else(|| panic!("missing libkrun runner: {json}"));
-    assert_eq!(libkrun["filesystem"], "fuse");
-    assert_eq!(libkrun["location"], "/omnifs");
-    assert_eq!(libkrun["state"], "running");
+    assert_eq!(json["result"]["frontends"], serde_json::json!([]));
 }
 
 #[test]
@@ -1144,7 +1099,7 @@ fn status_reports_complete_and_interrupted_provider_warmup() {
 }
 
 #[test]
-fn mount_access_paths_cover_each_observed_frontend() {
+fn mount_show_ignores_runner_records_without_daemon_attachment() {
     let fixture = Fixture::new();
     write_mount_fixture(&fixture, "example");
     write_runner_observation(&fixture, &fixture.mount_point);
@@ -1158,7 +1113,7 @@ fn mount_access_paths_cover_each_observed_frontend() {
         .as_array()
         .expect("frontends")
         .len();
-    assert_eq!(frontend_count, 1);
+    assert_eq!(frontend_count, 0);
     assert_eq!(access_paths.len(), frontend_count);
     assert!(access_paths.iter().all(|path| path["path"].is_string()));
 }

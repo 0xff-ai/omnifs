@@ -45,7 +45,7 @@ NFS keeps one bounded, process-local protocol cache for plain attribute and look
 
 ## Mount lifecycle
 
-NFS loopback mount startup and teardown belong to the host runner lifecycle. The CLI launches `omnifs-thin nfs` as a host runner; the daemon serves the projected tree over the fixed local socket and reports readiness through the control plane. The runner attaches and serves until unmount.
+NFS loopback mount startup and teardown belong to the frontend process. The CLI launches hidden `omnifs run-frontend nfs`; that process owns preflight, attach, mount startup cancellation, serving, and unmount. Its private instance-bound control socket handles disable and doctor requests.
 
 Do not describe macFUSE, `diskutil`, or macOS FUSE mounting as current behavior. macOS host-native integration is NFSv4 loopback.
 

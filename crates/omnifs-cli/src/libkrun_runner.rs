@@ -1,12 +1,12 @@
 //! The libkrun frontend runner: a macOS microVM hosting the same
-//! `omnifs-thin fuse` runner and Omnifs VFS wire protocol the Docker runner runs in a
+//! `omnifs-thin fuse` runner and Omnifs VFS wire protocol used by the Docker
 //! container, attached to the host-native daemon's namespace over vsock
 //! instead of TCP.
 //!
 //! State lives under `<config_dir>/libkrun/`: a persistent per-workspace ed25519
 //! keypair (survives across launches, since it authenticates guest ssh access
 //! independent of any one VM instance) plus per-launch artifacts (a writable
-//! root disk, pidfile, seed ISO, the helper-owned attach bridge, the readiness,
+//! root disk, strict helper record, seed ISO, the helper-owned attach bridge, the readiness,
 //! SSH, and control sockets, and the serial log). Every path lives under the workspace config dir,
 //! never a system temp dir, so `omnifs down`/`frontend disable` can find and
 //! remove exactly what this runner owns. The resolved guest image is an
@@ -14,9 +14,9 @@
 //!
 //! One explicit no-TSI vsock device bridges the guest to the host, with three
 //! fixed port mappings:
-//! - port 1024 (attach): guest-initiated (`,listen`) onto the daemon's own
-//!   vsock-attach unix socket (returned by the `AttachVsock` control operation;
-//!   this runner never creates or removes that socket).
+//! - port 1024 (attach): guest-initiated (`,listen`) through the helper-owned
+//!   bridge onto the daemon's fixed Unix attach socket. This runner never
+//!   creates or removes the daemon socket.
 //! - port 1025 (ready): guest-initiated (`,listen`) onto a unix socket this
 //!   runner binds before spawning libkrun; the launch lease accepts one later
 //!   readiness beacon on it — a
@@ -44,13 +44,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result};
 use omnifs_libkrun::{
     ATTACH_BRIDGE_SOCKET_NAME, CONTROL_SOCKET_NAME, ControlSocket, DIAGNOSTIC_LOG_NAME,
-    Installation, PID_FILE_NAME, READY_SOCKET_NAME, ROOT_DISK_NAME, SEED_DISK_NAME,
+    HelperRecord, Installation, PID_FILE_NAME, READY_SOCKET_NAME, ROOT_DISK_NAME, SEED_DISK_NAME,
     SERIAL_LOG_NAME, SSH_SOCKET_NAME,
 };
 use tokio::io::AsyncReadExt as _;
 
 use crate::commands::frontend::GUEST_MOUNT;
 use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
+#[cfg(test)]
 use crate::process::is_alive as process_alive;
 use crate::ui::output::Output;
 use omnifs_workspace::config::Config;
@@ -99,6 +100,19 @@ const SEED_CONF_KEYS: [&str; 3] = [
 /// CLI and daemon do not share a path-validation crate, and this check is
 /// small enough that a shared abstraction would cost more than it saves).
 const UDS_PATH_BYTE_LIMIT: usize = 100;
+
+fn new_instance_id() -> Result<String> {
+    use std::fmt::Write as _;
+
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).context("generate libkrun helper instance id")?;
+    Ok(bytes
+        .iter()
+        .fold(String::with_capacity(32), |mut id, byte| {
+            let _ = write!(id, "{byte:02x}");
+            id
+        }))
+}
 
 fn check_uds_path_length(path: &Path) -> Result<()> {
     use std::os::unix::ffi::OsStrExt as _;
@@ -303,17 +317,8 @@ impl LibkrunRunner {
         Ok(())
     }
 
-    fn read_pidfile(&self) -> Result<Option<u32>> {
-        match std::fs::read_to_string(self.pidfile()) {
-            Ok(contents) => Ok(Some(
-                contents
-                    .trim()
-                    .parse::<u32>()
-                    .context("parse the libkrun pidfile")?,
-            )),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error).context("read libkrun pidfile"),
-        }
+    fn read_helper_record(&self) -> Result<Option<HelperRecord>> {
+        HelperRecord::read(&self.pidfile()).context("read the libkrun helper record")
     }
 
     fn diagnostic_tail(&self) -> String {
@@ -424,6 +429,8 @@ struct LibkrunLaunchLease<'a> {
     timeout: Duration,
     child: Option<std::process::Child>,
     ready_listener: Option<tokio::net::UnixListener>,
+    instance_id: Option<String>,
+    expected_record: Option<HelperRecord>,
     replaced: bool,
 }
 
@@ -446,6 +453,8 @@ impl<'a> LibkrunLaunchLease<'a> {
             timeout: Duration::ZERO,
             child: None,
             ready_listener: None,
+            instance_id: None,
+            expected_record: None,
             replaced: false,
         }
     }
@@ -459,8 +468,16 @@ impl<'a> LibkrunLaunchLease<'a> {
             timeout: Duration::ZERO,
             child: None,
             ready_listener: None,
+            instance_id: None,
+            expected_record: None,
             replaced: true,
         }
+    }
+
+    fn for_confirmed_teardown(runner: &'a LibkrunRunner, expected_record: HelperRecord) -> Self {
+        let mut lease = Self::for_teardown(runner);
+        lease.expected_record = Some(expected_record);
+        lease
     }
 
     async fn prepare(runner: &'a LibkrunRunner, request: LibkrunLaunchRequest<'_>) -> Result<Self> {
@@ -521,8 +538,14 @@ impl<'a> LibkrunLaunchLease<'a> {
         let _ = std::fs::remove_file(self.runner.ssh_socket());
         let _ = std::fs::remove_file(self.runner.control_socket());
 
-        let helper_config =
-            omnifs_libkrun::Config::omnifs(dir, &self.daemon_attach_socket, &installation)?;
+        let instance_id = new_instance_id()?;
+        let helper_config = omnifs_libkrun::Config::omnifs(
+            dir,
+            &self.daemon_attach_socket,
+            &instance_id,
+            &installation,
+        )?;
+        self.instance_id = Some(instance_id);
         let diagnostic_path = helper_config.diagnostic_log();
         let diagnostic = std::fs::OpenOptions::new()
             .create(true)
@@ -548,7 +571,7 @@ impl<'a> LibkrunLaunchLease<'a> {
 
         // Detached: the VM outlives this CLI invocation. The lease retains
         // the pid until readiness publishes, while explicit teardown later
-        // rediscovers it from the durable pidfile.
+        // rediscovers it from the durable helper record.
         self.child = Some(command.spawn().with_context(|| {
             format!(
                 "spawn packaged libkrun helper {}",
@@ -556,16 +579,22 @@ impl<'a> LibkrunLaunchLease<'a> {
             )
         })?);
 
-        let pid = self.wait_for_pidfile().await?;
+        let record = self.wait_for_helper_record().await?;
         let child_pid = self
             .child
             .as_ref()
-            .context("libkrun child identity was lost before pidfile publication")?
+            .context("libkrun child identity was lost before helper-record publication")?
             .id();
         anyhow::ensure!(
-            child_pid == pid,
-            "libkrun pidfile named pid {pid}, but the spawned process is {child_pid}"
+            child_pid == record.pid,
+            "libkrun helper record named pid {}, but the spawned process is {child_pid}",
+            record.pid
         );
+        anyhow::ensure!(
+            self.instance_id.as_deref() == Some(record.instance_id.as_str()),
+            "libkrun helper record did not match the launch instance"
+        );
+        self.runner.confirm_record(&record)?;
 
         let mount = self.mount.clone();
         self.wait_for_ready(mount.as_deref(), self.timeout).await?;
@@ -628,21 +657,21 @@ impl<'a> LibkrunLaunchLease<'a> {
             .context("adopt the readiness listener into the async runtime")
     }
 
-    async fn wait_for_pidfile(&mut self) -> Result<u32> {
+    async fn wait_for_helper_record(&mut self) -> Result<HelperRecord> {
         let pidfile = self.runner.pidfile();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            if let Ok(contents) = std::fs::read_to_string(&pidfile)
-                && let Ok(pid) = contents.trim().parse::<u32>()
+            if let Ok(Some(record)) = self.runner.read_helper_record()
+                && self.instance_id.as_deref() == Some(record.instance_id.as_str())
             {
-                return Ok(pid);
+                return Ok(record);
             }
             if let Some(status) = self
                 .child
                 .as_mut()
-                .context("libkrun helper identity was lost before pidfile publication")?
+                .context("libkrun helper identity was lost before helper-record publication")?
                 .try_wait()
-                .context("poll libkrun helper before pidfile publication")?
+                .context("poll libkrun helper before helper-record publication")?
             {
                 anyhow::bail!(
                     "omnifs-libkrun exited with {status} before publishing {};\n{}",
@@ -709,75 +738,67 @@ impl<'a> LibkrunLaunchLease<'a> {
 
     async fn stop_and_remove(&mut self) -> Result<()> {
         self.ready_listener.take();
-        let pid = match self.child.as_ref() {
-            Some(child) => Some(child.id()),
-            None => match self.runner.read_pidfile() {
-                Ok(pid) => pid,
-                Err(error) => return Err(error),
-            },
-        };
-        if let Some(pid) = pid.filter(|pid| process_alive(*pid)) {
-            let _ = ControlSocket::new(self.runner.control_socket())
-                .and_then(|control| control.request_shutdown());
-            if !self
-                .wait_for_process_exit(pid, Duration::from_secs(5))
-                .await?
-            {
-                let _ = Command::new("kill")
-                    .arg("-TERM")
-                    .arg(pid.to_string())
-                    .status();
-            }
-            if !self
-                .wait_for_process_exit(pid, Duration::from_secs(5))
-                .await?
-            {
-                if let Some(child) = self.child.as_mut() {
-                    child
-                        .kill()
-                        .with_context(|| format!("kill libkrun process {pid}"))?;
-                } else {
-                    let status = Command::new("kill")
-                        .arg("-KILL")
-                        .arg(pid.to_string())
-                        .status()
-                        .with_context(|| format!("kill libkrun process {pid}"))?;
-                    anyhow::ensure!(
-                        status.success(),
-                        "kill -KILL failed for live libkrun process {pid}"
-                    );
-                }
-                if !self
-                    .wait_for_process_exit(pid, Duration::from_secs(3))
-                    .await?
-                {
-                    anyhow::bail!(
-                        "libkrun process {pid} remained live after termination; \
-                         recovery identity was preserved"
-                    );
-                }
-            }
-        }
-        if let Some(child) = self.child.as_mut()
-            && child.try_wait()?.is_none()
-        {
-            let pid = child.id();
-            anyhow::bail!(
-                "libkrun process {pid} remained live after termination; recovery identity was preserved"
+        let record = self.runner.read_helper_record()?;
+        if let Some(expected) = self.expected_record.as_ref() {
+            anyhow::ensure!(
+                record.as_ref() == Some(expected),
+                "libkrun helper identity changed; refusing to stop its replacement"
             );
         }
+        if let Some(expected) = record.as_ref() {
+            self.runner.confirm_record(expected)?;
+            ControlSocket::new(self.runner.control_socket())?
+                .request_shutdown(expected)
+                .context("request identity-matched libkrun shutdown")?;
+        } else if self.child.is_none() {
+            // With no helper identity there is no safe detached action. Do
+            // not unlink sockets or disks that a racing helper may own.
+            return Ok(());
+        }
+
+        if self.child.is_some() {
+            if !self
+                .wait_for_owned_child_exit(Duration::from_secs(5))
+                .await?
+            {
+                let child = self
+                    .child
+                    .as_mut()
+                    .context("libkrun child identity was lost during launch rollback")?;
+                let pid = child.id();
+                child
+                    .kill()
+                    .with_context(|| format!("kill directly-owned libkrun child {pid}"))?;
+                anyhow::ensure!(
+                    self.wait_for_owned_child_exit(Duration::from_secs(3))
+                        .await?,
+                    "directly-owned libkrun child {pid} remained live after termination; \
+                     recovery identity was preserved"
+                );
+            }
+        } else if let Some(expected) = record.as_ref() {
+            self.wait_for_detached_exit(expected, Duration::from_secs(10))
+                .await?;
+        }
+
         self.child = None;
+        anyhow::ensure!(
+            self.runner.read_helper_record()?.is_none(),
+            "libkrun helper exited without removing its identity record; recovery artifacts were preserved"
+        );
         self.remove_owned_artifacts();
         Ok(())
     }
 
-    async fn wait_for_process_exit(&mut self, pid: u32, timeout: Duration) -> Result<bool> {
+    async fn wait_for_owned_child_exit(&mut self, timeout: Duration) -> Result<bool> {
         let until = tokio::time::Instant::now() + timeout;
         loop {
-            let exited = match self.child.as_mut() {
-                Some(child) => child.try_wait()?.is_some(),
-                None => !process_alive(pid),
-            };
+            let exited = self
+                .child
+                .as_mut()
+                .context("libkrun child identity was lost while waiting for exit")?
+                .try_wait()?
+                .is_some();
             if exited {
                 return Ok(true);
             }
@@ -788,12 +809,37 @@ impl<'a> LibkrunLaunchLease<'a> {
         }
     }
 
+    async fn wait_for_detached_exit(
+        &self,
+        expected: &HelperRecord,
+        timeout: Duration,
+    ) -> Result<()> {
+        let until = tokio::time::Instant::now() + timeout;
+        loop {
+            match self.runner.read_helper_record()? {
+                None => return Ok(()),
+                Some(current) if current != *expected => {
+                    anyhow::bail!(
+                        "libkrun helper identity changed while waiting for shutdown; recovery artifacts were preserved"
+                    );
+                },
+                Some(_) => {},
+            }
+            if tokio::time::Instant::now() >= until {
+                anyhow::bail!(
+                    "identity-matched libkrun helper did not finish shutdown within {}s; recovery artifacts were preserved",
+                    timeout.as_secs()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// Remove only launch artifacts. The daemon attach listener, verified
     /// guest image, and persistent SSH key are owned elsewhere and never
     /// appear in this set.
     fn remove_owned_artifacts(&self) {
         for path in [
-            self.runner.pidfile(),
             self.runner.root_raw(),
             self.runner.seed_iso(),
             self.runner.ssh_socket(),
@@ -826,15 +872,37 @@ impl LibkrunRunner {
 }
 
 impl LibkrunRunner {
-    pub(crate) fn is_running(&self) -> Result<Option<bool>> {
-        let Some(pid) = self.read_pidfile()? else {
+    fn confirm_record(&self, expected: &HelperRecord) -> Result<()> {
+        let actual = ControlSocket::new(self.control_socket())?
+            .ping(&expected.instance_id)
+            .context("prove libkrun helper identity")?;
+        anyhow::ensure!(
+            actual == *expected,
+            "libkrun helper record and control identity do not match"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn confirmed_record(&self) -> Result<Option<HelperRecord>> {
+        let Some(record) = self.read_helper_record()? else {
             return Ok(None);
         };
-        Ok(Some(process_alive(pid)))
+        self.confirm_record(&record)?;
+        Ok(Some(record))
+    }
+
+    pub(crate) fn is_running(&self) -> Result<Option<bool>> {
+        Ok(self.confirmed_record()?.map(|_| true))
     }
 
     pub(crate) async fn tear_down(&self) -> Result<()> {
         LibkrunLaunchLease::for_teardown(self)
+            .stop_and_remove()
+            .await
+    }
+
+    pub(crate) async fn tear_down_confirmed(&self, expected: HelperRecord) -> Result<()> {
+        LibkrunLaunchLease::for_confirmed_teardown(self, expected)
             .stop_and_remove()
             .await
     }
@@ -933,7 +1001,6 @@ mod tests {
         let root_part = dir.join(format!("{ROOT_RAW_PART_PREFIX}fixture"));
         std::fs::write(&root_part, b"partial root").unwrap();
         for name in [
-            PID_FILE_NAME,
             SEED_DISK_NAME,
             SSH_SOCKET_NAME,
             READY_SOCKET_NAME,

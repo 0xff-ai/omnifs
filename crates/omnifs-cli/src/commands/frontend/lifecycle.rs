@@ -7,7 +7,6 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail, ensure};
 use clap::Args;
 use omnifs_api::{FrontendRuntime, FsType};
-use omnifs_mtab::{MountKind, MountState, StateError};
 use omnifs_workspace::resolve_mount_point;
 use serde::Serialize;
 
@@ -17,7 +16,6 @@ use crate::commands::frontend::{frontend_runtime_parser, fs_type_parser};
 use crate::commands::receipt::FrontendReceipt;
 use crate::docker::{DockerClient, DockerTarget};
 use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
-use crate::host_runner::HostRunner;
 use crate::inventory::{FrontendState, FrontendStatus, Inventory};
 use crate::libkrun_runner::LibkrunLaunchRequest;
 use crate::libkrun_runner::LibkrunRunner;
@@ -581,29 +579,7 @@ async fn runner_running(workspace: &Workspace, id: &FrontendId, output: Output) 
     match id.runtime() {
         FrontendRuntime::Host => {
             let location = id.location().context("host frontend has no location")?;
-            let state_dir = workspace.frontend().state_dir(id.filesystem(), location);
-            let states = MountState::read_all(&state_dir)?;
-            match states.as_slice() {
-                [] => {
-                    if omnifs_nfs::mount_is_active_checked(location)? {
-                        bail!(
-                            "active host frontend mount {} has no unique typed state; refusing to operate",
-                            location.display()
-                        );
-                    }
-                    Ok(false)
-                },
-                [state] => {
-                    let kind_matches = matches!(
-                        (id.filesystem(), &state.kind),
-                        (FsType::Fuse, MountKind::Fuse) | (FsType::Nfs, MountKind::Nfs { .. })
-                    );
-                    Ok(kind_matches
-                        && state.mount_point == location
-                        && crate::host_teardown::local_mount_is_owned(state))
-                },
-                states => Err(StateError::RecordCount(states.len()).into()),
-            }
+            crate::host_frontend::is_running(workspace.frontend(), id.filesystem(), location).await
         },
         FrontendRuntime::Docker => {
             let config = workspace.config()?;
@@ -630,14 +606,13 @@ async fn launch(
 ) -> Result<()> {
     match id.runtime() {
         FrontendRuntime::Host => {
-            HostRunner::new(
+            crate::host_frontend::launch(
                 workspace.frontend(),
                 id.location()
                     .context("host frontend has no location")?
                     .to_path_buf(),
                 id.filesystem(),
-            )?
-            .launch(mount)
+            )
             .await?;
         },
         FrontendRuntime::Docker => {
@@ -662,23 +637,19 @@ async fn launch_docker(workspace: &Workspace, mount: Option<&str>, output: Outpu
     let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
     let runtime = DockerClient::connect_ready(&target, "omnifs frontend enable", output).await?;
     #[cfg(target_os = "linux")]
-    let (bind_ip, expected) = {
-        let ip = runtime.frontend_attach_bind_ip().await?;
-        (Some(ip), ip)
-    };
+    let expected = runtime.frontend_attach_bind_ip().await?;
     #[cfg(not(target_os = "linux"))]
-    let (bind_ip, expected) = (None, std::net::Ipv4Addr::LOCALHOST);
-    let attach = crate::client::DaemonClient::for_workspace(workspace)
-        .frontend_attach_target(bind_ip)
+    let expected = std::net::Ipv4Addr::LOCALHOST;
+    let status = crate::client::DaemonClient::for_workspace(workspace)
+        .status()
         .await?;
-    let addr: SocketAddr = attach
-        .addr
-        .parse()
-        .context("invalid daemon attach address")?;
+    let addr = status
+        .attach_tcp
+        .context("daemon has no TCP frontend attach listener")?;
+    let expected = SocketAddr::new(IpAddr::V4(expected), workspace.attach_port()?.get());
     ensure!(
-        addr.ip() == IpAddr::V4(expected),
-        "daemon attach listener is bound to {}; restart daemon",
-        addr.ip()
+        addr == expected,
+        "daemon attach listener is bound to {addr}, expected {expected}; restart daemon"
     );
     let identity = workspace.identity();
     runtime
@@ -694,10 +665,8 @@ async fn launch_libkrun(
     output: Output,
 ) -> Result<()> {
     let config = workspace.config()?;
-    let attach = crate::client::DaemonClient::for_workspace(workspace)
-        .frontend_attach_target_vsock()
-        .await?;
     let frontend = workspace.frontend();
+    let attach_socket = frontend.attach_socket();
     let guest_image_cache = frontend.guest_image_cache();
     let runner = LibkrunRunner::new(frontend.libkrun_root());
     let attached = async {
@@ -710,7 +679,7 @@ async fn launch_libkrun(
     runner
         .launch(
             LibkrunLaunchRequest {
-                daemon_attach_socket: Path::new(&attach.socket_path),
+                daemon_attach_socket: &attach_socket,
                 config: &config,
                 guest_image_cache: &guest_image_cache,
                 output,
@@ -724,11 +693,14 @@ async fn launch_libkrun(
 
 async fn stop(workspace: &Workspace, id: &FrontendId, output: Output) -> Result<()> {
     match id.runtime() {
-        FrontendRuntime::Host => crate::host_teardown::teardown_local_frontend(
-            workspace.frontend().state_root(),
-            id.location().context("host frontend has no location")?,
-            id.filesystem() == FsType::Nfs,
-        ),
+        FrontendRuntime::Host => {
+            crate::host_frontend::stop(
+                workspace.frontend(),
+                id.filesystem(),
+                id.location().context("host frontend has no location")?,
+            )
+            .await
+        },
         FrontendRuntime::Docker => {
             let config = workspace.config()?;
             let image = resolve_frontend_image(None, &config)?;

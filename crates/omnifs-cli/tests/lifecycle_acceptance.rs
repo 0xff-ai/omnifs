@@ -323,8 +323,8 @@ fn zero_wait_does_not_publish_or_apply_a_revision() {
 // Full up, status, repeated up, and down lifecycle.
 
 /// Up serves the mount through an explicitly enabled host frontend, status
-/// shows it running, and down leaves that frontend alive. Scenarios 3-6 share
-/// a single daemon lifecycle so we do not pay 4x mount creation latency.
+/// shows it running, and down drains that frontend. Scenarios 3-6 share a
+/// single daemon lifecycle so we do not pay 4x mount creation latency.
 #[test]
 #[allow(clippy::too_many_lines)] // one shared daemon lifecycle across scenarios 3-6
 fn scenarios_3_to_6_lifecycle_cycle() {
@@ -474,8 +474,10 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         predecessor_pid = replacement_pid;
     }
 
-    // Shutdown stops only the daemon; the independent host frontend and its
-    // mount remain available while the daemon is down.
+    let final_runner_pid = fixture.host_frontend_pid();
+
+    // Explicit shutdown pushes Stop to the attached frontend and waits for
+    // its mount and process to leave before the daemon exits.
     let out = fixture.run(&["down"]);
     assert!(
         out.status.success(),
@@ -501,7 +503,8 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "status immediately after down must report stopped: {immediate_json:#}"
     );
 
-    // The host runner and mount remain observable after daemon shutdown.
+    // Status is daemon-authoritative and never synthesizes a row from stale
+    // runner state after shutdown.
     let frontend = immediate_json["result"]["frontends"]
         .as_array()
         .expect("status result.frontends must be an array");
@@ -510,43 +513,26 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     } else {
         "fuse"
     };
-    let mount_location = fixture.mount_point.to_string_lossy().into_owned();
     assert!(
-        frontend.iter().any(|entry| {
-            entry["filesystem"].as_str() == Some(filesystem)
-                && entry["runtime"].as_str() == Some("host")
-                && entry["location"].as_str() == Some(mount_location.as_str())
-                && entry["state"].as_str() == Some("running")
-        }),
-        "status after down must retain the running host frontend: {frontend:?}"
+        frontend.is_empty(),
+        "status after down must have no frontend rows: {frontend:?}"
     );
     assert!(
-        fixture.mount_is_active(),
-        "mount point {} must remain active while the daemon is down",
+        !fixture.mount_is_active(),
+        "mount point {} must be gone after down",
         fixture.mount_point.display()
     );
-
-    // Disable the exact host frontend while the daemon is stopped, then wait
-    // for its mount and runner observation to disappear.
-    let location = fixture.mount_point.to_string_lossy().into_owned();
-    let final_runner_pid = fixture.host_frontend_pid();
-    let disabled = fixture.run(&[
-        "frontend",
-        "disable",
-        filesystem,
-        "--runtime",
-        "host",
-        "--location",
-        &location,
-    ]);
     assert!(
-        disabled.status.success(),
-        "frontend disable while daemon is down must succeed (exit {})\nstdout: {}\nstderr: {}",
-        disabled.status,
-        String::from_utf8_lossy(&disabled.stdout),
-        String::from_utf8_lossy(&disabled.stderr),
+        !pid_is_alive(final_runner_pid),
+        "final host runner PID {final_runner_pid} must be dead after down"
+    );
+    assert!(
+        fixture.host_frontend_states().is_empty(),
+        "down must remove the final host runner state"
     );
 
+    // A later exact disable remains idempotent.
+    let location = fixture.mount_point.to_string_lossy().into_owned();
     let repeated_disable = fixture.run(&[
         "frontend",
         "disable",
@@ -594,15 +580,6 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "mount point {} must be gone from the mount table after frontend disable",
         fixture.mount_point.display()
     );
-    assert!(
-        !pid_is_alive(final_runner_pid),
-        "final host runner PID {final_runner_pid} must be dead after frontend disable"
-    );
-    assert!(
-        fixture.host_frontend_states().is_empty(),
-        "frontend disable must remove the final host runner state"
-    );
-
     let after_disable = fixture.run(&["status", "--output", "json"]);
     assert!(
         after_disable.status.success(),
@@ -675,8 +652,7 @@ fn pid_is_alive(pid: u32) -> bool {
 /// Uses a synthetic record (dead pid, no live mount) so the test never strands a
 /// real NFS mount. The on-disk stale-mount sweep is exercised on Linux (FUSE),
 /// where a dead-server mount can be force-unmounted without root; macOS NFS
-/// cannot, so a crashed-daemon mount there clears on the kernel NFS timeout (see
-/// the bounded unmount in `host_teardown`, which keeps `down` from hanging).
+/// cannot, so a crashed-daemon mount there clears on the kernel NFS timeout.
 #[test]
 fn scenario_7_dead_daemon_record_fallback() {
     if !live_acceptance_enabled() {

@@ -84,7 +84,7 @@ guest-image-smoke:
     bash scripts/guest-image/smoke.sh
 
 # Run the libkrun runtime conformance lane against a live guest: builds the
-# guest image if missing, builds the host thin runner used as the baseline, then
+# guest image if missing, builds the slim guest runner used by the fixture, then
 # runs `crates/omnifs-itest/tests/frontend_libkrun` with the live-acceptance
 # opt-in set. macOS (Apple Silicon) only, and
 # LOCAL-ONLY: GitHub-hosted macOS runners cannot nest virtualization, so this

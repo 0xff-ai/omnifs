@@ -447,6 +447,7 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
                 let mut command = Command::new(thin_runner_bin());
                 command
                     .arg("fuse")
+                    .args(["--runtime", "host"])
                     .arg("--mount-point")
                     .arg(mount_point)
                     .arg("--attach")
@@ -457,6 +458,7 @@ pub fn start_multi_frontend_daemon(kinds: &[&str]) -> Option<MultiFrontendDaemon
                 let mut command = Command::new(thin_runner_bin());
                 command
                     .arg("nfs")
+                    .args(["--runtime", "host"])
                     .arg("--mount-point")
                     .arg(mount_point)
                     .arg("--state-dir")
@@ -662,14 +664,8 @@ fn wire_frontend(
 
     let control_socket = home_path.join("control.sock");
 
-    // The daemon always serves its fixed local control socket. The TCP lane
-    // additionally requests the token-guarded VFS listener it intentionally
-    // exercises.
-    let mut daemon_args = daemon_args(&home_path);
-    if matches!(transport, AttachTransport::Tcp) {
-        daemon_args.push(OsString::from("--attach-tcp"));
-        daemon_args.push(OsString::from("0"));
-    }
+    // The daemon serves both fixed workspace endpoints on every start.
+    let daemon_args = daemon_args(&home_path);
     let daemon = Command::new(omnifs_bin())
         .args(&daemon_args)
         .env("OMNIFS_HOME", &home_path)
@@ -725,6 +721,11 @@ fn wire_frontend(
     let mut frontend_cmd = Command::new(thin_runner_bin());
     frontend_cmd
         .arg("nfs")
+        .arg("--runtime")
+        .arg(match transport {
+            AttachTransport::Unix => "host",
+            AttachTransport::Tcp => "docker",
+        })
         .arg("--mount-point")
         .arg(&mount_point)
         .arg("--state-dir")
@@ -742,17 +743,15 @@ fn wire_frontend(
             frontend_cmd.arg("--attach").arg(&socket);
         },
         AttachTransport::Tcp => {
-            let attach =
-                omnifs_workspace::attach::Store::open(home_path.join("frontends/targets.json"))
-                    .expect("read attach targets")
-                    .targets()
-                    .into_iter()
-                    .find_map(|target| match target {
-                        omnifs_workspace::attach::Target::Tcp { addr } => Some(addr.to_string()),
-                        omnifs_workspace::attach::Target::Vsock { .. } => None,
-                    })
-                    .expect("targets.json must carry TCP attach after --attach-tcp");
-            frontend_cmd.env(omnifs_api::OMNIFS_ATTACH_ADDR_ENV, &attach);
+            let reply = control_request(&control_socket, ControlOperation::Status)
+                .expect("query daemon status");
+            let ControlOutcome::Status(status) = reply.outcome else {
+                panic!("unexpected daemon status reply")
+            };
+            let attach = status
+                .attach_tcp
+                .expect("daemon status must publish its TCP attach endpoint");
+            frontend_cmd.env(omnifs_api::OMNIFS_ATTACH_ADDR_ENV, attach.to_string());
         },
     }
     let frontend = frontend_cmd.spawn();
@@ -934,6 +933,7 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
         let mut command = Command::new(thin_runner_bin());
         command
             .arg("fuse")
+            .args(["--runtime", "host"])
             .arg("--mount-point")
             .arg(&mount_point)
             .arg("--attach")
@@ -945,6 +945,7 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
         let mut command = Command::new(thin_runner_bin());
         command
             .arg("nfs")
+            .args(["--runtime", "host"])
             .arg("--mount-point")
             .arg(&mount_point)
             .arg("--state-dir")

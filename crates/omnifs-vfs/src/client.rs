@@ -7,8 +7,8 @@
 //! back by id; event frames feed a local broadcast that [`WireNamespace::subscribe`]
 //! taps. A disconnect fails every in-flight request with
 //! [`NsError::Network`](crate::NsError::Network) and reconnects with
-//! backoff forever until the [`WireNamespace`] is dropped. A reconnect that lands
-//! A disconnect also publishes the existing root invalidation event so every
+//! backoff until its deadline or until the [`WireNamespace`] is dropped. A
+//! disconnect also publishes the existing root invalidation event so every
 //! consumer fences derived state through the same ordered stream.
 
 use std::collections::HashMap;
@@ -27,13 +27,16 @@ use tokio::runtime::Handle;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{Instant, sleep, timeout};
 
+use crate::frame::KIND_CONTROL;
 use crate::frame::{Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame};
-use crate::{FrontendIdentity, Handshake, PROTOCOL, WireError, WireRequest, WireResponse};
+use crate::{
+    FrontendIdentity, Handshake, PROTOCOL, ServerControl, WireError, WireRequest, WireResponse,
+};
 
-/// Initial-connect deadline for [`WireNamespace::attach`]. A socket that never
-/// answers within this window fails the attach with the socket named, rather
-/// than hanging the frontend runner forever.
-const INITIAL_CONNECT_DEADLINE: Duration = Duration::from_secs(30);
+/// Deadline for the first attach and each reconnect attempt. A target that
+/// never answers triggers frontend-owned teardown instead of leaving a mount
+/// backed by a runner that can never regain its namespace.
+pub const ATTACH_DEADLINE: Duration = Duration::from_secs(30);
 /// First reconnect backoff, doubling up to [`MAX_BACKOFF`].
 const INITIAL_BACKOFF: Duration = Duration::from_millis(50);
 /// Backoff ceiling for reconnect attempts.
@@ -230,6 +233,34 @@ struct Outgoing {
     reply: oneshot::Sender<Result<WireResponse, NsError>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeardownReason {
+    ServerStop,
+    AttachDeadline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeardownOutcome {
+    Stopped,
+    Busy,
+}
+
+pub struct TeardownRequest {
+    reason: TeardownReason,
+    reply: oneshot::Sender<TeardownOutcome>,
+}
+
+impl TeardownRequest {
+    #[must_use]
+    pub fn reason(&self) -> TeardownReason {
+        self.reason
+    }
+
+    pub fn complete(self, outcome: TeardownOutcome) {
+        let _ = self.reply.send(outcome);
+    }
+}
+
 /// A [`Namespace`] backed by a wire connection to a daemon-served socket.
 pub struct WireNamespace {
     outgoing: mpsc::UnboundedSender<Outgoing>,
@@ -257,7 +288,18 @@ impl WireNamespace {
         identity: FrontendIdentity,
         rt: Handle,
     ) -> Result<Arc<Self>, WireError> {
-        let deadline = Instant::now() + INITIAL_CONNECT_DEADLINE;
+        let (teardown_tx, teardown_rx) = mpsc::channel(1);
+        drop(teardown_rx);
+        Self::attach_with_teardown(target, identity, rt, teardown_tx).await
+    }
+
+    pub async fn attach_with_teardown(
+        target: AttachTarget,
+        identity: FrontendIdentity,
+        rt: Handle,
+        teardown: mpsc::Sender<TeardownRequest>,
+    ) -> Result<Arc<Self>, WireError> {
+        let deadline = Instant::now() + ATTACH_DEADLINE;
         let connection = target
             .connect_with_backoff(Some(deadline), &identity)
             .await?;
@@ -271,6 +313,7 @@ impl WireNamespace {
                 connection,
                 outgoing_rx,
                 events: events_tx.clone(),
+                teardown,
             }
             .run(),
         );
@@ -416,6 +459,7 @@ struct ManagerState {
     connection: Connection,
     outgoing_rx: mpsc::UnboundedReceiver<Outgoing>,
     events: broadcast::Sender<NsEvent>,
+    teardown: mpsc::Sender<TeardownRequest>,
 }
 
 impl ManagerState {
@@ -426,6 +470,7 @@ impl ManagerState {
             HashMap::new();
         let mut next_request_id: u64 = 1;
         let mut reconnect: Option<tokio::task::JoinHandle<Result<Connection, WireError>>> = None;
+        let mut teardown_retry: Option<Instant> = None;
 
         loop {
             tokio::select! {
@@ -435,8 +480,16 @@ impl ManagerState {
 
                 frame = self.connection.frame_rx.recv(), if reconnect.is_none() => {
                     if let Some(frame) = frame {
-                        self.handle_inbound(&frame, &mut pending);
+                        if self.handle_inbound(&frame, &mut pending) {
+                            if self.request_teardown(TeardownReason::ServerStop).await
+                                == TeardownOutcome::Stopped
+                            {
+                                return;
+                            }
+                            teardown_retry = Some(Instant::now() + ATTACH_DEADLINE);
+                        }
                     } else {
+                        teardown_retry = None;
                         let _ = self.events.send(NsEvent::reset());
                         // The root invalidation is the first observable disconnect
                         // signal. Complete requests that were already in flight only
@@ -445,11 +498,7 @@ impl ManagerState {
                         for (_, reply) in pending.drain() {
                             let _ = reply.send(Err(NsError::Network));
                         }
-                        let target = self.target.clone();
-                        let identity = self.identity.clone();
-                        reconnect = Some(tokio::spawn(async move {
-                            target.connect_with_backoff(None, &identity).await
-                        }));
+                        reconnect = Some(self.start_reconnect());
                     }
                 }
 
@@ -472,9 +521,27 @@ impl ManagerState {
                         },
                         Err(error) => {
                             tracing::warn!(%error, "wire: reconnect task ended");
-                            return;
+                            if self.request_teardown(TeardownReason::AttachDeadline).await
+                                == TeardownOutcome::Stopped
+                            {
+                                return;
+                            }
+                            reconnect = Some(self.start_reconnect());
                         },
                     }
+                }
+
+                () = async {
+                    tokio::time::sleep_until(
+                        teardown_retry.expect("teardown retry branch is guarded")
+                    ).await;
+                }, if teardown_retry.is_some() && reconnect.is_none() => {
+                    if self.request_teardown(TeardownReason::ServerStop).await
+                        == TeardownOutcome::Stopped
+                    {
+                        return;
+                    }
+                    teardown_retry = Some(Instant::now() + ATTACH_DEADLINE);
                 }
 
                 outgoing = self.outgoing_rx.recv() => {
@@ -514,12 +581,22 @@ impl ManagerState {
         }
     }
 
+    fn start_reconnect(&self) -> tokio::task::JoinHandle<Result<Connection, WireError>> {
+        let target = self.target.clone();
+        let identity = self.identity.clone();
+        tokio::spawn(async move {
+            target
+                .connect_with_backoff(Some(Instant::now() + ATTACH_DEADLINE), &identity)
+                .await
+        })
+    }
+
     /// Route a response to its caller or apply and re-broadcast an event.
     fn handle_inbound(
         &self,
         frame: &Frame,
         pending: &mut HashMap<u64, oneshot::Sender<Result<WireResponse, NsError>>>,
-    ) {
+    ) -> bool {
         match frame.kind {
             KIND_RESPONSE => {
                 if let Some(reply) = pending.remove(&frame.request_id) {
@@ -537,10 +614,30 @@ impl ManagerState {
                     let _ = self.events.send(event);
                 }
             },
+            KIND_CONTROL => {
+                return matches!(
+                    postcard::from_bytes::<ServerControl>(&frame.body),
+                    Ok(ServerControl::Stop)
+                );
+            },
             other => {
                 tracing::debug!(kind = other, "wire: ignoring an unknown inbound frame kind");
             },
         }
+        false
+    }
+
+    async fn request_teardown(&self, reason: TeardownReason) -> TeardownOutcome {
+        let (reply, outcome) = oneshot::channel();
+        if self
+            .teardown
+            .send(TeardownRequest { reason, reply })
+            .await
+            .is_err()
+        {
+            return TeardownOutcome::Stopped;
+        }
+        outcome.await.unwrap_or(TeardownOutcome::Stopped)
     }
 }
 

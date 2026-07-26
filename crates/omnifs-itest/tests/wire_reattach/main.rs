@@ -180,6 +180,8 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     // then the active-mount restart must recover that address from state.
     let frontend_argv: Vec<String> = vec![
         "nfs".into(),
+        "--runtime".into(),
+        "host".into(),
         "--attach".into(),
         socket.to_str().expect("socket utf-8").into(),
         "--mount-point".into(),

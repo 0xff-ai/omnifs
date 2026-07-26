@@ -1,8 +1,8 @@
 //! `omnifs frontend`: lifecycle for local and guest frontend processes.
 //!
-//! Frontends attach to the daemon's shared namespace and contain no provider
-//! runtime or credentials. Local delivery starts a sibling runner binary;
-//! Docker and libkrun deliver the FUSE runner inside an isolated guest.
+//! Frontends attach to the daemon's shared namespace and use no provider
+//! runtime or credentials. Host delivery starts this binary's hidden
+//! `run-frontend` command; Docker and libkrun use the slim guest binary.
 
 mod discovery;
 mod lifecycle;

@@ -77,6 +77,8 @@ impl UpReceipt {
 pub(crate) struct TeardownReceipt {
     pub(crate) verdict: Verdict,
     pub(crate) rows: Vec<Outcome>,
+    pub(crate) detached: usize,
+    pub(crate) still_attached: Vec<String>,
 }
 
 /// `omnifs mount rm`: the approved removal plan and the rows settled by the
@@ -118,10 +120,12 @@ impl MountRemoveReceipt {
 }
 
 impl TeardownReceipt {
-    pub(crate) fn new(rows: Vec<Outcome>) -> Self {
+    pub(crate) fn new(rows: Vec<Outcome>, detached: usize, still_attached: Vec<String>) -> Self {
         Self {
             verdict: Verdict::from_rows(&rows),
             rows,
+            detached,
+            still_attached,
         }
     }
 
@@ -249,11 +253,18 @@ mod tests {
 
     #[test]
     fn teardown_receipt_owns_its_terminal_result() {
-        let receipt = TeardownReceipt::new(vec![Outcome::fail("daemon", "still running")]);
+        let receipt = TeardownReceipt::new(
+            vec![Outcome::fail("daemon", "still running")],
+            2,
+            vec!["fuse/host at /mnt/omnifs".to_owned()],
+        );
 
         assert_eq!(receipt.verdict, Verdict::Failed);
         assert_eq!(receipt.output_verdict(), ResultVerdict::Degraded);
         assert_eq!(receipt.exit_code(), crate::error::ExitCode::GenericFailure);
+        let json = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(json["detached"], 2);
+        assert_eq!(json["still_attached"][0], "fuse/host at /mnt/omnifs");
     }
 
     #[test]
