@@ -37,7 +37,7 @@ fn docker_bind_ip() -> anyhow::Result<Ipv4Addr> {
             .as_ref()
             .and_then(nix::sys::socket::SockaddrStorage::as_sockaddr_in)
         {
-            return Ok(Ipv4Addr::from(addr.ip()));
+            return Ok(addr.ip());
         }
     }
     Ok(Ipv4Addr::LOCALHOST)

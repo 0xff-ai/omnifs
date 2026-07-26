@@ -218,21 +218,33 @@ pub(crate) async fn stop(filesystem: &FilesystemState, spec: &fs::Spec) -> Resul
     };
     validate_record(&record, spec)?;
     let (_, outcome) = RunnerControlClient::new(&record).stop().await?;
-    match outcome {
-        StopOutcome::Stopped => {},
-        StopOutcome::Busy { message } | StopOutcome::Failed { message } => {
-            anyhow::bail!("{message}")
-        },
-    }
+    wait_for_cleanup(&state_dir, mount_point, outcome).await
+}
 
+async fn wait_for_cleanup(
+    state_dir: &Path,
+    mount_point: &Path,
+    outcome: StopOutcome,
+) -> Result<()> {
+    let busy_message = match outcome {
+        StopOutcome::Stopped => None,
+        StopOutcome::Busy { message } => Some(message),
+        StopOutcome::Failed { message } => anyhow::bail!("{message}"),
+    };
     let deadline = tokio::time::Instant::now() + STOP_TIMEOUT;
     loop {
-        let record_gone = RunnerRecord::read(&state_dir)?.is_none();
+        let record_gone = RunnerRecord::read(state_dir)?.is_none();
         let mount_gone = !omnifs_nfs::mount_is_active(mount_point);
         if record_gone && mount_gone {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
+            if let Some(message) = busy_message {
+                anyhow::bail!(
+                    "{message}; cleanup did not finish within {}s",
+                    STOP_TIMEOUT.as_secs()
+                );
+            }
             anyhow::bail!(
                 "host filesystem reported stopped but cleanup at {} did not finish within {}s",
                 mount_point.display(),
@@ -296,12 +308,7 @@ pub(crate) async fn stop_confirmed(state_dir: &Path, expected: &RunnerRecord) ->
     let client = RunnerControlClient::new(&record);
     client.ping().await.context("reconfirm host filesystem")?;
     let (_, outcome) = client.stop().await?;
-    match outcome {
-        StopOutcome::Stopped => Ok(()),
-        StopOutcome::Busy { message } | StopOutcome::Failed { message } => {
-            anyhow::bail!("{message}")
-        },
-    }
+    wait_for_cleanup(state_dir, record.spec.location(), outcome).await
 }
 
 pub(crate) async fn cleanup_stale(state_dir: &Path, expected: &RunnerRecord) -> Result<()> {
@@ -357,6 +364,48 @@ fn new_instance_id() -> Result<String> {
 mod tests {
     use super::*;
     use omnifs_workspace::Workspace;
+
+    #[tokio::test]
+    async fn busy_stop_waits_for_runner_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let mount_point = temp.path().join("mount");
+        let record = RunnerRecord {
+            version: RunnerRecord::VERSION,
+            instance_id: "0123456789abcdef0123456789abcdef".to_owned(),
+            pid: 42,
+            process_group: 42,
+            spec: fs::Spec::new(
+                fs::Id::new("main").unwrap(),
+                fs::Protocol::Fuse,
+                fs::Runtime::Host,
+                mount_point.clone(),
+            )
+            .unwrap(),
+            control_socket: state_dir.join("control.sock"),
+        };
+        std::fs::write(
+            state_dir.join("runner.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        let record_path = state_dir.join("runner.json");
+        tokio::spawn(async move {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            std::fs::remove_file(record_path).unwrap();
+        });
+
+        wait_for_cleanup(
+            &state_dir,
+            &mount_point,
+            StopOutcome::Busy {
+                message: "cleanup is still running".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn corrupt_runner_leaf_does_not_hide_a_valid_sibling() {
