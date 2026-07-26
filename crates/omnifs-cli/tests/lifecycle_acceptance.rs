@@ -108,7 +108,6 @@ impl Fixture {
         Command::new(omnifs_bin())
             .args(args)
             .env("OMNIFS_HOME", self.home_path())
-            .env("OMNIFS_MOUNT_POINT", &self.mount_point)
             .env("RUST_LOG", "warn")
             .output()
             .unwrap_or_else(|e| panic!("spawn omnifs {}: {e}", args.join(" ")))
@@ -144,30 +143,41 @@ impl Fixture {
         // Record daemon PID from the daemon record so Drop can kill it.
         self.update_pid_from_record();
 
-        // Frontends are independent of daemon startup. Enable the host
-        // frontend explicitly at this fixture's mount path before probing the
+        // Filesystems are independent of daemon startup. Attach the host
+        // filesystem explicitly at this fixture's mount path before probing the
         // projected tree.
-        let filesystem = if cfg!(target_os = "macos") {
+        let protocol = if cfg!(target_os = "macos") {
             "nfs"
         } else {
             "fuse"
         };
         let location = self.mount_point.to_string_lossy().into_owned();
-        let frontend = self.run(&[
-            "frontend",
-            "enable",
-            filesystem,
+        let created = self.run(&[
+            "fs",
+            "create",
+            "--name",
+            "acceptance",
+            "--protocol",
+            protocol,
             "--runtime",
             "host",
             "--location",
             &location,
         ]);
         assert!(
-            frontend.status.success(),
-            "host frontend enable failed (exit {})\nstdout: {}\nstderr: {}",
-            frontend.status,
-            String::from_utf8_lossy(&frontend.stdout),
-            String::from_utf8_lossy(&frontend.stderr),
+            created.status.success(),
+            "host filesystem create failed (exit {})\nstdout: {}\nstderr: {}",
+            created.status,
+            String::from_utf8_lossy(&created.stdout),
+            String::from_utf8_lossy(&created.stderr),
+        );
+        let attached = self.run(&["fs", "attach", "--name", "acceptance"]);
+        assert!(
+            attached.status.success(),
+            "host filesystem attach failed (exit {})\nstdout: {}\nstderr: {}",
+            attached.status,
+            String::from_utf8_lossy(&attached.stdout),
+            String::from_utf8_lossy(&attached.stderr),
         );
 
         // Wait for the mount to serve the projected tree.
@@ -208,25 +218,25 @@ impl Fixture {
         omnifs_nfs::mount_is_active(&self.mount_point)
     }
 
-    fn host_frontend_states(&self) -> Vec<MountState> {
+    fn host_filesystem_states(&self) -> Vec<MountState> {
         MountState::files_under(
             Workspace::under_root(self.home_path())
-                .frontend()
+                .filesystem_state()
                 .state_root(),
         )
-        .expect("read frontend state files")
+        .expect("read filesystem state files")
         .into_iter()
         .filter_map(|path| MountState::read_file(&path).ok())
         .filter(|state| state.mount_point == self.mount_point)
         .collect()
     }
 
-    fn host_frontend_pid(&self) -> u32 {
-        let states = self.host_frontend_states();
+    fn host_filesystem_pid(&self) -> u32 {
+        let states = self.host_filesystem_states();
         assert_eq!(
             states.len(),
             1,
-            "expected one host frontend state for {}; got {states:?}",
+            "expected one host filesystem state for {}; got {states:?}",
             self.mount_point.display()
         );
         states[0].pid
@@ -322,8 +332,8 @@ fn zero_wait_does_not_publish_or_apply_a_revision() {
 
 // Full up, status, repeated up, and down lifecycle.
 
-/// Up serves the mount through an explicitly enabled host frontend, status
-/// shows it running, and down drains that frontend. Scenarios 3-6 share a
+/// Up serves the mount through an explicitly attached host filesystem, status
+/// shows it running, and down drains that filesystem. Scenarios 3-6 share a
 /// single daemon lifecycle so we do not pay 4x mount creation latency.
 #[test]
 #[allow(clippy::too_many_lines)] // one shared daemon lifecycle across scenarios 3-6
@@ -349,7 +359,7 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     let mut fixture = Fixture::new();
     fixture.write_test_spec();
 
-    // Start the daemon, then enable the host frontend for the mount.
+    // Start the daemon, then attach the host filesystem for the mount.
 
     let Some(()) = fixture.up_and_wait() else {
         return; // skip: platform could not mount
@@ -431,30 +441,16 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     // Exact host restarts must wait for the predecessor runner to exit before
     // launching its replacement, or a detached NFS runner can survive forever
     // after observing the replacement mount.
-    let restart_filesystem = if cfg!(target_os = "macos") {
-        "nfs"
-    } else {
-        "fuse"
-    };
-    let restart_location = fixture.mount_point.to_string_lossy().into_owned();
-    let mut predecessor_pid = fixture.host_frontend_pid();
+    let mut predecessor_pid = fixture.host_filesystem_pid();
     for restart in 1..=2 {
-        let restarted = fixture.run(&[
-            "frontend",
-            "restart",
-            restart_filesystem,
-            "--runtime",
-            "host",
-            "--location",
-            &restart_location,
-        ]);
+        let restarted = fixture.run(&["fs", "restart", "--name", "acceptance"]);
         assert!(
             restarted.status.success(),
             "exact host restart {restart} must succeed\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&restarted.stdout),
             String::from_utf8_lossy(&restarted.stderr),
         );
-        let replacement_pid = fixture.host_frontend_pid();
+        let replacement_pid = fixture.host_filesystem_pid();
         assert_ne!(
             replacement_pid, predecessor_pid,
             "exact host restart {restart} must publish a new runner PID"
@@ -474,9 +470,9 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         predecessor_pid = replacement_pid;
     }
 
-    let final_runner_pid = fixture.host_frontend_pid();
+    let final_runner_pid = fixture.host_filesystem_pid();
 
-    // Explicit shutdown pushes Stop to the attached frontend and waits for
+    // Explicit shutdown pushes Stop to the attached filesystem and waits for
     // its mount and process to leave before the daemon exits.
     let out = fixture.run(&["down"]);
     assert!(
@@ -503,20 +499,14 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "status immediately after down must report stopped: {immediate_json:#}"
     );
 
-    // Status is daemon-authoritative and never synthesizes a row from stale
-    // runner state after shutdown.
-    let frontend = immediate_json["result"]["frontends"]
+    // The persisted spec remains, while daemon-authoritative attachment state
+    // settles to detached after shutdown.
+    let filesystems = immediate_json["result"]["filesystems"]
         .as_array()
-        .expect("status result.frontends must be an array");
-    let filesystem = if cfg!(target_os = "macos") {
-        "nfs"
-    } else {
-        "fuse"
-    };
-    assert!(
-        frontend.is_empty(),
-        "status after down must have no frontend rows: {frontend:?}"
-    );
+        .expect("status result.filesystems must be an array");
+    assert_eq!(filesystems.len(), 1, "{filesystems:?}");
+    assert_eq!(filesystems[0]["id"], "acceptance");
+    assert_eq!(filesystems[0]["state"], "detached");
     assert!(
         !fixture.mount_is_active(),
         "mount point {} must be gone after down",
@@ -527,40 +517,27 @@ fn scenarios_3_to_6_lifecycle_cycle() {
         "final host runner PID {final_runner_pid} must be dead after down"
     );
     assert!(
-        fixture.host_frontend_states().is_empty(),
+        fixture.host_filesystem_states().is_empty(),
         "down must remove the final host runner state"
     );
 
-    // A later exact disable remains idempotent.
-    let location = fixture.mount_point.to_string_lossy().into_owned();
-    let repeated_disable = fixture.run(&[
-        "frontend",
-        "disable",
-        filesystem,
-        "--runtime",
-        "host",
-        "--location",
-        &location,
-        "--output",
-        "json",
-    ]);
+    // A later exact detach remains idempotent and retains the spec.
+    let repeated_disable =
+        fixture.run(&["fs", "detach", "--name", "acceptance", "--output", "json"]);
     assert!(
         repeated_disable.status.success(),
-        "repeated frontend disable must succeed (exit {})\nstdout: {}\nstderr: {}",
+        "repeated filesystem detach must succeed (exit {})\nstdout: {}\nstderr: {}",
         repeated_disable.status,
         String::from_utf8_lossy(&repeated_disable.stdout),
         String::from_utf8_lossy(&repeated_disable.stderr),
     );
     let repeated_disable_json: serde_json::Value = serde_json::from_slice(&repeated_disable.stdout)
-        .expect("repeated frontend disable must produce valid JSON");
+        .expect("repeated filesystem detach must produce valid JSON");
     assert_eq!(
-        repeated_disable_json["result"]["rows"][0]["state"], "stopped",
-        "repeated frontend disable must report stopped: {repeated_disable_json:#}"
+        repeated_disable_json["result"]["filesystem"]["id"],
+        "acceptance"
     );
-    assert_eq!(
-        repeated_disable_json["result"]["rows"][0]["changed"], false,
-        "repeated frontend disable must report changed=false: {repeated_disable_json:#}"
-    );
+    assert_eq!(repeated_disable_json["result"]["state"], "detached");
 
     // Poll briefly: the OS may take a moment to acknowledge the unmount.
     let settled = {
@@ -577,29 +554,31 @@ fn scenarios_3_to_6_lifecycle_cycle() {
     };
     assert!(
         settled,
-        "mount point {} must be gone from the mount table after frontend disable",
+        "mount point {} must be gone from the mount table after filesystem detach",
         fixture.mount_point.display()
     );
-    let after_disable = fixture.run(&["status", "--output", "json"]);
+    let after_detach = fixture.run(&["status", "--output", "json"]);
     assert!(
-        after_disable.status.success(),
-        "status after frontend disable must succeed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&after_disable.stdout),
-        String::from_utf8_lossy(&after_disable.stderr),
+        after_detach.status.success(),
+        "status after filesystem detach must succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&after_detach.stdout),
+        String::from_utf8_lossy(&after_detach.stderr),
     );
-    let after_disable_json: serde_json::Value = serde_json::from_slice(&after_disable.stdout)
-        .expect("status after frontend disable must produce valid JSON");
-    let remaining_frontends = after_disable_json["result"]["frontends"]
+    let after_detach_json: serde_json::Value = serde_json::from_slice(&after_detach.stdout)
+        .expect("status after filesystem detach must produce valid JSON");
+    let remaining_filesystems = after_detach_json["result"]["filesystems"]
         .as_array()
-        .expect("status result.frontends must be an array after disable");
+        .expect("status result.filesystems must be an array after detach");
     assert!(
-        !remaining_frontends.iter().any(|entry| {
-            entry["filesystem"].as_str() == Some(filesystem)
-                && entry["runtime"].as_str() == Some("host")
-                && entry["location"].as_str() == Some(location.as_str())
+        remaining_filesystems.iter().any(|entry| {
+            entry["id"].as_str() == Some("acceptance")
+                && entry["state"].as_str() == Some("detached")
         }),
-        "frontend disable must remove the exact host frontend observation: {remaining_frontends:?}"
+        "filesystem detach must retain the configured detached row: {remaining_filesystems:?}"
     );
+
+    let removed = fixture.run(&["fs", "rm", "--name", "acceptance"]);
+    assert!(removed.status.success(), "{removed:?}");
 
     // The daemon record is removed.
     assert!(

@@ -1,48 +1,26 @@
 //! FUSE runner command for `omnifs-thin`.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::host_control::RunnerPhase;
 use crate::lifecycle::{Lifecycle, LifecycleConfig, coordinate_mount, preflight};
 use anyhow::Context as _;
-use clap::Args as ClapArgs;
-use omnifs_core::FrontendRuntime;
 use omnifs_mtab::StateFile;
 use omnifs_vfs::Namespace;
-use omnifs_vfs::{AttachTarget, FrontendIdentity, FsType, WireNamespace, resolve_ready_vsock_port};
+use omnifs_vfs::{AttachTarget, WireNamespace, resolve_ready_vsock_port};
 use tracing::info;
 
-/// Arguments for the Linux FUSE frontend.
-#[derive(Debug, ClapArgs)]
-pub struct Args {
-    /// Runtime identity supplied by the launcher.
-    #[arg(long, env = "OMNIFS_RUNTIME")]
-    runtime: FrontendRuntime,
-    /// Host-visible mount point to serve the projected tree at.
-    #[arg(long)]
-    mount_point: PathBuf,
-    /// Directory for local-process mount discovery. Omit for guest/container
-    /// delivery, whose runtime owns process discovery and teardown.
-    #[arg(long)]
-    state_dir: Option<PathBuf>,
-    /// Path to the daemon's namespace attach socket to connect to. When
-    /// absent, the attach target is resolved from the environment.
-    #[arg(long)]
-    attach: Option<PathBuf>,
-    #[command(flatten)]
-    host_control: crate::HostControlArgs,
-}
-
-pub(crate) fn run(args: Args) -> anyhow::Result<()> {
+pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     crate::init_tracing();
-    let Args {
-        runtime,
-        mount_point,
+    let crate::RunnerArgs {
+        spec,
         state_dir,
         attach,
+        port,
         host_control,
     } = args;
+    anyhow::ensure!(port == 0, "--port is valid only with --protocol nfs");
+    let mount_point = spec.location().to_path_buf();
 
     // Parsed (and platform-checked) before the attach dial, so a
     // misconfigured seed fails fast rather than after a 30s connect attempt.
@@ -60,26 +38,18 @@ pub(crate) fn run(args: Args) -> anyhow::Result<()> {
     let mut lifecycle = {
         let _runtime_guard = rt.enter();
         Lifecycle::prepare(LifecycleConfig {
-            runtime,
-            filesystem: FsType::Fuse,
-            mount_point: &mount_point,
+            spec: &spec,
             state_dir: state_dir.as_deref(),
             runner_control,
         })?
     };
-    preflight(FsType::Fuse, &mount_point, state_dir.as_deref())
-        .context("check the FUSE mount location")?;
+    preflight(&spec, state_dir.as_deref()).context("check the FUSE mount location")?;
     lifecycle.phase.send_replace(RunnerPhase::Attaching);
 
-    let identity = FrontendIdentity {
-        runtime,
-        kind: FsType::Fuse,
-        mount_point: mount_point.clone(),
-    };
     let namespace = rt
         .block_on(WireNamespace::attach_with_teardown(
             target,
-            identity,
+            spec.clone(),
             handle.clone(),
             lifecycle.wire_teardown_tx.clone(),
         ))
@@ -121,17 +91,12 @@ pub(crate) fn run(args: Args) -> anyhow::Result<()> {
             let _ = mount_done_tx.send(result);
         })
         .context("start the FUSE mount owner")?;
-    let result = rt.block_on(coordinate_mount(
-        FsType::Fuse,
-        mount_point.clone(),
-        &mut lifecycle,
-        mount_done_rx,
-    ));
+    let result = rt.block_on(coordinate_mount(&spec, &mut lifecycle, mount_done_rx));
     mount_thread
         .join()
         .map_err(|_| anyhow::anyhow!("FUSE mount owner panicked"))?;
     result?;
 
-    info!(mount = %mount_point.display(), "frontend exited");
+    info!(mount = %mount_point.display(), "filesystem exited");
     Ok(())
 }

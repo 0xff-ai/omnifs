@@ -1,4 +1,4 @@
-//! Workspace-owned configuration and frontend image assets.
+//! Workspace-owned configuration and filesystem image assets.
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
@@ -8,7 +8,7 @@ use thiserror::Error;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub metrics: Metrics,
-    pub frontend: FrontendAssets,
+    pub filesystem: FilesystemAssets,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,7 +25,7 @@ impl Default for Metrics {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct FrontendAssets {
+pub struct FilesystemAssets {
     pub attach_port: Option<u16>,
     pub docker_image: Option<String>,
     pub guest_image: Option<String>,
@@ -75,26 +75,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_load_preserves_assets_and_rejects_removed_frontend_plan() {
+    fn config_load_preserves_assets_and_rejects_removed_filesystem_plan() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "[metrics]\nenabled = false\n[frontend]\ndocker_image = \"example/frontend\"\nguest_image = \"guest.ext4\"\n",
+            "[metrics]\nenabled = false\n[filesystem]\ndocker_image = \"example/filesystem\"\nguest_image = \"guest.ext4\"\n",
         )
         .unwrap();
 
         let config = Config::load(&path).unwrap();
         assert_eq!(
-            config.frontend.docker_image.as_deref(),
-            Some("example/frontend")
+            config.filesystem.docker_image.as_deref(),
+            Some("example/filesystem")
         );
         assert!(!config.metrics.enabled);
-        assert_eq!(config.frontend.guest_image.as_deref(), Some("guest.ext4"));
+        assert_eq!(config.filesystem.guest_image.as_deref(), Some("guest.ext4"));
 
-        std::fs::write(&path, "[[frontends]]\nfilesystem = \"fuse\"\n").unwrap();
+        std::fs::write(&path, "[[filesystems]]\nfilesystem = \"fuse\"\n").unwrap();
         let error = Config::load(&path).unwrap_err().to_string();
-        assert!(error.contains("frontends"));
+        assert!(error.contains("filesystems"));
     }
 
     #[test]

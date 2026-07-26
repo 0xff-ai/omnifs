@@ -812,7 +812,7 @@ impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
             Resolution::Resolved(state) => {
                 let (chosen, value) = multi_select_echo(&items, &state.checked);
                 // A standalone single-row block: every current `MultiSelect`
-                // call site (`setup.rs`'s services/frontends pickers) prints
+                // call site (`setup.rs`'s services/filesystems pickers) prints
                 // this echo on its own, with no sibling ledger row nearby.
                 let key_width = Output::ledger_block_width(&[key.as_str()]);
                 output.ledger_row(&LedgerRow::new(Glyph::Done, key, value), key_width);
@@ -1170,7 +1170,7 @@ mod tests {
 
     #[test]
     fn multi_select_detailed_options_carries_the_initial_checked_state() {
-        let multi = MultiSelect::new("Which frontends?", "frontends").detailed_options([
+        let multi = MultiSelect::new("Which filesystems?", "filesystems").detailed_options([
             (
                 "nfs-host".to_owned(),
                 "nfs (host)".to_owned(),

@@ -1,13 +1,12 @@
 pub mod completions;
 pub mod doctor;
 pub mod down;
-pub mod frontend;
+pub mod fs;
 pub mod inspect;
 pub mod logs;
 pub mod mount;
 pub mod receipt;
 pub mod setup;
-pub mod shell;
 pub mod skill;
 pub mod status;
 pub mod up;

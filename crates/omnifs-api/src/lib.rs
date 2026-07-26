@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-pub use omnifs_core::{FrontendRuntime, FsType};
-
 mod control;
 
 pub use control::{
@@ -17,13 +15,13 @@ pub use control::{
 /// subsystem.
 pub mod events;
 
-/// TCP namespace attach address, injected by a guest frontend launcher and
+/// TCP namespace attach address, injected by a guest filesystem launcher and
 /// read by `omnifs-thin` when no local `--attach` path is given. Docker uses
 /// `host.docker.internal:<port>` to reach the host-native daemon's fixed TCP
 /// listener. The listener currently has no authentication.
 pub const OMNIFS_ATTACH_ADDR_ENV: &str = "OMNIFS_ATTACH_ADDR";
 
-/// Guest vsock port the frontend runner dials on host CID (`VMADDR_CID_HOST`)
+/// Guest vsock port the filesystem runner dials on host CID (`VMADDR_CID_HOST`)
 /// once its FUSE mount is serving, writing a single `ready\n` line so the
 /// libkrun runner's `launch` can observe guest readiness without an
 /// external probe into the guest (the Docker runner instead polls the
@@ -47,10 +45,10 @@ pub struct DaemonStatus {
     pub executable: PathBuf,
     pub config_dir: PathBuf,
     pub cache_dir: PathBuf,
-    /// TCP namespace endpoint this daemon bound for guest frontends.
+    /// TCP namespace endpoint this daemon bound for guest filesystems.
     pub attach_tcp: Option<SocketAddr>,
-    /// Every filesystem frontend currently attached to the shared namespace.
-    pub frontends: Vec<FrontendInfo>,
+    /// Every filesystem currently attached to the shared namespace.
+    pub filesystems: Vec<omnifs_core::fs::Spec>,
     /// Provider mounts loaded in the registry.
     pub mounts: Vec<MountInfo>,
     /// True when this daemon serves validated durable projections only.
@@ -63,7 +61,7 @@ pub struct DaemonStatus {
 impl DaemonStatus {
     #[must_use]
     pub fn ready(&self) -> bool {
-        self.health.frontend.state == HealthState::Healthy
+        self.health.filesystems.state == HealthState::Healthy
     }
 }
 
@@ -71,23 +69,23 @@ impl DaemonStatus {
 #[serde(deny_unknown_fields)]
 pub struct DaemonHealth {
     pub control: HealthReport,
-    pub frontend: HealthReport,
+    pub filesystems: HealthReport,
     pub mounts: HealthReport,
 }
 
 impl DaemonHealth {
     #[must_use]
-    pub fn new(control: HealthReport, frontend: HealthReport, mounts: HealthReport) -> Self {
+    pub fn new(control: HealthReport, filesystems: HealthReport, mounts: HealthReport) -> Self {
         Self {
             control,
-            frontend,
+            filesystems,
             mounts,
         }
     }
 
     #[must_use]
     pub fn overall_state(&self) -> HealthState {
-        let reports = [&self.control, &self.frontend, &self.mounts];
+        let reports = [&self.control, &self.filesystems, &self.mounts];
         if reports
             .iter()
             .any(|entry| entry.state == HealthState::Unhealthy)
@@ -137,18 +135,6 @@ pub enum HealthState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FrontendInfo {
-    pub fs_type: FsType,
-    /// The frontend-reported mount point. It is host-visible for the host
-    /// runner and display-only for Docker and libkrun guests.
-    pub mount_point: PathBuf,
-    /// How the launcher delivered this frontend. The frontend carries it in
-    /// every namespace handshake.
-    pub runtime: FrontendRuntime,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MountInfo {
     pub mount: String,
     /// Provider NAME slug, e.g. `github`; credentials key on this value.
@@ -188,39 +174,7 @@ impl CredentialHealth {
 
 #[cfg(test)]
 mod tests {
-    use super::{CredentialHealth, FrontendInfo, FrontendRuntime};
-
-    #[test]
-    fn frontend_info_round_trips_runtime() {
-        let frontend: FrontendInfo = serde_json::from_value(serde_json::json!({
-            "fs_type": "nfs",
-            "mount_point": "/omnifs",
-            "runtime": "host"
-        }))
-        .unwrap();
-
-        let round_trip: FrontendInfo =
-            serde_json::from_value(serde_json::to_value(&frontend).unwrap()).unwrap();
-        assert_eq!(round_trip.mount_point, std::path::Path::new("/omnifs"));
-        assert_eq!(round_trip.runtime, FrontendRuntime::Host);
-
-        assert!(
-            serde_json::from_value::<FrontendInfo>(serde_json::json!({
-                "fs_type": "nfs",
-                "runtime": "host"
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<FrontendInfo>(serde_json::json!({
-                "fs_type": "nfs",
-                "mount_point": "/omnifs",
-                "runtime": "host",
-                "unexpected": true
-            }))
-            .is_err()
-        );
-    }
+    use super::CredentialHealth;
 
     #[test]
     fn steady_state_healths_do_not_need_attention() {

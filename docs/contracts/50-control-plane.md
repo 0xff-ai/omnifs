@@ -1,7 +1,7 @@
 # Control plane contracts
 
 Status: current-contract
-Owns: CLI/daemon split, typed local control protocol, mount desired state, frontend runtimes, workspace layout, and dev home.
+Owns: CLI/daemon split, typed local control protocol, mount desired state, filesystem runtimes, workspace layout, and dev home.
 
 `omnifs_workspace::Workspace` is the central broker for one workspace. It does
 not expose the home root, generic directory getters, or path-transfer objects.
@@ -12,7 +12,7 @@ itself; only that type binds those names to behavior-owning components.
 
 ## Read when
 
-Read this before touching `omnifs-cli`, `omnifs-api`, lifecycle commands, daemon status, control operations, mount desired state, revision application, frontend runtimes, the embedded provider bundle, or dev workspace behavior.
+Read this before touching `omnifs-cli`, `omnifs-api`, lifecycle commands, daemon status, control operations, mount desired state, revision application, filesystem runtimes, the embedded provider bundle, or dev workspace behavior.
 
 ## Rules
 
@@ -20,7 +20,7 @@ Read this before touching `omnifs-cli`, `omnifs-api`, lifecycle commands, daemon
 
 A single `omnifs` binary is both CLI and daemon. The runtime loop lives behind hidden `omnifs daemon`; there is no separate public `omnifsd` binary.
 
-The daemon exposes one current, versioned JSONL control protocol whose wire types live in `omnifs-api`. It has Ready, Status, Shutdown, ValidateOffline, and SubscribeInspector requests, with no remote API or compatibility layer. Shutdown carries whether this is an explicit frontend-stopping `down` or a daemon-only replacement.
+The daemon exposes one current, versioned JSONL control protocol whose wire types live in `omnifs-api`. It has Ready, Status, Shutdown, ValidateOffline, and SubscribeInspector requests, with no remote API or compatibility layer. Shutdown carries whether this is an explicit filesystem-stopping `down` or a daemon-only replacement.
 
 A host-native daemon serves the local control protocol over `$OMNIFS_HOME/control.sock`. The workspace directory is forced to `0700` and the socket to `0600`, so filesystem permissions authenticate every control request. The control protocol has no remote TCP listener, bearer-token mode, or environment-selected endpoint.
 
@@ -44,55 +44,57 @@ Specs are one file per mount, and a spec file's stem is its mount name. `mounts:
 
 `omnifs up` is the sole apply implementation, and visible `omnifs apply` is an alias of that exact clap command, args type, handler, usage-metrics label, and receipt. Online `up` may commit valid manual `*.json` edits before application, then rejects malformed specs, unexpected tracked paths, missing provider artifacts, insufficient grants, and unusable credentials before stopping a healthy daemon. `omnifs up --offline` observes the existing committed `HEAD` and snapshots that exact revision without committing dirty specs; it skips provider, credential, network, and runtime startup checks, serves only validated durable projection facts, never advances `refs/omnifs/applied`, and restarts a daemon when its online/offline mode differs. When replacing a responding daemon, it first asks that daemon to validate the exact snapshot against its open cache; a failed validation leaves the current daemon, sockets, and applied ref untouched.
 
-The CLI materializes `HEAD` under cache storage and starts the daemon with that immutable snapshot plus its exact revision. The daemon never invokes Git or chooses desired state. If a healthy daemon already records `HEAD`, `up` leaves it running. Otherwise it stops only the daemon, starts the new revision, waits for readiness, and then advances `refs/omnifs/applied`; a failed start never advances the ref. `up` and its exact `apply` alias never launch, stop, or reconcile a frontend. Existing frontend runners survive daemon replacement and reconnect through the fixed endpoints. Explicit `down` asks the daemon to stop attached frontends, waits for a bounded drain, reports any busy stragglers, then stops the daemon.
+The CLI materializes `HEAD` under cache storage and starts the daemon with that immutable snapshot plus its exact revision. The daemon never invokes Git or chooses desired state. If a healthy daemon already records `HEAD`, `up` leaves it running. Otherwise it stops only the daemon, starts the new revision, waits for readiness, and then advances `refs/omnifs/applied`; a failed start never advances the ref. `up` and its exact `apply` alias never launch, stop, or reconcile a filesystem. Existing filesystem runners survive daemon replacement and reconnect through the fixed endpoints. Explicit `down` asks the daemon to stop attached filesystems, waits for a bounded drain, reports any busy stragglers, then stops the daemon.
 
-`omnifs setup [--providers NAME] [--no-up] [--no-browser]` is the thin first-run composition over the existing mount configuration, daemon start, frontend enable, and Inventory operations. Provider names are exact embedded names; `--yes` selects only providers whose existing resolver policy proves safe without required config or a fresh credential flow, while `--no-input` requires explicit providers or `--yes`. With `--no-up`, setup configures mounts only. It emits no setup receipt or frontend desired state, and structured output ends with the single terminal Inventory result after all selected operations.
+`omnifs setup [--providers NAME] [--no-up] [--no-browser]` is the thin first-run composition over mount configuration, daemon start, named filesystem creation and attachment, and Inventory operations. Provider names are exact embedded names; `--yes` selects only providers whose existing resolver policy proves safe without required config or a fresh credential flow, while `--no-input` requires explicit providers or `--yes`. With `--no-up`, setup configures mounts only. Structured output ends with the single terminal Inventory result after all selected operations.
 
-Host-owned mount objects, including `auth` and `limits`, strict-parse their fields. Unknown top-level or nested host-owned keys are invalid, while the provider-owned `config` object remains opaque to the host. The control protocol has no mount mutation or reconcile operation; it retains typed frontend, status, event, readiness, attach, and shutdown surfaces.
+Host-owned mount objects, including `auth` and `limits`, strict-parse their fields. Unknown top-level or nested host-owned keys are invalid, while the provider-owned `config` object remains opaque to the host. The control protocol has no mount mutation or reconcile operation; it retains typed filesystem, status, event, readiness, attach, and shutdown surfaces.
 
 Add an operation only when it has one owning domain fact and a focused typed reply. Keep credential material off the control protocol.
 
 ### Runtime modes
 
-There is one daemon runtime: host-native. `omnifs up` always spawns a host-native child process; there is no Docker daemon runtime and no `--runtime`/`[system].runtime` choice to make. The daemon is a pure namespace server; it never mounts a frontend in-process.
+There is one daemon runtime: host-native. `omnifs up` always spawns a host-native child process; there is no Docker daemon runtime and no `--runtime`/`[system].runtime` choice to make. The daemon is a pure namespace server; it never mounts a filesystem in-process.
 
-Docker's only role in the runtime is serving an optional FUSE frontend (`omnifs frontend enable fuse --runtime docker`): a separate, credential-free container attached to the host-native daemon's shared namespace over TCP. It is never how the daemon itself runs.
+Docker's only runtime role is serving a named FUSE filesystem in a separate, credential-free container attached to the host-native daemon over TCP. It never runs the daemon.
 
-The daemon serves one shared namespace through `omnifs_vfs::VfsServer`. `VfsServer` owns the fixed Unix and TCP listeners, listener and connection tasks, readiness, server-pushed stop, drain state, and the deduplicated live attachment set; the daemon owns namespace construction, typed local control, and process lifetime. Host frontends run through hidden `omnifs run-frontend`; Docker and libkrun guests use the slim `omnifs-thin` binary. `DaemonStatus.frontends` reports the deterministic live attachment set and `DaemonStatus.attach_tcp` reports the bound TCP address. Public presentation orders by runtime, filesystem, and location; low-level fields retain runtime, filesystem type, transport, and per-frontend mount point.
+The daemon serves one shared namespace through `omnifs_vfs::VfsServer`. `VfsServer` owns the fixed Unix and TCP listeners, listener and connection tasks, readiness, server-pushed stop, drain state, and live attachments. The daemon owns namespace construction, typed local control, and process lifetime. Host filesystems run through hidden `omnifs run-fs`; Docker and libkrun guests use the slim `omnifs-thin` binary. `DaemonStatus.filesystems` reports exact live attachment specs and `DaemonStatus.attach_tcp` reports the bound TCP address.
 
-Frontend defaults are never persisted. After configuring mounts and starting the daemon, `omnifs setup` offers every filesystem/runtime pair supported on the current OS and enables whichever the user selects (or, under `--yes`/`--no-input`/a non-interactive run, whichever are pre-checked) as imperative actions; there is no separate hardcoded setup default list. The pre-checked set is the same deterministic runtime `omnifs frontend enable FILESYSTEM` resolves when `--runtime` is absent: FUSE uses libkrun on Apple Silicon macOS and host on Linux, while NFS uses host. Intel macOS has no implicit FUSE runtime, so callers must select Docker. Docker remains explicit, never pre-checked. Separate operations remain available through `omnifs up` and `omnifs frontend enable`; Inventory reports only observed frontends.
+`omnifs_core::fs` owns the validated `Id`, `Protocol`, `Runtime`, and fully resolved `Spec` types. `omnifs-workspace` stores one strict atomic spec per ID under `$OMNIFS_HOME/filesystems/specs` and supplies a per-ID claim that serializes create, attach, detach, restart, and remove. Filesystem specs are configuration, not desired running state.
 
-Frontend identity uses `filesystem` (`fuse` or `nfs`), `runtime` (`host`, `docker`, or `libkrun`), and an optional host-only absolute `location`. Docker and libkrun deliver FUSE only, NFS is host-only, and host FUSE is Linux-only. A missing host location resolves from `OMNIFS_MOUNT_POINT` or the existing platform location helper. Guest runtimes own their mount location. There is no persistent frontend desired state and no default/effective-plan normalization.
+`omnifs fs create --name <id>` resolves defaults once and persists every field without launching a runtime. Linux defaults to FUSE/host, Apple Silicon macOS to FUSE/libkrun, and Intel macOS to NFS/host. NFS without a runtime means host; Docker or libkrun without a protocol means FUSE. Host locations must be absolute and default to an ID-bearing workspace path. Docker and libkrun reject `--location` and persist `/omnifs`.
 
-`daemon.json` records process identity for control-plane readiness and stale teardown. Attach endpoints have no durable target record: the Unix path is fixed, and `[frontend].attach_port` or a stable workspace-derived nonzero port selects TCP. Runtime comes from the launcher-supplied wire identity, not listener ownership.
+`omnifs fs attach|detach|restart|rm --name <id>` and `fs shell --name <id>` select only by stable ID. Attach rejects a confirmed existing instance. Detach proves both mount absence and runtime exit. Restart preserves the stored spec. Remove never detaches and refuses running, attached, or uncertain state. `fs ls` joins specs with exact daemon attachment state and reports `unknown` when that join cannot be proved.
 
-Keep frontend-specific Docker policy (image resolution, container naming, the no-credentials contract) in the frontend command paths (`crates/omnifs-cli/src/commands/frontend/`, `crates/omnifs-cli/src/frontend_container.rs`); the daemon launch path has no Docker policy to keep aligned with it.
+`daemon.json` records process identity for control-plane readiness and stale teardown. Attach endpoints have no durable target record: the Unix path is fixed, and `[filesystem].attach_port` or a stable workspace-derived nonzero port selects TCP. Runtime comes from the launcher-supplied wire identity, not listener ownership.
 
-### Namespace attach sockets and out-of-process frontends
+Keep filesystem-specific Docker policy in `commands/fs.rs` and `fs_container.rs`; the daemon launch path has no Docker policy.
 
-The daemon always serves its shared namespace over `$OMNIFS_HOME/frontends/local.sock` and one fixed-port TCP endpoint. The `frontends/` directory is forced to `0700` and the Unix socket to `0600`; filesystem permissions authenticate the Unix socket. TCP has no auth and binds only loopback or Linux's detected Docker bridge address. A refused stale Unix socket is removed before binding, while any ambiguous probe error fails closed. Both endpoints bind before daemon readiness and either listener's unexpected exit is fatal. There is no named attach-socket flag or listener-creation control operation. The Omnifs VFS wire protocol uses length-delimited postcard framing from `omnifs-vfs`, not an RPC framework. It transports the shared `Namespace` surface and does not own projection semantics.
+### Namespace attach sockets and out-of-process filesystems
 
-The `Ready` operation succeeds only after the immutable mount revision loads completely and both fixed namespace listeners have bound and remain supervised. Listener readiness does not require a frontend to be attached. `DaemonStatus.frontends` is the authoritative location set; status has no singular daemon mount-point projection or failed-mount collection.
+The daemon always serves its shared namespace over `$OMNIFS_HOME/filesystems/runtime/local.sock` and one fixed-port TCP endpoint. The runtime directory is forced to `0700` and the Unix socket to `0600`; filesystem permissions authenticate the Unix socket. TCP has no auth and binds only loopback or Linux's detected Docker bridge address. A refused stale Unix socket is removed before binding, while any ambiguous probe error fails closed. Both endpoints bind before daemon readiness and either listener's unexpected exit is fatal. There is no named attach-socket flag or listener-creation control operation. The Omnifs VFS wire protocol uses length-delimited postcard framing from `omnifs-vfs`. It transports the shared `Namespace` surface and does not own projection semantics.
 
-The host frontend runs through the full binary's hidden `omnifs run-frontend`; Docker and libkrun guests use the separate `omnifs-thin` binary. Both call the same `omnifs-thin` library entrypoints, attach a VFS-wire-backed namespace, and serve one frontend location until teardown. The slim guest binary runs no provider and its normal dependency graph excludes Wasmtime, the provider bundle, and the daemon control plane. The launcher supplies `--runtime` for host and libkrun or `OMNIFS_RUNTIME=docker` in the container. `omnifs-thin fuse --mount-point <path>` is the Docker and libkrun guest entrypoint; `OMNIFS_ATTACH_ADDR` selects TCP or vsock. Host NFS uses `omnifs run-frontend nfs --attach <socket> --mount-point <path>` and persists filehandle identity and mount discovery state so a restarted runner can resume an active kernel mount. Both modes consume attach resolution, reconnect, server-pushed stop, and readiness signaling from `omnifs-vfs`.
+The `Ready` operation succeeds only after the immutable mount revision loads completely and both fixed namespace listeners have bound and remain supervised. Listener readiness does not require a filesystem to be attached. `DaemonStatus.filesystems` is the authoritative location set; status has no singular daemon mount-point projection or failed-mount collection.
 
-`omnifs frontend enable FILESYSTEM [--runtime RUNTIME] [--location PATH]` starts or confirms one whole-namespace runner. `disable` stops one exact runtime probe, `restart` restarts one daemon-observed selector or every daemon-observed frontend, and `ls` reports platform support and prerequisite readiness separately from daemon attachment inventory. Host selectors may need `--location` to disambiguate; distinct locations permit multiple host instances of one filesystem/runtime pair. Docker and libkrun reject location because their guest location is runtime-owned, which gives each one instance per workspace. These commands persist no desired frontend configuration and are not daemon runtime modes. The Docker path reads `DaemonStatus.attach_tcp`, checks the full address against the expected loopback or Docker bridge address and workspace port, resolves the frontend image by build-channel provenance (`ghcr.io/0xff-ai/omnifs-frontend:<version>` for a release binary, `omnifs-frontend:dev` for a dev binary, `[frontend].docker_image`/`OMNIFS_FRONTEND_IMAGE` override), and runs the container with no binds, no `OMNIFS_HOME`, no docker.sock, no SSH agent, and no published ports. Only `OMNIFS_ATTACH_ADDR` and `OMNIFS_RUNTIME=docker` cross into it. A fail-closed check right after start asserts an empty `Mounts` array and that exact env set plus the image's own defaults, killing the container on violation. One frontend container runs per workspace: `omnifs-frontend` for the default home, `omnifs-frontend-<hash8(home)>` otherwise. Live attachment rows come only from `VfsServer`.
+The host filesystem runs through the full binary's hidden `omnifs run-fs`; Docker and libkrun guests use `omnifs-thin`. Both accept required flat `--name`, `--protocol`, `--runtime`, and `--location` flags, attach a VFS-wire-backed namespace, and serve until teardown. `OMNIFS_ATTACH_ADDR` selects TCP or vsock for guests. Host NFS also persists filehandle identity and mount discovery state so a restarted runner can resume an active kernel mount.
 
-`omnifs frontend shell [FILESYSTEM] [--runtime RUNTIME]` enters one observed Docker or libkrun frontend and accepts an optional `--shell` plus a trailing command. Omitted selectors are inferred only when one observed guest frontend matches the supplied selectors; an ambiguous match requires the filesystem and runtime. Host frontends are already mounted in the caller's filesystem namespace and are browsed through the caller's ordinary shell.
+The Docker path reads `DaemonStatus.attach_tcp`, checks the full address against the expected loopback or Docker bridge address and workspace port, resolves the image by build-channel provenance, and runs one exact ID-bearing container with no binds, no `OMNIFS_HOME`, no docker.sock, no SSH agent, and no published ports. The workspace home and filesystem ID labels plus immutable container ID form the ownership proof used by doctor. Normal lifecycle checks also compare the inspected flat command with the stored resolved spec.
 
-The libkrun runtime (Apple Silicon macOS only) mirrors that build-channel provenance for its guest disk image instead of a container image: a release binary resolves `ghcr.io/0xff-ai/omnifs-guest:<version>` and pulls it into the workspace cache on first use; a dev binary resolves the local `target/guest-image/omnifs-guest.raw` and never downloads. `[frontend].guest_image`/`OMNIFS_GUEST_IMAGE` override either default the same way `[frontend].docker_image`/`OMNIFS_FRONTEND_IMAGE` override the Docker image. The CLI launches only its sibling `omnifs-libkrun` helper and passes the fixed configuration through the shared `omnifs-libkrun` crate; no external launcher discovery or compatibility path exists.
+`omnifs fs shell --name <id> [--shell <path>] [--command <argv>...]` probes only the runtime stored in the spec. Docker enters the exact labeled container. Libkrun enters the exact helper and VM. Host verifies its mounted phase and reports the ordinary host path.
 
-The resolved libkrun image is an immutable base. Before each launch, the CLI materializes a workspace-owned `libkrun/root.raw` with mode `0600` and passes that root, never the cached or configured base path, as the first virtio-blk device. Atomic temporary roots and `root.raw` are launch-owned state and are removed on rollback, stale replacement, restart, and disable; the base image is preserved unchanged.
+The libkrun runtime (Apple Silicon macOS only) mirrors that build-channel provenance for its guest disk image instead of a container image: a release binary resolves `ghcr.io/0xff-ai/omnifs-guest:<version>` and pulls it into the workspace cache on first use; a dev binary resolves the local `target/guest-image/omnifs-guest.raw` and never downloads. `[filesystem].guest_image`/`OMNIFS_GUEST_IMAGE` override either default the same way `[filesystem].docker_image`/`OMNIFS_FILESYSTEM_IMAGE` override the Docker image. The CLI launches only its sibling `omnifs-libkrun` helper and passes the fixed configuration through the shared `omnifs-libkrun` crate. Its strict helper record and control reply carry the full resolved spec and random process instance; no external launcher discovery or compatibility path exists.
 
-The Omnifs VFS wire protocol also serves over local TCP because a containerized frontend cannot share the host Unix socket. Docker Desktop forwards `host.docker.internal` to host loopback. Native Linux maps that name to the default Docker bridge gateway, so daemon startup binds that detected `docker0` address when present and loopback otherwise. It never binds `0.0.0.0` or uses host networking. The configured or workspace-derived nonzero port stays stable across daemon replacement. Wire protocol v8 carries the launcher-supplied runtime, filesystem, and mount point in the handshake, engine-issued cache lifetimes, cacheable negative lookup answers, the terminal `OfflineMiss` namespace error, and server-pushed stop control. Older clients are rejected outright with a named reason. `Status` reports live attachments and the bound TCP address. Libkrun maps guest vsock port 1024 through its helper-owned bridge to the same fixed Unix endpoint used by host runners.
+The resolved libkrun image is an immutable base. Before each launch, the CLI materializes `filesystems/runtime/<id>/libkrun/root.raw` with mode `0600` and passes that root, never the cached or configured base path, as the first virtio-blk device. Atomic temporary roots and `root.raw` are launch-owned state and are removed on rollback, restart, and detach; the base image is preserved unchanged.
+
+The Omnifs VFS wire protocol also serves over local TCP because a container cannot share the host Unix socket. Docker Desktop forwards `host.docker.internal` to host loopback. Native Linux maps that name to the default Docker bridge gateway, so daemon startup binds that detected address when present and loopback otherwise. It never binds `0.0.0.0` or uses host networking. The configured or workspace-derived nonzero port stays stable across daemon replacement. Wire protocol v9 carries the exact resolved spec in the handshake, engine-issued cache lifetimes, cacheable negative lookup answers, terminal `OfflineMiss`, and server-pushed stop control. Older clients are rejected with a named reason. Libkrun maps guest vsock port 1024 through its helper-owned bridge to the fixed Unix endpoint.
 
 ### Dev home
 
-`scripts/dev.ts` owns contributor dev state. It renders a dedicated `~/.omnifs-dev` home, builds the CLI with its provider bundle, starts the host-native daemon through `omnifs up`, then imperatively enables the credential-free host and Docker frontends and opens the developer at `/omnifs` inside the Docker frontend. Host CLI commands use the normal workspace resolution unless `OMNIFS_HOME` is explicit; do not reintroduce a Rust-side dev command or dev-session owner.
+`scripts/dev.ts` owns contributor dev state. It renders a dedicated `~/.omnifs-dev` home, builds the CLI with its provider bundle, starts the host-native daemon, ensures stable `dev-host` and `dev-docker` specs, attaches them by name, and opens the developer at `/omnifs` inside the Docker filesystem. Host CLI commands use normal workspace resolution unless `OMNIFS_HOME` is explicit; do not add a Rust-side dev command or dev-session owner.
 
 ### Provider bundles
 
-`just build providers` emits the content-addressed provider-store bundle at `target/omnifs-provider-store`. `scripts/dev.ts` embeds it into the natively-built `omnifs` CLI/daemon binary via `OMNIFS_PROVIDER_BUNDLE_DIR`, validates its v2 entries by exact name and id, and invokes `mount add` so each selected embedded artifact is retained lazily; it must not copy the whole store into the dev home or rebuild provider Wasm. Retention may warm Wasmtime's host compilation cache as described below. The frontend image (`Dockerfile`'s `frontend-dev`/`frontend-release` stages, built from or injected into `thin-builder`) needs no provider-store build context at all: it runs `omnifs-thin fuse`, which contains no engine runtime and no provider bundle. Release CLI binaries embed the provider bundle and retain selected artifacts through mount creation.
+`just build providers` emits the content-addressed provider-store bundle at `target/omnifs-provider-store`. `scripts/dev.ts` embeds it into the natively-built `omnifs` CLI/daemon binary via `OMNIFS_PROVIDER_BUNDLE_DIR`, validates its v2 entries by exact name and id, and invokes `mount add` so each selected embedded artifact is retained lazily; it must not copy the whole store into the dev home or rebuild provider Wasm. Retention may warm Wasmtime's host compilation cache as described below. The filesystem image (`Dockerfile`'s `filesystem-dev`/`filesystem-release` stages, built from or injected into `thin-builder`) needs no provider-store build context: it runs flat `omnifs-thin` arguments supplied by the launcher and contains no engine runtime or provider bundle. Release CLI binaries embed the provider bundle and retain selected artifacts through mount creation.
 
 Provider-store indexes strict-parse both the top-level index object and retained provider entries. Unknown keys make the store unreadable instead of being silently accepted.
 
@@ -133,19 +135,19 @@ Every JSON result uses one envelope:
   "verdict": "ok",
   "result": {
     "workspace": {},
-    "frontends": [],
+    "filesystems": [],
     "mounts": []
   }
 }
 ```
 
-Inventory and receipt models are typed and sorted before both rendering and serialization. Status owns plural `frontends` and `mounts`; each mount reports the health of its exact provider pin, and focused mutation receipts add plural `access_paths` where relevant. Frontends always carry `scope: "all"` and a mount count because they expose the complete namespace. `up` applies the committed pin exactly and never installs or chooses a replacement artifact.
+Inventory and receipt models are typed and sorted before both rendering and serialization. Status owns plural `filesystems` and `mounts`; each mount reports the health of its exact provider pin, and focused mutation receipts add plural `access_paths` where relevant. Filesystems always carry `scope: "all"` and a mount count because they expose the complete namespace. `up` applies the committed pin exactly and never installs or chooses a replacement artifact.
 
 Observation commands exit 0 when collection succeeds and every resource is positive or neutral, including a deliberately stopped daemon, offline mounts while stopped, and unnecessary auth. Inventory never adds a row for an unlaunched default or for a runtime record that is not attached to the daemon. A complete inventory with an actionable or failed row exits 5. When the daemon record says the daemon should be live but its control probe is unavailable, status emits the trustworthy degraded inventory and exits 3. Human, JSON, and JSONL derive the same resource verdict; the exit mapper applies the unreachable override.
 
-`down` asks every attached frontend to stop, waits up to the daemon's drain bound,
+`down` asks every attached filesystem to stop, waits up to the daemon's drain bound,
 returns the detached and still-attached identities in the typed shutdown result,
-then stops the daemon. Busy or slow frontends are reported as stragglers and remain
+then stops the daemon. Busy or slow filesystems are reported as stragglers and remain
 for `omnifs doctor`; their presence does not make daemon shutdown unbounded. The CLI
 uses a request timeout longer than the drain and then waits until the control surface
 and recorded process are both gone. `down` never
@@ -168,9 +170,9 @@ whose destination streams are owned by the invoked tools.
 - Select a remote control endpoint or bypass the workspace's local control socket; the CLI only dials the Unix socket recorded in its own `daemon.json` or the fixed `$OMNIFS_HOME/control.sock`.
 - Add ad hoc control operations without keeping the typed client and daemon behavior in step.
 - Reintroduce a separate public `omnifsd` binary name in docs or UX.
-- Deepen Docker assumptions in daemon architecture; Docker policy belongs in the frontend command paths only.
+- Deepen Docker assumptions in daemon architecture; Docker policy belongs in the filesystem command paths only.
 - Present macOS host-native integration as macFUSE.
-- Make the frontend (or any other) Docker image own release provider bundles; the CLI binary is the sole owner.
+- Make the filesystem (or any other) Docker image own release provider bundles; the CLI binary is the sole owner.
 - Assume a fresh worktree already has provider artifacts or wasi-sdk.
 - Move generated or cache state into source directories.
 
@@ -181,8 +183,8 @@ whose destination streams are owned by the invoked tools.
 - `crates/omnifs-cli/src/daemon/server.rs`
 - `crates/omnifs-thin/src/fuse.rs`
 - `crates/omnifs-vfs/src/beacon.rs`
-- `crates/omnifs-cli/src/commands/frontend/`
-- `crates/omnifs-cli/src/frontend_container.rs`
+- `crates/omnifs-cli/src/commands/fs.rs`
+- `crates/omnifs-cli/src/fs_container.rs`
 - `crates/omnifs-vfs/src/lib.rs`
 - `crates/omnifs-itest/src/live.rs`
 - `crates/omnifs-thin/src/nfs.rs`
@@ -202,5 +204,5 @@ whose destination streams are owned by the invoked tools.
 
 - Control protocol changes need focused daemon, CLI, and existing lifecycle tests for request/reply and streaming behavior.
 - Protocol shape changes keep `omnifs-api` wire types, daemon dispatch, and CLI decoding synchronized.
-- Daemon-launch or frontend-attach changes need targeted CLI/daemon tests and live runtime validation for the affected path.
+- Daemon-launch or filesystem-attach changes need targeted CLI/daemon tests and live runtime validation for the affected path.
 - Contributor workflow changes need CLI tests and, when touching launch behavior, `just dev -y` plus the smoke path in `CONTRIBUTING.md`.

@@ -606,7 +606,7 @@ impl Visit for Fields {
     }
 }
 
-/// Create the structured root span for one frontend filesystem request.
+/// Create the structured root span for one filesystem request.
 pub fn request_span(operation: &'static str, mount: &str, path: &str) -> Span {
     if !tracing::enabled!(target: TARGET, Level::INFO) {
         return Span::none();

@@ -2,11 +2,12 @@
 //! socket on the conformance read/readdir workloads.
 //!
 //! Two lanes serve the same test-provider tree over NFS and run the same two
-//! workloads; the only difference is the frontend's attach transport:
+//! workloads; the only difference is the filesystem's attach transport:
 //!
-//! - **Lane 1 (Unix).** `omnifs-thin nfs` attaches to `frontends/local.sock`.
+//! - **Lane 1 (Unix).** A flat `omnifs-thin --protocol nfs` runner attaches to
+//!   `filesystems/runtime/local.sock`.
 //! - **Lane 2 (TCP).** The same runner attaches to the token-guarded loopback
-//!   listener used by Docker-delivered frontends.
+//!   listener used by Docker-delivered filesystems.
 //!
 //! The lanes run sequentially, never two mounts at once, under one held NFS
 //! serial lock so no other test process interleaves a mount between them. Lane 1
@@ -195,7 +196,7 @@ fn tcp_attach_overhead_within_budget() {
     let _nfs_lock = live::nfs_serial_lock();
 
     let unix = {
-        let Some(daemon) = live::start_wire_frontend_holding_lock() else {
+        let Some(daemon) = live::start_wire_filesystem_holding_lock() else {
             eprintln!("skip: Unix attach lane could not come up");
             return;
         };
@@ -210,7 +211,7 @@ fn tcp_attach_overhead_within_budget() {
     std::thread::sleep(Duration::from_secs(1));
 
     let tcp = {
-        let Some(wire_daemon) = live::start_wire_frontend_tcp_holding_lock() else {
+        let Some(wire_daemon) = live::start_wire_filesystem_tcp_holding_lock() else {
             eprintln!("skip: TCP attach lane could not come up");
             return;
         };

@@ -28,11 +28,11 @@ wait_for_registry_artifact() {
   done
 }
 
-# Build the top-level Dockerfile's `frontend-release` stage for one platform:
+# Build the top-level Dockerfile's `filesystem-release` stage for one platform:
 # a minimal image with a prebuilt Linux `omnifs-thin` binary injected as the
 # `omnifs-thin-bin` build context, never compiling inside Docker.
 #
-# $1: the Dockerfile stage to build (`frontend-release`).
+# $1: the Dockerfile stage to build (`filesystem-release`).
 #
 # Reads IMAGE (required), PLATFORM, PUSH, METADATA_FILE, OMNIFS_BINARY,
 # OMNIFS_LINUX_TARGET from the environment (all optional beyond IMAGE). Writes

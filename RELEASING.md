@@ -9,8 +9,8 @@ How omnifs ships: conventional commits drive an always-open release PR; merging 
 | 1. Development | You + feature PRs (conventional commits) | CI verify | Work lands on `main` |
 | 2. Standing release PR | `release-pr.yml`, every push to `main` | git-cliff next version + changelog; `cargo set-version`; `just npm sync` | An open `chore(release): vX.Y.Z` PR, always current |
 | 3. Ship it | You merge the release PR | `release-pr.yml` tags the merge commit `vX.Y.Z` | `main` carries the bump; tag created |
-| 4. Build | **CI** on the merge commit | native CLI archives + frontend image + guest artifact | four `omnifs-cli-*` tarballs and `sha-<commit>` frontend/guest artifacts |
-| 5. Publish | **`release.yml`** after green CI | GitHub Release + assets → GHCR promotions → npm | GitHub Release `vX.Y.Z`, frontend/guest GHCR tags, npm `@0xff-ai/omnifs@X.Y.Z` |
+| 4. Build | **CI** on the merge commit | native CLI archives + filesystem image + guest artifact | four `omnifs-cli-*` tarballs and `sha-<commit>` filesystem/guest artifacts |
+| 5. Publish | **`release.yml`** after green CI | GitHub Release + assets → GHCR promotions → npm | GitHub Release `vX.Y.Z`, filesystem/guest GHCR tags, npm `@0xff-ai/omnifs@X.Y.Z` |
 
 Phase 5 recompiles nothing: `release.yml` downloads the artifacts from the CI run for the tagged commit.
 
@@ -47,7 +47,7 @@ The next version is computed from conventional commits since the last tag: `feat
 
 | Workflow | Trigger | Role |
 |----------|---------|------|
-| `ci.yml` | push / PR to `main` | preflight, host/WASM verification, Linux and Darwin CLI archives, the native arm64 helper payload, frontend images, guest artifact, smoke, and `sha-<commit>` manifests |
+| `ci.yml` | push / PR to `main` | preflight, host/WASM verification, Linux and Darwin CLI archives, the native arm64 helper payload, filesystem images, guest artifact, smoke, and `sha-<commit>` manifests |
 | `release-pr.yml` | push to `main` | maintain the standing release PR; tag `vX.Y.Z` when it merges |
 | `release.yml` | `workflow_run` after successful CI on `main` | if a `v*` tag points at the built commit: sign and notarize Darwin arm64, publish GitHub assets, promote GHCR, then publish npm |
 
@@ -67,7 +67,7 @@ The release environment needs `APPLE_DEVELOPER_ID_CERTIFICATE_BASE64`, `APPLE_DE
 ## What gets released
 
 - **CLI**: `omnifs-cli-linux-*.tar.xz` from `cargo-zigbuild` with glibc 2.17, Darwin x64 cross-linked from Linux, and Darwin arm64 built on native Apple Silicon. The arm64 archive also carries the private `omnifs-libkrun` helper, pinned libkrun dylib, EFI firmware, manifest, and licenses. Release signs that payload with Developer ID and publishes it only after Apple reports the one recorded submission as `Accepted`. The CLI binaries embed the compressed provider/tool WASM bundle and unpack it into `OMNIFS_HOME/providers`.
-- **Frontend**: `ghcr.io/0xff-ai/omnifs-frontend:<version>` promoted from the multi-platform `sha-<commit>` manifest (also `v<version>` on GHCR). It contains only the credential-free `omnifs-thin fuse` frontend.
+- **Filesystem**: `ghcr.io/0xff-ai/omnifs-filesystem:<version>` promoted from the multi-platform `sha-<commit>` manifest (also `v<version>` on GHCR). It contains only the credential-free `omnifs-thin --protocol fuse` filesystem.
 - **Guest**: `ghcr.io/0xff-ai/omnifs-guest:<version>` promoted from the arm64 `sha-<commit>` OCI artifact (also `v<version>` on GHCR). It is the compressed libkrun disk image, not a container image.
 - **npm**: `@0xff-ai/omnifs` + four platform packages.
 
@@ -81,10 +81,10 @@ The bin shim at `npm/omnifs/bin/omnifs.js` and its `scripts/resolve-binary.js` h
 
 ## Version coupling
 
-For release `X.Y.Z`, the npm package version, the CLI `CARGO_PKG_VERSION` / `omnifs --version`, and the default frontend and guest tags all share the **same unprefixed semver** (`0.3.0`, not `v0.3.0`):
+For release `X.Y.Z`, the npm package version, the CLI `CARGO_PKG_VERSION` / `omnifs --version`, and the default filesystem and guest tags all share the **same unprefixed semver** (`0.3.0`, not `v0.3.0`):
 
 - npm: `@0xff-ai/omnifs@X.Y.Z` and matching `@0xff-ai/omnifs-cli-*` optional dependencies
-- CLI default frontend: `ghcr.io/0xff-ai/omnifs-frontend:X.Y.Z` (`crates/omnifs-cli/src/frontend_container.rs`)
+- CLI default filesystem: `ghcr.io/0xff-ai/omnifs-filesystem:X.Y.Z` (`crates/omnifs-cli/src/fs_container.rs`)
 - CLI default guest: `ghcr.io/0xff-ai/omnifs-guest:X.Y.Z` (`crates/omnifs-cli/src/libkrun_runner.rs`)
 - Git tag / GitHub Release name: `vX.Y.Z` (the `v` prefix is used only here)
 - Both GHCR promotions publish `X.Y.Z` and `vX.Y.Z`; the CLI defaults use the unprefixed tags
@@ -132,7 +132,7 @@ Re-run a failed **Release** job after fixing CI; do not re-run compile steps in 
 ```bash
 gh release view vX.Y.Z --json isPrerelease,assets
 npm view @0xff-ai/omnifs --json | jq '.["dist-tags"]'
-docker buildx imagetools inspect ghcr.io/0xff-ai/omnifs-frontend:X.Y.Z
+docker buildx imagetools inspect ghcr.io/0xff-ai/omnifs-filesystem:X.Y.Z
 oras manifest fetch ghcr.io/0xff-ai/omnifs-guest:X.Y.Z >/dev/null
 ```
 
@@ -155,7 +155,7 @@ Gates that must be in place:
 
 - Manual `git tag` / `git push --tags` (`release-pr.yml` owns tagging)
 - Version bumps outside the release PR
-- Rebuild frontend/guest/WASM/CLI artifacts during ship
+- Rebuild filesystem/guest/WASM/CLI artifacts during ship
 
 ## Troubleshooting
 
@@ -184,7 +184,7 @@ Gates that must be in place:
 | `scripts/ci/build-libkrun-runtime.sh` | Native arm64 pinned libkrun payload builder and audit entrypoint |
 | `scripts/ci/sign-darwin-arm64-payload.sh` | Developer ID signing order and Team ID checks |
 | `scripts/ci/wait-for-notarization.sh` | Poll one saved Apple submission until it reaches a terminal status |
-| `scripts/ci/build-frontend-image.sh` | Frontend image assembly from a prebuilt CLI binary |
+| `scripts/ci/build-filesystem-image.sh` | Filesystem image assembly from a prebuilt CLI binary |
 | `.github/workflows/release-pr.yml` | Release coordinator: standing PR + tag |
 | `.github/workflows/release.yml` | Post-CI ship |
 | `scripts/ci/promote-image.sh` | `sha-*` → semver GHCR tags |

@@ -77,7 +77,7 @@ pub fn open_test_host(
 }
 
 /// Load a complete immutable mount snapshot with provider callout capture
-/// enabled. This keeps live frontend concurrency fixtures on the same startup
+/// enabled. This keeps live filesystem concurrency fixtures on the same startup
 /// construction path as the daemon while exposing the capture option only in
 /// the test-support surface.
 #[doc(hidden)]

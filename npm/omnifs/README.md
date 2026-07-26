@@ -11,7 +11,7 @@ omnifs shell
 ```
 
 The npm install step does not start the daemon or fetch assets for an optional
-virtualized FUSE frontend. The Rust CLI resolves those assets when the frontend
+virtualized FUSE filesystem. The Rust CLI resolves those assets when the filesystem
 is requested. The daemon itself always runs on the host.
 
 Supported npm host binaries:

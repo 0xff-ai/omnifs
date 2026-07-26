@@ -47,18 +47,18 @@ schema:
 dev *args:
     bun scripts/dev.ts {{ args }}
 
-# Build the omnifs-frontend:dev image from the working tree. Compiles inside
+# Build the omnifs-filesystem:dev image from the working tree. Compiles inside
 # Docker via the `thin-builder` stage `just dev` never touches: the slim
 # `omnifs-thin` binary needs no engine runtime or Wasmtime, so unlike the full `omnifs`
 # binary's `builder` stage, no provider-store build context is needed here.
 [group('dev')]
-frontend-image:
-    docker build -t omnifs-frontend:dev --target frontend-dev .
+filesystem-image:
+    docker build -t omnifs-filesystem:dev --target filesystem-dev .
 
 # Build the libkrun guest disk image: an EFI-bootable Debian trixie arm64 raw
 # disk with fuse3 and the linux/arm64 `omnifs-thin` binary baked in, whose init
-# starts the FUSE frontend runner once a per-launch seed volume delivers the
-# attach parameters. Mirrors `frontend-image`'s reuse of the shared
+# starts the FUSE filesystem runner once a per-launch seed volume delivers the
+# attach parameters. Mirrors `filesystem-image`'s reuse of the shared
 # `thin-builder` Dockerfile stage; see scripts/guest-image/build.sh.
 [group('dev')]
 guest-image:
@@ -76,7 +76,7 @@ libkrun-runtime:
         target/debug/omnifs-libkrun
 
 # Boot the guest image once with a throwaway seed ISO and check the serial
-# console for a successful boot and the frontend runner starting. See
+# console for a successful boot and the filesystem runner starting. See
 # scripts/guest-image/smoke.sh for the intentionally boot-only success criteria.
 [group('dev')]
 guest-image-smoke:
@@ -85,7 +85,7 @@ guest-image-smoke:
 
 # Run the libkrun runtime conformance lane against a live guest: builds the
 # guest image if missing, builds the slim guest runner used by the fixture, then
-# runs `crates/omnifs-itest/tests/frontend_libkrun` with the live-acceptance
+# runs `crates/omnifs-itest/tests/filesystem_libkrun` with the live-acceptance
 # opt-in set. macOS (Apple Silicon) only, and
 # LOCAL-ONLY: GitHub-hosted macOS runners cannot nest virtualization, so this
 # never runs in CI (see docs/contracts/60-build-validation.md). Requires
@@ -101,4 +101,4 @@ libkrun-conformance:
     fi
     just libkrun-runtime
     cargo build -p omnifs-thin
-    OMNIFS_ACCEPTANCE_LIVE=1 cargo nextest run -p omnifs-itest --test frontend_libkrun
+    OMNIFS_ACCEPTANCE_LIVE=1 cargo nextest run -p omnifs-itest --test filesystem_libkrun

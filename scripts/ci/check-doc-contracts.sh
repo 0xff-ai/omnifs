@@ -11,7 +11,7 @@ expected=(
   docs/contracts/10-system.md
   docs/contracts/20-provider-sdk.md
   docs/contracts/30-projection-tree.md
-  docs/contracts/40-frontends.md
+  docs/contracts/40-filesystems.md
   docs/contracts/50-control-plane.md
   docs/contracts/60-build-validation.md
 )

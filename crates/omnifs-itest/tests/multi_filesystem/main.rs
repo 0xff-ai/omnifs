@@ -1,15 +1,15 @@
-//! Multi-frontend acceptance: one daemon, several renderers, one shared
+//! Multiple-filesystem acceptance: one daemon, several instances, one shared
 //! namespace.
 //!
-//! The VFS server is the frontend registry. These lanes prove that a single
+//! The VFS server is the filesystem registry. These lanes prove that a single
 //! daemon can serve more than one renderer over one namespace, and that an
 //! invalidation reaches every renderer.
 //!
-//! - `dual_frontend_serves_one_namespace` (Linux only): one daemon serving FUSE
+//! - `dual_filesystem_serves_one_namespace` (Linux only): one daemon serving FUSE
 //!   and NFS concurrently. The full conformance row table runs against BOTH
-//!   roots, and cross-frontend byte identity is asserted. Skips on macOS, which
+//!   roots, and cross-filesystem byte identity is asserted. Skips on macOS, which
 //!   is NFS-only.
-//! - `invalidation_reaches_both_frontends_within_one_op`: a live-growth
+//! - `invalidation_reaches_both_filesystems_within_one_op`: a live-growth
 //!   invalidation is observed as fresh content through every mount within a
 //!   bounded poll. Linux runs the dual variant; macOS runs a single-NFS variant.
 //!
@@ -31,7 +31,7 @@ use omnifs_itest::live;
 /// bounded polls need.
 fn acceptance_gated() -> bool {
     if std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_none() {
-        eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run multi-frontend acceptance");
+        eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run multi-filesystem acceptance");
         return false;
     }
     true
@@ -39,7 +39,7 @@ fn acceptance_gated() -> bool {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn dual_frontend_serves_one_namespace() {
+fn dual_filesystem_serves_one_namespace() {
     use omnifs_itest::matrix::{self, Exec, ROWS};
 
     if !acceptance_gated() {
@@ -48,17 +48,17 @@ fn dual_frontend_serves_one_namespace() {
 
     // One daemon, FUSE at mount_points[0] and NFS at mount_points[1], over one
     // shared namespace. The helper holds the NFS serial lock.
-    let Some(daemon) = live::start_multi_frontend_daemon(&["fuse", "nfs"]) else {
+    let Some(daemon) = live::start_multi_filesystem_daemon(&["fuse", "nfs"]) else {
         return;
     };
 
     // Live status, not durable daemon metadata, owns attachment observations.
     let status = daemon.status();
     assert_eq!(
-        status.frontends.len(),
+        status.filesystems.len(),
         2,
-        "the VFS server must observe both served frontends, got {:?}",
-        status.frontends
+        "the VFS server must observe both served filesystems, got {:?}",
+        status.filesystems
     );
 
     let fuse_root = daemon.tree_root(0);
@@ -96,8 +96,8 @@ fn dual_frontend_serves_one_namespace() {
         matrix::render_table(&[fuse_card.clone(), nfs_card.clone()])
     );
 
-    // Cross-frontend byte identity: both frontends expose every configured
-    // mount. There is no per-mount frontend assignment to special-case.
+    // Cross-filesystem byte identity: both filesystems expose every configured
+    // mount. There is no per-mount filesystem assignment to special-case.
     for root in ["test", "test2"] {
         assert_bytes_identical(
             &daemon.mount_points[0].join(root).join("hello/message"),
@@ -122,7 +122,7 @@ fn dual_frontend_serves_one_namespace() {
 /// so the target still runs green there.
 #[cfg(not(target_os = "linux"))]
 #[test]
-fn dual_frontend_serves_one_namespace() {
+fn dual_filesystem_serves_one_namespace() {
     if !acceptance_gated() {
         return;
     }
@@ -131,15 +131,15 @@ fn dual_frontend_serves_one_namespace() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn invalidation_reaches_both_frontends_within_one_op() {
+fn invalidation_reaches_both_filesystems_within_one_op() {
     if !acceptance_gated() {
         return;
     }
-    let Some(daemon) = live::start_multi_frontend_daemon(&["fuse", "nfs"]) else {
+    let Some(daemon) = live::start_multi_filesystem_daemon(&["fuse", "nfs"]) else {
         return;
     };
     // The live-follow pump emits an `AttrsChanged` invalidation on the shared
-    // namespace event stream; both frontends subscribe independently, so each
+    // namespace event stream; both filesystems subscribe independently, so each
     // sees the grown file. Assert fresh (grown) content through both mounts.
     for mount in ["test", "test2"] {
         assert_live_growth_visible(&daemon.mount_points[0], mount);
@@ -148,11 +148,11 @@ fn invalidation_reaches_both_frontends_within_one_op() {
     drop(daemon);
 }
 
-/// macOS is NFS-only, so the single-frontend variant asserts the same
+/// macOS is NFS-only, so the single-filesystem variant asserts the same
 /// invalidation reaches the one NFS renderer.
 #[cfg(not(target_os = "linux"))]
 #[test]
-fn invalidation_reaches_both_frontends_within_one_op() {
+fn invalidation_reaches_both_filesystems_within_one_op() {
     if !acceptance_gated() {
         return;
     }
@@ -167,21 +167,21 @@ fn invalidation_reaches_both_frontends_within_one_op() {
 
 /// A renderer serves the projected tree from a different process than the
 /// projection owner over the Omnifs VFS wire protocol. A
-/// daemon serves its fixed local attach socket; an `omnifs-thin nfs` child
+/// daemon serves its fixed local attach socket; an `omnifs-thin --protocol nfs` child
 /// (the shipped out-of-process NFS runner) mounts NFS over an Omnifs VFS
 /// wire-backed namespace. The full conformance row table runs against that
 /// mount with the same expectations as the regular macOS NFS loopback lane,
 /// scored as column `macos-nfs-wire`.
 #[cfg(not(target_os = "linux"))]
 #[test]
-fn wire_frontend_nfs_parity() {
+fn wire_filesystem_nfs_parity() {
     use omnifs_itest::matrix::{self, Column, Exec, ROWS};
 
     if !acceptance_gated() {
         return;
     }
 
-    let Some(daemon) = live::start_wire_frontend() else {
+    let Some(daemon) = live::start_wire_filesystem() else {
         return;
     };
 
@@ -219,14 +219,14 @@ fn wire_frontend_nfs_parity() {
     drop(daemon);
 }
 
-/// The wire-frontend live parity proof targets macOS NFS loopback; skip on Linux.
+/// The wire-filesystem live parity proof targets macOS NFS loopback; skip on Linux.
 #[cfg(target_os = "linux")]
 #[test]
-fn wire_frontend_nfs_parity() {
+fn wire_filesystem_nfs_parity() {
     if !acceptance_gated() {
         return;
     }
-    eprintln!("skip: the wire-frontend live parity test targets macOS NFS loopback");
+    eprintln!("skip: the wire-filesystem live parity test targets macOS NFS loopback");
 }
 
 // ===========================================================================
@@ -254,7 +254,7 @@ fn assert_live_growth_visible(mount_point: &Path, mount: &str) {
         assert!(
             Instant::now() < deadline,
             "live-log at {} did not grow past {baseline} bytes within the poll window; \
-             the invalidation did not reach this frontend",
+             the invalidation did not reach this filesystem",
             path.display()
         );
         std::thread::sleep(Duration::from_millis(250));
@@ -282,13 +282,13 @@ fn assert_bytes_identical(a: &Path, b: &Path, limit: usize) {
     assert_eq!(
         bytes_a.len(),
         bytes_b.len(),
-        "byte length mismatch across frontends for {} vs {}",
+        "byte length mismatch across filesystems for {} vs {}",
         a.display(),
         b.display()
     );
     assert!(
         bytes_a == bytes_b,
-        "cross-frontend byte identity failed for {} vs {}",
+        "cross-filesystem byte identity failed for {} vs {}",
         a.display(),
         b.display()
     );
@@ -312,7 +312,7 @@ fn assert_column_honest(card: &omnifs_itest::matrix::Scorecard) {
     let mismatches = omnifs_itest::matrix::mismatches(card);
     assert!(
         mismatches.is_empty(),
-        "frontend column `{}` has {} expectation mismatch(es):\n  {}",
+        "filesystem column `{}` has {} expectation mismatch(es):\n  {}",
         card.column,
         mismatches.len(),
         mismatches.join("\n  ")

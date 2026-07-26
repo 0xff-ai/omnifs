@@ -4,9 +4,9 @@ use anyhow::Context as _;
 
 use super::app::DaemonArgs;
 use omnifs_api::{
-    CredentialHealth, DaemonHealth, DaemonStatus, FrontendInfo, HealthReport, HealthState,
-    MountInfo,
+    CredentialHealth, DaemonHealth, DaemonStatus, HealthReport, HealthState, MountInfo,
 };
+use omnifs_core::fs;
 use omnifs_engine::{Host, HostOffline, HostOfflineOpen, HostOnline, HostOpen};
 use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::mounts::Revision;
@@ -41,7 +41,7 @@ struct ProcessInfo {
 impl DaemonContext {
     pub(crate) fn resolve(args: &DaemonArgs) -> anyhow::Result<Self> {
         let workspace = Workspace::resolve()?;
-        let attach_socket = workspace.frontend().attach_socket();
+        let attach_socket = workspace.filesystem_state().attach_socket();
         let attach_port = workspace.attach_port()?;
         let process = ProcessInfo::current();
         anyhow::ensure!(
@@ -207,10 +207,10 @@ impl DaemonContext {
         &self,
         attach_serving: bool,
         attach_tcp: Option<SocketAddr>,
-        frontends: Vec<FrontendInfo>,
+        filesystems: Vec<fs::Spec>,
         mounts: Vec<MountInfo>,
     ) -> DaemonStatus {
-        let health = self.health(attach_serving, &frontends, &mounts);
+        let health = self.health(attach_serving, &filesystems, &mounts);
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             pid: self.process.pid,
@@ -219,7 +219,7 @@ impl DaemonContext {
             config_dir: self.daemon.config_dir().to_path_buf(),
             cache_dir: self.daemon.cache_dir(),
             attach_tcp,
-            frontends,
+            filesystems,
             mounts,
             offline: self.offline,
             health: Box::new(health),
@@ -229,7 +229,7 @@ impl DaemonContext {
     fn health(
         &self,
         attach_serving: bool,
-        frontends: &[FrontendInfo],
+        filesystems: &[fs::Spec],
         mounts: &[MountInfo],
     ) -> DaemonHealth {
         DaemonHealth::new(
@@ -240,22 +240,23 @@ impl DaemonContext {
                     self.daemon.control_socket().display()
                 ),
             ),
-            Self::frontend_health(attach_serving, frontends),
+            Self::filesystem_health(attach_serving, filesystems),
             mount_health(mounts),
         )
     }
 
-    /// Listener readiness is independent of whether a frontend is currently
+    /// Listener readiness is independent of whether a filesystem is currently
     /// attached. Startup flips this subsystem healthy only after mount loading and
     /// every requested listener bind have completed.
-    fn frontend_health(attach_serving: bool, frontends: &[FrontendInfo]) -> HealthReport {
+    fn filesystem_health(attach_serving: bool, filesystems: &[fs::Spec]) -> HealthReport {
         let mut listed = vec!["attach socket local".to_string()];
-        listed.extend(frontends.iter().map(|frontend| {
+        listed.extend(filesystems.iter().map(|filesystem| {
             format!(
-                "attached {} at {} via {}",
-                frontend.fs_type,
-                frontend.mount_point.display(),
-                frontend.runtime
+                "attached `{}` ({}) at {} via {}",
+                filesystem.id(),
+                filesystem.protocol(),
+                filesystem.location().display(),
+                filesystem.runtime()
             )
         }));
         let listed = listed.join(", ");
@@ -352,7 +353,7 @@ mod tests {
         );
         DaemonContext {
             daemon: workspace.daemon().clone(),
-            attach_socket: workspace.frontend().attach_socket(),
+            attach_socket: workspace.filesystem_state().attach_socket(),
             attach_port: workspace.attach_port().unwrap(),
             metrics: workspace.metrics().clone(),
             host,

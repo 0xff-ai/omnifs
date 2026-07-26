@@ -7,6 +7,7 @@ pub mod authn;
 pub mod config;
 pub mod creds;
 pub mod daemon_record;
+pub mod filesystems;
 pub mod ids;
 mod io;
 pub mod metrics;
@@ -15,7 +16,6 @@ pub mod provider;
 pub mod workspace;
 
 pub use workspace::{
-    DaemonState, FrontendState, OMNIFS_HOME_ENV, OMNIFS_MOUNT_POINT_ENV, ResolveError,
-    WarmupProgress, WarmupStore, Workspace, WorkspaceIdentity, display, resolve_mount_point,
-    wasm_cache_dir,
+    DaemonState, FilesystemState, OMNIFS_HOME_ENV, ResolveError, WarmupProgress, WarmupStore,
+    Workspace, WorkspaceIdentity, display, wasm_cache_dir,
 };

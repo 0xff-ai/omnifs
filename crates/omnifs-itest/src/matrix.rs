@@ -1,4 +1,4 @@
-//! Frontend conformance matrix: the shared row table, outcome model, per-column
+//! Filesystem conformance matrix: the shared row table, outcome model, per-column
 //! scorecard, executor abstraction, and markdown renderer.
 //!
 //! The product contract is that the projected tree behaves like real files for
@@ -7,7 +7,7 @@
 //! or `docker exec`). Each lane produces a [`Scorecard`] whose per-row observed
 //! outcome is checked against a per-column [`Expect`]; a run is red iff any row
 //! contradicts its expectation. The row table and models live here so every
-//! frontend conformance target shares the same contract.
+//! filesystem conformance target shares the same contract.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-/// The runner-side kill deadline for a single row. A wedged frontend operation
+/// The runner-side kill deadline for a single row. A wedged filesystem operation
 /// (a mount that never answers) must not hang the whole lane; on timeout the row
 /// is recorded as failed with error `timeout`.
 const ROW_TIMEOUT: Duration = Duration::from_mins(1);
@@ -26,7 +26,7 @@ const ROW_TIMEOUT: Duration = Duration::from_mins(1);
 // ===========================================================================
 
 /// Whether a row exercises read semantics or a write/mutation. Write rows expect
-/// failure because the frontends are read-only.
+/// failure because the filesystems are read-only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowClass {
     Read,
@@ -56,7 +56,7 @@ pub struct Row {
     pub class: RowClass,
     /// Optional tool the row needs beyond the POSIX base. When set, the executor
     /// probes `command -v <tool>` first and records [`Outcome::ToolMissing`]
-    /// (an environment gap, not a frontend result) when it is absent.
+    /// (an environment gap, not a filesystem result) when it is absent.
     pub tool: Option<&'static str>,
     pub script: &'static str,
 }
@@ -91,7 +91,7 @@ impl Outcome {
 }
 
 /// What a column expects a row to do. A [`Expect::Fail`] entry names a known
-/// read-only or frontend-quirk limitation; each carries a one-line rationale
+/// read-only or filesystem-quirk limitation; each carries a one-line rationale
 /// where it is declared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Expect {
@@ -109,7 +109,7 @@ impl Expect {
 }
 
 /// An execution lane: one column of the matrix. Expectations override the class
-/// baseline (read -> pass, write -> fail) per row id, for the frontend quirks a
+/// baseline (read -> pass, write -> fail) per row id, for the filesystem quirks a
 /// live run proves.
 pub struct Column {
     pub id: &'static str,
@@ -122,7 +122,7 @@ pub struct Column {
 
 impl Column {
     /// The expectation for `row`: an override if present, else the class
-    /// baseline (read -> pass, write -> fail; the frontends are read-only).
+    /// baseline (read -> pass, write -> fail; the filesystems are read-only).
     #[must_use]
     pub fn expectation(&self, row: &Row) -> Expect {
         for (id, expect) in self.expectations {
@@ -138,7 +138,7 @@ impl Column {
 }
 
 /// Whether an observed outcome contradicts an expectation. A tool gap satisfies
-/// any expectation (it is an environment gap, not frontend behavior). Otherwise
+/// any expectation (it is an environment gap, not filesystem behavior). Otherwise
 /// a pass must match [`Expect::Pass`] and a fail must match [`Expect::Fail`] —
 /// an unexpectedly passing expected-fail row is a mismatch too, so the table
 /// stays honest.
@@ -171,7 +171,7 @@ pub enum Exec {
         root: String,
         scratch: String,
     },
-    /// `omnifs frontend shell fuse --runtime libkrun -- <cmd>` into a libkrun
+    /// `omnifs fs shell --name itest-libkrun --command <cmd>` into a libkrun
     /// guest through ssh over the vsock-to-unix bridge. `root` and `scratch`
     /// are guest paths, matching `DockerExec`'s shape. `omnifs_bin` and
     /// `home` select which workspace's libkrun guest to reach, so no
@@ -252,8 +252,7 @@ impl Exec {
                     shell_single_quote(script)
                 );
                 let mut cmd = Command::new(omnifs_bin);
-                cmd.args(["frontend", "shell", "fuse", "--runtime", "libkrun"])
-                    .arg("--")
+                cmd.args(["fs", "shell", "--name", "itest-libkrun", "--command"])
                     .arg(remote)
                     .env("OMNIFS_HOME", home);
                 cmd
@@ -602,7 +601,7 @@ fn render_cell(observed: &Observed) -> String {
 // The row table
 // ===========================================================================
 
-/// The frontend conformance rows: the standard toolbox against the test
+/// The filesystem conformance rows: the standard toolbox against the test
 /// provider's canned tree. Read rows prove real-filesystem behavior; write rows
 /// assert the write SUCCEEDS, so each flips green the day the write path lands.
 ///
@@ -810,7 +809,7 @@ sz=$(stat -f%z "$SCRATCH/chunk" 2>/dev/null || stat -c%s "$SCRATCH/chunk"); [ "$
 ls "$ROOT/hello/bundle" >/dev/null 2>&1 || true
 ! test -e "$ROOT/hello/.DS_Store" && ! test -e "$ROOT/hello/._message" && ! test -e "$ROOT/hello/bundle/.DS_Store""#,
     },
-    // --- writes (expect failure because the frontends are read-only) -------
+    // --- writes (expect failure because the filesystems are read-only) -------
     Row {
         id: "append",
         class: RowClass::Write,
@@ -847,7 +846,7 @@ ls "$ROOT/hello/bundle" >/dev/null 2>&1 || true
 // Columns
 // ===========================================================================
 
-/// Cross-frontend expectation shared by every column: `grep -r` over
+/// Cross-filesystem expectation shared by every column: `grep -r` over
 /// `items/open/7` recurses into `items/open/7/comments`, a paged
 /// sub-collection, and opens whatever `@next`/`@all` pagination controls its
 /// single readdir snapshot named (the mount-root ignore files shield
@@ -856,7 +855,7 @@ ls "$ROOT/hello/bundle" >/dev/null 2>&1 || true
 /// `items/open/7/log`, an object stream face (`.stream(Item::log)`).
 /// The provider's `checkout` child deliberately returns unknown tree ref 777
 /// to exercise engine rejection, so this row excludes that one invalid fixture
-/// rather than treating its expected `EIO` as a frontend failure.
+/// rather than treating its expected `EIO` as a filesystem failure.
 ///
 /// Two invariants keep this row passing:
 ///
@@ -903,8 +902,8 @@ pub const MACOS_NFS_LOOPBACK: Column = Column {
     ],
 };
 
-/// Linux NFSv4.0 loopback lane, served by the dual-frontend acceptance test
-/// (`tests/multi_frontend`) alongside a FUSE mount over one shared namespace.
+/// Linux NFSv4.0 loopback lane, served by the dual-filesystem acceptance test
+/// (`tests/multi_filesystem`) alongside a FUSE mount over one shared namespace.
 ///
 /// Seeded from [`MACOS_NFS_LOOPBACK`]: the NFS renderer is platform-neutral, so
 /// the same expectations apply here: `grep -r` passes (see
@@ -926,34 +925,33 @@ pub const LINUX_NFS_LOOPBACK: Column = Column {
     ],
 };
 
-/// The Docker-hosted FUSE frontend (`omnifs frontend enable fuse --runtime docker`): a separate,
+/// The Docker-hosted FUSE filesystem (`omnifs fs attach --name itest-docker`): a separate,
 /// credential-free container attached to a host-native daemon's
 /// shared namespace over TCP, running kernel FUSE inside the container. This
-/// frontend ships its own minimal `debian:trixie-slim` image (`Dockerfile`'s
-/// `frontend-base`) chosen specifically because Debian's default
+/// filesystem ships its own minimal `debian:trixie-slim` image (`Dockerfile`'s
+/// `filesystem-base`) chosen specifically because Debian's default
 /// coreutils/findutils are GNU, so both `tar` and `tail -f` pass here.
 /// `grep -r` passes here too (see [`GREP_R_PAGINATION_CONTROLS`]).
-pub const FUSE_DOCKER_FRONTEND: Column = Column {
+pub const FUSE_DOCKER_FILESYSTEM: Column = Column {
     id: "fuse-docker",
     platform: "linux",
     expectations: &[GREP_R_PAGINATION_CONTROLS],
 };
 
-/// The libkrun guest FUSE frontend (`omnifs frontend enable fuse
-/// --runtime libkrun`), a libkrun microVM on Apple Silicon macOS, reached over
-/// ssh-over-vsock via the real `omnifs frontend shell fuse --runtime libkrun
-/// -- <cmd>` CLI path
-/// (`crates/omnifs-itest/tests/frontend_libkrun`). LOCAL-ONLY: GitHub-hosted
+/// The libkrun guest FUSE filesystem (`omnifs fs attach --name itest-libkrun`),
+/// a libkrun microVM on Apple Silicon macOS, reached over ssh-over-vsock via
+/// the real `omnifs fs shell --name itest-libkrun --command <cmd>` CLI path
+/// (`crates/omnifs-itest/tests/filesystem_libkrun`). LOCAL-ONLY: GitHub-hosted
 /// macOS runners cannot nest virtualization, so this column never runs in CI
 /// (see `docs/contracts/60-build-validation.md`).
 ///
-/// Seeded from [`FUSE_DOCKER_FRONTEND`]'s expectations and confirmed against
+/// Seeded from [`FUSE_DOCKER_FILESYSTEM`]'s expectations and confirmed against
 /// a live run on this guest image: the guest's `dropbear`/ssh remote-exec
 /// path runs the row script as `sh -c '<script>'` (the guest's own `/bin/sh`,
 /// not bash), and its package set (`scripts/guest-image/mkosi/mkosi.conf`)
 /// has no `rsync`/`jq`/`xxd`/`python3`, all of which already degrade to
 /// `Outcome::ToolMissing` (never a mismatch) rather than a real failure.
-pub const FUSE_LIBKRUN_FRONTEND: Column = Column {
+pub const FUSE_LIBKRUN_FILESYSTEM: Column = Column {
     id: "fuse-libkrun",
     platform: "macos",
     expectations: &[GREP_R_PAGINATION_CONTROLS],

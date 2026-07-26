@@ -465,7 +465,7 @@ impl Output {
 
     /// The key column width one contiguous ledger block needs. Every flow that emits rows one at a time as async
     /// work settles (a spinner settling into its ledger row, a live region's
-    /// summary, `up`'s streamed `daemon`/`mounts`/`frontends` rows) computes
+    /// summary, `up`'s streamed `daemon`/`mounts`/`filesystems` rows) computes
     /// this once from its full possible key set before the first row prints,
     /// so the block still reads as one aligned unit. An associated function,
     /// not a method: the width depends only on the declared key set, never on
@@ -716,7 +716,7 @@ mod tests {
             .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
         let row = crate::ui::render::LedgerRow::new(
             crate::ui::style::Glyph::Done,
-            "frontend image",
+            "filesystem image",
             "ghcr.io/omnifs:latest ready",
         );
         output.ledger_row(&row, 9);

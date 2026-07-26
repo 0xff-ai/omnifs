@@ -1,4 +1,4 @@
-use omnifs_mtab::{RunnerLocationClaim, RunnerRecord, RunnerRecordFile};
+use omnifs_mtab::{RunnerClaim, RunnerRecord, RunnerRecordFile};
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -93,10 +93,10 @@ pub(crate) struct HostControl {
 
 impl HostControl {
     pub(crate) fn bind(state_dir: &Path, record: &RunnerRecord) -> anyhow::Result<Self> {
-        let claim = RunnerLocationClaim::acquire(state_dir)?;
+        let claim = RunnerClaim::acquire(state_dir)?;
         if RunnerRecord::read(state_dir)?.is_some() {
             anyhow::bail!(
-                "frontend state already exists at {}; run `omnifs doctor`",
+                "filesystem state already exists at {}; run `omnifs doctor`",
                 state_dir.display()
             );
         }
@@ -195,10 +195,10 @@ async fn handle_connection(
                 flushed: flushed_rx,
             })
             .await
-            .map_err(|_| anyhow::anyhow!("frontend stop owner exited"))?;
+            .map_err(|_| anyhow::anyhow!("filesystem stop owner exited"))?;
             let outcome = outcome_rx
                 .await
-                .map_err(|_| anyhow::anyhow!("frontend stop result was lost"))?;
+                .map_err(|_| anyhow::anyhow!("filesystem stop result was lost"))?;
             let current_phase = phase.borrow().clone();
             let result = write_reply(
                 &mut writer,
@@ -354,7 +354,7 @@ pub fn control_socket_for(state_dir: &Path, instance_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_core::FsType;
+    use omnifs_core::fs;
 
     #[tokio::test]
     async fn ping_and_stop_require_and_echo_the_exact_instance() {
@@ -380,8 +380,13 @@ mod tests {
             instance_id: instance.to_owned(),
             pid: 42,
             process_group: 42,
-            filesystem: FsType::Nfs,
-            mount_point: PathBuf::from("/mnt/omnifs"),
+            spec: fs::Spec::new(
+                fs::Id::new("main").unwrap(),
+                fs::Protocol::Nfs,
+                fs::Runtime::Host,
+                PathBuf::from("/mnt/omnifs"),
+            )
+            .unwrap(),
             control_socket: socket,
         };
         let client = RunnerControlClient::new(&record);

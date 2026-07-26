@@ -16,7 +16,7 @@ impl TreeNamespace {
     /// (mount, mount-relative path); the mount root resolves to a directory
     /// without a provider round trip, and any deeper path resolves its leaf via
     /// [`resolve_child`](Self::resolve_child) against the parent directory.
-    /// Doubles as path rehydration: a frontend persisted (mount,
+    /// Doubles as path rehydration: a filesystem persisted (mount,
     /// path) in its handle and calls resolve again to rebuild a `Node` after
     /// eviction, without re-walking from root.
     pub(crate) async fn resolve(&self, path: &Path, _ctx: &RequestCtx) -> Result<Node> {

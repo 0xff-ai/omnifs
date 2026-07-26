@@ -59,38 +59,41 @@ Per scenario:
 The suite must run on the same host as the mount so that per-op timing is not
 polluted by transport overhead. Concretely:
 
-- **Docker-hosted frontend** (`just dev`): the mount lives at `/omnifs` inside
-  the credential-free frontend container. Driving one `docker exec` per
+- **Docker-hosted filesystem** (`just dev`): the mount lives at `/omnifs` inside
+  the credential-free filesystem container. Driving one `docker exec` per
   operation would add hundreds of milliseconds of startup to every sample and
   swamp millisecond-scale filesystem ops. Run the suite inside that container.
-  The frontend image has no Bun, so compile `run.ts` to a standalone Linux
+  The filesystem image has no Bun, so compile `run.ts` to a standalone Linux
   binary on the host and copy it in.
 - **Host-native mount** (Linux FUSE or macOS NFSv4 loopback): the mount is a
   host path, so run `run.ts` directly with `bun`.
 
-### Docker-hosted frontend
+### Docker-hosted filesystem
 
 The concrete k8s fixture paths below are available on Linux. `scripts/dev.ts`
 skips the k8s mount on macOS because Docker Desktop cannot expose its Unix
 socket to the host-native daemon.
 
 ```bash
-# 1. Bring the daemon and frontend up without opening an interactive shell,
-#    then discover the workspace-scoped frontend container.
+# 1. Bring the daemon and named filesystems up without opening a shell,
+#    then discover the exact dev Docker filesystem container.
 just dev -y --detach
-FRONTEND=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
-test -n "$FRONTEND"
+FS_CONTAINER=$(docker ps \
+  --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" \
+  --filter label=ai.0xff.omnifs.fs=dev-docker \
+  --format '{{.Names}}')
+test -n "$FS_CONTAINER"
 
 # 2. Compile the suite for the container's arch (linux/arm64 on Apple silicon,
 #    linux/x64 on Intel) and copy the single self-contained binary in.
 bun build --compile --target=bun-linux-arm64 benchmarks/latency/run.ts \
   --outfile /tmp/latency-bench
-docker cp /tmp/latency-bench "${FRONTEND}:/tmp/latency-bench"
-docker exec "$FRONTEND" chmod +x /tmp/latency-bench
+docker cp /tmp/latency-bench "${FS_CONTAINER}:/tmp/latency-bench"
+docker exec "$FS_CONTAINER" chmod +x /tmp/latency-bench
 
 # 3. Run it against the mount, pinning the paths for a clean cold number
 #    (see Cold protocol). Pass the host git sha since there is no repo inside.
-docker exec "$FRONTEND" /tmp/latency-bench \
+docker exec "$FS_CONTAINER" /tmp/latency-bench \
   --target /omnifs \
   --subdir /omnifs/k8s/cluster/apiservices \
   --file /omnifs/k8s/cluster/apiservices/v1.apps/manifest.json \
@@ -100,8 +103,8 @@ docker exec "$FRONTEND" /tmp/latency-bench \
   --out /tmp/latency-$(date +%F).json
 
 # 4. Copy the report out and commit it under benchmarks/reports/.
-docker cp "${FRONTEND}:/tmp/latency-$(date +%F).json" benchmarks/reports/
-docker cp "${FRONTEND}:/tmp/latency-$(date +%F).md" benchmarks/reports/
+docker cp "${FS_CONTAINER}:/tmp/latency-$(date +%F).json" benchmarks/reports/
+docker cp "${FS_CONTAINER}:/tmp/latency-$(date +%F).md" benchmarks/reports/
 ```
 
 Pin `--subdir` at a **local fixture** provider (the dev `k8s` mount is a local
@@ -112,8 +115,10 @@ there, cold reflects the upstream fetch and warm reflects the host cache.
 ### Host-native mount
 
 ```bash
+# Copy the attached host location from `target/debug/omnifs fs ls`.
+MOUNT=/absolute/path
 bun benchmarks/latency/run.ts \
-  --target "$HOME/omnifs" \
+  --target "$MOUNT" \
   --iterations 50 --concurrency 1,4,8 \
   --out benchmarks/reports/latency-$(date +%F).json
 ```
@@ -123,11 +128,11 @@ bun benchmarks/latency/run.ts \
 `cold_first_ms` is only a true first touch if nothing read the path before the
 timed spawn. Two things guarantee that:
 
-1. **Restart the host-native daemon and let the existing frontend runner
-   reconnect so caches are fresh.** Use the same `OMNIFS_HOME` for `omnifs
-   down` and `omnifs up`; the runner remains alive across the daemon restart.
-   Use `omnifs frontend restart` only when the benchmark requires a fresh
-   runner as well. Wait for
+1. **Replace the host-native daemon and let the existing filesystem runner
+   reconnect so caches are fresh.** Run `target/debug/omnifs up` with the same
+   `OMNIFS_HOME`; `up` replaces only the daemon and leaves the runner alive.
+   Use `target/debug/omnifs fs restart --name <id>` only when the benchmark
+   requires a fresh filesystem runner as well. Wait for
    readiness with `omnifs status` rather than reading the mount. The on-disk
    cache under `OMNIFS_HOME` persists, so this gives *fresh-daemon cold*
    (in-memory/session state reset, first provider callout), not

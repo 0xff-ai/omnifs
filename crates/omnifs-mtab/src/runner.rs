@@ -1,5 +1,5 @@
 use fs2::FileExt as _;
-use omnifs_core::FsType;
+use omnifs_core::fs;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
@@ -16,7 +16,7 @@ pub enum RunnerRecordError {
     Json(#[from] serde_json::Error),
     #[error("unsupported runner record version {0}")]
     UnsupportedVersion(u64),
-    #[error("frontend location is already owned")]
+    #[error("filesystem location is already owned")]
     LocationOwned,
     #[error("runner record already exists at {0}")]
     RecordExists(PathBuf),
@@ -33,8 +33,7 @@ pub struct RunnerRecord {
     pub instance_id: String,
     pub pid: u32,
     pub process_group: u32,
-    pub filesystem: FsType,
-    pub mount_point: PathBuf,
+    pub spec: fs::Spec,
     pub control_socket: PathBuf,
 }
 
@@ -43,8 +42,7 @@ impl RunnerRecord {
 
     pub fn new(
         instance_id: String,
-        filesystem: FsType,
-        mount_point: PathBuf,
+        spec: fs::Spec,
         control_socket: PathBuf,
     ) -> Result<Self, RunnerRecordError> {
         let pid = std::process::id();
@@ -54,8 +52,7 @@ impl RunnerRecord {
             instance_id,
             pid,
             process_group,
-            filesystem,
-            mount_point,
+            spec,
             control_socket,
         };
         record.validate()?;
@@ -101,12 +98,12 @@ impl RunnerRecord {
     }
 }
 
-pub struct RunnerLocationClaim {
+pub struct RunnerClaim {
     state_dir: PathBuf,
     _file: File,
 }
 
-impl RunnerLocationClaim {
+impl RunnerClaim {
     pub fn acquire(state_dir: &Path) -> Result<Self, RunnerRecordError> {
         ensure_private_dir(state_dir)?;
         let path = state_dir.join(RUNNER_LOCK);
@@ -165,7 +162,7 @@ impl RunnerLocationClaim {
 pub struct RunnerRecordFile {
     path: PathBuf,
     instance_id: String,
-    _claim: RunnerLocationClaim,
+    _claim: RunnerClaim,
 }
 
 impl Drop for RunnerRecordFile {
@@ -226,14 +223,19 @@ fn process_group_id() -> io::Result<u32> {
 mod tests {
     use super::*;
 
-    fn record(instance: &str, mount: &str) -> RunnerRecord {
+    fn record(instance: &str, id: &str, mount: &str) -> RunnerRecord {
         RunnerRecord {
             version: RunnerRecord::VERSION,
             instance_id: instance.to_owned(),
             pid: 42,
             process_group: 42,
-            filesystem: FsType::Nfs,
-            mount_point: PathBuf::from(mount),
+            spec: fs::Spec::new(
+                fs::Id::new(id).unwrap(),
+                fs::Protocol::Nfs,
+                fs::Runtime::Host,
+                PathBuf::from(mount),
+            )
+            .unwrap(),
             control_socket: PathBuf::from("/tmp/control.sock"),
         }
     }
@@ -241,24 +243,29 @@ mod tests {
     #[test]
     fn location_claim_is_exclusive_and_record_drop_is_instance_guarded() {
         let temp = tempfile::tempdir().unwrap();
-        let claim = RunnerLocationClaim::acquire(temp.path()).unwrap();
+        let claim = RunnerClaim::acquire(temp.path()).unwrap();
         assert!(matches!(
-            RunnerLocationClaim::acquire(temp.path()),
+            RunnerClaim::acquire(temp.path()),
             Err(RunnerRecordError::LocationOwned)
         ));
         let guard = claim
-            .publish(&record("00112233445566778899aabbccddeeff", "/mnt/a"))
+            .publish(&record(
+                "00112233445566778899aabbccddeeff",
+                "main",
+                "/mnt/a",
+            ))
             .unwrap();
         assert_eq!(
             RunnerRecord::read(temp.path())
                 .unwrap()
                 .unwrap()
-                .mount_point,
+                .spec
+                .location(),
             Path::new("/mnt/a")
         );
         drop(guard);
         assert!(RunnerRecord::read(temp.path()).unwrap().is_none());
-        RunnerLocationClaim::acquire(temp.path()).unwrap();
+        RunnerClaim::acquire(temp.path()).unwrap();
     }
 
     #[test]
@@ -266,12 +273,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join(RUNNER_RECORD),
-            r#"{"version":1,"instance_id":"bad","pid":1,"process_group":1,"filesystem":"nfs","mount_point":"/mnt","control_socket":"/tmp/c","extra":true}"#,
+            r#"{"version":1,"instance_id":"bad","pid":1,"process_group":1,"spec":{"id":"main","protocol":"nfs","runtime":"host","location":"/mnt"},"control_socket":"/tmp/c","extra":true}"#,
         )
         .unwrap();
         assert!(RunnerRecord::read(temp.path()).is_err());
         assert!(matches!(
-            record("bad", "/mnt").validate(),
+            record("bad", "main", "/mnt").validate(),
             Err(RunnerRecordError::InvalidInstance)
         ));
     }

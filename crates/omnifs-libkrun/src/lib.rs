@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use omnifs_core::fs;
 use serde::{Deserialize, Serialize};
 
 pub use launch::run;
@@ -38,7 +39,7 @@ const READINESS_PORT: u32 = 1025;
 const SSH_PORT: u32 = 22;
 const VCPUS: u8 = 2;
 const MEMORY_MIB: u32 = 2048;
-const HELPER_RECORD_VERSION: u8 = 1;
+const HELPER_RECORD_VERSION: u8 = 3;
 const CONTROL_MAX_LINE_BYTES: u64 = 128;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -47,14 +48,16 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 pub struct HelperRecord {
     pub version: u8,
     pub pid: u32,
+    pub spec: fs::Spec,
     pub instance_id: String,
 }
 
 impl HelperRecord {
-    pub fn new(pid: u32, instance_id: impl Into<String>) -> Result<Self, Error> {
+    pub fn new(pid: u32, spec: fs::Spec, instance_id: impl Into<String>) -> Result<Self, Error> {
         let record = Self {
             version: HELPER_RECORD_VERSION,
             pid,
+            spec,
             instance_id: instance_id.into(),
         };
         record.validate()?;
@@ -241,6 +244,7 @@ pub struct Config {
     ssh_port: u32,
     vcpus: u8,
     memory_mib: u32,
+    spec: fs::Spec,
     instance_id: String,
 }
 
@@ -248,6 +252,7 @@ impl Config {
     pub fn omnifs(
         state_dir: impl AsRef<Path>,
         attach_socket: impl AsRef<Path>,
+        spec: fs::Spec,
         instance_id: impl Into<String>,
         installation: &Installation,
     ) -> Result<Self, Error> {
@@ -271,6 +276,7 @@ impl Config {
             ssh_port: SSH_PORT,
             vcpus: VCPUS,
             memory_mib: MEMORY_MIB,
+            spec,
             instance_id: instance_id.into(),
         };
         config.validate()?;
@@ -290,25 +296,55 @@ impl Config {
             state_dir,
             attach_flag,
             attach_socket,
+            name_flag,
+            filesystem_id,
+            protocol_flag,
+            protocol,
+            runtime_flag,
+            runtime,
+            location_flag,
+            location,
             instance_flag,
             instance_id,
         ] = arguments.as_slice()
         else {
             return Err(Error::Arguments(
-                "expected `--state-dir PATH --attach-socket PATH --instance-id ID`".to_owned(),
+                "expected `--state-dir PATH --attach-socket PATH --name ID --protocol PROTOCOL \
+                 --runtime RUNTIME --location PATH --instance-id ID`"
+                    .to_owned(),
             ));
         };
         if state_flag != "--state-dir"
             || attach_flag != "--attach-socket"
+            || name_flag != "--name"
+            || protocol_flag != "--protocol"
+            || runtime_flag != "--runtime"
+            || location_flag != "--location"
             || instance_flag != "--instance-id"
         {
             return Err(Error::Arguments(
-                "expected `--state-dir PATH --attach-socket PATH --instance-id ID`".to_owned(),
+                "expected `--state-dir PATH --attach-socket PATH --name ID --protocol PROTOCOL \
+                 --runtime RUNTIME --location PATH --instance-id ID`"
+                    .to_owned(),
             ));
         }
         Self::omnifs(
             PathBuf::from(state_dir),
             PathBuf::from(attach_socket),
+            fs::Spec::new(
+                filesystem_id
+                    .to_string_lossy()
+                    .parse()
+                    .map_err(|error| Error::Arguments(format!("invalid filesystem id: {error}")))?,
+                protocol.to_string_lossy().parse().map_err(|error| {
+                    Error::Arguments(format!("invalid filesystem protocol: {error}"))
+                })?,
+                runtime.to_string_lossy().parse().map_err(|error| {
+                    Error::Arguments(format!("invalid filesystem runtime: {error}"))
+                })?,
+                PathBuf::from(location),
+            )
+            .map_err(|error| Error::Arguments(format!("invalid filesystem spec: {error}")))?,
             instance_id.to_string_lossy(),
             &Installation::current()?,
         )
@@ -318,13 +354,17 @@ impl Config {
         &self.diagnostic_log
     }
 
-    fn arguments(&self) -> [(&'static str, OsString); 3] {
+    fn arguments(&self) -> [(&'static str, OsString); 7] {
         [
             ("--state-dir", self.state_dir.clone().into_os_string()),
             (
                 "--attach-socket",
                 self.attach_socket.clone().into_os_string(),
             ),
+            ("--name", OsString::from(self.spec.id().as_str())),
+            ("--protocol", OsString::from(self.spec.protocol().as_str())),
+            ("--runtime", OsString::from(self.spec.runtime().as_str())),
+            ("--location", self.spec.location().as_os_str().to_owned()),
             ("--instance-id", OsString::from(&self.instance_id)),
         ]
     }
@@ -359,6 +399,15 @@ impl Config {
                 "vsock ports must be attach={ATTACH_PORT}, readiness={READINESS_PORT}, ssh={SSH_PORT}"
             )));
         }
+        if self.spec.protocol() != fs::Protocol::Fuse
+            || self.spec.runtime() != fs::Runtime::Libkrun
+            || self.spec.location() != Path::new(fs::GUEST_LOCATION)
+        {
+            return Err(Error::Config(format!(
+                "libkrun requires a fuse/libkrun filesystem at {}",
+                fs::GUEST_LOCATION
+            )));
+        }
         if (self.vcpus, self.memory_mib) != (VCPUS, MEMORY_MIB) {
             return Err(Error::Config(format!(
                 "resources must be {VCPUS} vCPUs and {MEMORY_MIB} MiB"
@@ -391,17 +440,40 @@ impl ControlSocket {
         Self { path }
     }
 
-    pub fn ping(&self, expected_instance_id: &str) -> Result<HelperRecord, Error> {
+    pub fn ping(
+        &self,
+        expected_spec: &fs::Spec,
+        expected_instance_id: &str,
+    ) -> Result<HelperRecord, Error> {
         validate_instance_id(expected_instance_id)?;
-        let reply = self.request(&format!("ping {expected_instance_id}\n"))?;
+        let reply = self.request(&format!(
+            "ping {} {expected_instance_id}\n",
+            expected_spec.id()
+        ))?;
         let mut fields = reply.trim_end().split(' ');
         let record = match (fields.next(), fields.next(), fields.next(), fields.next()) {
-            (Some("pong"), Some(pid), Some(instance_id), None) => HelperRecord::new(
-                pid.parse().map_err(|_| {
-                    Error::Control("control Ping returned an invalid pid".to_owned())
-                })?,
-                instance_id,
-            )?,
+            (Some("pong"), Some(pid), Some(filesystem_id), Some(instance_id))
+                if fields.next().is_none() =>
+            {
+                let filesystem_id: fs::Id = filesystem_id.parse().map_err(|error| {
+                    Error::Control(format!(
+                        "control Ping returned an invalid filesystem id: {error}"
+                    ))
+                })?;
+                if &filesystem_id != expected_spec.id() {
+                    return Err(Error::Control(format!(
+                        "control Ping identity mismatch at {}",
+                        self.path.display()
+                    )));
+                }
+                HelperRecord::new(
+                    pid.parse().map_err(|_| {
+                        Error::Control("control Ping returned an invalid pid".to_owned())
+                    })?,
+                    expected_spec.clone(),
+                    instance_id,
+                )?
+            },
             _ => {
                 return Err(Error::Control(format!(
                     "unexpected Ping reply from {}",
@@ -409,7 +481,7 @@ impl ControlSocket {
                 )));
             },
         };
-        if record.instance_id != expected_instance_id {
+        if record.spec != *expected_spec || record.instance_id != expected_instance_id {
             return Err(Error::Control(format!(
                 "control Ping identity mismatch at {}",
                 self.path.display()
@@ -420,8 +492,17 @@ impl ControlSocket {
 
     pub fn request_shutdown(&self, expected: &HelperRecord) -> Result<(), Error> {
         expected.validate()?;
-        let reply = self.request(&format!("shutdown {}\n", expected.instance_id))?;
-        let expected_reply = format!("ok {} {}\n", expected.pid, expected.instance_id);
+        let reply = self.request(&format!(
+            "shutdown {} {}\n",
+            expected.spec.id(),
+            expected.instance_id
+        ))?;
+        let expected_reply = format!(
+            "ok {} {} {}\n",
+            expected.pid,
+            expected.spec.id(),
+            expected.instance_id
+        );
         if reply != expected_reply {
             return Err(Error::Control(format!(
                 "unexpected shutdown reply from {}",
@@ -467,11 +548,22 @@ impl ControlSocket {
 mod tests {
     use super::*;
 
+    fn spec() -> fs::Spec {
+        fs::Spec::new(
+            "demo".parse().unwrap(),
+            fs::Protocol::Fuse,
+            fs::Runtime::Libkrun,
+            fs::GUEST_LOCATION.into(),
+        )
+        .unwrap()
+    }
+
     fn fixture() -> (Installation, Config) {
         let install = Installation::for_executable("/opt/omnifs/omnifs").unwrap();
         let config = Config::omnifs(
             "/tmp/omnifs/libkrun",
             "/tmp/omnifs/attach.sock",
+            spec(),
             "0123456789abcdef0123456789abcdef",
             &install,
         )
@@ -505,6 +597,7 @@ mod tests {
         assert_eq!(parsed.state_dir, config.state_dir);
         assert_eq!(parsed.attach_socket, config.attach_socket);
         assert_eq!(parsed.root_disk, config.root_disk);
+        assert_eq!(parsed.spec, config.spec);
         assert_eq!(parsed.attach_port, ATTACH_PORT);
         assert_eq!(parsed.vcpus, VCPUS);
     }
@@ -519,11 +612,7 @@ mod tests {
             .collect::<Vec<_>>();
         arguments.extend(["--resources".into(), "4:4096".into()]);
         let error = Config::parse(arguments).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("expected `--state-dir PATH --attach-socket PATH --instance-id ID`")
-        );
+        assert!(error.to_string().contains("expected `--state-dir PATH"));
     }
 
     #[test]
@@ -532,17 +621,17 @@ mod tests {
         let path = dir.path().join(PID_FILE_NAME);
         std::fs::write(
             &path,
-            r#"{"version":1,"pid":42,"instance_id":"0123456789abcdef0123456789abcdef"}"#,
+            r#"{"version":3,"pid":42,"spec":{"id":"demo","protocol":"fuse","runtime":"libkrun","location":"/omnifs"},"instance_id":"0123456789abcdef0123456789abcdef"}"#,
         )
         .unwrap();
         assert_eq!(HelperRecord::read(&path).unwrap().unwrap().pid, 42);
 
         std::fs::write(
             &path,
-            r#"{"version":1,"pid":42,"instance_id":"0123456789abcdef0123456789abcdef","extra":true}"#,
+            r#"{"version":3,"pid":42,"spec":{"id":"demo","protocol":"fuse","runtime":"libkrun","location":"/omnifs"},"instance_id":"0123456789abcdef0123456789abcdef","extra":true}"#,
         )
         .unwrap();
         assert!(HelperRecord::read(&path).is_err());
-        assert!(HelperRecord::new(42, "short").is_err());
+        assert!(HelperRecord::new(42, spec(), "short").is_err());
     }
 }

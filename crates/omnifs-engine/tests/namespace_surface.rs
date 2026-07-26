@@ -5,7 +5,7 @@
 //! Reuses the omnifs-itest provider-loading harness (`RuntimeHarness` via
 //! `make_runtime`), keeps an `Arc<Engine>` clone so the test can fire provider
 //! effects directly, and builds a single-mount `TreeNamespace` over the same
-//! engine. This proves the narrow frontend-facing surface (opaque node ids,
+//! engine. This proves the narrow filesystem-facing surface (opaque node ids,
 //! policied attrs, ranged-handle reuse, paging, and the invalidation event
 //! stream) consumed by both kernel adapters.
 //!

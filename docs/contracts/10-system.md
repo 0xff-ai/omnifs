@@ -11,7 +11,7 @@ Read this before touching host/provider trust, callout authority, capabilities, 
 
 ### Trust boundary
 
-The host owns trust. Providers are untrusted WASM components. Frontends expose one trusted host tree to the OS. Upstreams are external systems whose bytes and metadata must be treated as provider input.
+The host owns trust. Providers are untrusted WASM components. Filesystems expose one trusted host tree to the OS. Upstreams are external systems whose bytes and metadata must be treated as provider input.
 
 Keep credential storage, credential injection, callout execution, cache storage, namespace state, and I/O in the host. Keep provider meaning in the provider: path meaning, object identity, canonical assembly, render, versioning, preload, and revalidation.
 
@@ -24,7 +24,7 @@ excluded from those identities.
 
 The host operates on paths, bytes, content types, file attributes, cache metadata, capability outcomes, and effects. Object meaning stays provider-side.
 
-Lower provider output into neutral host/tree types before frontend adaptation. Keep canonical bytes opaque to the host. Do not decode canonical object payloads host-side to make projection decisions.
+Lower provider output into neutral host/tree types before filesystem adaptation. Keep canonical bytes opaque to the host. Do not decode canonical object payloads host-side to make projection decisions.
 
 ### Provider authority gates
 
@@ -46,11 +46,11 @@ OAuth client ids in provider declarations are public application identifiers, no
 
 Credential values must never appear in CLI output, errors, tracing, metrics, or structured envelopes. Source identifiers such as environment-variable names may appear when they make an error actionable.
 
-### Frontend attach authority
+### Filesystem attach authority
 
-The Docker-hosted frontend receives no credentials or host filesystem mounts. Its only host authority is the Omnifs VFS wire protocol over a local TCP attach. Docker Desktop reaches a loopback listener through its host forwarder; native Linux reaches a listener bound specifically to the address assigned to the default `docker0` bridge. The daemon validates that interface assignment rather than trusting a caller-supplied address. Do not bind the attach listener on every host interface or give the frontend host networking merely to cross the container boundary.
+The Docker-hosted filesystem receives no credentials or host filesystem mounts. Its only host authority is the Omnifs VFS wire protocol over a local TCP attach. Docker Desktop reaches a loopback listener through its host forwarder; native Linux reaches a listener bound specifically to the address assigned to the default `docker0` bridge. The daemon validates that interface assignment rather than trusting a caller-supplied address. Do not bind the attach listener on every host interface or give the filesystem host networking merely to cross the container boundary.
 
-The libkrun frontend guest also receives no credentials or network device. Its only host authority is the three fixed vsock paths for attach, readiness, and keyed ssh. The trusted, signed `omnifs-libkrun` helper owns Hypervisor.framework and libkrun calls; the guest and provider WASM never gain that host authority.
+The libkrun filesystem guest also receives no credentials or network device. Its only host authority is the three fixed vsock paths for attach, readiness, and keyed ssh. The trusted, signed `omnifs-libkrun` helper owns Hypervisor.framework and libkrun calls; the guest and provider WASM never gain that host authority.
 
 ## Must not
 

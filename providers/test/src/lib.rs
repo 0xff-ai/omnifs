@@ -406,7 +406,7 @@ impl TestProvider {
         // to prove independent ops interleave on one instance.
         r.file("/hello/remote-a").handler(remote)?;
         r.file("/hello/remote-b").handler(remote)?;
-        // A read parked on a slow upstream: the frontend concurrency net holds
+        // A read parked on a slow upstream: the filesystem concurrency net holds
         // the callout answer for `{ms}` to prove one slow op cannot block the
         // mount.
         r.file("/slow/{ms}").ranged().handler(slow)?;
@@ -531,11 +531,11 @@ async fn remote(cx: Cx<State>) -> Result<FileProjection> {
 ///
 /// The file is ranged so the slowness lands on the read op itself: opening it
 /// is cheap, and the first chunk read suspends on an HTTP callout that the
-/// frontend concurrency tests hold open for the requested delay, with the
+/// filesystem concurrency tests hold open for the requested delay, with the
 /// host's callout-capture harness playing the slow upstream. Keeping the open
 /// fast matters on macOS NFS, whose client serializes OPENs mount-wide, so a
 /// file that is slow to open would measure client protocol behavior instead of
-/// frontend dispatch. Against a real network the URL is httpbin's delay
+/// filesystem dispatch. Against a real network the URL is httpbin's delay
 /// endpoint, whose 10-second ceiling matches the cap (it takes whole seconds,
 /// so the requested delay rounds up).
 async fn slow(_cx: Cx<State>, captures: SlowCaptures) -> Result<FileProjection> {

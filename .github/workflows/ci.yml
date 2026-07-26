@@ -15,7 +15,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  FRONTEND_IMAGE_NAME: ${{ github.repository }}-frontend
+  FILESYSTEM_IMAGE_NAME: ${{ github.repository }}-filesystem
   GUEST_IMAGE_NAME: ${{ github.repository }}-guest
   CI_MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
@@ -312,7 +312,7 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  # Runs the frontend conformance matrix against a live kernel-FUSE mount served
+  # Runs the filesystem conformance matrix against a live kernel-FUSE mount served
   # by the packaged Linux CLI, and uploads the per-column scorecard. Gated like
   # cli-linux-x64 (whose binary it consumes); a skipped dependency skips this.
   conformance-fuse:
@@ -347,7 +347,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           # fuse3 for the FUSE lane; nfs-common provides mount.nfs4 for the
-          # Linux NFS loopback mount the dual-frontend lane exercises.
+          # Linux NFS loopback mount the dual-filesystem lane exercises.
           sudo apt-get install -y --no-install-recommends fuse3 nfs-common
 
       - name: Prepare WASM sidecar directory
@@ -373,14 +373,14 @@ jobs:
           test -x dist-cli/bin/omnifs
           test -x dist-cli/bin/omnifs-thin
 
-      - name: Run frontend conformance matrix and control-plane acceptance
+      - name: Run filesystem conformance matrix and control-plane acceptance
         run: |
           set -euo pipefail
           OMNIFS_ACCEPTANCE_LIVE=1 \
           OMNIFS_BIN="$(pwd)/dist-cli/bin/omnifs" \
           OMNIFS_THIN_BIN="$(pwd)/dist-cli/bin/omnifs-thin" \
           cargo nextest run -p omnifs-itest \
-            -E 'binary(frontend_matrix) + binary(control_plane) + binary(multi_frontend) + binary(wire_reattach)' --no-capture
+            -E 'binary(filesystem_matrix) + binary(control_plane) + binary(multi_filesystem) + binary(wire_reattach)' --no-capture
 
       - name: Upload conformance scorecards
         if: always()
@@ -620,7 +620,7 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  # Builds the standalone `omnifs-thin` binary the frontend images run: it
+  # Builds the standalone `omnifs-thin` binary the filesystem images run: it
   # needs no provider WASM (no `components` dependency, unlike `cli-linux-*`)
   # since it contains no engine runtime and no Wasmtime.
   thin-linux-x64:
@@ -792,11 +792,11 @@ jobs:
         run: |
           echo "::warning::skipping ghcr push for the guest image: this PR is from a fork and has no registry write access"
 
-  # Builds the omnifs-frontend image (the Docker-hosted FUSE frontend, `omnifs
-  # frontend up`): the Dockerfile's `frontend-release` target. See
+  # Builds the omnifs-filesystem image (the Docker-hosted FUSE filesystem, `omnifs
+  # filesystem up`): the Dockerfile's `filesystem-release` target. See
   # docs/contracts/60-build-validation.md.
-  frontend-amd64:
-    name: frontend amd64
+  filesystem-amd64:
+    name: filesystem amd64
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
@@ -821,14 +821,14 @@ jobs:
       - name: Mark omnifs-thin binary executable
         run: chmod 0755 dist-thin/omnifs-thin
 
-      - name: Build and push amd64 frontend image
+      - name: Build and push amd64 filesystem image
         id: docker
         env:
-          IMAGE: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}:docker-amd64-${{ github.sha }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.FILESYSTEM_IMAGE_NAME }}:docker-amd64-${{ github.sha }}
           PLATFORM: linux/amd64
           PUSH: "true"
           OMNIFS_BINARY: ${{ github.workspace }}/dist-thin/omnifs-thin
-        run: scripts/ci/build-frontend-image.sh
+        run: scripts/ci/build-filesystem-image.sh
 
       - name: Export amd64 image digest
         run: |
@@ -841,13 +841,13 @@ jobs:
       - name: Upload amd64 image digest
         uses: actions/upload-artifact@v7
         with:
-          name: frontend-digest-amd64
+          name: filesystem-digest-amd64
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
-  frontend-arm64:
-    name: frontend arm64
+  filesystem-arm64:
+    name: filesystem arm64
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
@@ -872,14 +872,14 @@ jobs:
       - name: Mark omnifs-thin binary executable
         run: chmod 0755 dist-thin/omnifs-thin
 
-      - name: Build and push arm64 frontend image
+      - name: Build and push arm64 filesystem image
         id: docker
         env:
-          IMAGE: ${{ env.REGISTRY }}/${{ env.FRONTEND_IMAGE_NAME }}:docker-arm64-${{ github.sha }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.FILESYSTEM_IMAGE_NAME }}:docker-arm64-${{ github.sha }}
           PLATFORM: linux/arm64
           PUSH: "true"
           OMNIFS_BINARY: ${{ github.workspace }}/dist-thin/omnifs-thin
-        run: scripts/ci/build-frontend-image.sh
+        run: scripts/ci/build-filesystem-image.sh
 
       - name: Export arm64 image digest
         run: |
@@ -892,13 +892,13 @@ jobs:
       - name: Upload arm64 image digest
         uses: actions/upload-artifact@v7
         with:
-          name: frontend-digest-arm64
+          name: filesystem-digest-arm64
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
   # Smokes the contributor dev flow's CI-relevant halves: a host-native daemon
-  # on this runner (kernel FUSE) plus the omnifs-frontend image `frontend-amd64`
+  # on this runner (kernel FUSE) plus the omnifs-filesystem image `filesystem-amd64`
   # built, attached over TCP. Needs the CLI on PATH (host-native, not
   # containerized) and fuse3 on the runner itself.
   smoke-amd64:
@@ -909,13 +909,13 @@ jobs:
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: *linux_runner
-    needs: [frontend-amd64, cli-linux-x64]
+    needs: [filesystem-amd64, cli-linux-x64]
     timeout-minutes: 30
     permissions:
       contents: read
       packages: read
     env:
-      FRONTEND_IMAGE: ghcr.io/${{ github.repository }}-frontend:smoke
+      FILESYSTEM_IMAGE: ghcr.io/${{ github.repository }}-filesystem:smoke
     steps:
       - uses: actions/checkout@v6
 
@@ -939,15 +939,15 @@ jobs:
         with:
           arch: x64
 
-      - uses: ./.github/actions/omnifs-load-frontend
+      - uses: ./.github/actions/omnifs-load-filesystem
         with:
           arch: amd64
-          image: ${{ env.FRONTEND_IMAGE }}
+          image: ${{ env.FILESYSTEM_IMAGE }}
 
-      - name: Run native+frontend smoke test
+      - name: Run native+filesystem smoke test
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/ci/smoke-native-frontend.sh
+        run: scripts/ci/smoke-native-filesystem.sh
 
   smoke-arm64:
     name: smoke arm64
@@ -957,13 +957,13 @@ jobs:
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: *arm_runner
-    needs: [frontend-arm64, cli-linux-arm64]
+    needs: [filesystem-arm64, cli-linux-arm64]
     timeout-minutes: 30
     permissions:
       contents: read
       packages: read
     env:
-      FRONTEND_IMAGE: ghcr.io/${{ github.repository }}-frontend:smoke
+      FILESYSTEM_IMAGE: ghcr.io/${{ github.repository }}-filesystem:smoke
     steps:
       - uses: actions/checkout@v6
 
@@ -987,86 +987,86 @@ jobs:
         with:
           arch: arm64
 
-      - uses: ./.github/actions/omnifs-load-frontend
+      - uses: ./.github/actions/omnifs-load-filesystem
         with:
           arch: arm64
-          image: ${{ env.FRONTEND_IMAGE }}
+          image: ${{ env.FILESYSTEM_IMAGE }}
 
-      - name: Run native+frontend smoke test
+      - name: Run native+filesystem smoke test
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: scripts/ci/smoke-native-frontend.sh
+        run: scripts/ci/smoke-native-filesystem.sh
 
-  # The frontend image needs no daemon, no dev home, and no provider store: it
-  # only ever runs `omnifs-thin fuse`, so its smoke test is the three
-  # structural checks in scripts/ci/smoke-frontend-image.sh, not the
+  # The filesystem image needs no daemon, no dev home, and no provider store: it
+  # only ever runs `omnifs-thin --protocol fuse`, so its smoke test is the three
+  # structural checks in scripts/ci/smoke-filesystem-image.sh, not the
   # scripts/dev.ts launch path smoke-amd64/arm64 use. The fuse-docker gate
   # separately exercises the live daemon, TCP attach, and FUSE mount path.
-  smoke-frontend-amd64:
-    name: smoke frontend amd64
+  smoke-filesystem-amd64:
+    name: smoke filesystem amd64
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: *linux_runner
-    needs: frontend-amd64
+    needs: filesystem-amd64
     timeout-minutes: 10
     permissions:
       contents: read
       packages: read
     env:
-      IMAGE: ghcr.io/${{ github.repository }}-frontend:smoke
+      IMAGE: ghcr.io/${{ github.repository }}-filesystem:smoke
     steps:
       - uses: actions/checkout@v6
 
       - uses: ./.github/actions/omnifs-docker
 
-      - uses: ./.github/actions/omnifs-load-frontend
+      - uses: ./.github/actions/omnifs-load-filesystem
         with:
           arch: amd64
           image: ${{ env.IMAGE }}
 
-      - name: Run frontend image smoke test
-        run: scripts/ci/smoke-frontend-image.sh
+      - name: Run filesystem image smoke test
+        run: scripts/ci/smoke-filesystem-image.sh
 
-  smoke-frontend-arm64:
-    name: smoke frontend arm64
+  smoke-filesystem-arm64:
+    name: smoke filesystem arm64
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: *arm_runner
-    needs: frontend-arm64
+    needs: filesystem-arm64
     timeout-minutes: 10
     permissions:
       contents: read
       packages: read
     env:
-      IMAGE: ghcr.io/${{ github.repository }}-frontend:smoke
+      IMAGE: ghcr.io/${{ github.repository }}-filesystem:smoke
     steps:
       - uses: actions/checkout@v6
 
       - uses: ./.github/actions/omnifs-docker
 
-      - uses: ./.github/actions/omnifs-load-frontend
+      - uses: ./.github/actions/omnifs-load-filesystem
         with:
           arch: arm64
           image: ${{ env.IMAGE }}
 
-      - name: Run frontend image smoke test
-        run: scripts/ci/smoke-frontend-image.sh
+      - name: Run filesystem image smoke test
+        run: scripts/ci/smoke-filesystem-image.sh
 
-  # Exercises the Docker-hosted FUSE frontend end to end against a real
-  # host-native daemon and the real amd64 frontend image. Mirrors
+  # Exercises the Docker-hosted FUSE filesystem end to end against a real
+  # host-native daemon and the real amd64 filesystem image. Mirrors
   # conformance-fuse's input-consumption shape (wasm sidecar, packaged Linux
-  # CLI) and additionally needs frontend-amd64's image digest. One job, no
-  # per-arch matrix: the frontend image build already covers arm64 separately
-  # in smoke-frontend-arm64, which does not need a live daemon.
+  # CLI) and additionally needs filesystem-amd64's image digest. One job, no
+  # per-arch matrix: the filesystem image build already covers arm64 separately
+  # in smoke-filesystem-arm64, which does not need a live daemon.
   fuse-docker:
     name: fuse docker
-    needs: [changes, components, cli-linux-x64, frontend-amd64]
+    needs: [changes, components, cli-linux-x64, filesystem-amd64]
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
@@ -1075,7 +1075,7 @@ jobs:
     runs-on: *linux_runner
     env:
       OMNIFS_ITEST_SKIP_PROVIDER_BUILD: "1"
-      OMNIFS_FRONTEND_IMAGE: "omnifs-frontend:ci"
+      OMNIFS_FILESYSTEM_IMAGE: "omnifs-filesystem:ci"
     steps:
       - uses: actions/checkout@v6
 
@@ -1121,10 +1121,10 @@ jobs:
           test -x dist-cli/bin/omnifs
           test -x dist-cli/bin/omnifs-thin
 
-      - uses: ./.github/actions/omnifs-load-frontend
+      - uses: ./.github/actions/omnifs-load-filesystem
         with:
           arch: amd64
-          image: ${{ env.OMNIFS_FRONTEND_IMAGE }}
+          image: ${{ env.OMNIFS_FILESYSTEM_IMAGE }}
 
       - name: Run the fuse-docker acceptance gate
         run: |
@@ -1132,7 +1132,7 @@ jobs:
           OMNIFS_ACCEPTANCE_LIVE=1 \
           OMNIFS_BIN="$(pwd)/dist-cli/bin/omnifs" \
           OMNIFS_THIN_BIN="$(pwd)/dist-cli/bin/omnifs-thin" \
-          cargo nextest run -p omnifs-itest -E 'binary(frontend_docker)' --no-capture
+          cargo nextest run -p omnifs-itest -E 'binary(filesystem_docker)' --no-capture
 
       - name: Upload fuse-docker scorecards
         if: always()
@@ -1155,12 +1155,12 @@ jobs:
       - cli-linux-arm64
       - cli-darwin
       - cli-darwin-arm64
-      - frontend-amd64
-      - frontend-arm64
+      - filesystem-amd64
+      - filesystem-arm64
       - smoke-amd64
       - smoke-arm64
-      - smoke-frontend-amd64
-      - smoke-frontend-arm64
+      - smoke-filesystem-amd64
+      - smoke-filesystem-arm64
     permissions:
       contents: read
       packages: write
@@ -1169,25 +1169,25 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - name: Download frontend image digests
+      - name: Download filesystem image digests
         uses: actions/download-artifact@v8
         with:
-          pattern: frontend-digest-*
-          path: /tmp/frontend-digests
+          pattern: filesystem-digest-*
+          path: /tmp/filesystem-digests
           merge-multiple: true
 
-      - name: Publish frontend multi-platform manifest
+      - name: Publish filesystem multi-platform manifest
         run: |
           set -euo pipefail
           scripts/ci/publish-manifest.sh \
-            "${REGISTRY}/${FRONTEND_IMAGE_NAME}" "sha-${GITHUB_SHA}" /tmp/frontend-digests frontend
+            "${REGISTRY}/${FILESYSTEM_IMAGE_NAME}" "sha-${GITHUB_SHA}" /tmp/filesystem-digests filesystem
 
-      - name: Upload frontend manifest digest
+      - name: Upload filesystem manifest digest
         uses: actions/upload-artifact@v7
         with:
-          name: frontend-manifest-digest
+          name: filesystem-manifest-digest
           path: |
-            frontend-manifest.txt
-            frontend-manifest-digest.txt
+            filesystem-manifest.txt
+            filesystem-manifest-digest.txt
           retention-days: 90
           if-no-files-found: error

@@ -1,6 +1,6 @@
 //! `omnifs setup`: the guided first-run walkthrough. A thin
 //! composition over `mount add`'s stages, `up`'s launch choreography, and
-//! `frontend enable`, narrated as three numbered steps rather than as a
+//! named filesystem creation and attachment, narrated as three numbered steps rather than as a
 //! sequence of separate command invocations.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,11 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use clap::Args;
 
-use omnifs_api::{FrontendRuntime, FsType};
-
-use crate::commands::frontend::{
-    FrontendEnableArgs, FrontendResult, FrontendResultState, available_frontends, default_runtime,
-};
+use crate::commands::fs::{available_filesystems, default_runtime};
 use crate::commands::mount::AddArgs;
 use crate::commands::up::UpArgs;
 use crate::error::ExitCode;
@@ -27,6 +23,7 @@ use crate::ui::live::LiveRegion;
 use crate::ui::output::Output;
 use crate::ui::render::{self, Capabilities};
 use crate::ui::style::{self, Glyph};
+use omnifs_core::fs;
 use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
@@ -34,7 +31,7 @@ pub struct SetupArgs {
     /// Configure these exact embedded provider names. Repeat or comma-separate.
     #[arg(long, value_name = "PROVIDER", value_delimiter = ',')]
     pub providers: Vec<String>,
-    /// Configure mounts without starting the daemon or enabling frontends.
+    /// Configure mounts without starting the daemon or attaching filesystems.
     #[arg(long)]
     pub no_up: bool,
     /// Print OAuth URLs instead of opening a browser.
@@ -95,16 +92,17 @@ impl SetupArgs {
         {
             output.narrate("");
             output.heading("3. Your files");
-            output.narrate("A frontend serves the tree to your OS. You can enable more than one.");
-            let frontends = select_frontends(&output, prompt)?;
+            output
+                .narrate("A filesystem serves the tree to your OS. You can attach more than one.");
+            let filesystems = select_filesystems(&output, prompt)?;
             output.narrate("");
 
             UpArgs::default()
                 .start_in_workspace(workspace, output.clone())
                 .await?;
 
-            if !frontends.is_empty() {
-                Self::enable_frontends(workspace, &output, &frontends).await?;
+            if !filesystems.is_empty() {
+                Self::attach_filesystems(workspace, &output, &filesystems).await?;
             }
         }
 
@@ -215,94 +213,76 @@ impl SetupArgs {
         }
     }
 
-    /// Enable every selected frontend, aggregating the outcome into one
-    /// `frontends` ledger row
+    /// Create and attach every selected filesystem, aggregating the outcome into one
+    /// `filesystems` ledger row
     /// instead of one row per runtime: the multi-select echo above already
-    /// named which frontends setup chose, so the outcome only needs a count.
-    /// Setup uses no reconnect-grace machinery because it runs these enables
-    /// itself, so this reuses
-    /// `FrontendEnableArgs::enable` directly rather than `Launcher`'s
-    /// reattachment wait.
+    /// named which filesystems setup chose, so the outcome only needs a count.
+    /// Setup creates deterministic names for missing specs, then uses the same
+    /// runtime launch and attachment checks as `omnifs fs attach`.
     ///
-    /// Each `enable` call narrates its own progress (a Docker image pull
+    /// Each attach call narrates its own progress (a Docker image pull
     /// spinner, container lifecycle lines) through `Output`, and left alone
     /// those rows would print into scrollback while the aggregate region
     /// above is still drawn, so every redraw of one fights the other's
-    /// cursor math. Instead, each `enable` gets an `Output` clone whose
+    /// cursor math. Instead, each attach gets an `Output` clone whose
     /// narration is redirected (`Output::with_narration_sink`) into this
-    /// region's one `frontends` line, combined with the running
+    /// region's one `filesystems` line, combined with the running
     /// `n/m attaching…` counter, so a slow image pull still reads as live
     /// text instead of vanishing into a suppressed row. The region is
     /// shared behind a `Mutex` because the sink closure and this loop both
-    /// need to drive it: the closure updates it live while `enable` runs,
+    /// need to drive it: the closure updates it live while attach runs,
     /// and the loop updates it between calls as each result lands.
-    async fn enable_frontends(
+    async fn attach_filesystems(
         workspace: &Workspace,
         output: &Output,
-        frontends: &[(FsType, FrontendRuntime)],
-    ) -> Result<Vec<FrontendResult>> {
-        let total = frontends.len();
-        let key_width = Output::ledger_block_width(&["frontends"]);
-        let region = Arc::new(Mutex::new(LiveRegion::new(output.clone(), ["frontends"])));
+        filesystems: &[(fs::Protocol, fs::Runtime)],
+    ) -> Result<()> {
+        let total = filesystems.len();
+        let key_width = Output::ledger_block_width(&["filesystems"]);
+        let region = Arc::new(Mutex::new(LiveRegion::new(output.clone(), ["filesystems"])));
         update_region(&region, format!("0/{total} attaching…"));
-        let mut results = Vec::with_capacity(total);
-        for (filesystem, runtime) in frontends {
-            let attached_so_far = results
-                .iter()
-                .filter(|result: &&FrontendResult| result.state == FrontendResultState::Attached)
-                .count();
+        let mut attached = 0;
+        for (protocol, runtime) in filesystems {
+            let attached_so_far = attached;
             let sink_region = Arc::clone(&region);
-            let enable_output = output.clone().with_narration_sink(move |line| {
+            let attach_output = output.clone().with_narration_sink(move |line| {
                 update_region(
                     &sink_region,
                     format!("{attached_so_far}/{total} attaching… {line}"),
                 );
             });
-            let result = FrontendEnableArgs {
-                filesystem: *filesystem,
-                runtime: Some(*runtime),
-                location: None,
-            }
-            .enable(workspace, enable_output)
+            crate::commands::fs::ensure_setup_filesystem(
+                workspace,
+                *protocol,
+                *runtime,
+                attach_output,
+            )
             .await?;
-            results.push(result);
-            let attached = results
-                .iter()
-                .filter(|result| result.state == FrontendResultState::Attached)
-                .count();
+            attached += 1;
             update_region(&region, format!("{attached}/{total} attaching…"));
         }
-        let attached = results
-            .iter()
-            .filter(|result| result.state == FrontendResultState::Attached)
-            .count();
         let glyph = if attached == total {
             Glyph::Done
         } else {
             Glyph::Warn
         };
-        // Every sink clone above is scoped to one loop iteration's `enable`
+        // Every sink clone above is scoped to one loop iteration's attach
         // call and is dropped when that call returns, so by the time the
         // loop exits this is the only remaining handle: safe to reclaim the
         // region out of the `Arc<Mutex<_>>` and call the consuming
         // `finish`.
         let region = Arc::try_unwrap(region)
             .ok()
-            .expect("no enable() call outlives its own loop iteration")
+            .expect("no attach call outlives its own loop iteration")
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner);
         region.finish(
             glyph,
-            "frontends",
+            "filesystems",
             format!("{attached}/{total} attached"),
             key_width,
         );
-        for result in &results {
-            if let Some(fix) = &result.fix {
-                output.narrate(fix);
-            }
-        }
-        Ok(results)
+        Ok(())
     }
 
     /// The closing block: the tree reveal, the access lines,
@@ -324,14 +304,14 @@ impl SetupArgs {
 }
 
 /// Update the shared aggregate region from either the loop in
-/// [`SetupArgs::enable_frontends`] or one of its per-enable narration sink
+/// [`SetupArgs::attach_filesystems`] or one of its per-attach narration sink
 /// closures. A tiny free function rather than inlining the lock at each call
 /// site, since both callers need the exact same poisoning behavior.
 fn update_region(region: &Arc<Mutex<LiveRegion>>, text: String) {
     region
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .update("frontends", text);
+        .update("filesystems", text);
 }
 
 /// Split `requested` provider names (the explicit `--providers` path) into
@@ -355,101 +335,99 @@ fn split_requested_providers(
     (new, skipped)
 }
 
-/// Which frontends setup enables: every
-/// frontend supported on this OS, pre-checked at the platform's recommended
-/// default (`FsType::default_runtime`). `--yes`, `--no-input`,
+/// Which filesystems setup enables: every
+/// filesystem supported on this OS, pre-checked at the platform's recommended
+/// default (`fs::default_runtime`). `--yes`, `--no-input`,
 /// and a non-interactive run all take that recommended default without
 /// prompting, mirroring `PromptMode::resolve`'s explicit/yes/no-input
 /// precedence even though a multi-select has no single "explicit" value to
 /// check. A free function (not a `SetupArgs` method): it needs only the
 /// invocation's output policy and prompt mode, never `SetupArgs` itself.
-fn select_frontends(output: &Output, prompt: PromptMode) -> Result<Vec<(FsType, FrontendRuntime)>> {
-    let available = available_frontends();
+fn select_filesystems(
+    output: &Output,
+    prompt: PromptMode,
+) -> Result<Vec<(fs::Protocol, fs::Runtime)>> {
+    let available = available_filesystems();
     if output.yes() || prompt.no_input || !prompt.interactive {
         return Ok(available
             .into_iter()
-            .filter(|&(filesystem, runtime)| default_runtime(filesystem) == Some(runtime))
+            .filter(|&(protocol, runtime)| default_runtime(protocol) == Some(runtime))
             .collect());
     }
-    let choices = available.into_iter().map(|(filesystem, runtime)| {
-        let checked = default_runtime(filesystem) == Some(runtime);
+    let choices = available.into_iter().map(|(protocol, runtime)| {
+        let checked = default_runtime(protocol) == Some(runtime);
         (
-            FrontendChoice {
-                filesystem,
-                runtime,
-            },
-            frontend_label(filesystem, runtime),
-            vec![frontend_detail(filesystem, runtime).to_owned()],
+            FilesystemChoice { protocol, runtime },
+            filesystem_label(protocol, runtime),
+            vec![filesystem_detail(protocol, runtime).to_owned()],
             checked,
         )
     });
-    let selected: Vec<FrontendChoice> = crate::ui::prompt::MultiSelect::new(
-        "Which frontends should serve your files?",
-        "frontends",
+    let selected: Vec<FilesystemChoice> = crate::ui::prompt::MultiSelect::new(
+        "Which filesystems should serve your files?",
+        "filesystems",
     )
     .detailed_options(choices)
     .ask_with_output(output)?;
     Ok(selected
         .into_iter()
-        .map(|choice| (choice.filesystem, choice.runtime))
+        .map(|choice| (choice.protocol, choice.runtime))
         .collect())
 }
 
-/// One frontend multi-select choice: a filesystem/runtime pair with a
+/// One filesystem multi-select choice: a filesystem/runtime pair with a
 /// `Display` impl (`MultiSelect<T>` requires one, the same way a plain
-/// string value would satisfy it), so `select_frontends` can hand the
+/// string value would satisfy it), so `select_filesystems` can hand the
 /// picker a real value type instead of a bare tuple.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FrontendChoice {
-    filesystem: FsType,
-    runtime: FrontendRuntime,
+struct FilesystemChoice {
+    protocol: fs::Protocol,
+    runtime: fs::Runtime,
 }
 
-impl std::fmt::Display for FrontendChoice {
+impl std::fmt::Display for FilesystemChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&frontend_label(self.filesystem, self.runtime))
+        f.write_str(&filesystem_label(self.protocol, self.runtime))
     }
 }
 
-/// The frontend multi-select's option label (`nfs (host)`).
-fn frontend_label(filesystem: FsType, runtime: FrontendRuntime) -> String {
-    format!("{filesystem} ({runtime})")
+/// The filesystem multi-select's option label (`nfs (host)`).
+fn filesystem_label(protocol: fs::Protocol, runtime: fs::Runtime) -> String {
+    format!("{protocol} ({runtime})")
 }
 
-/// The frontend multi-select's detail-panel education copy: one
+/// The filesystem multi-select's detail-panel education copy: one
 /// plain sentence naming what each filesystem/runtime combination actually
 /// is, since a first-run user has no other way to know the difference
-/// between, say, a libkrun and a Docker FUSE frontend.
-fn frontend_detail(filesystem: FsType, runtime: FrontendRuntime) -> &'static str {
-    match (filesystem, runtime) {
-        (FsType::Nfs, FrontendRuntime::Host) => "Native mount, nothing to install.",
-        (FsType::Fuse, FrontendRuntime::Host) => "Native FUSE mount, nothing to install.",
-        (FsType::Fuse, FrontendRuntime::Libkrun) => {
+/// between, say, a libkrun and a Docker FUSE filesystem.
+fn filesystem_detail(protocol: fs::Protocol, runtime: fs::Runtime) -> &'static str {
+    match (protocol, runtime) {
+        (fs::Protocol::Nfs, fs::Runtime::Host) => "Native mount, nothing to install.",
+        (fs::Protocol::Fuse, fs::Runtime::Host) => "Native FUSE mount, nothing to install.",
+        (fs::Protocol::Fuse, fs::Runtime::Libkrun) => {
             "FUSE in a lightweight microVM, closest to Linux behavior."
         },
-        (FsType::Fuse, FrontendRuntime::Docker) => {
+        (fs::Protocol::Fuse, fs::Runtime::Docker) => {
             "FUSE in a container, for containerized workflows."
         },
-        (FsType::Nfs, FrontendRuntime::Docker | FrontendRuntime::Libkrun) => {
+        (fs::Protocol::Nfs, fs::Runtime::Docker | fs::Runtime::Libkrun) => {
             "NFS is host-only; this combination is not offered."
         },
     }
 }
 
-/// The tree-reveal root label: the attached host frontend's
+/// The tree-reveal root label: the attached host filesystem's
 /// location when one exists, else the guest wire mount point (display-only,
 /// but still the right label when only a guest attach is live).
 fn tree_root_label(inventory: &Inventory) -> String {
-    crate::ui::access::primary_host_location(inventory).map_or_else(
-        || crate::commands::frontend::GUEST_MOUNT.to_owned(),
-        omnifs_workspace::display,
-    )
+    crate::ui::access::primary_host_location(inventory)
+        .map_or_else(|| fs::GUEST_LOCATION.to_owned(), omnifs_workspace::display)
 }
 
 /// One mount's tree-reveal annotation: the first few entry names at its
 /// root, comma-joined, from a cheap bounded listing. `None` on any read
 /// failure, an empty/dynamic root (a namespace like `dns/` that has nothing
-/// to enumerate at its own root), or without a host frontend to list
+/// to enumerate at its own root), or without a host filesystem to list
 /// through at all (a guest-only attach cannot be read from the host). Never
 /// an error: every failure mode just omits the annotation.
 fn mount_annotation(host_root: Option<&Path>, mount_name: &str) -> Option<String> {
@@ -557,7 +535,7 @@ fn format_elapsed(elapsed: Duration) -> String {
 mod tests {
     use super::*;
     use crate::inventory::{
-        AuthState, DaemonHealth, FrontendState, MountStatus, ProviderPin, ProviderPinState,
+        AuthState, DaemonHealth, FilesystemState, MountStatus, ProviderPin, ProviderPinState,
         ServingState,
     };
     use std::path::PathBuf;
@@ -583,7 +561,7 @@ mod tests {
         assert_eq!(skipped, vec!["dns".to_owned()]);
     }
 
-    // -- select_frontends: --yes/--no-input/non-interactive all default -----
+    // -- select_filesystems: --yes/--no-input/non-interactive all default -----
 
     fn prompt(interactive: bool, yes: bool, no_input: bool) -> PromptMode {
         PromptMode {
@@ -593,10 +571,10 @@ mod tests {
         }
     }
 
-    fn expected_default_frontends() -> Vec<(FsType, FrontendRuntime)> {
-        available_frontends()
+    fn expected_default_filesystems() -> Vec<(fs::Protocol, fs::Runtime)> {
+        available_filesystems()
             .into_iter()
-            .filter(|&(filesystem, runtime)| default_runtime(filesystem) == Some(runtime))
+            .filter(|&(protocol, runtime)| default_runtime(protocol) == Some(runtime))
             .collect()
     }
 
@@ -617,8 +595,8 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                select_frontends(&output, mode).unwrap(),
-                expected_default_frontends()
+                select_filesystems(&output, mode).unwrap(),
+                expected_default_filesystems()
             );
         }
     }
@@ -689,12 +667,16 @@ mod tests {
         }
     }
 
-    fn host_frontend() -> crate::inventory::FrontendStatus {
-        crate::inventory::FrontendStatus {
-            filesystem: FsType::Nfs,
-            runtime: FrontendRuntime::Host,
-            location: Some(PathBuf::from("/Users/raulk/omnifs")),
-            state: FrontendState::Attached,
+    fn host_fs() -> crate::inventory::FilesystemStatus {
+        crate::inventory::FilesystemStatus {
+            spec: fs::Spec::new(
+                "host".parse().unwrap(),
+                fs::Protocol::Nfs,
+                fs::Runtime::Host,
+                PathBuf::from("/Users/raulk/omnifs"),
+            )
+            .unwrap(),
+            state: FilesystemState::Attached,
             mount_count: 1,
             fix: None,
         }
@@ -704,7 +686,7 @@ mod tests {
     fn closing_block_orders_tree_then_access_lines_then_the_closing_sentence() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
-            vec![host_frontend()],
+            vec![host_fs()],
             vec![mount("github")],
         );
         let tree = vec!["~/omnifs".to_owned(), "└── github/".to_owned()];

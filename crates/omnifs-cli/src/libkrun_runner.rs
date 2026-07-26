@@ -1,14 +1,14 @@
-//! The libkrun frontend runner: a macOS microVM hosting the same
-//! `omnifs-thin fuse` runner and Omnifs VFS wire protocol used by the Docker
+//! The libkrun filesystem runner: a macOS microVM hosting the same
+//! `omnifs-thin --protocol fuse` runner and Omnifs VFS wire protocol used by the Docker
 //! container, attached to the host-native daemon's namespace over vsock
 //! instead of TCP.
 //!
-//! State lives under `<config_dir>/libkrun/`: a persistent per-workspace ed25519
-//! keypair (survives across launches, since it authenticates guest ssh access
+//! State lives under `filesystems/runtime/<id>/libkrun/`: a persistent
+//! per-filesystem ed25519 keypair (survives across launches and authenticates guest ssh access
 //! independent of any one VM instance) plus per-launch artifacts (a writable
 //! root disk, strict helper record, seed ISO, the helper-owned attach bridge, the readiness,
 //! SSH, and control sockets, and the serial log). Every path lives under the workspace config dir,
-//! never a system temp dir, so `omnifs down`/`frontend disable` can find and
+//! never a system temp dir, so `omnifs down`/`fs detach` can find and
 //! remove exactly what this runner owns. The resolved guest image is an
 //! immutable base artifact and is only the source for that launch-local root.
 //!
@@ -26,7 +26,7 @@
 //!   host-to-guest mode; omitting both keywords means guest-initiated):
 //!   libkrun itself creates and listens on the unix socket, relaying each
 //!   accepted connection into the guest's vsock-listening dropbear
-//!   (`ListenStream=vsock::22` in the guest image). `omnifs frontend shell` dials it
+//!   (`ListenStream=vsock::22` in the guest image). `omnifs fs shell` dials it
 //!   through `ssh -o ProxyCommand='socat - UNIX-CONNECT:<path>'`.
 //!
 //! No network or GPU configuration exists in the helper's typed launch shape.
@@ -42,6 +42,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
+use omnifs_core::fs;
 use omnifs_libkrun::{
     ATTACH_BRIDGE_SOCKET_NAME, CONTROL_SOCKET_NAME, ControlSocket, DIAGNOSTIC_LOG_NAME,
     HelperRecord, Installation, PID_FILE_NAME, READY_SOCKET_NAME, ROOT_DISK_NAME, SEED_DISK_NAME,
@@ -49,7 +50,6 @@ use omnifs_libkrun::{
 };
 use tokio::io::AsyncReadExt as _;
 
-use crate::commands::frontend::GUEST_MOUNT;
 use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
 #[cfg(test)]
 use crate::process::is_alive as process_alive;
@@ -74,12 +74,12 @@ const ENV_GUEST_IMAGE: &str = "OMNIFS_GUEST_IMAGE";
 /// The `just guest-image` recipe's default output path
 /// (`scripts/guest-image/build.sh`'s `OUT_DIR` default), resolved relative to
 /// the current working directory. A repo-root-relative default matches every
-/// other dev-only default in this crate (e.g. `omnifs-frontend:dev`) rather
+/// other dev-only default in this crate (e.g. `omnifs-filesystem:dev`) rather
 /// than trying to locate the repo from an installed binary.
 const DEFAULT_GUEST_IMAGE: &str = "target/guest-image/omnifs-guest.raw";
 /// Release channel default: the pinned ghcr OCI artifact tag the
 /// guest-image-arm64 CI job publishes and `release`'s `promote` job retags
-/// to this version (mirrors `FRONTEND_RELEASE_IMAGE`'s version pinning).
+/// to this version (mirrors `FILESYSTEM_RELEASE_IMAGE`'s version pinning).
 const GUEST_RELEASE_IMAGE: &str =
     concat!("ghcr.io/0xff-ai/omnifs-guest:", env!("CARGO_PKG_VERSION"));
 
@@ -89,8 +89,9 @@ const SEED_CONF_NAME: &str = "omnifs-seed.conf";
 /// The exact seed keys a launch ever writes. The lockdown audit
 /// ([`audit_seed_staging`]) asserts the staging dir carries exactly this set
 /// before it is burned into the ISO.
-const SEED_CONF_KEYS: [&str; 3] = [
+const SEED_CONF_KEYS: [&str; 4] = [
     "OMNIFS_ATTACH_ADDR",
+    "OMNIFS_FS_ID",
     "OMNIFS_READY_VSOCK_PORT",
     "OMNIFS_SSH_PUBKEY",
 ];
@@ -129,7 +130,7 @@ fn check_uds_path_length(path: &Path) -> Result<()> {
 
 /// The default guest image setting for each build channel: a local path for
 /// dev, the pinned ghcr tag for release. Mirrors
-/// `default_frontend_image_for`.
+/// `default_filesystem_image_for`.
 pub(crate) const fn default_guest_image_for(channel: BuildChannel) -> &'static str {
     match channel {
         BuildChannel::Release => GUEST_RELEASE_IMAGE,
@@ -137,7 +138,7 @@ pub(crate) const fn default_guest_image_for(channel: BuildChannel) -> &'static s
     }
 }
 
-/// `omnifs frontend shell`'s libkrun dispatch calls this before building the ssh
+/// `omnifs fs shell`'s libkrun dispatch calls this before building the ssh
 /// command: `shell_command` itself stays pure construction (no I/O), so the
 /// probe belongs at the one call site that is about to actually run it.
 pub(crate) fn ensure_socat_available() -> Result<()> {
@@ -155,18 +156,13 @@ pub(crate) fn ensure_socat_available() -> Result<()> {
     }
 }
 
-/// The libkrun microVM frontend runner. Durable workspace state and explicit
+/// The libkrun microVM filesystem runner. Durable workspace state and explicit
 /// teardown live here; one launch's resources live in [`LibkrunLaunchLease`].
 pub(crate) struct LibkrunRunner {
     dir: PathBuf,
 }
 
 impl LibkrunRunner {
-    pub(crate) fn probe() -> Result<()> {
-        Installation::current()?.probe()?;
-        Ok(())
-    }
-
     pub(crate) fn new(dir: PathBuf) -> Self {
         Self { dir }
     }
@@ -223,6 +219,24 @@ impl LibkrunRunner {
         self.dir().join(DIAGNOSTIC_LOG_NAME)
     }
 
+    pub(crate) fn has_operational_state(&self) -> bool {
+        [
+            self.pidfile(),
+            self.root_raw(),
+            self.seed_iso(),
+            self.ssh_socket(),
+            self.ready_socket(),
+            self.control_socket(),
+            self.attach_bridge_socket(),
+            self.serial_log(),
+            self.diagnostic_log(),
+            self.seed_staging(),
+        ]
+        .into_iter()
+        .any(|path| path.exists())
+            || !self.root_raw_parts().is_empty()
+    }
+
     fn root_raw_parts(&self) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(self.dir()) else {
             return Vec::new();
@@ -271,7 +285,7 @@ impl LibkrunRunner {
     /// staging dir against the exact expected key set, then hand it to
     /// `hdiutil makehybrid`. Array args throughout: nothing here is
     /// interpolated into a shell.
-    fn write_seed_iso(&self, ssh_pubkey: &str) -> Result<()> {
+    fn write_seed_iso(&self, spec: &fs::Spec, ssh_pubkey: &str) -> Result<()> {
         let staging = self.seed_staging();
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging)
@@ -280,8 +294,10 @@ impl LibkrunRunner {
         let conf_path = staging.join(SEED_CONF_NAME);
         let conf = format!(
             "OMNIFS_ATTACH_ADDR=vsock:{ATTACH_VSOCK_PORT}\n\
+             OMNIFS_FS_ID={}\n\
              OMNIFS_READY_VSOCK_PORT={READY_VSOCK_PORT}\n\
-             OMNIFS_SSH_PUBKEY={ssh_pubkey}\n"
+             OMNIFS_SSH_PUBKEY={ssh_pubkey}\n",
+            spec.id()
         );
         std::fs::write(&conf_path, conf)
             .with_context(|| format!("write {}", conf_path.display()))?;
@@ -394,7 +410,7 @@ async fn resolve_guest_image(
 ) -> Result<PathBuf> {
     let resolved = std::env::var(ENV_GUEST_IMAGE)
         .ok()
-        .or_else(|| config.frontend.guest_image.clone())
+        .or_else(|| config.filesystem.guest_image.clone())
         .unwrap_or_else(|| default_guest_image_for(BUILD_CHANNEL).to_string());
     let path = match BUILD_CHANNEL {
         BuildChannel::Dev => PathBuf::from(resolved),
@@ -430,11 +446,13 @@ struct LibkrunLaunchLease<'a> {
     child: Option<std::process::Child>,
     ready_listener: Option<tokio::net::UnixListener>,
     instance_id: Option<String>,
+    spec: Option<fs::Spec>,
     expected_record: Option<HelperRecord>,
     replaced: bool,
 }
 
 pub(crate) struct LibkrunLaunchRequest<'a> {
+    pub(crate) spec: &'a fs::Spec,
     pub(crate) daemon_attach_socket: &'a Path,
     pub(crate) config: &'a Config,
     pub(crate) guest_image_cache: &'a Path,
@@ -454,6 +472,7 @@ impl<'a> LibkrunLaunchLease<'a> {
             child: None,
             ready_listener: None,
             instance_id: None,
+            spec: None,
             expected_record: None,
             replaced: false,
         }
@@ -469,6 +488,7 @@ impl<'a> LibkrunLaunchLease<'a> {
             child: None,
             ready_listener: None,
             instance_id: None,
+            spec: None,
             expected_record: None,
             replaced: true,
         }
@@ -484,6 +504,7 @@ impl<'a> LibkrunLaunchLease<'a> {
         let guest_image =
             resolve_guest_image(request.config, request.guest_image_cache, request.output).await?;
         let mut lease = Self::new(runner, request.daemon_attach_socket, guest_image);
+        lease.spec = Some(request.spec.clone());
         lease.mount = request.mount.map(str::to_owned);
         lease.timeout = request.timeout;
         Ok(lease)
@@ -533,7 +554,12 @@ impl<'a> LibkrunLaunchLease<'a> {
 
         self.materialize_root_disk()?;
         let ssh_pubkey = self.runner.ensure_ssh_keypair()?;
-        self.runner.write_seed_iso(&ssh_pubkey)?;
+        let spec = self
+            .spec
+            .as_ref()
+            .context("libkrun launch has no filesystem identity")?
+            .clone();
+        self.runner.write_seed_iso(&spec, &ssh_pubkey)?;
         self.ready_listener = Some(self.bind_ready_listener()?);
         let _ = std::fs::remove_file(self.runner.ssh_socket());
         let _ = std::fs::remove_file(self.runner.control_socket());
@@ -542,6 +568,7 @@ impl<'a> LibkrunLaunchLease<'a> {
         let helper_config = omnifs_libkrun::Config::omnifs(
             dir,
             &self.daemon_attach_socket,
+            spec.clone(),
             &instance_id,
             &installation,
         )?;
@@ -589,6 +616,10 @@ impl<'a> LibkrunLaunchLease<'a> {
             child_pid == record.pid,
             "libkrun helper record named pid {}, but the spawned process is {child_pid}",
             record.pid
+        );
+        anyhow::ensure!(
+            record.spec == spec,
+            "libkrun helper record did not match the resolved filesystem spec"
         );
         anyhow::ensure!(
             self.instance_id.as_deref() == Some(record.instance_id.as_str()),
@@ -726,11 +757,11 @@ impl<'a> LibkrunLaunchLease<'a> {
             result.context("read the libkrun readiness beacon")
         } else {
             let path = mount.map_or_else(
-                || GUEST_MOUNT.to_owned(),
-                |name| format!("{GUEST_MOUNT}/{name}"),
+                || fs::GUEST_LOCATION.to_owned(),
+                |name| format!("{}/{name}", fs::GUEST_LOCATION),
             );
             anyhow::bail!(
-                "{path} did not appear inside the frontend within {}s",
+                "{path} did not appear inside the filesystem within {}s",
                 timeout.as_secs()
             )
         }
@@ -874,7 +905,7 @@ impl LibkrunRunner {
 impl LibkrunRunner {
     fn confirm_record(&self, expected: &HelperRecord) -> Result<()> {
         let actual = ControlSocket::new(self.control_socket())?
-            .ping(&expected.instance_id)
+            .ping(&expected.spec, &expected.instance_id)
             .context("prove libkrun helper identity")?;
         anyhow::ensure!(
             actual == *expected,
@@ -885,20 +916,15 @@ impl LibkrunRunner {
 
     pub(crate) fn confirmed_record(&self) -> Result<Option<HelperRecord>> {
         let Some(record) = self.read_helper_record()? else {
+            anyhow::ensure!(
+                !self.has_operational_state(),
+                "libkrun filesystem state exists at {} without a helper record; run `omnifs doctor`",
+                self.dir().display()
+            );
             return Ok(None);
         };
         self.confirm_record(&record)?;
         Ok(Some(record))
-    }
-
-    pub(crate) fn is_running(&self) -> Result<Option<bool>> {
-        Ok(self.confirmed_record()?.map(|_| true))
-    }
-
-    pub(crate) async fn tear_down(&self) -> Result<()> {
-        LibkrunLaunchLease::for_teardown(self)
-            .stop_and_remove()
-            .await
     }
 
     pub(crate) async fn tear_down_confirmed(&self, expected: HelperRecord) -> Result<()> {
@@ -940,7 +966,7 @@ impl LibkrunRunner {
         // the guest. Acceptable for the same reason most ssh-wrapping CLIs
         // accept it: building real remote shell-quoting here would trade one
         // narrow edge case for a much larger footgun surface.
-        cmd.arg("cd").arg(GUEST_MOUNT).arg("&&").arg("exec");
+        cmd.arg("cd").arg(fs::GUEST_LOCATION).arg("&&").arg("exec");
         if trailing.is_empty() {
             cmd.arg(shell_override.unwrap_or("/bin/sh"));
         } else {
@@ -959,12 +985,12 @@ mod tests {
         // Tests run under a dev build (no OMNIFS_RELEASE at compile time), so
         // the configured path is resolved locally. The release path is
         // covered by `default_guest_image_for` directly, mirroring the
-        // frontend image tests.
+        // filesystem image tests.
         let temp = tempfile::tempdir().unwrap();
         let custom = temp.path().join("custom.raw");
         std::fs::write(&custom, b"guest image").unwrap();
         let mut config = Config::default();
-        config.frontend.guest_image = Some(custom.to_string_lossy().into_owned());
+        config.filesystem.guest_image = Some(custom.to_string_lossy().into_owned());
         let image = resolve_guest_image(
             &config,
             temp.path(),
@@ -1072,6 +1098,7 @@ mod tests {
         std::fs::write(
             dir.path().join(SEED_CONF_NAME),
             "OMNIFS_ATTACH_ADDR=vsock:1024\n\
+             OMNIFS_FS_ID=main\n\
              OMNIFS_READY_VSOCK_PORT=1025\n\
              OMNIFS_SSH_PUBKEY=ssh-ed25519 AAAA test\n",
         )

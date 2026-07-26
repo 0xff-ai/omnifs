@@ -23,8 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{Namespace, NsEvent};
-use omnifs_api::FrontendInfo;
-use omnifs_core::FrontendRuntime;
+use omnifs_core::fs;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -34,9 +33,7 @@ use tokio::time::Instant;
 use crate::frame::{
     Frame, KIND_CONTROL, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame,
 };
-use crate::{
-    FrontendIdentity, Handshake, PROTOCOL, ServerControl, WireError, WireRequest, WireResponse,
-};
+use crate::{Handshake, PROTOCOL, ServerControl, WireError, WireRequest, WireResponse};
 
 const UDS_PATH_BYTE_LIMIT: usize = 100;
 
@@ -77,35 +74,13 @@ struct VfsState {
     startup_gate: Option<watch::Sender<bool>>,
 }
 
-#[derive(Debug, Clone)]
-struct AttachedFrontend {
-    identity: FrontendIdentity,
-}
-
-impl AttachedFrontend {
-    fn key(&self) -> AttachmentKey {
-        AttachmentKey {
-            runtime: self.identity.runtime,
-            kind: self.identity.kind,
-            mount_point: self.identity.mount_point.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct AttachmentKey {
-    runtime: FrontendRuntime,
-    kind: crate::FsType,
-    mount_point: PathBuf,
-}
-
-struct AttachedEntry {
-    frontend: AttachedFrontend,
+struct AttachmentEntry {
+    spec: fs::Spec,
     connections: usize,
 }
 
 struct AttachedConnection {
-    key: AttachmentKey,
+    key: fs::Id,
     control: mpsc::UnboundedSender<Frame>,
 }
 
@@ -119,26 +94,24 @@ enum AttachmentPhase {
 struct AttachmentState {
     next_attachment_id: u64,
     connections: BTreeMap<u64, AttachedConnection>,
-    entries: BTreeMap<AttachmentKey, AttachedEntry>,
+    entries: BTreeMap<fs::Id, AttachmentEntry>,
     phase: AttachmentPhase,
-    generation: u64,
 }
 
 struct Attachments {
     state: Mutex<AttachmentState>,
-    changed: watch::Sender<(u64, usize)>,
+    changed: watch::Sender<usize>,
 }
 
 impl Attachments {
     fn new() -> Arc<Self> {
-        let (changed, _) = watch::channel((0, 0));
+        let (changed, _) = watch::channel(0);
         Arc::new(Self {
             state: Mutex::new(AttachmentState {
                 next_attachment_id: 1,
                 connections: BTreeMap::new(),
                 entries: BTreeMap::new(),
                 phase: AttachmentPhase::Running,
-                generation: 0,
             }),
             changed,
         })
@@ -146,19 +119,25 @@ impl Attachments {
 
     fn attached(
         &self,
-        identity: &crate::FrontendIdentity,
+        spec: &fs::Spec,
         control: mpsc::UnboundedSender<Frame>,
-    ) -> Option<u64> {
-        let frontend = AttachedFrontend {
-            identity: identity.clone(),
-        };
-        let key = frontend.key();
+    ) -> Result<u64, String> {
+        let key = spec.id().clone();
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.phase != AttachmentPhase::Running {
-            return None;
+            return Err(
+                "daemon is draining and is not accepting filesystem attachments".to_owned(),
+            );
+        }
+        if let Some(existing) = state.entries.get(&key)
+            && existing.spec != *spec
+        {
+            return Err(format!(
+                "filesystem `{key}` is already attached with different resolved fields"
+            ));
         }
         let id = state.next_attachment_id;
         state.next_attachment_id += 1;
@@ -173,12 +152,12 @@ impl Attachments {
             .entries
             .entry(key)
             .and_modify(|entry| entry.connections += 1)
-            .or_insert(AttachedEntry {
-                frontend,
+            .or_insert(AttachmentEntry {
+                spec: spec.clone(),
                 connections: 1,
             });
         Self::publish_locked(&mut state, &self.changed);
-        Some(id)
+        Ok(id)
     }
 
     fn detached(&self, id: u64) {
@@ -200,7 +179,7 @@ impl Attachments {
         Self::publish_locked(&mut state, &self.changed);
     }
 
-    fn snapshot(&self) -> Vec<FrontendInfo> {
+    fn snapshot(&self) -> Vec<fs::Spec> {
         let state = self
             .state
             .lock()
@@ -208,15 +187,11 @@ impl Attachments {
         state
             .entries
             .values()
-            .map(|entry| FrontendInfo {
-                fs_type: entry.frontend.identity.kind,
-                mount_point: entry.frontend.identity.mount_point.clone(),
-                runtime: entry.frontend.identity.runtime,
-            })
+            .map(|entry| entry.spec.clone())
             .collect()
     }
 
-    fn stop_frontends(&self) {
+    fn stop_filesystems(&self) {
         let controls = {
             let mut state = self
                 .state
@@ -241,7 +216,7 @@ impl Attachments {
         }
     }
 
-    async fn drain(&self, timeout: Duration) -> Vec<FrontendIdentity> {
+    async fn drain(&self, timeout: Duration) -> Vec<fs::Spec> {
         let deadline = Instant::now() + timeout;
         let mut changed = self.changed.subscribe();
         loop {
@@ -265,13 +240,13 @@ impl Attachments {
         }
     }
 
-    fn identities(&self) -> Vec<FrontendIdentity> {
+    fn identities(&self) -> Vec<fs::Spec> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entries
             .values()
-            .map(|entry| entry.frontend.identity.clone())
+            .map(|entry| entry.spec.clone())
             .collect()
     }
 
@@ -284,9 +259,8 @@ impl Attachments {
         Self::publish_locked(&mut state, &self.changed);
     }
 
-    fn publish_locked(state: &mut AttachmentState, changed: &watch::Sender<(u64, usize)>) {
-        state.generation = state.generation.wrapping_add(1);
-        changed.send_replace((state.generation, state.connections.len()));
+    fn publish_locked(state: &mut AttachmentState, changed: &watch::Sender<usize>) {
+        changed.send_replace(state.connections.len());
     }
 }
 
@@ -391,25 +365,25 @@ impl VfsServer {
     }
 
     #[must_use]
-    /// Subscribe to listener failure observations.
+    /// Subscribe to listener failure events.
     pub fn listener_events(&self) -> broadcast::Receiver<ListenerEvent> {
         self.event_tx.subscribe()
     }
 
     #[must_use]
     /// Return the current deduplicated live attachment rows.
-    pub fn attachments(&self) -> Vec<FrontendInfo> {
+    pub fn attachments(&self) -> Vec<fs::Spec> {
         self.attachments.snapshot()
     }
 
     /// Stop admitting attachments and push a stop command to every live
     /// connection.
-    pub fn stop_frontends(&self) {
-        self.attachments.stop_frontends();
+    pub fn stop_filesystems(&self) {
+        self.attachments.stop_filesystems();
     }
 
     /// Wait until every attachment has detached or `timeout` expires.
-    pub async fn drain_attachments(&self, timeout: Duration) -> Vec<FrontendIdentity> {
+    pub async fn drain_attachments(&self, timeout: Duration) -> Vec<fs::Spec> {
         self.attachments.drain(timeout).await
     }
 
@@ -784,12 +758,14 @@ where
     let (mut reader, mut writer) = tokio::io::split(stream);
 
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Frame>();
-    let identity = read_hello(&mut reader, &mut writer).await?;
+    let spec = read_hello(&mut reader, &mut writer).await?;
     let attach_guard = if let Some(attachments) = attachments {
-        let Some(id) = attachments.attached(&identity, outbound_tx.clone()) else {
-            let reason = "daemon is draining and is not accepting frontend attachments";
-            send_rejected(&mut writer, reason.to_owned()).await?;
-            return Err(WireError::Rejected(reason.to_owned()));
+        let id = match attachments.attached(&spec, outbound_tx.clone()) {
+            Ok(id) => id,
+            Err(reason) => {
+                send_rejected(&mut writer, reason.clone()).await?;
+                return Err(WireError::Rejected(reason));
+            },
         };
         Some(AttachGuard { attachments, id })
     } else {
@@ -846,7 +822,7 @@ where
 
 /// Read the client's `Hello` and check the protocol. The caller performs
 /// attachment admission before sending `Welcome`.
-async fn read_hello<R, W>(reader: &mut R, writer: &mut W) -> Result<FrontendIdentity, WireError>
+async fn read_hello<R, W>(reader: &mut R, writer: &mut W) -> Result<fs::Spec, WireError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -858,7 +834,11 @@ where
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
     }
     let hello: Handshake = postcard::from_bytes(&frame.body)?;
-    let Handshake::Hello { protocol, frontend } = hello else {
+    let Handshake::Hello {
+        protocol,
+        filesystem,
+    } = hello
+    else {
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
     };
     if protocol != PROTOCOL {
@@ -869,7 +849,7 @@ where
         send_rejected(writer, error.to_string()).await?;
         return Err(error);
     }
-    Ok(frontend)
+    Ok(filesystem)
 }
 
 async fn send_welcome<W>(writer: &mut W) -> Result<(), WireError>

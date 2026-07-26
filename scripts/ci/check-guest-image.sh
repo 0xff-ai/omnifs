@@ -107,7 +107,7 @@ note "checking omnifs unit presence"
 unit_dir=/mnt/root/etc/systemd/system
 present_units=(
   omnifs-seed-mount.service
-  omnifs-frontend.service
+  omnifs-filesystem.service
   omnifs-ssh-setup.service
   omnifs-dropbear.service
   omnifs-ssh.service
@@ -120,7 +120,7 @@ for unit in "${present_units[@]}"; do
 done
 
 note "checking omnifs unit enablement"
-enabled_units=(omnifs-seed-mount.service omnifs-frontend.service omnifs-ssh-setup.service)
+enabled_units=(omnifs-seed-mount.service omnifs-filesystem.service omnifs-ssh-setup.service)
 for unit in "${enabled_units[@]}"; do
   link="$unit_dir/multi-user.target.wants/$unit"
   if [[ ! -L "$link" ]]; then

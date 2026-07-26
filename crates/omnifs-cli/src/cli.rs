@@ -52,12 +52,12 @@ pub enum Commands {
     /// Start the daemon and serve configured mounts
     ///
     /// Spawns or replaces the host-native daemon over configured mounts.
-    /// Frontends are managed separately with `omnifs frontend enable`.
+    /// Filesystems are managed separately with `omnifs fs`.
     #[command(visible_alias = "apply")]
     Up(commands::up::UpArgs),
     /// Stop the daemon and clean up
     ///
-    /// Asks attached frontends to stop, drains them for a bounded time, then
+    /// Asks attached filesystems to stop, drains them for a bounded time, then
     /// stops the daemon. Busy stragglers are reported for `omnifs doctor`.
     Down,
     /// Tail the daemon log
@@ -67,7 +67,7 @@ pub enum Commands {
     /// Add, list, reauthenticate, revoke, or remove mounts
     Mount(commands::mount::MountArgs),
 
-    /// Configure providers, start the daemon, and enable platform frontends
+    /// Configure providers, start the daemon, and attach platform filesystems
     Setup(commands::setup::SetupArgs),
 
     /// Install omnifs usage skills for agent harnesses
@@ -94,16 +94,16 @@ pub enum Commands {
     #[command(hide = true)]
     WarmProviders(crate::provider_warmup::WarmProvidersArgs),
 
-    /// Run a host frontend. Internal: launched by frontend lifecycle commands.
+    /// Run a host filesystem. Internal: launched by filesystem lifecycle commands.
     #[command(hide = true)]
-    RunFrontend(omnifs_thin::RunFrontendArgs),
+    RunFs(omnifs_thin::RunFsArgs),
 
-    /// Manage filesystem frontends attached to the host-native daemon
+    /// Configure and manage named filesystems
     ///
-    /// Enable, disable, restart, or list FUSE and NFS frontends. Every
-    /// frontend renders the daemon's same shared namespace and carries no
+    /// Create, attach, detach, restart, remove, or list FUSE and NFS filesystems.
+    /// Every filesystem renders the daemon's same shared namespace and carries no
     /// provider credentials.
-    Frontend(commands::frontend::FrontendArgs),
+    Fs(commands::fs::FsArgs),
 }
 
 impl Cli {
@@ -160,17 +160,17 @@ impl Commands {
             Self::Version => (Some("version"), "version"),
             Self::Daemon(_) => (None, "daemon"),
             Self::WarmProviders(_) => (None, "warm-providers"),
-            Self::RunFrontend(_) => (None, "run-frontend"),
-            // Every `frontend` subcommand shares one usage label; there is
-            // no longer a hidden internal one (like `daemon`'s) to exclude.
-            Self::Frontend(args) => (
-                Some("frontend"),
+            Self::RunFs(_) => (None, "run-fs"),
+            Self::Fs(args) => (
+                Some("fs"),
                 match &args.command {
-                    commands::frontend::FrontendCommand::Enable(_) => "frontend.enable",
-                    commands::frontend::FrontendCommand::Disable(_) => "frontend.disable",
-                    commands::frontend::FrontendCommand::Restart(_) => "frontend.restart",
-                    commands::frontend::FrontendCommand::Ls => "frontend.ls",
-                    commands::frontend::FrontendCommand::Shell(_) => "frontend.shell",
+                    commands::fs::FsCommand::Create(_) => "fs.create",
+                    commands::fs::FsCommand::Rm(_) => "fs.rm",
+                    commands::fs::FsCommand::Attach(_) => "fs.attach",
+                    commands::fs::FsCommand::Detach(_) => "fs.detach",
+                    commands::fs::FsCommand::Restart(_) => "fs.restart",
+                    commands::fs::FsCommand::Shell(_) => "fs.shell",
+                    commands::fs::FsCommand::Ls => "fs.ls",
                 },
             ),
         }
@@ -205,10 +205,10 @@ impl Commands {
             Self::Version => commands::version::run(output).await,
             Self::Daemon(args) => crate::daemon::run(&args).await.map(|()| ExitCode::Success),
             Self::WarmProviders(args) => args.run().await.map(|()| ExitCode::Success),
-            Self::RunFrontend(_) => {
-                anyhow::bail!("run-frontend must be dispatched before the CLI runtime starts")
+            Self::RunFs(_) => {
+                anyhow::bail!("run-fs must be dispatched before the CLI runtime starts")
             },
-            Self::Frontend(args) => args.run(output).await,
+            Self::Fs(args) => args.run(output).await,
         }
     }
 }
@@ -299,19 +299,13 @@ where
         [command, subcommand, ..] if command == "mount" && subcommand == "reauth" => "mount.reauth",
         [command, subcommand, ..] if command == "mount" && subcommand == "revoke" => "mount.revoke",
         [command, subcommand, ..] if command == "mount" && subcommand == "rm" => "mount.rm",
-        [command, subcommand, ..] if command == "frontend" && subcommand == "enable" => {
-            "frontend.enable"
-        },
-        [command, subcommand, ..] if command == "frontend" && subcommand == "disable" => {
-            "frontend.disable"
-        },
-        [command, subcommand, ..] if command == "frontend" && subcommand == "restart" => {
-            "frontend.restart"
-        },
-        [command, subcommand, ..] if command == "frontend" && subcommand == "ls" => "frontend.ls",
-        [command, subcommand, ..] if command == "frontend" && subcommand == "shell" => {
-            "frontend.shell"
-        },
+        [command, subcommand, ..] if command == "fs" && subcommand == "create" => "fs.create",
+        [command, subcommand, ..] if command == "fs" && subcommand == "rm" => "fs.rm",
+        [command, subcommand, ..] if command == "fs" && subcommand == "attach" => "fs.attach",
+        [command, subcommand, ..] if command == "fs" && subcommand == "detach" => "fs.detach",
+        [command, subcommand, ..] if command == "fs" && subcommand == "restart" => "fs.restart",
+        [command, subcommand, ..] if command == "fs" && subcommand == "ls" => "fs.ls",
+        [command, subcommand, ..] if command == "fs" && subcommand == "shell" => "fs.shell",
         [command, ..] if command == "apply" => "up",
         [command, ..] if command == "status" => "status",
         [command, ..] if command == "up" => "up",
@@ -436,10 +430,10 @@ fn fresh_workspace_screen(
 /// The one actionable fact behind a `Degraded` verdict on a mount-less
 /// workspace, if any: `Inventory::verdict` (inventory.rs) has two disjuncts
 /// that can still fire when `mounts` is empty (a daemon that failed or went
-/// unreachable, or a frontend severe enough to flip the verdict while the
+/// unreachable, or a filesystem severe enough to flip the verdict while the
 /// daemon is otherwise up), and the mount-related disjuncts are moot on an
 /// empty mount list. Returns the label to show and the fix command to run;
-/// the fix command is always `DaemonHealth::context_fix` or the frontend's
+/// the fix command is always `DaemonHealth::context_fix` or the filesystem's
 /// own `fix` field, never re-derived here.
 fn fresh_workspace_degradation(
     inventory: &crate::inventory::Inventory,
@@ -465,17 +459,17 @@ fn fresh_workspace_degradation(
     if !daemon_up {
         return None;
     }
-    inventory.frontends.iter().find_map(|frontend| {
-        if frontend.state.severity() < crate::inventory::Severity::Attention {
+    inventory.filesystems.iter().find_map(|filesystem| {
+        if filesystem.state.severity() < crate::inventory::Severity::Attention {
             return None;
         }
-        let fix = frontend.fix.clone()?;
+        let fix = filesystem.fix.clone()?;
         Some((
             format!(
-                "{} ({}) frontend is {}",
-                frontend.filesystem.as_str(),
-                frontend.runtime.as_str(),
-                frontend.state.label()
+                "{} ({}) filesystem is {}",
+                filesystem.spec.protocol().as_str(),
+                filesystem.spec.runtime().as_str(),
+                filesystem.state.label()
             ),
             fix,
         ))
@@ -584,36 +578,41 @@ mod tests {
         );
     }
 
-    /// A leftover failed frontend observation (e.g. a stale entry under
-    /// `cache/frontends`) can flip the verdict to `Degraded` while the daemon
+    /// Leftover failed filesystem state (e.g. a stale entry under
+    /// `cache/filesystems`) can flip the verdict to `Degraded` while the daemon
     /// is otherwise running and there are still zero mounts; the screen must
-    /// name that frontend and reuse its own `fix` field verbatim.
+    /// name that filesystem and reuse its own `fix` field verbatim.
     #[test]
-    fn fresh_workspace_screen_names_a_failed_frontend_while_daemon_is_up() {
-        let frontend = crate::inventory::FrontendStatus {
-            filesystem: omnifs_api::FsType::Fuse,
-            runtime: omnifs_api::FrontendRuntime::Docker,
-            location: None,
-            state: crate::inventory::FrontendState::Failed,
+    fn fresh_workspace_screen_names_a_failed_filesystem_while_daemon_is_up() {
+        let filesystem = crate::inventory::FilesystemStatus {
+            spec: omnifs_core::fs::Spec::new(
+                "test".parse().unwrap(),
+                omnifs_core::fs::Protocol::Fuse,
+                omnifs_core::fs::Runtime::Docker,
+                omnifs_core::fs::GUEST_LOCATION.into(),
+            )
+            .unwrap(),
+            state: crate::inventory::FilesystemState::Failed,
             mount_count: 0,
             fix: Some("omnifs logs (container exited)".to_owned()),
         };
         let inventory = crate::inventory::Inventory::test(
             crate::inventory::DaemonHealth::Running,
-            vec![frontend],
+            vec![filesystem],
             Vec::new(),
         );
         assert_eq!(inventory.verdict(), crate::inventory::Verdict::Degraded);
         assert_eq!(
             super::fresh_workspace_degradation(&inventory),
             Some((
-                "fuse (docker) frontend is failed".to_owned(),
+                "fuse (docker) filesystem is failed".to_owned(),
                 "omnifs logs (container exited)".to_owned()
             ))
         );
         let screen = super::fresh_workspace_screen(&inventory, caps(false));
         assert!(
-            screen.contains("fuse (docker) frontend is failed:  `omnifs logs (container exited)`"),
+            screen
+                .contains("fuse (docker) filesystem is failed:  `omnifs logs (container exited)`"),
             "{screen}"
         );
     }

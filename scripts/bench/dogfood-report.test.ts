@@ -21,8 +21,8 @@ test("parseJsonl skips blank and malformed lines", () => {
 test("computeReport counts sessions and median duration", () => {
   const daemon = [
     { ts: "2026-07-01T10:00:00Z", event: "daemon_start", mounts: 0 },
-    { ts: "2026-07-01T10:00:10Z", event: "frontend_serving", mounts: 2 },
-    { ts: "2026-07-01T10:00:30Z", event: "frontend_stopped", mounts: 2 },
+    { ts: "2026-07-01T10:00:10Z", event: "filesystem_serving", mounts: 2 },
+    { ts: "2026-07-01T10:00:30Z", event: "filesystem_stopped", mounts: 2 },
     { ts: "2026-07-01T10:00:30Z", event: "daemon_stop", mounts: 2 },
     { ts: "2026-07-01T12:00:00Z", event: "daemon_start", mounts: 0 },
     { ts: "2026-07-01T12:00:50Z", event: "daemon_stop", mounts: 1 },
@@ -36,11 +36,11 @@ test("computeReport counts sessions and median duration", () => {
 });
 
 test("computeReport detects an unclean restart as a recovery", () => {
-  // frontend_stopped with NO daemon_stop before the next daemon_start, within 5m.
+  // filesystem_stopped with NO daemon_stop before the next daemon_start, within 5m.
   const daemon = [
     { ts: "2026-07-02T10:00:00Z", event: "daemon_start" },
-    { ts: "2026-07-02T10:00:05Z", event: "frontend_serving" },
-    { ts: "2026-07-02T10:05:00Z", event: "frontend_stopped" },
+    { ts: "2026-07-02T10:00:05Z", event: "filesystem_serving" },
+    { ts: "2026-07-02T10:05:00Z", event: "filesystem_stopped" },
     // no daemon_stop here; the process died and was restarted 2 minutes later
     { ts: "2026-07-02T10:07:00Z", event: "daemon_start" },
     { ts: "2026-07-02T10:10:00Z", event: "daemon_stop" },
@@ -55,7 +55,7 @@ test("computeReport detects an unclean restart as a recovery", () => {
 test("computeReport: a clean stop before restart is not a recovery", () => {
   const daemon = [
     { ts: "2026-07-02T10:00:00Z", event: "daemon_start" },
-    { ts: "2026-07-02T10:05:00Z", event: "frontend_stopped" },
+    { ts: "2026-07-02T10:05:00Z", event: "filesystem_stopped" },
     { ts: "2026-07-02T10:05:00Z", event: "daemon_stop" },
     { ts: "2026-07-02T10:06:00Z", event: "daemon_start" },
     { ts: "2026-07-02T10:10:00Z", event: "daemon_stop" },
@@ -67,7 +67,7 @@ test("computeReport: a clean stop before restart is not a recovery", () => {
 test("computeReport: restart after 5 minutes is not a recovery", () => {
   const daemon = [
     { ts: "2026-07-02T10:00:00Z", event: "daemon_start" },
-    { ts: "2026-07-02T10:05:00Z", event: "frontend_stopped" },
+    { ts: "2026-07-02T10:05:00Z", event: "filesystem_stopped" },
     { ts: "2026-07-02T10:20:00Z", event: "daemon_start" }, // 15m later
   ];
   const report = computeReport(daemon, [], Date.parse("2026-07-02T11:00:00Z"));

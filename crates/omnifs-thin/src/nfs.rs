@@ -1,51 +1,26 @@
 //! NFS runner command for `omnifs-thin`.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::host_control::RunnerPhase;
 use crate::lifecycle::{Lifecycle, LifecycleConfig, coordinate_mount, preflight};
 use anyhow::Context as _;
-use clap::Args as ClapArgs;
-use omnifs_core::FrontendRuntime;
 use omnifs_vfs::Namespace;
-use omnifs_vfs::{AttachTarget, FrontendIdentity, FsType, WireNamespace, resolve_ready_vsock_port};
+use omnifs_vfs::{AttachTarget, WireNamespace, resolve_ready_vsock_port};
 use tracing::info;
 
-/// Arguments for the `NFSv4` loopback frontend.
-#[derive(Debug, ClapArgs)]
-pub struct Args {
-    /// Runtime identity supplied by the launcher.
-    #[arg(long, env = "OMNIFS_RUNTIME")]
-    runtime: FrontendRuntime,
-    /// Host-visible mount point to serve.
-    #[arg(long)]
-    mount_point: PathBuf,
-    /// Directory for mount discovery and persistent filehandle state.
-    #[arg(long)]
-    state_dir: PathBuf,
-    /// Path to the daemon's local VFS attach socket. When absent, the attach
-    /// target comes from the environment.
-    #[arg(long)]
-    attach: Option<PathBuf>,
-    /// Loopback NFS server port. Zero asks the OS for an ephemeral port.
-    #[arg(long, default_value_t = 0)]
-    port: u16,
-    #[command(flatten)]
-    host_control: crate::HostControlArgs,
-}
-
-pub(crate) fn run(args: Args) -> anyhow::Result<()> {
+pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     crate::init_tracing();
-    let Args {
-        runtime: frontend_runtime,
-        mount_point,
+    let crate::RunnerArgs {
+        spec,
         state_dir,
         attach,
         port,
         host_control,
     } = args;
+    let state_dir = state_dir.context("--state-dir is required with --protocol nfs")?;
+    let mount_point = spec.location().to_path_buf();
     let ready_port =
         resolve_ready_vsock_port().context("resolve the readiness-beacon vsock port")?;
     let target = AttachTarget::resolve(attach).context("resolve the VFS attach target")?;
@@ -60,25 +35,17 @@ pub(crate) fn run(args: Args) -> anyhow::Result<()> {
     let mut lifecycle = {
         let _runtime_guard = runtime.enter();
         Lifecycle::prepare(LifecycleConfig {
-            runtime: frontend_runtime,
-            filesystem: FsType::Nfs,
-            mount_point: &mount_point,
+            spec: &spec,
             state_dir: Some(&state_dir),
             runner_control,
         })?
     };
-    preflight(FsType::Nfs, &mount_point, Some(&state_dir))
-        .context("check the NFS mount location")?;
+    preflight(&spec, Some(&state_dir)).context("check the NFS mount location")?;
     lifecycle.phase.send_replace(RunnerPhase::Attaching);
-    let identity = FrontendIdentity {
-        runtime: frontend_runtime,
-        kind: FsType::Nfs,
-        mount_point: mount_point.clone(),
-    };
     let namespace = runtime
         .block_on(WireNamespace::attach_with_teardown(
             target,
-            identity,
+            spec.clone(),
             handle.clone(),
             lifecycle.wire_teardown_tx.clone(),
         ))
@@ -116,17 +83,12 @@ pub(crate) fn run(args: Args) -> anyhow::Result<()> {
             let _ = mount_done_tx.send(result);
         })
         .context("start the NFS mount owner")?;
-    let result = runtime.block_on(coordinate_mount(
-        FsType::Nfs,
-        mount_point.clone(),
-        &mut lifecycle,
-        mount_done_rx,
-    ));
+    let result = runtime.block_on(coordinate_mount(&spec, &mut lifecycle, mount_done_rx));
     mount_thread
         .join()
         .map_err(|_| anyhow::anyhow!("NFS mount owner panicked"))?;
     result?;
 
-    info!(mount = %mount_point.display(), "frontend exited");
+    info!(mount = %mount_point.display(), "filesystem exited");
     Ok(())
 }

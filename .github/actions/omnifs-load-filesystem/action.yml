@@ -1,0 +1,30 @@
+name: omnifs-load-filesystem-image
+description: Load a CI-built filesystem image under a local tag
+inputs:
+  arch:
+    description: Filesystem image architecture (amd64 or arm64)
+    required: true
+  image:
+    description: Local image tag to create
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Download ${{ inputs.arch }} filesystem image digest
+      uses: actions/download-artifact@v8
+      with:
+        name: filesystem-digest-${{ inputs.arch }}
+        path: ${{ runner.temp }}/filesystem-digest
+
+    - name: Pull and tag the filesystem image
+      shell: bash
+      env:
+        TARGET_IMAGE: ${{ inputs.image }}
+      run: |
+        set -euo pipefail
+        digest_path="$(find "$RUNNER_TEMP/filesystem-digest" -mindepth 1 -maxdepth 1 -type f -print -quit)"
+        test -n "$digest_path"
+        digest_file="${digest_path##*/}"
+        ref="${REGISTRY}/${FILESYSTEM_IMAGE_NAME}@sha256:${digest_file}"
+        docker pull "$ref"
+        docker tag "$ref" "$TARGET_IMAGE"

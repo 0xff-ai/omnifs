@@ -1,6 +1,6 @@
-//! Read-only NFSv4.0 loopback frontend for `omnifs`.
+//! Read-only NFSv4.0 loopback filesystem for `omnifs`.
 //!
-//! This crate owns the NFS frontend and adapts it to the existing
+//! This crate owns the NFS filesystem and adapts it to the existing
 //! `omnifs-engine` provider runtime without replacing the Linux FUSE path.
 //! The `Export` adapter intentionally depends on host runtime/cache
 //! types; the Omnifs VFS wire protocol remains isolated behind `ReadOnlyExport`.
@@ -17,7 +17,7 @@ mod server;
 mod trace;
 
 pub use adapter::Export;
-pub use error::NfsFrontendError;
+pub use error::NfsFilesystemError;
 pub use export::{
     Attr, DirEntry, DirListing, NodeKind, OpenRead, OpenResult, ReadOnlyExport, StateId, Status,
     StatusResult,

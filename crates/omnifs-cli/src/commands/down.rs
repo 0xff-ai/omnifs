@@ -3,7 +3,7 @@
 //! The command first probes the daemon's typed local control endpoint. If the
 //! daemon cannot answer, `DaemonTeardown` falls back to the strict daemon
 //! record and its direct pid for liveness-checked cleanup. A responsive
-//! daemon pushes Stop to attached frontends and reports the bounded drain.
+//! daemon pushes Stop to attached filesystems and reports the bounded drain.
 
 use crate::commands::receipt::TeardownReceipt;
 use crate::daemon_teardown::DaemonTeardown;

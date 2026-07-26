@@ -5,9 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Credential-free guest frontend runner for omnifs"
+description = "Credential-free guest filesystem runner for omnifs"
 categories = ["filesystem"]
-keywords = ["omnifs", "filesystem", "frontend"]
+keywords = ["omnifs", "fuse", "nfs"]
 
 [[bin]]
 name = "omnifs-thin"

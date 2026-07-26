@@ -1,4 +1,4 @@
-use crate::error::NfsFrontendError;
+use crate::error::NfsFilesystemError;
 use crate::export::ReadOnlyExport;
 use crate::protocol::filehandle::now_sec;
 use crate::protocol::rpc::{handle_rpc_record, read_rpc_record, write_rpc_record};
@@ -53,9 +53,9 @@ pub fn start_server(
     export: Arc<dyn ReadOnlyExport>,
     bind: SocketAddr,
     trace_path: Option<PathBuf>,
-) -> Result<RunningNfsServer, NfsFrontendError> {
+) -> Result<RunningNfsServer, NfsFilesystemError> {
     if !bind.ip().is_loopback() {
-        return Err(NfsFrontendError::Io(std::io::Error::new(
+        return Err(NfsFilesystemError::Io(std::io::Error::new(
             std::io::ErrorKind::AddrNotAvailable,
             format!("NFS loopback server must bind to a loopback address, got {bind}"),
         )));
@@ -408,6 +408,6 @@ mod tests {
     fn start_server_rejects_non_loopback_bind() {
         let bind = "0.0.0.0:0".parse().expect("bind addr");
         let result = start_server(Arc::new(EmptyExport), bind, None);
-        assert!(matches!(result, Err(NfsFrontendError::Io(_))));
+        assert!(matches!(result, Err(NfsFilesystemError::Io(_))));
     }
 }

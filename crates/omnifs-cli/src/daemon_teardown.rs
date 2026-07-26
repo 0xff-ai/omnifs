@@ -57,7 +57,7 @@ impl TeardownOutcome {
                 detached,
                 still_attached,
             } => {
-                let mut value = format!("stopped (pid {pid}, detached {detached} frontends)");
+                let mut value = format!("stopped (pid {pid}, detached {detached} filesystems)");
                 if !still_attached.is_empty() {
                     let _ = write!(
                         value,
@@ -132,9 +132,9 @@ impl DaemonTeardown {
         Ok(())
     }
 
-    /// Stop only the namespace daemon, leaving every frontend process in
+    /// Stop only the namespace daemon, leaving every filesystem process in
     /// place. Apply uses this path when switching desired mount revisions;
-    /// surviving frontends reconnect when the daemon returns.
+    /// surviving filesystems reconnect when the daemon returns.
     pub(crate) async fn stop_daemon(&self) -> anyhow::Result<()> {
         let outcome = match self.client.status_optional().await {
             Ok(Some(status)) => self.shutdown_and_wait(status.pid, false).await,
@@ -196,8 +196,8 @@ impl DaemonTeardown {
     /// Request shutdown and wait until the control surface and process are gone.
     /// The daemon acknowledges shutdown before its serving task exits, so a
     /// successful POST alone is not enough to report `DaemonStopped`.
-    async fn shutdown_and_wait(&self, pid: u32, stop_frontends: bool) -> TeardownOutcome {
-        match self.client.shutdown(stop_frontends).await {
+    async fn shutdown_and_wait(&self, pid: u32, stop_filesystems: bool) -> TeardownOutcome {
+        match self.client.shutdown(stop_filesystems).await {
             Ok(Some(shutdown)) => {
                 let deadline = tokio::time::Instant::now() + SHUTDOWN_SETTLE_TIMEOUT;
                 let mut last_error = None;
@@ -343,7 +343,7 @@ mod tests {
     /// one key (`daemon`, 6 columns), so the field width is `6 + 3 = 9`, a
     /// 3-space gap rather than the retired fixed-14-column rail's 8:
     /// ```text
-    /// ✓ daemon   stopped (pid 31114, detached 2 frontends)
+    /// ✓ daemon   stopped (pid 31114, detached 2 filesystems)
     /// ```
     #[test]
     fn transcript_matches_the_stopped_daemon_shape() {
@@ -358,7 +358,7 @@ mod tests {
         let lines = transcript(&outcomes, caps(false));
         assert_eq!(
             lines,
-            vec!["✓ daemon   stopped (pid 31114, detached 2 frontends)".to_owned(),]
+            vec!["✓ daemon   stopped (pid 31114, detached 2 filesystems)".to_owned(),]
         );
     }
 
@@ -394,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn a_teardown_failure_never_shows_the_frontends_stay_attached_line() {
+    fn a_teardown_failure_never_shows_the_filesystems_stay_attached_line() {
         let outcomes = vec![TeardownOutcome::DaemonShutdownFailed {
             error: "busy".to_owned(),
         }];

@@ -1,7 +1,7 @@
 //! Human-only responsive resource tables.
 //!
 //! This module deliberately has no serde surface and no knowledge of mounts,
-//! providers, or frontends. Commands provide cells and state tokens; the
+//! providers, or filesystems. Commands provide cells and state tokens; the
 //! renderer owns layout, terminal width, and action placement.
 
 use std::fmt::Write as _;
@@ -346,12 +346,6 @@ impl ResourceTable {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CountLabel(String);
 
-impl CountLabel {
-    pub(crate) fn named(count: usize, noun: &'static str) -> Self {
-        Self(format!("{count} {noun}"))
-    }
-}
-
 impl From<usize> for CountLabel {
     fn from(count: usize) -> Self {
         Self(count.to_string())
@@ -609,7 +603,7 @@ mod tests {
             Column::new("Details", Priority::Detail, WidthPolicy::Auto),
         ];
         let action = Action::fix("omnifs mount reauth github");
-        let mut table = ResourceTable::new("Frontends", 2, columns);
+        let mut table = ResourceTable::new("Filesystems", 2, columns);
         table.push(
             ResourceRow::new(
                 [
@@ -645,7 +639,7 @@ mod tests {
             width: 120,
             color: false,
         });
-        assert!(output.starts_with("Frontends  2\n"));
+        assert!(output.starts_with("Filesystems  2\n"));
         assert!(output.contains("Name"));
         assert!(output.contains("Location"));
         assert!(!output.contains('│'));

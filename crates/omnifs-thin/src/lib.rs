@@ -1,4 +1,4 @@
-//! Shared credential-free frontend entrypoints.
+//! Shared credential-free filesystem entrypoints.
 
 #[cfg(target_os = "linux")]
 pub mod fuse;
@@ -6,7 +6,8 @@ pub mod host_control;
 mod lifecycle;
 pub mod nfs;
 
-use clap::{Args, Subcommand};
+use clap::Args;
+use omnifs_core::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]
@@ -33,26 +34,56 @@ impl HostControlArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct RunFrontendArgs {
-    #[command(subcommand)]
-    command: FrontendCommand,
+pub struct RunFsArgs {
+    /// Stable configured filesystem name.
+    #[arg(long)]
+    name: fs::Id,
+    /// OS filesystem protocol to serve.
+    #[arg(long)]
+    protocol: fs::Protocol,
+    /// Runtime identity supplied by the launcher.
+    #[arg(long)]
+    runtime: fs::Runtime,
+    /// Mount location resolved in the persisted filesystem spec.
+    #[arg(long)]
+    location: PathBuf,
+    /// Directory for local mount and runner state.
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    /// Path to the daemon's local VFS attach socket.
+    #[arg(long)]
+    attach: Option<PathBuf>,
+    /// Loopback NFS server port. Zero asks the OS for an ephemeral port.
+    #[arg(long, default_value_t = 0)]
+    port: u16,
+    #[command(flatten)]
+    host_control: HostControlArgs,
 }
 
-#[derive(Debug, Subcommand)]
-enum FrontendCommand {
-    /// Attach to the daemon and serve a FUSE mount.
-    #[cfg(target_os = "linux")]
-    Fuse(fuse::Args),
-    /// Attach to the daemon and serve an `NFSv4` loopback mount.
-    Nfs(nfs::Args),
-}
-
-pub fn run(args: RunFrontendArgs) -> anyhow::Result<()> {
-    match args.command {
+pub fn run(args: RunFsArgs) -> anyhow::Result<()> {
+    let spec = fs::Spec::new(args.name, args.protocol, args.runtime, args.location)?;
+    let args = RunnerArgs {
+        spec,
+        state_dir: args.state_dir,
+        attach: args.attach,
+        port: args.port,
+        host_control: args.host_control,
+    };
+    match args.spec.protocol() {
         #[cfg(target_os = "linux")]
-        FrontendCommand::Fuse(args) => fuse::run(args),
-        FrontendCommand::Nfs(args) => nfs::run(args),
+        fs::Protocol::Fuse => fuse::run(args),
+        #[cfg(not(target_os = "linux"))]
+        fs::Protocol::Fuse => anyhow::bail!("FUSE is not supported on this platform"),
+        fs::Protocol::Nfs => nfs::run(args),
     }
+}
+
+struct RunnerArgs {
+    spec: fs::Spec,
+    state_dir: Option<PathBuf>,
+    attach: Option<PathBuf>,
+    port: u16,
+    host_control: HostControlArgs,
 }
 
 pub(crate) fn init_tracing() {

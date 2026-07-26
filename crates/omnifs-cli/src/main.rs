@@ -19,9 +19,9 @@ mod daemon_launch;
 mod daemon_teardown;
 mod docker;
 mod error;
-mod frontend_container;
+mod fs_container;
 mod guest_image_pull;
-mod host_frontend;
+mod host_fs;
 mod image;
 mod inspector;
 mod inventory;
@@ -94,7 +94,7 @@ fn main() {
         },
     };
     match cli.command {
-        Some(cli::Commands::RunFrontend(args)) => {
+        Some(cli::Commands::RunFs(args)) => {
             let code = match omnifs_thin::run(args) {
                 Ok(()) => ExitCode::Success.code(),
                 Err(error) => {

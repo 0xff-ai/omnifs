@@ -51,7 +51,7 @@ impl Runtime {
 
     /// Record that directory `path`'s contents changed without touching the
     /// cached view record. Used by pagination's `@next`/`@all`; the host/FUSE
-    /// frontend drains this event and decides how to notify the kernel.
+    /// filesystem drains this event and decides how to notify the kernel.
     pub fn record_dir_changed(&self, path: &Path) {
         self.invalidation.record_changed_dir(path.clone());
     }

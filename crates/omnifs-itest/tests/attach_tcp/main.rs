@@ -44,7 +44,7 @@ fn spawn_namespace_only(attach_port: Option<u16>) -> NamespaceOnlyDaemon {
     if let Some(port) = attach_port {
         std::fs::write(
             home.path().join("config.toml"),
-            format!("[frontend]\nattach_port = {port}\n"),
+            format!("[filesystem]\nattach_port = {port}\n"),
         )
         .expect("write attach port config");
     }

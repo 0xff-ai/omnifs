@@ -1,6 +1,6 @@
 //! Shared VFS facade: the [`Namespace`] trait and plain answer types.
 //!
-//! Frontends and the optional wire transport consume this surface. Projection
+//! Filesystems and the optional wire transport consume this surface. Projection
 //! semantics stay in `omnifs-engine` (`TreeNamespace`). Enable the `wire`
 //! feature on this crate for attach transport (`WireNamespace`, `VfsServer`).
 
@@ -23,7 +23,7 @@ use tokio_stream::wrappers::BroadcastStream;
 /// so the wire types never depend on `view`/`tree` internals.
 ///
 /// Provider and host-tree nodes use the same ordinary file kinds. Host-tree
-/// symlinks are read through [`Namespace::readlink`], never by a frontend.
+/// symlinks are read through [`Namespace::readlink`], never by a filesystem.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryKind {
     Directory,
@@ -31,16 +31,16 @@ pub enum EntryKind {
     Symlink,
 }
 
-/// How a frontend pulls a file's bytes, decided by the engine.
+/// How a filesystem pulls a file's bytes, decided by the engine.
 ///
 /// - `Whole`: the engine serves the entire payload from a single
-///   `read(node, 0, u32::MAX)`. A frontend materializes it once per open and
+///   `read(node, 0, u32::MAX)`. A filesystem materializes it once per open and
 ///   slices locally, so a mutating control action (`@next`) or an unversioned
 ///   dynamic render runs exactly once. Every non-ranged file (inline, canonical,
 ///   blob, deferred-full) and every directory is `Whole`.
 /// - `Ranged`: the engine streams by `read(node, offset, len)` per request,
 ///   deduping the provider open behind its internal handle cache and learning
-///   the exact size on an EOF-short read. A frontend reads through per protocol
+///   the exact size on an EOF-short read. A filesystem reads through per protocol
 ///   read rather than buffering, so a live (`tail -f`) or large ranged file is
 ///   never fully materialized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +80,7 @@ pub struct Attrs {
     pub change: u64,
     pub direct_io: bool,
     pub stability: Stability,
-    /// Whether a frontend materializes the whole payload once or reads through
+    /// Whether a filesystem materializes the whole payload once or reads through
     /// per request. See [`ReadStyle`].
     pub read_style: ReadStyle,
 }
@@ -193,7 +193,7 @@ pub struct ReadAnswer {
     pub attrs: Attrs,
 }
 
-/// A namespace event. Plain data so wire-attached frontends can consume the
+/// A namespace event. Plain data so wire-attached filesystems can consume the
 /// same stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NsEvent {
@@ -213,7 +213,7 @@ impl NsEvent {
 }
 
 /// Retry classification for an [`NsError`], derivable without importing the
-/// engine's tree errors. Mirrors the frontend `retry_class` partition.
+/// engine's tree errors. Mirrors the filesystem `retry_class` partition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NsRetryClass {
     Retry,
@@ -222,8 +222,8 @@ pub enum NsRetryClass {
     TooLarge,
 }
 
-/// Plain-data error surface. Mirrors the frontend-relevant classification of the
-/// engine's tree errors plus the retry class, so a frontend maps to errno /
+/// Plain-data error surface. Mirrors the filesystem-relevant classification of the
+/// engine's tree errors plus the retry class, so a filesystem maps to errno /
 /// nfsstat4 without importing engine internals.
 ///
 /// Serde-derived because it crosses the Omnifs VFS wire protocol inside every
@@ -256,7 +256,7 @@ pub enum NsError {
 }
 
 impl NsError {
-    /// How a frontend should treat this error on retry.
+    /// How a filesystem should treat this error on retry.
     pub fn retry_class(&self) -> NsRetryClass {
         match self {
             Self::RateLimited { .. } | Self::Timeout | Self::Network => NsRetryClass::Retry,
@@ -281,7 +281,7 @@ impl EventStream {
     ///
     /// The in-engine runtime implementation taps its own broadcast sender, but a
     /// VFS wire client (this crate's `wire` feature) re-broadcasts the events it
-    /// decodes off the socket through a local channel and hands frontends an
+    /// decodes off the socket through a local channel and hands filesystems an
     /// `EventStream` over that receiver; this is the constructor it needs.
     #[must_use]
     pub fn from_broadcast(receiver: broadcast::Receiver<NsEvent>) -> Self {
@@ -298,11 +298,11 @@ impl EventStream {
 
     /// Non-blocking drain of one buffered event, `None` when none is ready.
     ///
-    /// The NFS frontend's `ReadOnlyExport` methods are synchronous and must
+    /// The NFS filesystem's `ReadOnlyExport` methods are synchronous and must
     /// apply invalidation events with drain-before-answer ordering (a stat that
     /// sees its own invalidation must prune before it re-reads its inode). A
     /// detached subscriber task cannot guarantee that ordering against a
-    /// synchronous caller, so the frontend polls the buffered events inline
+    /// synchronous caller, so the filesystem polls the buffered events inline
     /// after each namespace op emits them. A lagged receiver skips the gap; the
     /// next answer re-resolves fresh state regardless.
     pub fn try_recv(&mut self) -> Option<NsEvent> {
@@ -332,9 +332,9 @@ impl futures::Stream for EventStream {
 // The trait
 // -----------------------------------------------------------------------------
 
-/// The narrow namespace surface a frontend consumes. Dyn-compatible: methods
+/// The narrow namespace surface a filesystem consumes. Dyn-compatible: methods
 /// return [`BoxFuture`] rather than `async fn`, so the projection has no
-/// async-trait dependency and a frontend can hold a `dyn Namespace`.
+/// async-trait dependency and a filesystem can hold a `dyn Namespace`.
 pub trait Namespace: Send + Sync {
     /// Resolve `name` under `parent`, returning the child's structural path.
     fn lookup<'a>(

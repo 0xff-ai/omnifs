@@ -6,19 +6,15 @@
 //! failed row. All narration stays on stderr. The commands own the side
 //! effects; this module owns the wire shape they settle into.
 
-use omnifs_api::FrontendRuntime as Runtime;
 use serde::Serialize;
-use std::path::PathBuf;
 
-use crate::commands::frontend::FrontendResult;
-use crate::inventory::{AccessPath, FrontendStatus, Inventory};
+use crate::inventory::Inventory;
 use crate::stages::MountInitStatus;
 use crate::ui::consent::{Outcome, Plan};
 use crate::ui::output::ResultVerdict;
-use omnifs_core::MountName;
 
 /// The overall health of a completed operation. `up` reports `degraded` (and
-/// exits 5) when any mount, frontend, or subsystem needs attention.
+/// exits 5) when any mount, filesystem, or subsystem needs attention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Verdict {
@@ -47,7 +43,7 @@ impl Verdict {
     }
 }
 
-/// `omnifs up`: the daemon, its mounts and frontends, and a verdict.
+/// `omnifs up`: the daemon, its mounts and filesystems, and a verdict.
 /// Reuses the same status view types so the receipt never drifts from
 /// `omnifs status`.
 #[derive(Debug, Serialize)]
@@ -158,98 +154,9 @@ pub(crate) struct MountReauthReceipt {
     pub(crate) mount: String,
 }
 
-/// The typed terminal receipt for frontend enable/disable/restart. The rows
-/// retain operation outcomes, while `frontends` and `access_paths` are fresh
-/// post-operation inventory facts rather than launch-time guesses.
-#[derive(Debug, Serialize)]
-pub(crate) struct FrontendReceipt {
-    pub(crate) verdict: Verdict,
-    pub(crate) changed: bool,
-    pub(crate) rows: Vec<FrontendResult>,
-    pub(crate) frontends: Vec<FrontendStatus>,
-    pub(crate) access_paths: Vec<AccessPath>,
-}
-
-impl FrontendReceipt {
-    pub(crate) fn from_inventory(inventory: &Inventory, rows: Vec<FrontendResult>) -> Self {
-        let frontends = inventory
-            .frontends
-            .iter()
-            .filter(|frontend| rows.iter().any(|row| row.id.matches_status(frontend)))
-            .cloned()
-            .collect::<Vec<_>>();
-        let access_paths = frontend_access_paths(inventory, &rows);
-        let failed = rows
-            .iter()
-            .any(|row| row.state == crate::commands::frontend::FrontendResultState::Failed);
-        let selected_degraded = frontends
-            .iter()
-            .any(|frontend| frontend.state.severity() >= crate::inventory::Severity::Attention);
-        let verdict = if failed {
-            Verdict::Failed
-        } else if selected_degraded {
-            Verdict::Degraded
-        } else {
-            Verdict::Ok
-        };
-        Self {
-            verdict,
-            changed: rows.iter().any(|row| row.changed),
-            rows,
-            frontends,
-            access_paths,
-        }
-    }
-
-    pub(crate) fn output_verdict(&self) -> ResultVerdict {
-        self.verdict.output_verdict()
-    }
-
-    pub(crate) fn exit_code(&self) -> crate::error::ExitCode {
-        match self.verdict {
-            Verdict::Ok => crate::error::ExitCode::Success,
-            Verdict::Degraded | Verdict::Failed => crate::error::ExitCode::Degraded,
-        }
-    }
-}
-
-fn frontend_access_paths(inventory: &Inventory, rows: &[FrontendResult]) -> Vec<AccessPath> {
-    let mut paths = Vec::new();
-    for mount in &inventory.mounts {
-        let Ok(name) = MountName::new(mount.name.clone()) else {
-            continue;
-        };
-        let root = mount.root.strip_prefix("/").unwrap_or(&mount.root);
-        let expected = rows
-            .iter()
-            .filter_map(|row| {
-                let location = row.id.location().map(PathBuf::from).or_else(|| {
-                    (row.id.runtime() != Runtime::Host).then(|| PathBuf::from("/omnifs"))
-                })?;
-                Some((row.id.filesystem(), row.id.runtime(), location.join(root)))
-            })
-            .collect::<Vec<_>>();
-        paths.extend(inventory.access_paths(&name).into_iter().filter(|path| {
-            expected.iter().any(|(filesystem, runtime, location)| {
-                path.filesystem == *filesystem && path.runtime == *runtime && path.path == *location
-            })
-        }));
-    }
-    paths
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::frontend::FrontendResultState;
-    use omnifs_api::{FrontendRuntime as Runtime, FsType as Filesystem};
-
-    use crate::commands::frontend::FrontendId;
-    use crate::inventory::{DaemonHealth, FrontendState};
-
-    fn inventory_with_frontends(frontends: Vec<FrontendStatus>) -> Inventory {
-        Inventory::test(DaemonHealth::Running, frontends, Vec::new())
-    }
 
     #[test]
     fn teardown_receipt_owns_its_terminal_result() {
@@ -265,49 +172,5 @@ mod tests {
         let json = serde_json::to_value(&receipt).unwrap();
         assert_eq!(json["detached"], 2);
         assert_eq!(json["still_attached"][0], "fuse/host at /mnt/omnifs");
-    }
-
-    #[test]
-    fn frontend_receipt_ignores_unrelated_degraded_frontends() {
-        let selected = FrontendId::try_new(
-            Filesystem::Nfs,
-            Runtime::Host,
-            Some(PathBuf::from("/mnt/omnifs")),
-        )
-        .unwrap();
-        let unrelated = FrontendId::try_new(Filesystem::Fuse, Runtime::Docker, None).unwrap();
-        let inventory = inventory_with_frontends(vec![
-            FrontendStatus {
-                filesystem: selected.filesystem(),
-                runtime: selected.runtime(),
-                location: selected.location().map(PathBuf::from),
-                state: FrontendState::Attached,
-                mount_count: 0,
-                fix: None,
-            },
-            FrontendStatus {
-                filesystem: unrelated.filesystem(),
-                runtime: unrelated.runtime(),
-                location: unrelated.location().map(PathBuf::from),
-                state: FrontendState::Failed,
-                mount_count: 0,
-                fix: Some("omnifs up".into()),
-            },
-        ]);
-        assert_eq!(inventory.verdict(), crate::inventory::Verdict::Degraded);
-
-        let receipt = FrontendReceipt::from_inventory(
-            &inventory,
-            vec![FrontendResult {
-                id: selected,
-                state: FrontendResultState::Attached,
-                changed: true,
-                fix: None,
-                detail: None,
-            }],
-        );
-
-        assert_eq!(receipt.verdict, Verdict::Ok);
-        assert_eq!(receipt.exit_code(), crate::error::ExitCode::Success);
     }
 }

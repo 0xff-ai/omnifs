@@ -1,6 +1,6 @@
 //! Minimal XDR helpers for the NFSv4.0 loopback subset.
 //!
-//! This module is deliberately small and local because the frontend only
+//! This module is deliberately small and local because the filesystem only
 //! decodes the handful of ONC RPC/NFS shapes implemented in `ops`. If protocol
 //! coverage expands beyond that subset, revisit a generated or crate-backed XDR
 //! layer instead of growing this reader into a general implementation.
@@ -96,7 +96,7 @@ impl<'a> XdrReader<'a> {
     /// Does **not** validate that the pad bytes are zero.  This is a deliberate
     /// choice for a subset server: strict pad validation would reject benign
     /// implementations that emit non-zero pad, and there is no security benefit
-    /// from enforcing it in a loopback-only read-only frontend. If this server
+    /// from enforcing it in a loopback-only read-only filesystem. If this server
     /// ever accepts network-facing connections, pad validation should be added.
     pub(crate) fn skip_padding(&mut self, len: usize) -> Result<(), XdrError> {
         let pad = (4 - (len % 4)) % 4;

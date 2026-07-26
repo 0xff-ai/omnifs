@@ -260,7 +260,7 @@ impl Daemon {
         let endpoint = vfs.serve_tcp(bind_ip, port).with_context(|| {
             format!(
                 "bind namespace TCP endpoint on port {port}; another process holds it. \
-                     Set [frontend] attach_port in workspace config to move it."
+                     Set [filesystem] attach_port in workspace config to move it."
             )
         })?;
         let _ = self.bound_tcp.set(endpoint);
@@ -520,11 +520,11 @@ async fn handle_control_connection(
             )
             .await?;
         },
-        ControlOperation::Shutdown { stop_frontends } => {
-            let (detached, still_attached) = if stop_frontends {
+        ControlOperation::Shutdown { stop_filesystems } => {
+            let (detached, still_attached) = if stop_filesystems {
                 if let Some(vfs) = daemon.vfs.get() {
                     let before = vfs.attachments().len();
-                    vfs.stop_frontends();
+                    vfs.stop_filesystems();
                     let still = vfs.drain_attachments(DRAIN_TIMEOUT).await;
                     (
                         before.saturating_sub(still.len()),
@@ -764,34 +764,29 @@ mod tests {
         let attach_target = omnifs_vfs::AttachTarget::Tcp {
             addr: target.to_string(),
         };
-        let identity = omnifs_vfs::FrontendIdentity {
-            runtime: omnifs_api::FrontendRuntime::Docker,
-            kind: omnifs_vfs::FsType::Fuse,
-            mount_point: std::path::PathBuf::from("/guest/omnifs"),
-        };
-        let wire = omnifs_vfs::WireNamespace::attach(attach_target.clone(), identity, rt.clone())
+        let identity = omnifs_core::fs::Spec::new(
+            "control-test".parse().unwrap(),
+            omnifs_core::fs::Protocol::Fuse,
+            omnifs_core::fs::Runtime::Docker,
+            std::path::PathBuf::from("/omnifs"),
+        )
+        .unwrap();
+        let wire =
+            omnifs_vfs::WireNamespace::attach(attach_target.clone(), identity.clone(), rt.clone())
+                .await
+                .unwrap();
+        let wire2 = omnifs_vfs::WireNamespace::attach(attach_target, identity, rt.clone())
             .await
             .unwrap();
-        let wire2 = omnifs_vfs::WireNamespace::attach(
-            attach_target,
-            omnifs_vfs::FrontendIdentity {
-                runtime: omnifs_api::FrontendRuntime::Docker,
-                kind: omnifs_vfs::FsType::Fuse,
-                mount_point: std::path::PathBuf::from("/guest/omnifs"),
-            },
-            rt.clone(),
-        )
-        .await
-        .unwrap();
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let status = loop {
             let reply = request(&control_socket, ControlOperation::Status).await;
             if let ControlOutcome::Status(status) = reply.outcome
                 && status
-                    .frontends
+                    .filesystems
                     .iter()
-                    .any(|frontend| frontend.runtime == omnifs_api::FrontendRuntime::Docker)
+                    .any(|filesystem| filesystem.runtime() == omnifs_core::fs::Runtime::Docker)
             {
                 break status;
             }
@@ -801,9 +796,9 @@ mod tests {
         assert!(
             status
                 .health
-                .frontend
+                .filesystems
                 .message
-                .contains("attached fuse at /guest/omnifs via docker")
+                .contains("attached `control-test` (fuse) at /omnifs via docker")
         );
 
         drop(wire);
@@ -813,16 +808,16 @@ mod tests {
             let reply = request(&control_socket, ControlOperation::Status).await;
             if let ControlOutcome::Status(status) = reply.outcome
                 && status
-                    .frontends
+                    .filesystems
                     .iter()
-                    .all(|frontend| frontend.runtime != omnifs_api::FrontendRuntime::Docker)
+                    .all(|filesystem| filesystem.runtime() != omnifs_core::fs::Runtime::Docker)
             {
                 break status;
             }
             assert!(tokio::time::Instant::now() < deadline);
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         };
-        assert!(status.frontends.is_empty());
+        assert!(status.filesystems.is_empty());
 
         daemon.vfs.get().unwrap().shutdown().await;
         daemon.stop_tasks().await;

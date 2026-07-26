@@ -2,10 +2,10 @@
 # Boot the libkrun guest image once through the packaged Omnifs helper, with a
 # throwaway seed ISO carrying placeholder attach parameters, and check the serial console
 # log for two things: the guest reaching multi-user (systemd/EFI boot
-# actually worked) and the omnifs-frontend.service runner starting (the seed
+# actually worked) and the omnifs-filesystem.service runner starting (the seed
 # was found, mounted, and the unit execed the binary). A successful attach is
 # not expected: no daemon listens on the mapped host socket, so
-# `omnifs-thin fuse` retries its connect for up to 30s
+# `omnifs-thin --protocol fuse` retries its connect for up to 30s
 # (INITIAL_CONNECT_DEADLINE in crates/omnifs-vfs/src/client.rs)
 # before giving up. This smoke intentionally covers guest boot and service
 # startup only; it does not exercise a live attach.
@@ -51,6 +51,7 @@ fi
 
 "$root/scripts/guest-image/make-seed-iso.sh" \
   --out "$seed_iso" \
+  --filesystem-id "smoke" \
   --attach-addr "vsock:1024" \
   || exit 1
 
@@ -115,7 +116,7 @@ while [[ $(date +%s) -lt $deadline ]]; do
   if [[ -z "$reached_multi_user" ]] && grep -qiE "Reached target multi-user\.target" <<<"$stripped"; then
     reached_multi_user="$(date +%s)"
   fi
-  if [[ -z "$runner_started" ]] && grep -qiE "(Starting|Started) omnifs-frontend\.service" <<<"$stripped"; then
+  if [[ -z "$runner_started" ]] && grep -qiE "(Starting|Started) omnifs-filesystem\.service" <<<"$stripped"; then
     runner_started="$(date +%s)"
   fi
   if [[ -n "$reached_multi_user" && -n "$runner_started" ]]; then
@@ -135,10 +136,10 @@ else
   echo "PASS: reached multi-user.target at +$((reached_multi_user - start_epoch))s"
 fi
 if [[ -z "$runner_started" ]]; then
-  echo "FAIL: never saw omnifs-frontend.service start within ${boot_timeout}s" >&2
+  echo "FAIL: never saw omnifs-filesystem.service start within ${boot_timeout}s" >&2
   status=1
 else
-  echo "PASS: omnifs-frontend.service started at +$((runner_started - start_epoch))s"
+  echo "PASS: omnifs-filesystem.service started at +$((runner_started - start_epoch))s"
 fi
 
 exit "$status"

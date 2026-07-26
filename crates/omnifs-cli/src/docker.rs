@@ -1,5 +1,5 @@
-//! The Docker client for the optional Docker-hosted FUSE frontend
-//! (`omnifs frontend enable|disable`). The daemon itself always runs
+//! The Docker client for the optional Docker-hosted FUSE filesystem
+//! (`omnifs fs attach|detach`). The daemon itself always runs
 //! host-native and has no Docker surface here.
 
 use std::collections::HashMap;
@@ -13,18 +13,19 @@ use anyhow::{Context, Result, anyhow};
 use bollard::Docker;
 use bollard::models::ContainerCreateBody;
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, InspectContainerOptions, RemoveContainerOptions,
-    StartContainerOptions, StopContainerOptions,
+    CreateContainerOptions, CreateImageOptions, InspectContainerOptions, ListContainersOptions,
+    RemoveContainerOptions, StartContainerOptions, StopContainerOptions,
 };
 use futures_util::TryStreamExt;
+use omnifs_core::fs;
 
-use crate::commands::frontend::GUEST_MOUNT;
 use crate::error::WithHint;
-use crate::frontend_container::{
-    FRONTEND_HOME_LABEL, assert_locked_down, build_frontend_container_body,
+use crate::fs_container::{
+    FILESYSTEM_HOME_LABEL, FILESYSTEM_ID_LABEL, assert_locked_down,
+    build_filesystem_container_body, filesystem_command,
 };
 use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
-use crate::ui::output::{Output, OutputMode};
+use crate::ui::output::Output;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ContainerName(String);
@@ -96,16 +97,6 @@ struct LayerProgress {
     total: u64,
 }
 
-/// Outcome of a Docker daemon reachability probe.
-pub(crate) enum DockerProbeOutcome {
-    /// Daemon responded to ping; the connected `DockerClient` is returned for reuse.
-    Reachable(DockerClient),
-    /// Could not connect to the daemon socket.
-    ConnectFailed(bollard::errors::Error),
-    /// Connected but the ping RPC failed.
-    PingFailed(bollard::errors::Error),
-}
-
 pub(crate) struct DockerClient {
     docker: Docker,
     target: DockerTarget,
@@ -117,20 +108,33 @@ pub(crate) struct DockerContainerIdentity {
     pub(crate) id: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OwnedFilesystemContainer {
+    pub(crate) identity: Option<DockerContainerIdentity>,
+    pub(crate) filesystem_id: Option<String>,
+    pub(crate) names: Vec<String>,
+}
+
 impl DockerClient {
-    pub(crate) async fn launch(&self, home: &std::path::Path, attach_port: u16) -> Result<()> {
-        let body = build_frontend_container_body(
+    pub(crate) async fn launch(
+        &self,
+        home: &std::path::Path,
+        spec: &fs::Spec,
+        attach_port: u16,
+    ) -> Result<()> {
+        let body = build_filesystem_container_body(
             self.image(),
             home,
+            spec,
             attach_port,
             cfg!(target_os = "linux"),
         );
-        self.launch_frontend_container(body).await?;
+        self.launch_filesystem_container(body).await?;
 
         let (mounts, env) = self.inspect_mounts_and_env().await?;
         if let Err(violation) = assert_locked_down(&mounts, &env) {
             let _ = self.remove().await;
-            anyhow::bail!("refusing to run the frontend container: {violation}");
+            anyhow::bail!("refusing to run the filesystem container: {violation}");
         }
         Ok(())
     }
@@ -138,7 +142,7 @@ impl DockerClient {
     pub(crate) async fn mount_ready(&self, path: &str) -> Result<bool> {
         tokio::time::timeout(Duration::from_secs(2), self.exec_path_exists(path))
             .await
-            .context("Docker frontend mount probe timed out")?
+            .context("Docker filesystem mount probe timed out")?
     }
 
     pub(crate) async fn is_running(&self) -> Result<Option<bool>> {
@@ -148,10 +152,63 @@ impl DockerClient {
     /// Prove that the stable workspace name still resolves to one running
     /// container with the expected workspace label, and return Docker's
     /// immutable container ID for later revalidation.
-    pub(crate) async fn confirmed_frontend(
+    pub(crate) async fn confirmed_filesystem(
         &self,
         expected_home: &std::path::Path,
+        expected_spec: &fs::Spec,
     ) -> Result<Option<DockerContainerIdentity>> {
+        Ok(self
+            .confirmed_container_for_spec(expected_home, expected_spec)
+            .await?
+            .and_then(|(identity, running)| running.then_some(identity)))
+    }
+
+    /// Prove the workspace labels and full flat filesystem command, regardless
+    /// of whether the container is running.
+    pub(crate) async fn confirmed_container_for_spec(
+        &self,
+        expected_home: &std::path::Path,
+        expected_spec: &fs::Spec,
+    ) -> Result<Option<(DockerContainerIdentity, bool)>> {
+        let Some((identity, running)) = self
+            .confirmed_container(expected_home, expected_spec.id())
+            .await?
+        else {
+            return Ok(None);
+        };
+        let inspect = self
+            .docker
+            .inspect_container(
+                self.container_name().as_str(),
+                None::<InspectContainerOptions>,
+            )
+            .await
+            .with_context(|| format!("reinspect container `{}`", self.container_name()))?;
+        anyhow::ensure!(
+            inspect.id.as_deref() == Some(identity.id.as_str()),
+            "filesystem container changed during exact identity confirmation"
+        );
+        let actual_command = inspect
+            .config
+            .as_ref()
+            .and_then(|config| config.cmd.as_ref());
+        let expected_command = filesystem_command(expected_spec);
+        anyhow::ensure!(
+            actual_command == Some(&expected_command),
+            "filesystem container command does not match configured spec `{}`",
+            expected_spec.id()
+        );
+        Ok(Some((identity, running)))
+    }
+
+    /// Prove the stable name and both ownership labels, regardless of whether
+    /// the container is running. Doctor uses this for stopped containers that
+    /// still reserve a filesystem ID.
+    pub(crate) async fn confirmed_container(
+        &self,
+        expected_home: &std::path::Path,
+        expected_id: &fs::Id,
+    ) -> Result<Option<(DockerContainerIdentity, bool)>> {
         let inspect = match self
             .docker
             .inspect_container(
@@ -169,49 +226,90 @@ impl DockerClient {
                     .with_context(|| format!("inspect container `{}`", self.container_name()));
             },
         };
-        if !inspect
+        let running = inspect
             .state
             .as_ref()
             .and_then(|state| state.running)
-            .unwrap_or(false)
-        {
-            return Ok(None);
-        }
+            .unwrap_or(false);
         let label = inspect
             .config
             .as_ref()
             .and_then(|config| config.labels.as_ref())
-            .and_then(|labels| labels.get(FRONTEND_HOME_LABEL))
-            .context("frontend container has no workspace ownership label")?;
+            .and_then(|labels| labels.get(FILESYSTEM_HOME_LABEL))
+            .context("filesystem container has no workspace ownership label")?;
         anyhow::ensure!(
             label == &expected_home.display().to_string(),
-            "frontend container workspace label `{label}` does not match `{}`",
+            "filesystem container workspace label `{label}` does not match `{}`",
             expected_home.display()
+        );
+        let filesystem_id = inspect
+            .config
+            .as_ref()
+            .and_then(|config| config.labels.as_ref())
+            .and_then(|labels| labels.get(FILESYSTEM_ID_LABEL))
+            .context("filesystem container has no filesystem identity label")?;
+        anyhow::ensure!(
+            filesystem_id == expected_id.as_str(),
+            "filesystem container identity label `{filesystem_id}` does not match `{expected_id}`"
         );
         let id = inspect
             .id
             .context("Docker inspect returned no immutable container ID")?;
-        Ok(Some(DockerContainerIdentity { id }))
+        Ok(Some((DockerContainerIdentity { id }, running)))
+    }
+
+    /// List every container carrying this workspace's ownership label.
+    /// Individual filesystem IDs and canonical names are validated by doctor
+    /// before it offers any destructive action.
+    pub(crate) async fn owned_filesystem_containers(
+        &self,
+        expected_home: &std::path::Path,
+    ) -> Result<Vec<OwnedFilesystemContainer>> {
+        let mut filters = HashMap::new();
+        filters.insert(
+            "label".to_owned(),
+            vec![format!(
+                "{FILESYSTEM_HOME_LABEL}={}",
+                expected_home.display()
+            )],
+        );
+        let containers = self
+            .docker
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                filters: Some(filters),
+                ..Default::default()
+            }))
+            .await
+            .context("list workspace filesystem containers")?;
+        Ok(containers
+            .into_iter()
+            .map(|container| OwnedFilesystemContainer {
+                identity: container.id.map(|id| DockerContainerIdentity { id }),
+                filesystem_id: container
+                    .labels
+                    .and_then(|labels| labels.get(FILESYSTEM_ID_LABEL).cloned()),
+                names: container.names.unwrap_or_default(),
+            })
+            .collect())
     }
 
     pub(crate) async fn remove_confirmed(
         &self,
         expected: &DockerContainerIdentity,
         expected_home: &std::path::Path,
+        expected_spec: &fs::Spec,
     ) -> Result<()> {
         let current = self
-            .confirmed_frontend(expected_home)
+            .confirmed_container_for_spec(expected_home, expected_spec)
             .await?
-            .context("the confirmed frontend container is no longer running")?;
+            .context("the confirmed filesystem container no longer exists")?
+            .0;
         anyhow::ensure!(
             current == *expected,
-            "frontend container identity changed; refusing to remove its replacement"
+            "filesystem container identity changed; refusing to remove its replacement"
         );
         self.stop_and_remove_id(&expected.id).await
-    }
-
-    pub(crate) async fn tear_down(&self) -> Result<()> {
-        self.remove().await
     }
 
     pub(crate) fn shell_command(
@@ -228,7 +326,7 @@ impl DockerClient {
         }
         command
             .arg("-w")
-            .arg(GUEST_MOUNT)
+            .arg(fs::GUEST_LOCATION)
             .arg(self.container_name().as_str());
         if trailing.is_empty() {
             command.arg(shell_override.unwrap_or("/bin/sh"));
@@ -240,15 +338,6 @@ impl DockerClient {
 }
 
 impl DockerClient {
-    pub(crate) async fn probe() -> Result<()> {
-        let docker = Docker::connect_with_local_defaults().context("connect to Docker daemon")?;
-        tokio::time::timeout(Duration::from_secs(2), docker.ping())
-            .await
-            .context("Docker daemon probe timed out")?
-            .map(|_| ())
-            .context("Docker daemon did not respond")
-    }
-
     pub(crate) fn connect_for(target: &DockerTarget, output: Output) -> Result<Self> {
         Ok(Self {
             docker: Docker::connect_with_local_defaults()
@@ -293,12 +382,12 @@ impl DockerClient {
         self.docker.ping().await.map(|_| ()).map_err(Into::into)
     }
 
-    /// Address on which the host daemon must accept the frontend container's
+    /// Address on which the host daemon must accept the filesystem container's
     /// attach connection. Docker Desktop forwards `host.docker.internal` to
     /// host loopback. Native Linux maps that name to the default bridge
     /// gateway instead, so the daemon must bind that gateway explicitly.
     #[cfg(target_os = "linux")]
-    pub(crate) async fn frontend_attach_bind_ip(&self) -> Result<Ipv4Addr> {
+    pub(crate) async fn filesystem_attach_bind_ip(&self) -> Result<Ipv4Addr> {
         let network = self
             .docker
             .inspect_network("bridge", None)
@@ -314,29 +403,6 @@ impl DockerClient {
         gateway
             .parse()
             .with_context(|| format!("Docker bridge gateway `{gateway}` is not IPv4"))
-    }
-
-    /// Probe Docker daemon reachability without requiring a pre-connected client.
-    /// Used by `omnifs doctor` so the probe result carries a typed outcome and
-    /// the resulting `DockerClient` can be reused for image inspection.
-    pub(crate) async fn probe_docker(target: &DockerTarget) -> DockerProbeOutcome {
-        let runtime = match Self::connect_for(target, Output::new(OutputMode::Human, false)) {
-            Ok(r) => r,
-            Err(e) => {
-                // connect_for wraps bollard errors in anyhow; downcast to the
-                // underlying bollard error or synthesise an IOError.
-                let bollard_err = e.downcast::<bollard::errors::Error>().unwrap_or_else(|e| {
-                    bollard::errors::Error::IOError {
-                        err: std::io::Error::other(e.to_string()),
-                    }
-                });
-                return DockerProbeOutcome::ConnectFailed(bollard_err);
-            },
-        };
-        match runtime.docker.ping().await {
-            Ok(_) => DockerProbeOutcome::Reachable(runtime),
-            Err(e) => DockerProbeOutcome::PingFailed(e),
-        }
     }
 
     /// Inspect an image by name. Returns the bollard result directly so callers
@@ -359,9 +425,9 @@ impl DockerClient {
         };
         let source = image.split('/').next().unwrap_or(image);
         // Its own standalone single-row block: no sibling ledger row prints
-        // alongside a frontend image pull, so the width is just its own key.
-        let key_width = Output::ledger_block_width(&["frontend image"]);
-        let mut row = self.output.progress("frontend image", key_width);
+        // alongside a filesystem image pull, so the width is just its own key.
+        let key_width = Output::ledger_block_width(&["filesystem image"]);
+        let mut row = self.output.progress("filesystem image", key_width);
         let mut layers: HashMap<String, LayerProgress> = HashMap::new();
         let mut stream = self.docker.create_image(Some(opts), None, None);
         let result: Result<()> = async {
@@ -421,7 +487,7 @@ impl DockerClient {
 
     /// `Some(running)` when a container named `name` exists, `None` when it
     /// does not. Generic over `name` (unlike a self-targeted check) so a
-    /// caller can probe the frontend container through any connected `DockerClient`.
+    /// caller can probe the filesystem container through any connected `DockerClient`.
     pub(crate) async fn container_running(&self, name: &ContainerName) -> Result<Option<bool>> {
         match self
             .docker
@@ -493,7 +559,7 @@ impl DockerClient {
 
     async fn stop_and_remove_id(&self, id: &str) -> Result<()> {
         self.output
-            .narrate(format!("Stopping confirmed frontend container `{id}`"));
+            .narrate(format!("Stopping confirmed filesystem container `{id}`"));
         let _ = self
             .docker
             .stop_container(
@@ -514,18 +580,21 @@ impl DockerClient {
                 }),
             )
             .await
-            .with_context(|| format!("remove confirmed frontend container `{id}`"))
+            .with_context(|| format!("remove confirmed filesystem container `{id}`"))
     }
 
-    /// Launch the frontend container from `body`, replacing any existing
-    /// container of the same name first (one frontend container per
+    /// Launch the filesystem container from `body`, replacing any existing
+    /// container of the same name first (one filesystem container per
     /// workspace). Reuses [`Self::ensure_image`]'s dev/release pull gating.
-    pub(crate) async fn launch_frontend_container(&self, body: ContainerCreateBody) -> Result<()> {
+    pub(crate) async fn launch_filesystem_container(
+        &self,
+        body: ContainerCreateBody,
+    ) -> Result<()> {
         self.ensure_image().await?;
         self.remove().await?;
 
         self.output.narrate(format!(
-            "Creating frontend container `{}` from image `{}`",
+            "Creating filesystem container `{}` from image `{}`",
             self.container_name(),
             self.image()
         ));
@@ -538,9 +607,9 @@ impl DockerClient {
                 body,
             )
             .await
-            .with_context(|| format!("create frontend container `{}`", self.container_name()))?;
+            .with_context(|| format!("create filesystem container `{}`", self.container_name()))?;
         self.output.narrate(format!(
-            "Starting frontend container `{}`",
+            "Starting filesystem container `{}`",
             self.container_name()
         ));
         self.docker
@@ -549,12 +618,12 @@ impl DockerClient {
                 None::<StartContainerOptions>,
             )
             .await
-            .with_context(|| format!("start frontend container `{}`", self.container_name()))?;
+            .with_context(|| format!("start filesystem container `{}`", self.container_name()))?;
         Ok(())
     }
 
     /// Mounts and env of the running container, for the fail-closed lockdown
-    /// check run immediately after a frontend container starts.
+    /// check run immediately after a filesystem container starts.
     pub(crate) async fn inspect_mounts_and_env(
         &self,
     ) -> Result<(Vec<bollard::models::MountPoint>, Vec<String>)> {
@@ -576,7 +645,7 @@ impl DockerClient {
 
     /// True when `path` exists inside the running container, probed with
     /// `docker exec test -e <path>`. Used to wait for the FUSE mount to come
-    /// up inside the frontend container after start.
+    /// up inside the filesystem container after start.
     pub(crate) async fn exec_path_exists(&self, path: &str) -> Result<bool> {
         use bollard::exec::{CreateExecOptions, StartExecResults};
 
@@ -641,8 +710,8 @@ impl DockerClient {
                 let image = self.image();
                 Err(anyhow!(BUILD_CHANNEL.pull_refusal_reason()))
                     .context(format!("image `{image}` is not present locally"))
-                    .with_hint("build it with `just frontend-image`")
-                    .with_hint("or set a specific image via the OMNIFS_FRONTEND_IMAGE env var or the `[frontend].docker_image` config key")
+                    .with_hint("build it with `just filesystem-image`")
+                    .with_hint("or set a specific image via the OMNIFS_FILESYSTEM_IMAGE env var or the `[filesystem].docker_image` config key")
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
@@ -663,10 +732,10 @@ impl DockerClient {
                             anyhow::anyhow!(
                                 "image `{image_str}` was not found in the registry\n\n\
                                  This tag may not be published yet. Options:\n\
-                                 - Configure a specific frontend image in `config.toml` (for example \
+                                 - Configure a specific filesystem image in `config.toml` (for example \
                                    a release tag or a channel tag)\n\
                                  - Run `just dev` to build and launch the local sandbox\n\
-                                 - Check https://ghcr.io/0xff-ai/omnifs-frontend for available tags"
+                                 - Check https://ghcr.io/0xff-ai/omnifs-filesystem for available tags"
                             )
                         } else {
                             pull_err

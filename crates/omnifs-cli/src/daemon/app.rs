@@ -90,7 +90,7 @@ pub(crate) async fn run(args: &DaemonArgs) -> anyhow::Result<()> {
     daemon.set_namespace(Arc::clone(&namespace));
     let result = daemon.run().await;
     let served_mounts = registry.mounts().len();
-    metrics.daemon_event(DaemonEvent::FrontendStopped, served_mounts);
+    metrics.daemon_event(DaemonEvent::FilesystemStopped, served_mounts);
     metrics.daemon_event(DaemonEvent::DaemonStop, served_mounts);
     result
 }

@@ -4,7 +4,7 @@ Repository-local guidance for working in `omnifs`, shared by Codex, Claude, and 
 
 ## Start here
 
-`omnifs` projects external services as native filesystems. Providers own meaning: what paths exist and what bytes they hold. The host owns trust, auth, callouts, caching, and I/O. Frontends translate one shared projected tree into OS protocol behavior.
+`omnifs` projects external services as native filesystems. Providers own meaning: what paths exist and what bytes they hold. The host owns trust, auth, callouts, caching, and I/O. Filesystems translate one shared projected tree into OS protocol behavior.
 
 The product contract is simple: the projected tree must behave like real files for the standard Linux toolbox, judged against every consumer, not one calling pattern. Shells, scripts, editors, agents, and applications are served by the same mount. Do not special-case one consumer.
 
@@ -31,9 +31,9 @@ If a rule here and a contract disagree, follow current code plus the relevant co
 - The host owns trust. Providers are untrusted, even when built in this repo.
 - The host knows paths, bytes, content types, file attributes, cache metadata, capability outcomes, and effects. Object meaning stays SDK/provider-side.
 - All object reasoning lives SDK-side: identity, canonical assembly via render, versioning, preload, and revalidation.
-- No provider-specific behavior belongs in the host, tree, or frontends.
-- `omnifs-engine` owns projection semantics shared by FUSE, NFS, and future frontends.
-- Frontends translate namespace answers into protocol state. They consume the narrow `omnifs_engine::namespace` surface, never internal tree/view modules directly, and do not decide projection semantics. The daemon is a registry that serves several frontends over one shared namespace.
+- No provider-specific behavior belongs in the host, tree, or filesystems.
+- `omnifs-engine` owns projection semantics shared by FUSE, NFS, and future filesystems.
+- Filesystems translate namespace answers into protocol state. They consume the narrow `omnifs_engine::namespace` surface, never internal tree/view modules directly, and do not decide projection semantics. The daemon is a registry that serves several filesystems over one shared namespace.
 - Host caching is opaque byte storage. Providers do not add private LRUs or time-based expiration policy.
 - Declarations must bind behavior. A permission, capability, schema rule, routing rule, cache contract, or validation guarantee must feed an enforced runtime or build-time decision.
 
@@ -53,8 +53,8 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 | Trust, byte boundary, provider authority, auth, credentials, sandbox claims | `docs/contracts/10-system.md` |
 | Provider SDK, provider macros, objects, routes, WIT, metadata, provider config, endpoints | `docs/contracts/20-provider-sdk.md` |
 | Projection tree, cache, attrs, listing, lookup, traversal, learned sizes, live growth | `docs/contracts/30-projection-tree.md` |
-| FUSE, NFS, mount protocol behavior, frontend state, protocol replies | `docs/contracts/40-frontends.md` |
-| CLI, daemon, typed local control protocol, frontend runtimes, workspace layout, mount desired state, dev home | `docs/contracts/50-control-plane.md` |
+| FUSE, NFS, mount protocol behavior, filesystem state, protocol replies | `docs/contracts/40-filesystems.md` |
+| CLI, daemon, typed local control protocol, filesystem runtimes, workspace layout, mount desired state, dev home | `docs/contracts/50-control-plane.md` |
 | CI, validation commands, provider artifacts, generated schema, docs checks | `docs/contracts/60-build-validation.md` |
 | System model or rationale | `docs/architecture/00-overview.md` |
 
@@ -66,12 +66,12 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 | Route precedence, capture validation, lookup/listing authority, exhaustive listings | `docs/architecture/20-route-dispatch-and-listing.md` |
 | Object/view/blob cache roles, canonical push, effects, invalidation fences | `docs/architecture/30-cache-and-effects.md` |
 | Auth trust boundary, OAuth ownership, credential injection, grants versus needs | `docs/architecture/40-auth-boundary.md` |
-| NFSv4 loopback filehandles, stateids, leases, attrs, mount lifecycle | `docs/architecture/50-nfs-frontend.md` |
+| NFSv4 loopback filehandles, stateids, leases, attrs, mount lifecycle | `docs/architecture/50-nfs-filesystem.md` |
 | Provider async execution, host imports, callout tracing, same-instance concurrency | `docs/architecture/60-async-provider-runtime.md` |
 
 ## Orientation
 
-- `crates/omnifs-core`: shared path, mount and provider content identities, frontend identity, and file-contract primitives.
+- `crates/omnifs-core`: shared path, mount and provider content identities, filesystem identity, and file-contract primitives.
 - `crates/omnifs-sdk`: provider authoring API, object model, route registration, and dispatch.
 - `crates/omnifs-wit/wit/provider.wit`: provider component contract.
 - `crates/omnifs-workspace`: every byte under `OMNIFS_HOME`: the directory layout, provider catalog metadata, credential identity types, the auth-scheme wire model, provider manifests and the content-addressed provider index, the mount-spec registry (sole owner of on-disk specs) with creation-time inheritance and materialization, and credential stores.
@@ -79,7 +79,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - `crates/omnifs-engine`: trusted runtime, callouts, auth, cache, pagination, shared projection semantics (`TreeNamespace`), and opaque cache storage.
 - `crates/omnifs-fuse` and `crates/omnifs-nfs`: protocol adapters.
 - `crates/omnifs-mtab`: `/proc/mounts` parsing, NFS mount state files, and shared platform unmount command construction.
-- `crates/omnifs-libkrun`: private fixed-purpose libkrun loader, VM configuration, and shutdown control used only by the Apple Silicon frontend runtime.
+- `crates/omnifs-libkrun`: private fixed-purpose libkrun loader, VM configuration, and shutdown control used only by the Apple Silicon filesystem runtime.
 - `crates/omnifs-cli`: daemon process owner, control server, lifecycle, auth commands, dev sessions, and control-plane UX.
 - `crates/omnifs-itest`: host-driven provider and tree conformance tests.
 - `scripts/ci/*` and `just/*.just`: maintainer command surface, CI orchestration, runtime image assembly, and generated-artifact checks.
@@ -92,11 +92,11 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - **Provider.** A sandboxed WASM component (`wasm32-wasip2`) that defines paths, bytes, and object meaning for one service.
 - **Upstream.** The external service or data source a provider projects.
 - **Host.** The trusted runtime that owns auth, caching, callout execution, namespace state, and I/O.
-- **Frontend.** A protocol surface (FUSE or NFSv4 loopback) over the complete shared namespace. Host frontends run through hidden `omnifs run-frontend`; Docker and libkrun guests use the slim `omnifs-thin` binary. Both attach over the Omnifs VFS wire protocol. Public identity is filesystem (`fuse` or `nfs`) plus runtime (`host`, `docker`, or `libkrun`) and a runtime-owned or host-selected location. The daemon never runs a frontend in-process.
-- **Omnifs VFS wire protocol.** The internal daemon-to-frontend serialization of `omnifs_engine::Namespace` for out-of-process frontends. It is not the provider protocol and does not own projection semantics.
+- **Filesystem.** One named OS-facing instance over the complete shared namespace. Its strict persisted `fs::Spec` contains ID, protocol (`fuse` or `nfs`), runtime (`host`, `docker`, or `libkrun`), and resolved location. Host filesystems run through hidden `omnifs run-fs`; Docker and libkrun guests use `omnifs-thin`. The daemon never runs a filesystem in-process.
+- **Omnifs VFS wire protocol.** The internal daemon-to-filesystem serialization of `omnifs_engine::Namespace` for out-of-process filesystems. It is not the provider protocol and does not own projection semantics.
 - **Mount.** A configured provider projection rooted into the served filesystem tree.
 - **Object.** Provider-side domain identity plus canonical bytes and derived files.
-- **Render.** SDK-side assembly of an object's canonical bytes. A provider concern, never a frontend concern.
+- **Render.** SDK-side assembly of an object's canonical bytes. A provider concern, never a filesystem concern.
 - **Path.** `omnifs_core::path::Path`, the parsed provider path type used inside SDK and tree policy.
 - **Callout.** A host-run effect a provider awaits through an async WIT import, such as HTTP. The host executes it and the component future resumes with the result.
 - **Effect.** The single terminal channel a provider returns for cache writes, invalidations, and related host-visible side effects.
@@ -116,19 +116,19 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - The control protocol wire types live in `omnifs-api`. Credential material is never transmitted on the wire; credential health is non-secret operational state.
 - Mount specs are one file per mount under `mounts/`, and a spec file's stem is its mount name. Only this directory is a local Git repository: `HEAD` is desired state and `refs/omnifs/applied` is the last revision that reached daemon readiness. `mounts::Registry` owns spec parsing, naming, and atomic writes; `mounts::Repository` owns the shared lock, Git operations, revision validation, and immutable snapshots under cache storage. The daemon receives one snapshot path and revision at startup and never invokes Git or reads the mutable worktree. `omnifs up --offline` observes and snapshots the committed `HEAD` without mutating dirty specs, skips provider, credential, network, and runtime startup, serves only validated durable facts, never advances `refs/omnifs/applied`, and replaces a live daemon when its mode differs.
 - Provider storage is an internal append-only cache. `mount add` resolves an existing Wasm path, a directory containing one Wasm, an embedded provider name, or an exact/unique lowercase digest prefix, validates and retains that artifact, and commits its exact pin. A newly retained artifact starts detached Wasmtime warmup for that exact ID. Online `up` joins the workspace warmup lock and loads the desired revision's unique provider IDs through the production `ComponentEngine` before replacing a daemon. `cache/provider-warmup.json` is atomic status history, never cache authority. Existing pins change only through an explicit desired-spec edit; `omnifs up` and its exact `apply` alias validate and apply the committed pin without installing or choosing another artifact.
-- The daemon is a pure namespace server and control-plane owner. `VfsServer` binds one fixed Unix and one fixed TCP endpoint on every start, owns connection tasks and live attachments, and treats either listener's exit as fatal. Host frontends use hidden `omnifs run-frontend`; Docker and libkrun guests keep the slim `omnifs-thin` binary.
-- The CLI owns frontend launch and teardown through three frontend runtimes: `host` (native runner process), `docker` (container), and `libkrun` (libkrun microVM on Apple Silicon macOS). Docker and libkrun serve FUSE only. `frontend enable` infers libkrun for FUSE on Apple Silicon macOS, host for FUSE on Linux, and host for NFS when `--runtime` is absent; Intel macOS has no implicit FUSE runtime and Docker stays explicit. Public commands, tables, and help use filesystem, runtime, and location.
-- Libkrun resolves an immutable guest image base, then materializes a workspace-owned `libkrun/root.raw` with mode 0600 for each launch. Only that writable per-launch root reaches the first virtio-blk device; temporary roots and `root.raw` are launch-owned cleanup artifacts, while the base image and persistent SSH key survive. The private sibling `omnifs-libkrun` helper loads only the packaged pinned `libkrun.1.dylib` and EFI firmware from `libexec/omnifs`, accepts one fixed VM shape, exposes mode-0600 shutdown and attach-bridge sockets, and never resolves a runtime from `PATH` or Homebrew. The bridge closes the guest leg when daemon replacement closes its target leg, so the wire client opens a fresh connection to the restored target.
-- Frontends are durable access surfaces. `up` and `apply` replace only the daemon, so live frontends reconnect. Explicit `down` pushes stop to attached frontends, drains for a bound, reports busy stragglers, then stops the daemon. Host frontends hold a per-location lock and expose a private instance-bound control socket; normal lifecycle never signals a recorded PID.
-- Wire protocol v8 carries runtime, filesystem, and mount point in the handshake plus server stop control. The launcher supplies runtime through `--runtime` or `OMNIFS_RUNTIME`; transport never infers it. A failed reconnect past the attach deadline enters frontend-owned teardown.
-- `omnifs status` uses daemon attachments as its sole frontend source. Commands that act on Docker, libkrun, or a host runner probe that runtime directly. `omnifs doctor` owns stray and stale-record reporting and requires fresh identity proof before destructive remediation.
+- The daemon is a pure namespace server and control-plane owner. `VfsServer` binds one fixed Unix and one fixed TCP endpoint on every start, owns connection tasks and live attachments, and treats either listener's exit as fatal. Host filesystems use hidden `omnifs run-fs`; Docker and libkrun guests keep the slim `omnifs-thin` binary.
+- `omnifs-workspace` stores strict filesystem specs under `filesystems/specs` and serializes lifecycle with a per-ID claim. `fs create` resolves defaults once without launching. `fs attach`, `detach`, `restart`, `rm`, and `shell` select only by `--name`; `fs ls` joins specs with daemon attachments. Host locations are absolute and ID-bearing. Docker and libkrun use `/omnifs`.
+- The CLI owns filesystem launch and teardown through host processes, Docker containers, and libkrun VMs. Attach rejects an existing confirmed instance. Detach proves mount absence and runtime exit. Remove never detaches implicitly. `up` and `apply` replace only the daemon; `down` pushes stop, drains for a bound, and preserves filesystem specs.
+- Libkrun resolves an immutable guest image base, then materializes `filesystems/runtime/<id>/libkrun/root.raw` with mode 0600 for each launch. The helper record and private control carry the full resolved filesystem spec plus a random process instance. Docker container names and labels carry the ID, and exact inspection also verifies the flat command against the stored spec.
+- Wire protocol v9 carries the exact resolved filesystem spec plus server stop control. The daemon keys attachments by ID, accepts reconnect overlap only for the same exact spec, and rejects conflicting fields. A failed reconnect past the attach deadline enters filesystem-owned teardown.
+- `omnifs status` joins configured specs with daemon attachments. Commands that act on Docker, libkrun, or a host runner probe only the runtime named by the spec. `omnifs doctor` owns stray and stale-record reporting and requires a cleanly stopped daemon, interactive consent, and fresh exact identity proof before destructive remediation.
 - Global `--output human|json|jsonl`, `--quiet`, `--no-input`, and `--yes` belong to the invocation. JSON emits exactly one result/error envelope; JSONL emits events followed by one terminal result/error. Status and list results use plural resource arrays and absolute machine paths.
 - Workspace-local dogfood metrics are appended only under `$OMNIFS_HOME/metrics/`, controlled by `[metrics] enabled` and `OMNIFS_METRICS`, and never transmitted. The local JSONL writer has no networking dependency and never fails a product operation.
-- `omnifs frontend shell [filesystem] [--runtime <docker|libkrun>]` enters one observed guest frontend. Omitted selectors are inferred only when one observed guest matches; ambiguous matches require both selectors. Host frontends are ordinary mounted paths and need no Omnifs-owned subshell.
-- Guided onboarding belongs to `omnifs setup`, which composes provider configuration, `up`, and imperative user-selected frontend enables without persisting frontend desired state. `up` still starts only the daemon, and `frontend enable` still starts one explicit runner. `status` reports daemon attachments; `down`, `shell`, and lifecycle commands probe or control the runtime facts they need.
-- `just dev` is the supported contributor runtime entrypoint: it runs `scripts/dev.ts` to build provider WASM into a content-addressed provider-store bundle, build the omnifs CLI natively, start a host-native daemon with pinned dev mounts and credentials rendered into `~/.omnifs-dev`, imperatively enable the host and Docker frontends, and open a shell inside the Docker frontend at `/omnifs`. Uniform across OSes: the daemon is always host-native; a frontend location is how a contributor browses.
-- The daemon runs on the host, not in a container: `omnifs status`, `omnifs down`, and the daemon log (`~/.omnifs-dev/cache/daemon.log`) all work directly, no `docker exec` needed. The frontend container is discoverable by its `ai.0xff.omnifs.home` label (`docker ps --filter label=ai.0xff.omnifs.home=~/.omnifs-dev`); reach its location with `docker exec -it -w /omnifs <name> /bin/sh` (it ships no zsh) and disable it with `omnifs frontend disable fuse --runtime docker`.
-- `Dockerfile`'s `frontend-dev` stage is the contributor image path for `just dev` (the same target `just frontend-image` builds). There is no daemon-in-a-container image or stage: the daemon only ever runs host-native. The frontend image runs `omnifs-thin fuse`, built by the `thin-builder` Dockerfile stage with no provider-store build context. Release frontend image assembly uses `scripts/ci/build-frontend-image.sh`, injecting a prebuilt `omnifs-thin` binary as the `omnifs-thin-bin` build context; release CLI binaries (the separate full `omnifs` binary) embed the provider bundle, and selected mounts retain their exact artifacts through `mount add`.
+- `omnifs fs shell --name <id> [--shell <path>] [--command <argv>...]` enters one exact guest filesystem. For a host filesystem it verifies the mounted phase and reports the ordinary host path.
+- Guided onboarding belongs to `omnifs setup`, which composes provider configuration, `up`, and named filesystem creation and attachment. `up` still starts only the daemon.
+- `just dev` builds providers and the native CLI, starts the host daemon, ensures `dev-host` and `dev-docker` specs, attaches them, and opens a shell inside `dev-docker` at `/omnifs`.
+- The daemon runs on the host. The dev Docker filesystem carries `ai.0xff.omnifs.home` and `ai.0xff.omnifs.fs` labels. Detach it with `target/debug/omnifs fs detach --name dev-docker`.
+- `Dockerfile`'s `filesystem-dev` stage is the contributor image path. The image entrypoint is only `omnifs-thin`; the launcher passes the flat named arguments. Release image assembly uses `scripts/ci/build-filesystem-image.sh`.
 - A provider is one `#[omnifs_sdk::provider]` impl with synchronous `fn start` registering routes on a `Router`. `r.object::<O>` and `r.file_object::<O>` bind objects; `r.alias` mounts the same object at another template; `r.dir`, `r.file`, and `r.treeref` are the path-oriented face for non-object routes.
 - Provider namespace and notify exports are async component functions. SDK callout futures await host imports directly; the host uses Wasmtime component async with `run_concurrent` so one provider instance can have multiple filesystem operations in flight.
 
@@ -186,6 +186,8 @@ cargo fmt
 cargo nextest run
 ```
 
+Finish source review before broad validation. Tests replace a preceding `cargo check` or `cargo test --no-run` for the same target. Run one broad gate on the final tree, and rerun it only after a relevant code change.
+
 Use the right wider gate for the change:
 
 - **Before a push or PR handoff.** Run `just check`; it composes formatting, justfile and docs checks, workflow linting, provider gates, host clippy and tests, and whitespace validation. CI keeps the scoped lanes separate for parallelism.
@@ -234,26 +236,3 @@ Do not use `cargo check --workspace --all-targets` as the host gate. If validati
 - Delete stale footguns in this file when their condition no longer holds.
 - Update current shape when the implementation shape changes.
 - Fix or add a rule here when the work proves one wrong or missing.
-
-# Writing style
-
-Write in flowing technical prose, the way a sharp senior engineer talks in chat - direct, conversational, and confident. Not documentation, not a report, not a slide deck.
-
-Rules:
-
-1. **Answer exactly what was asked, at the length it deserves - err short.** A yes/no or confirmation question gets 2-4 sentences. A "which one should I pick" gets a few paragraphs. Only a genuinely multi-part design question earns a long answer. Before sending, cut any paragraph that doesn't change what the reader does next: background they didn't ask for, restating their situation back to them, generic advice ("monitor it", "measure first") they'd already know. Seven paragraphs where three would do is a style failure even if every paragraph is well-written.
-2. **Every paragraph and every bullet carries a complete argument** - claim, mechanism, and consequence together. Never state a fact without saying why it matters in the same breath. Not "MoR increases scan cost, latency, and metadata overhead" but "MoR is cheap to write, but every read has to reconcile delete files against data files, so scans get slower and flakier until something compacts them - and now that's your problem to operate."
-3. **Match the form to the content - and vary it.** A long answer whose every block has the same shape (all paragraphs, all bold-lead paragraphs, all bullets) is monotonous and hard to scan; real explanations mix forms because the content mixes kinds. Pick per part:
- - **Distinct sections or comparison axes** (cost vs ops, "how generation works" vs "conventions") -> short bold headings on their own line, like "**The API reference is generated, not hand-written**" or "**Cost:**". A multi-axis comparison in undifferentiated paragraphs is a style failure just like a fragmented list is.
- - **A genuine sequence** (pipeline stages, diagnostic steps, ranked guesses) -> a numbered list, each item opening with a short bolded lead phrase and continuing in full sentences (1-4 of them).
- - **Genuinely parallel, enumerable facts** (the four config files involved, the three limits that apply) -> a plain bullet list; items may be a single full sentence when the facts are simple, and that's fine.
- - **Reasoning, causality, narrative** -> paragraphs.
- Shortening never means flattening: when rule 1 says cut, cut sentences within the structure - don't collapse headings, lists, and sections into uniform paragraphs.
-4. **Don't shred connected reasoning into bullets.** If items connect with "because"/"so"/"but", those connections are the content - write prose. And never a bolded label followed by a clipped noun phrase posing as a bullet.
-5. **Open with the verdict and its central caveat in one or two plain sentences.** Not a bolded headline.
-6. **Conversational but not dramatic.** Use contractions (it's, you'd, don't). Say "so" and "but", not "therefore" and "however". Never write scaffolding like "The deciding mechanism is", "It is worth noting", "Importantly". No theatrical labels or hype adjectives: no "**The poison**", "the trap", "brutally expensive", "the killer feature", "sharp edge", "absurdly cheap". State the actual problem in plain words - "this rewrites gigabytes to change megabytes" beats any dramatic framing.
- - No staccato, short dramatic sentences. Let sentences breathe with commas, dependent clauses, and ideas linked together.
- - No cheesy setup phrases that introduce a point instead of stating it. Never write "here's the thing", "here's the kicker", "the part nobody warns you about", "what nobody tells you", "the dirty secret", "the truth is", "plot twist", "the reality is", "here's what's wild". State the claim directly.
- - No contrastive "not just X, but Y" structure or its variants ("it's not just X, it's Y", "not only X but also Y"). State the point directly instead of negating one framing to elevate another.
-7. **No compression.** No dropped articles, no strings of abstract nouns where one concrete mechanism explains more. Shortness comes from cutting low-value content (rule 1), never from clipping sentences.
-8. **End with a bottom line only when the answer weighed a real decision.** One plain-prose sentence: the call plus the condition that would flip it. Short factual or confirmation answers just end - no formulaic closer.

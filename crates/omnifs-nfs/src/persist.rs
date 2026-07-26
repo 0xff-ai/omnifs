@@ -1,9 +1,9 @@
-//! Persistence of the NFS filehandle-identity table across a frontend restart.
+//! Persistence of the NFS filehandle-identity table across a filesystem restart.
 //!
 //! An NFS filehandle is `(generation, id)`. A kernel client holds filehandles
-//! across a frontend process restart and expects them to keep decoding; a fresh
+//! across a filesystem process restart and expects them to keep decoding; a fresh
 //! random `generation` would fail every held handle with `NFS4ERR_FHEXPIRED`
-//! (the transport-level ESTALE the frontend must not surface). So the restartable
+//! (the transport-level ESTALE the filesystem must not surface). So the restartable
 //! out-of-process runner persists the protocol identity table: the `generation`,
 //! the `next_ino` allocation cursor, and one entry per inode id carrying only the
 //! protocol-local `{ scope, parent, name, kind }` plus the validated namespace
@@ -14,8 +14,8 @@
 //! This schema and its IO live in `omnifs-nfs`, not `omnifs-mtab`. The
 //! `omnifs-mtab` state file (`MountState`) is mount *discovery/teardown* state
 //! (protocol kind, mount point, address when applicable, and pid) shared by
-//! frontend runners and the CLI; this file is NFS
-//! *protocol identity* (the filehandle decode table), which the frontend contract
+//! filesystem runners and the CLI; this file is NFS
+//! *protocol identity* (the filehandle decode table), which the filesystem contract
 //! keeps in `omnifs-nfs`. It lands in the same NFS state directory next to the
 //! mtab mount-state files and follows the same discipline: a `version` field, an
 //! unknown version is a hard error, an atomic temp-then-rename write, and 0600

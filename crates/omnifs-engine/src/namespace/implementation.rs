@@ -237,7 +237,7 @@ pub struct TreeNamespace {
 impl TreeNamespace {
     /// Production constructor: build the namespace over the immutable mount registry and
     /// start the background invalidation drain. The returned value is the
-    /// frontend's complete `dyn Namespace` implementation.
+    /// filesystem's complete `dyn Namespace` implementation.
     pub fn online(registry: Arc<MountTable>, rt: Handle) -> Arc<Self> {
         assert!(
             !registry.is_offline(),
@@ -374,7 +374,7 @@ impl TreeNamespace {
     // --- inspector tracing ---------------------------------------------------
     //
     // `TreeNamespace` owns request spans because structural paths are opaque to
-    // frontends. Only this id table can map a node to the mount and path that
+    // filesystems. Only this id table can map a node to the mount and path that
     // the inspector records; child provider and callout spans inherit the
     // request span through tracing.
     fn begin_span(op: &'static str, mount: &str, path: &str) -> tracing::Span {
@@ -520,7 +520,7 @@ impl TreeNamespace {
             })
             .collect();
 
-        // Effects are authoritative even when a frontend presents a persisted
+        // Effects are authoritative even when a filesystem presents a persisted
         // structural path that has never been interned in this daemon instance.
         // Convert every effect path into its full namespace path before updating
         // the private change table or publishing the event.
@@ -552,7 +552,7 @@ impl TreeNamespace {
         for id in affected {
             self.node_epochs.insert(id.clone(), epoch);
             // Drop the learned attrs so the next answer re-resolves; keep the
-            // identity so a frontend's cached id stays resolvable.
+            // identity so a filesystem's cached id stays resolvable.
             if let Some(mut record) = self.ids.get_mut(&id) {
                 record.attrs = None;
                 record.host = None;
@@ -604,7 +604,7 @@ impl TreeNamespace {
     /// The change counter for a node, folding the served-mount set into the
     /// enumeration root's answer. Adding or removing a mount does not invalidate
     /// the synthetic `/` node (its mount name is `""`, never a served mount), so
-    /// its epoch never moves; a frontend cache keyed on the change attribute
+    /// its epoch never moves; a filesystem cache keyed on the change attribute
     /// (the NFS root directory listing under `noac`) would otherwise never drop a
     /// stale empty listing. Mixing the sorted served mounts in bumps the root's
     /// change exactly when the mount set changes.

@@ -1,12 +1,12 @@
-//! `fuser::Filesystem` trait implementation for [`super::Frontend`].
+//! `fuser::Filesystem` trait implementation for [`super::FuseAdapter`].
 //!
-//! Every callback is a thin dispatch: clone the frontend, spawn the async op
+//! Every callback is a thin dispatch: clone the filesystem, spawn the async op
 //! onto the runtime (so the fuser event-loop thread never blocks and notifier
 //! calls never deadlock the dispatch thread), then marshal the op's plain-data
 //! result into the kernel `Reply*` sink. All resolution/attr/read decisions live
 //! in `ops.rs`.
 
-use super::Frontend;
+use super::FuseAdapter;
 use fuser::{
     Errno, FileHandle as FuseFileHandle, Filesystem, FopenFlags, Generation, INodeNo, LockOwner,
     OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, Request,
@@ -14,7 +14,7 @@ use fuser::{
 use std::ffi::OsStr;
 use tracing::{Instrument, debug_span};
 
-impl Filesystem for Frontend {
+impl Filesystem for FuseAdapter {
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let fs = self.clone();
         let name = name.to_owned();

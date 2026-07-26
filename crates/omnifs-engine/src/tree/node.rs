@@ -167,7 +167,7 @@ impl Entry {
     }
 
     /// A host-synthesized child surfaced by `Tree` and materialized by a
-    /// frontend through the namespace.
+    /// filesystem through the namespace.
     pub(crate) fn synthetic(name: String, meta: EntryMeta) -> Self {
         Self { name, meta }
     }

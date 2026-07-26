@@ -5,14 +5,13 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use omnifs_api::DaemonStatus;
+use omnifs_core::fs;
 use omnifs_workspace::creds::CredentialStore;
 use omnifs_workspace::mounts::{Registry, Revision};
 use omnifs_workspace::provider::Catalog;
 
 use crate::client::DaemonClient;
-use crate::commands::frontend::FrontendId;
 use crate::daemon_teardown::DaemonTeardown;
-use crate::inventory::{FrontendState, FrontendStatus, Inventory};
 use crate::mount_config::validate_host_managed_credentials;
 use crate::ui::live::LiveRegion;
 use crate::ui::output::Output;
@@ -20,7 +19,7 @@ use crate::ui::render::LedgerRow;
 use crate::ui::style::Glyph;
 use omnifs_workspace::Workspace;
 
-/// A short grace window for independent frontend runners to reattach after
+/// A short grace window for independent filesystem runners to reattach after
 /// this command replaces the daemon they were talking to.
 const RECONNECT_GRACE: Duration = Duration::from_secs(3);
 const RECONNECT_POLL: Duration = Duration::from_millis(250);
@@ -28,10 +27,10 @@ const RECONNECT_POLL: Duration = Duration::from_millis(250);
 /// The keys `up`'s ledger block ever prints, in print order. Rows settle one
 /// at a time as async work finishes rather than as one batch (provider
 /// warmup's spinner settles first, then `daemon`/`mounts` print together,
-/// then `frontends` settles last from the reconnect-grace live region), so
+/// then `filesystems` settles last from the reconnect-grace live region), so
 /// the shared key width is computed once from this fixed set up front: a
 /// block's key column is sized to the whole block, never truncated.
-pub(crate) const UP_LEDGER_KEYS: [&str; 4] = ["providers", "daemon", "mounts", "frontends"];
+pub(crate) const UP_LEDGER_KEYS: [&str; 4] = ["providers", "daemon", "mounts", "filesystems"];
 
 pub(crate) fn up_key_width() -> usize {
     crate::ui::render::key_field_width(&UP_LEDGER_KEYS)
@@ -39,7 +38,7 @@ pub(crate) fn up_key_width() -> usize {
 
 /// Whether replacing the daemon actually happened, or the daemon was already
 /// serving the desired revision. Only a real replacement prints the ledger
-/// block, waits out the frontend reconnect grace, and (for the human
+/// block, waits out the filesystem reconnect grace, and (for the human
 /// register) prints access lines below it; a no-op collapses to the single
 /// `Already serving revision <sha>. Files at <location>` sentence instead.
 pub(crate) enum LaunchOutcome {
@@ -193,10 +192,10 @@ impl<'a> Launcher<'a> {
         let client = crate::client::DaemonClient::for_workspace(self.workspace);
         let current = client.status_optional().await?;
 
-        // The frontends observed while the prior daemon was still answering
+        // The filesystems observed while the prior daemon was still answering
         // are the set expected to reattach once the new one is ready. A
         // fresh start (no prior daemon) has nothing to reconnect: any
-        // frontend runner sitting idle without ever having attached is an
+        // filesystem runner sitting idle without ever having attached is an
         // `enable`, not a `reattach`, and stays out of this slice's grace
         // wait.
         let mut expected_reattach = Vec::new();
@@ -216,14 +215,7 @@ impl<'a> Launcher<'a> {
                 return Ok(LaunchOutcome::AlreadyServing);
             }
 
-            if let Ok(inventory) = Inventory::collect(self.workspace).await {
-                expected_reattach = inventory
-                    .frontends
-                    .iter()
-                    .filter(|frontend| frontend.state == FrontendState::Attached)
-                    .map(FrontendId::from_status)
-                    .collect();
-            }
+            expected_reattach.clone_from(&status.filesystems);
 
             if existing_record.as_ref().is_some_and(|record| {
                 record.mount_revision == *revision && record.offline != offline
@@ -264,17 +256,17 @@ impl<'a> Launcher<'a> {
         Ok(LaunchOutcome::Started)
     }
 
-    /// Wait a short grace period for every frontend observed just before
+    /// Wait a short grace period for every filesystem observed just before
     /// replacement to reappear as attached, rendering the live-region row
     /// and settled summary from the live region. Timing out is not a failure:
     /// `up` still returns `Ok`, and the caller's exit code stays 0.
     async fn wait_for_reattachment(
         &self,
-        expected: Vec<FrontendId>,
+        expected: Vec<fs::Spec>,
         key_width: usize,
     ) -> anyhow::Result<()> {
         let total = expected.len();
-        let mut region = LiveRegion::new(self.output.clone(), ["frontends"]);
+        let mut region = LiveRegion::new(self.output.clone(), ["filesystems"]);
         let deadline = tokio::time::Instant::now() + RECONNECT_GRACE;
         let client = crate::client::DaemonClient::for_workspace(self.workspace);
         loop {
@@ -283,20 +275,21 @@ impl<'a> Launcher<'a> {
             // `Inventory::collect` join (registry parse, credential lookups,
             // runner discovery I/O) every tick for one signal.
             let status = client.status_optional().await.ok().flatten();
-            let observed = crate::inventory::frontend_statuses(status.as_ref(), 0);
-            let observed = observed.as_slice();
+            let observed = status
+                .as_ref()
+                .map_or(&[][..], |status| status.filesystems.as_slice());
             let (reattached, pending) = reattach_progress(&expected, observed);
-            region.update("frontends", format!("{reattached}/{total} reattached…"));
+            region.update("filesystems", format!("{reattached}/{total} reattached…"));
 
             if pending.is_empty() {
                 let detail = expected
                     .iter()
-                    .map(FrontendId::describe)
+                    .map(describe_filesystem)
                     .collect::<Vec<_>>()
                     .join(", ");
                 region.finish(
                     Glyph::Done,
-                    "frontends",
+                    "filesystems",
                     reattached_value(reattached, total, &detail),
                     key_width,
                 );
@@ -307,12 +300,12 @@ impl<'a> Launcher<'a> {
                 let first = &pending[0];
                 region.finish(
                     Glyph::Warn,
-                    "frontends",
-                    pending_value(reattached, total, &first.describe()),
+                    "filesystems",
+                    pending_value(reattached, total, &describe_filesystem(first)),
                     key_width,
                 );
                 self.output
-                    .narrate(format!("  fix:  `{}`", first.restart_command()));
+                    .narrate(format!("  fix:  `omnifs fs restart --name {}`", first.id()));
                 return Ok(());
             }
 
@@ -322,7 +315,7 @@ impl<'a> Launcher<'a> {
                     let (reattached, _) = reattach_progress(&expected, observed);
                     region.finish(
                         Glyph::Warn,
-                        "frontends",
+                        "filesystems",
                         format!("{reattached}/{total} reattached (canceled)"),
                         key_width,
                     );
@@ -333,12 +326,12 @@ impl<'a> Launcher<'a> {
     }
 }
 
-/// The settled `frontends` row value once every expected track reattached.
+/// The settled `filesystems` row value once every expected track reattached.
 fn reattached_value(reattached: usize, total: usize, detail: &str) -> String {
     format!("{reattached}/{total} reattached ({detail})")
 }
 
-/// The settled `frontends` row value when the grace window elapsed with at
+/// The settled `filesystems` row value when the grace window elapsed with at
 /// least one track still pending.
 fn pending_value(reattached: usize, total: usize, first_pending: &str) -> String {
     format!("{reattached}/{total} reattached, {first_pending} pending")
@@ -347,20 +340,17 @@ fn pending_value(reattached: usize, total: usize, first_pending: &str) -> String
 /// How many of `expected` are observed attached in `current`, and which
 /// tracks are still pending. Pure so the reconnect-grace state machine is
 /// unit-testable without a real daemon or real timing.
-fn reattach_progress(
-    expected: &[FrontendId],
-    current: &[FrontendStatus],
-) -> (usize, Vec<FrontendId>) {
-    let pending: Vec<FrontendId> = expected
+fn reattach_progress(expected: &[fs::Spec], current: &[fs::Spec]) -> (usize, Vec<fs::Spec>) {
+    let pending = expected
         .iter()
-        .filter(|track| {
-            !current.iter().any(|status| {
-                status.state == FrontendState::Attached && track.matches_status(status)
-            })
-        })
+        .filter(|track| !current.contains(track))
         .cloned()
-        .collect();
+        .collect::<Vec<_>>();
     (expected.len() - pending.len(), pending)
+}
+
+fn describe_filesystem(spec: &fs::Spec) -> String {
+    format!("`{}` {}/{}", spec.id(), spec.protocol(), spec.runtime())
 }
 
 /// Validate every configured mount before the running daemon is touched and
@@ -528,9 +518,9 @@ fn mounts_row_value(mounts: &[omnifs_api::MountInfo]) -> String {
 }
 
 /// Print the `daemon` and `mounts` rows of `up`'s ledger block.
-/// The former generic `frontend`/`mounts` subsystem-health rows are gone:
+/// The former generic `filesystem`/`mounts` subsystem-health rows are gone:
 /// `daemon` now carries the identity a successful launch actually answers
-/// (pid, revision), and the frontend row is owned entirely by
+/// (pid, revision), and the filesystem row is owned entirely by
 /// [`Launcher::wait_for_reattachment`] below.
 fn report_launch_status(
     output: &Output,
@@ -557,7 +547,7 @@ fn report_launch_status(
 mod tests {
     use super::*;
     use crate::ui::render::Capabilities;
-    use omnifs_api::{FrontendRuntime as Runtime, FsType as Filesystem};
+    use omnifs_core::fs::{self, Runtime};
 
     fn caps() -> Capabilities {
         Capabilities {
@@ -613,40 +603,27 @@ mod tests {
         );
     }
 
-    fn track(filesystem: Filesystem, runtime: Runtime, location: &str) -> FrontendId {
-        FrontendId::from_status(&FrontendStatus {
-            filesystem,
+    fn track(protocol: fs::Protocol, runtime: Runtime, location: &str) -> fs::Spec {
+        fs::Spec::new(
+            fs::Id::new(format!("{protocol}-{runtime}")).unwrap(),
+            protocol,
             runtime,
-            location: Some(PathBuf::from(location)),
-            state: FrontendState::Attached,
-            mount_count: 2,
-            fix: None,
-        })
-    }
-
-    fn attached(track: &FrontendId) -> FrontendStatus {
-        FrontendStatus {
-            filesystem: track.filesystem(),
-            runtime: track.runtime(),
-            location: track.location().map(Path::to_path_buf),
-            state: FrontendState::Attached,
-            mount_count: 2,
-            fix: None,
-        }
+            PathBuf::from(location),
+        )
+        .unwrap()
     }
 
     #[test]
     fn reattach_progress_counts_matched_tracks_and_lists_the_rest_as_pending() {
-        let nfs_host = track(Filesystem::Nfs, Runtime::Host, "/Users/raul/omnifs");
-        let fuse_libkrun = track(Filesystem::Fuse, Runtime::Libkrun, "/omnifs");
+        let nfs_host = track(fs::Protocol::Nfs, Runtime::Host, "/Users/raul/omnifs");
+        let fuse_libkrun = track(fs::Protocol::Fuse, Runtime::Libkrun, "/omnifs");
         let expected = vec![nfs_host.clone(), fuse_libkrun.clone()];
 
-        let (reattached, pending) = reattach_progress(&expected, &[attached(&nfs_host)]);
+        let (reattached, pending) = reattach_progress(&expected, std::slice::from_ref(&nfs_host));
         assert_eq!(reattached, 1);
         assert_eq!(pending, vec![fuse_libkrun.clone()]);
 
-        let (reattached, pending) =
-            reattach_progress(&expected, &[attached(&nfs_host), attached(&fuse_libkrun)]);
+        let (reattached, pending) = reattach_progress(&expected, &[nfs_host, fuse_libkrun.clone()]);
         assert_eq!(reattached, 2);
         assert!(pending.is_empty());
 
@@ -656,34 +633,22 @@ mod tests {
     }
 
     #[test]
-    fn reattach_progress_ignores_a_track_observed_but_not_yet_attached() {
-        let track = track(Filesystem::Fuse, Runtime::Docker, "/omnifs");
-        let mut not_yet_attached = attached(&track);
-        not_yet_attached.state = FrontendState::Running;
-        let (reattached, pending) =
-            reattach_progress(std::slice::from_ref(&track), &[not_yet_attached]);
-        assert_eq!(reattached, 0);
-        assert_eq!(pending, vec![track]);
-    }
-
-    #[test]
-    fn frontend_restart_command_names_the_exact_filesystem_and_runtime() {
-        let track = track(Filesystem::Fuse, Runtime::Libkrun, "/omnifs");
-        assert_eq!(track.describe(), "fuse libkrun");
+    fn filesystem_restart_command_names_the_exact_name() {
+        let track = track(fs::Protocol::Fuse, Runtime::Libkrun, "/omnifs");
         assert_eq!(
-            track.restart_command(),
-            "omnifs frontend restart fuse --runtime libkrun"
+            format!("omnifs fs restart --name {}", track.id()),
+            "omnifs fs restart --name fuse-libkrun"
         );
     }
 
-    /// The `daemon`/`mounts`/`frontends` three-row fragment of the
+    /// The `daemon`/`mounts`/`filesystems` three-row fragment of the
     /// ledger block, reproduced byte-for-byte from the same pure value
     /// functions and the same streamed-row primitive `report_launch_status`/
     /// `wait_for_reattachment` call in production:
     /// ```text
-    /// ✓ daemon      running (pid 31114), revision 3f69473...
-    /// ✓ mounts      /github /dns serving
-    /// ✓ frontends   2/2 reattached (nfs host, fuse libkrun)
+    /// ✓ daemon        running (pid 31114), revision 3f69473...
+    /// ✓ mounts        /github /dns serving
+    /// ✓ filesystems   2/2 reattached (nfs host, fuse libkrun)
     /// ```
     #[test]
     fn up_ledger_rows_compose_into_the_documented_block() {
@@ -702,7 +667,7 @@ mod tests {
             ),
             crate::ui::render::LedgerRow::new(
                 Glyph::Done,
-                "frontends",
+                "filesystems",
                 reattached_value(2, 2, "nfs host, fuse libkrun"),
             ),
         ];
@@ -714,9 +679,9 @@ mod tests {
         assert_eq!(
             block,
             format!(
-                "✓ daemon      running (pid 31114), revision {revision}\n\
-                 ✓ mounts      /github /dns serving\n\
-                 ✓ frontends   2/2 reattached (nfs host, fuse libkrun)"
+                "✓ daemon        running (pid 31114), revision {revision}\n\
+                 ✓ mounts        /github /dns serving\n\
+                 ✓ filesystems   2/2 reattached (nfs host, fuse libkrun)"
             )
         );
     }

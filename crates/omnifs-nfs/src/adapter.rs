@@ -80,7 +80,7 @@ pub(crate) enum Body {
     /// A namespace node: resolution, attrs, listing, and reads go through the
     /// [`Namespace`] via this handle.
     Node(Path),
-    /// A frontend-owned hidden marker, served without entering the namespace.
+    /// A filesystem-owned hidden marker, served without entering the namespace.
     Synthetic(&'static [u8]),
 }
 
@@ -108,7 +108,7 @@ pub struct Export {
     /// and negative-name caches are deliberately disabled.
     replies: ReplyCache,
     /// Invalidation and live-growth events, drained inline after each namespace
-    /// op so the frontend applies them with drain-before-answer ordering.
+    /// op so the filesystem applies them with drain-before-answer ordering.
     events: Mutex<EventStream>,
     /// Proactive deferral for provider-backed `READDIR`.
     delayed_lists: PendingListings,
@@ -181,7 +181,7 @@ impl Export {
             );
             by_node.insert((scope, Path::root()), scope);
         }
-        // Keep the marker inode stable across frontend restarts without
+        // Keep the marker inode stable across filesystem restarts without
         // persisting it as a namespace path that would need re-resolution.
         inodes.insert(
             SPOTLIGHT_MARKER_ID,

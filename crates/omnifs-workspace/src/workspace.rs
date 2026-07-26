@@ -31,23 +31,13 @@ const DEFAULT_HOME_SUBDIR: &str = ".omnifs";
 // flat shape.
 pub(crate) const CONFIG_FILE: &str = "config.toml";
 pub(crate) const CREDENTIALS_FILE: &str = "credentials.json";
+pub(crate) const FILESYSTEMS_SUBDIR: &str = "filesystems";
 pub(crate) const MOUNTS_SUBDIR: &str = "mounts";
 pub(crate) const PROVIDERS_SUBDIR: &str = "providers";
 pub(crate) const CACHE_SUBDIR: &str = "cache";
 /// Subdirectory of `cache_dir` holding immutable mount-spec revision snapshots.
 pub(crate) const MOUNT_REVISIONS_SUBDIR: &str = "mount-revisions";
-/// Subdirectory of `cache_dir` holding local frontend state.
-pub(crate) const FRONTEND_STATE_SUBDIR: &str = "frontends";
-/// Subdirectory of `config_dir` holding the daemon's fixed namespace attach
-/// socket served to host-side frontend clients.
-pub(crate) const FRONTENDS_SUBDIR: &str = "frontends";
-/// Filename of the daemon's fixed namespace attach socket for local frontend
-/// runners (`<config_dir>/frontends/local.sock`). One socket, always at this
-/// name; auth is filesystem permissions on the socket.
-pub(crate) const LOCAL_ATTACH_SOCKET_NAME: &str = "local.sock";
 pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
-/// Overrides the host-visible mount point the daemon serves at.
-pub const OMNIFS_MOUNT_POINT_ENV: &str = "OMNIFS_MOUNT_POINT";
 
 /// Path resolution failed because no default root could be derived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,28 +78,14 @@ pub fn wasm_cache_dir(cache_dir: &Path) -> PathBuf {
     cache_dir.join("wasm")
 }
 
-/// Resolve the host-visible mount point the daemon serves at:
-/// `OMNIFS_MOUNT_POINT` when set (the container entrypoint exports it),
-/// otherwise `$HOME/omnifs`, deliberately outside `OMNIFS_HOME` so the mounted
-/// tree lives at a normal user-owned location. `None` only when neither is
-/// available.
-///
-/// Single owner of this path: the daemon serves here and `omnifs setup`
-/// previews it, so the served location and the preview cannot drift.
-pub fn resolve_mount_point() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os(OMNIFS_MOUNT_POINT_ENV) {
-        return Some(PathBuf::from(explicit));
-    }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("omnifs"))
-}
-
 pub struct Workspace {
     config_file: PathBuf,
     credentials: Arc<FileStore>,
     catalog: Catalog,
     desired_state: DesiredState,
+    filesystems: crate::filesystems::Registry,
     daemon: DaemonState,
-    frontend: FrontendState,
+    filesystem_state: FilesystemState,
     identity: WorkspaceIdentity,
     metrics: crate::metrics::Store,
     warmup: WarmupStore,
@@ -130,15 +106,18 @@ impl Workspace {
         let credentials = Arc::new(FileStore::new(home.join(CREDENTIALS_FILE)));
         let catalog = Catalog::open(home.join(PROVIDERS_SUBDIR));
         let daemon = DaemonState::new(home.clone());
-        let frontend = FrontendState::new(home.clone(), cache_dir.clone());
+        let filesystem_state = FilesystemState::new(home.clone(), cache_dir.clone());
         let identity = WorkspaceIdentity { home: home.clone() };
         Self {
             config_file: home.join(CONFIG_FILE),
             credentials,
             catalog,
             desired_state: DesiredState::new(home.join(MOUNTS_SUBDIR), cache_dir.clone()),
+            filesystems: crate::filesystems::Registry::new(
+                home.join(FILESYSTEMS_SUBDIR).join("specs"),
+            ),
             daemon,
-            frontend,
+            filesystem_state,
             identity,
             metrics: crate::metrics::Store::new(&home),
             warmup: WarmupStore::new(home, cache_dir),
@@ -153,10 +132,10 @@ impl Workspace {
     /// Stable, nonzero namespace attach port for this workspace.
     ///
     /// The default is derived from workspace identity so a replacement daemon
-    /// rebinds the address that live guest frontends keep dialing.
+    /// rebinds the address that live guest filesystems keep dialing.
     pub fn attach_port(&self) -> anyhow::Result<NonZeroU16> {
-        if let Some(configured) = self.config()?.frontend.attach_port {
-            return NonZeroU16::new(configured).context("[frontend] attach_port must not be 0");
+        if let Some(configured) = self.config()?.filesystem.attach_port {
+            return NonZeroU16::new(configured).context("[filesystem] attach_port must not be 0");
         }
         let digest = blake3::hash(self.daemon.config_dir().as_os_str().as_encoded_bytes());
         let bytes = digest.as_bytes();
@@ -195,13 +174,18 @@ impl Workspace {
     }
 
     #[must_use]
+    pub fn filesystems(&self) -> &crate::filesystems::Registry {
+        &self.filesystems
+    }
+
+    #[must_use]
     pub fn daemon(&self) -> &DaemonState {
         &self.daemon
     }
 
     #[must_use]
-    pub fn frontend(&self) -> &FrontendState {
-        &self.frontend
+    pub fn filesystem_state(&self) -> &FilesystemState {
+        &self.filesystem_state
     }
 
     /// Workspace identity consumed by Docker naming and final output.
@@ -398,21 +382,21 @@ impl DaemonState {
     }
 }
 
-/// Frontend lifecycle state and launch resources for one workspace.
+/// Filesystem lifecycle state and launch resources for one workspace.
 ///
-/// The component owns runner discovery leaves and frontend-specific runtime
+/// The component owns runner discovery leaves and filesystem-specific runtime
 /// locations. It derives a concrete path only when a
-/// frontend process, state scan, teardown, or output boundary consumes it.
+/// filesystem process, state scan, teardown, or output boundary consumes it.
 #[derive(Debug, Clone)]
-pub struct FrontendState {
+pub struct FilesystemState {
     config_dir: PathBuf,
     cache_dir: PathBuf,
     state_root: PathBuf,
 }
 
-impl FrontendState {
+impl FilesystemState {
     fn new(config_dir: PathBuf, cache_dir: PathBuf) -> Self {
-        let state_root = cache_dir.join(FRONTEND_STATE_SUBDIR);
+        let state_root = cache_dir.join(FILESYSTEMS_SUBDIR);
         Self {
             config_dir,
             cache_dir,
@@ -425,33 +409,33 @@ impl FrontendState {
         &self.state_root
     }
 
-    /// Return the sole runner-state leaf for a host mount location.
-    ///
-    /// Filesystem kind is intentionally absent: one mount location admits one
-    /// runner and one process-held claim across all frontend kinds.
+    /// Return the sole runner-state leaf for a named host filesystem.
     #[must_use]
-    pub fn state_dir(&self, mount: &Path) -> PathBuf {
-        let normalized = mount.components().collect::<PathBuf>();
-        let digest = blake3::hash(normalized.as_os_str().as_encoded_bytes()).to_hex();
-        self.state_root.join(digest.as_str())
+    pub fn state_dir(&self, id: &omnifs_core::fs::Id) -> PathBuf {
+        self.state_root.join(id.as_str())
     }
 
     #[must_use]
     pub fn attach_socket(&self) -> PathBuf {
         self.config_dir
-            .join(FRONTENDS_SUBDIR)
-            .join(LOCAL_ATTACH_SOCKET_NAME)
+            .join(FILESYSTEMS_SUBDIR)
+            .join("runtime")
+            .join("local.sock")
     }
 
     #[must_use]
-    pub fn host_log(&self, kind: omnifs_core::FsType) -> PathBuf {
-        self.cache_dir
-            .join(format!("frontend-{}.log", kind.as_str()))
+    pub fn host_log(&self, id: &omnifs_core::fs::Id) -> PathBuf {
+        self.cache_dir.join(format!("filesystem-{id}.log"))
     }
 
     #[must_use]
-    pub fn libkrun_root(&self) -> PathBuf {
-        self.config_dir.join("libkrun")
+    pub fn libkrun_root(&self, id: &omnifs_core::fs::Id) -> PathBuf {
+        self.runtime_root().join(id.as_str()).join("libkrun")
+    }
+
+    #[must_use]
+    pub fn runtime_root(&self) -> PathBuf {
+        self.config_dir.join(FILESYSTEMS_SUBDIR).join("runtime")
     }
 
     #[must_use]
@@ -460,8 +444,11 @@ impl FrontendState {
     }
 
     #[must_use]
-    pub fn default_host_location(&self) -> PathBuf {
-        self.config_dir.join("omnifs")
+    pub fn default_host_location(&self, id: &omnifs_core::fs::Id) -> PathBuf {
+        self.config_dir
+            .join(FILESYSTEMS_SUBDIR)
+            .join("mounts")
+            .join(id.as_str())
     }
 }
 
@@ -602,17 +589,17 @@ mod tests {
     }
 
     #[test]
-    fn frontend_state_has_one_leaf_per_mount_location() {
+    fn filesystem_state_has_one_leaf_per_id() {
         let workspace = Workspace::under_root(Path::new("/tmp/omnifs-test"));
-        let frontend = workspace.frontend();
+        let filesystem = workspace.filesystem_state();
 
         assert_eq!(
-            frontend.state_dir(Path::new("/mnt/omnifs")),
-            frontend.state_dir(Path::new("/mnt/./omnifs"))
+            filesystem.state_dir(&omnifs_core::fs::Id::new("main").unwrap()),
+            filesystem.state_dir(&omnifs_core::fs::Id::new("main").unwrap())
         );
         assert_ne!(
-            frontend.state_dir(Path::new("/mnt/omnifs")),
-            frontend.state_dir(Path::new("/mnt/other"))
+            filesystem.state_dir(&omnifs_core::fs::Id::new("main").unwrap()),
+            filesystem.state_dir(&omnifs_core::fs::Id::new("other").unwrap())
         );
     }
 
@@ -682,7 +669,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join(CONFIG_FILE),
-            "[frontend]\nattach_port = 32123\n",
+            "[filesystem]\nattach_port = 32123\n",
         )
         .unwrap();
         assert_eq!(
@@ -699,7 +686,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join(CONFIG_FILE),
-            "[frontend]\nattach_port = 0\n",
+            "[filesystem]\nattach_port = 0\n",
         )
         .unwrap();
         assert!(

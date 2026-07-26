@@ -100,7 +100,7 @@ impl MountState {
         }
     }
 
-    /// Find runner records below the discoverable frontend-state parent.
+    /// Find runner records below the discoverable filesystem-state parent.
     /// Corrupt records remain in the returned list so callers can report each
     /// one independently with [`MountState::read_file`].
     pub fn files_under(root: &Path) -> Result<Vec<PathBuf>, StateError> {

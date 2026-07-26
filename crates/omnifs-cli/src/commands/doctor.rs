@@ -1,16 +1,19 @@
 //! `omnifs doctor` — runtime + auth diagnostics, presented as a grouped
-//! checklist. It can run mount reauth and narrowly proved frontend cleanup.
+//! checklist. It can run mount reauth and narrowly proved filesystem cleanup.
 //! Reauth is a fresh `omnifs mount reauth <name>` subprocess rather than a
 //! call into `commands::mount`'s internal API.
 
 use anyhow::Context as _;
+use omnifs_core::fs;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use omnifs_workspace::creds::CredentialStore;
 
-use crate::docker::{DockerClient, DockerContainerIdentity, DockerTarget};
-use crate::frontend_container::{frontend_container_name, resolve_frontend_image};
+use crate::docker::{
+    DockerClient, DockerContainerIdentity, DockerTarget, OwnedFilesystemContainer,
+};
+use crate::fs_container::{filesystem_container_name, resolve_filesystem_image};
 use crate::image::ImageRef;
 use crate::inventory::{AuthState, DaemonHealth, Inventory, MountStatus, Severity};
 use crate::ui::output::{Output, ResultVerdict};
@@ -30,7 +33,7 @@ pub(crate) enum DoctorVerdict {
 pub async fn run(output: Output) -> anyhow::Result<DoctorVerdict> {
     let workspace = Workspace::resolve()?;
     let inventory = Inventory::collect(&workspace).await?;
-    let docker_target = resolve_frontend_target(&workspace)
+    let docker_target = resolve_filesystem_target(&workspace)
         .map_err(|error: anyhow::Error| format!("resolve target: {error:#}"));
     Doctor {
         workspace: &workspace,
@@ -42,24 +45,40 @@ pub async fn run(output: Output) -> anyhow::Result<DoctorVerdict> {
     .await
 }
 
-/// The optional Docker-hosted FUSE frontend's target, probed by the
+/// The optional Docker-hosted FUSE filesystem's target, probed by the
 /// `docker reachable`/`image cached` diagnostics. The daemon itself always
 /// runs host-native, so there is no daemon Docker target to resolve here.
-fn resolve_frontend_target(workspace: &Workspace) -> anyhow::Result<DockerTarget> {
+fn resolve_filesystem_target(workspace: &Workspace) -> anyhow::Result<DockerTarget> {
+    let id = workspace
+        .filesystems()
+        .list()?
+        .into_iter()
+        .find(|spec| spec.runtime() == fs::Runtime::Docker)
+        .map_or_else(
+            || fs::Id::new("doctor").expect("static filesystem id"),
+            |spec| spec.id().clone(),
+        );
+    resolve_docker_target(workspace, &id)
+}
+
+fn resolve_docker_target(
+    workspace: &Workspace,
+    filesystem_id: &fs::Id,
+) -> anyhow::Result<DockerTarget> {
     let config = workspace.config()?;
-    let image = resolve_frontend_image(None, &config)?;
-    let identity = workspace.identity();
-    let container_name = frontend_container_name(identity.container_label())?;
+    let image = resolve_filesystem_image(None, &config)?;
+    let container_name =
+        filesystem_container_name(workspace.identity().container_label(), filesystem_id)?;
     DockerTarget::new(
-        container_name.as_str().to_string(),
-        image.as_str().to_string(),
+        container_name.as_str().to_owned(),
+        image.as_str().to_owned(),
     )
 }
 
 struct Doctor<'a> {
     workspace: &'a Workspace,
     inventory: Inventory,
-    /// The frontend's Docker target, or the error resolving it.
+    /// The filesystem's Docker target, or the error resolving it.
     docker_target: Result<DockerTarget, String>,
     output: Output,
 }
@@ -77,23 +96,21 @@ enum Section {
 #[derive(Debug, Clone)]
 enum Remediation {
     MountReauth(String),
-    StopHostFrontend {
+    StopHostFilesystem {
         state_dir: PathBuf,
-        instance_id: String,
-        filesystem: omnifs_api::FsType,
-        mount_point: PathBuf,
+        record: omnifs_mtab::RunnerRecord,
     },
     CleanStaleHostRecord {
         state_dir: PathBuf,
-        instance_id: String,
-        mount_point: PathBuf,
+        record: omnifs_mtab::RunnerRecord,
     },
-    StopDockerFrontend {
+    StopDockerFilesystem {
         target: DockerTarget,
         identity: DockerContainerIdentity,
         workspace_home: PathBuf,
+        spec: fs::Spec,
     },
-    StopLibkrunFrontend {
+    StopLibkrunFilesystem {
         state_dir: PathBuf,
         record: omnifs_libkrun::HelperRecord,
     },
@@ -105,29 +122,30 @@ enum ConsentPolicy {
     InteractiveOnly,
 }
 
+struct DockerCandidate {
+    listed_identity: DockerContainerIdentity,
+    target: DockerTarget,
+    spec: fs::Spec,
+}
+
 impl Remediation {
     fn command_line(&self) -> String {
         match self {
             Self::MountReauth(name) => format!("omnifs mount reauth {name}"),
-            Self::StopHostFrontend {
-                filesystem,
-                mount_point,
-                ..
-            } => format!(
-                "omnifs frontend disable {filesystem} --runtime host --location {}",
-                mount_point.display()
-            ),
-            Self::CleanStaleHostRecord { mount_point, .. } => {
+            Self::StopHostFilesystem { record, .. } => {
+                format!("omnifs fs detach --name {}", record.spec.id())
+            },
+            Self::CleanStaleHostRecord { record, .. } => {
                 format!(
                     "omnifs doctor (clean stale host record for {})",
-                    mount_point.display()
+                    record.spec.location().display()
                 )
             },
-            Self::StopDockerFrontend { .. } => {
-                "omnifs frontend disable fuse --runtime docker".to_owned()
+            Self::StopDockerFilesystem { spec, .. } => {
+                format!("omnifs fs detach --name {}", spec.id())
             },
-            Self::StopLibkrunFrontend { .. } => {
-                "omnifs frontend disable fuse --runtime libkrun".to_owned()
+            Self::StopLibkrunFilesystem { record, .. } => {
+                format!("omnifs fs detach --name {}", record.spec.id())
             },
         }
     }
@@ -135,9 +153,9 @@ impl Remediation {
     const fn consent_policy(&self) -> ConsentPolicy {
         match self {
             Self::MountReauth(_) | Self::CleanStaleHostRecord { .. } => ConsentPolicy::AutoAllowed,
-            Self::StopHostFrontend { .. }
-            | Self::StopDockerFrontend { .. }
-            | Self::StopLibkrunFrontend { .. } => ConsentPolicy::InteractiveOnly,
+            Self::StopHostFilesystem { .. }
+            | Self::StopDockerFilesystem { .. }
+            | Self::StopLibkrunFilesystem { .. } => ConsentPolicy::InteractiveOnly,
         }
     }
 
@@ -160,58 +178,60 @@ impl Remediation {
                     );
                     Ok(())
                 }),
-            Self::StopHostFrontend {
-                state_dir,
-                instance_id,
-                ..
+            Self::StopHostFilesystem {
+                state_dir, record, ..
             } => {
-                anyhow::ensure!(
-                    crate::client::DaemonClient::for_workspace(workspace)
-                        .status_optional()
-                        .await?
-                        .is_none(),
-                    "daemon is no longer cleanly stopped; refusing frontend teardown"
-                );
-                crate::host_frontend::stop_confirmed(state_dir, instance_id).await
+                let _claim = workspace.filesystems().claim(record.spec.id())?;
+                ensure_daemon_cleanly_stopped(workspace).await?;
+                crate::host_fs::stop_confirmed(state_dir, record).await
             },
             Self::CleanStaleHostRecord {
-                state_dir,
-                instance_id,
-                ..
-            } => crate::host_frontend::cleanup_stale(state_dir, instance_id).await,
-            Self::StopDockerFrontend {
+                state_dir, record, ..
+            } => {
+                let _claim = workspace.filesystems().claim(record.spec.id())?;
+                crate::host_fs::cleanup_stale(state_dir, record).await
+            },
+            Self::StopDockerFilesystem {
                 target,
                 identity,
                 workspace_home,
+                spec,
             } => {
-                anyhow::ensure!(
-                    crate::client::DaemonClient::for_workspace(workspace)
-                        .status_optional()
-                        .await?
-                        .is_none(),
-                    "daemon is no longer cleanly stopped; refusing frontend teardown"
-                );
+                let _claim = workspace.filesystems().claim(spec.id())?;
+                ensure_daemon_cleanly_stopped(workspace).await?;
                 DockerClient::connect_for(
                     target,
                     Output::new(crate::ui::output::OutputMode::Human, false),
                 )?
-                .remove_confirmed(identity, workspace_home)
+                .remove_confirmed(identity, workspace_home, spec)
                 .await
             },
-            Self::StopLibkrunFrontend { state_dir, record } => {
-                anyhow::ensure!(
-                    crate::client::DaemonClient::for_workspace(workspace)
-                        .status_optional()
-                        .await?
-                        .is_none(),
-                    "daemon is no longer cleanly stopped; refusing frontend teardown"
-                );
+            Self::StopLibkrunFilesystem { state_dir, record } => {
+                let _claim = workspace.filesystems().claim(record.spec.id())?;
+                ensure_daemon_cleanly_stopped(workspace).await?;
                 crate::libkrun_runner::LibkrunRunner::new(state_dir.clone())
                     .tear_down_confirmed(record.clone())
                     .await
             },
         }
     }
+}
+
+async fn ensure_daemon_cleanly_stopped(workspace: &Workspace) -> anyhow::Result<()> {
+    let client = crate::client::DaemonClient::for_workspace(workspace);
+    anyhow::ensure!(
+        client.record()?.is_none(),
+        "daemon has a process record; refusing filesystem teardown"
+    );
+    anyhow::ensure!(
+        client.status_optional_checked().await?.is_none(),
+        "daemon is running; refusing filesystem teardown"
+    );
+    anyhow::ensure!(
+        client.record()?.is_none(),
+        "daemon started during the safety check; refusing filesystem teardown"
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -291,6 +311,15 @@ impl Finding {
             remediation: Some(Remediation::MountReauth(mount.name.clone())),
         })
     }
+}
+
+fn docker_ownership_finding(target: impl Into<Option<String>>, result: ProbeResult) -> Finding {
+    Finding::from_probe(
+        Section::Workspace,
+        "docker filesystem ownership",
+        target.into(),
+        result,
+    )
 }
 
 #[derive(Debug)]
@@ -484,7 +513,7 @@ fn verdict_line(rows: &[&Row], verdict: DoctorVerdict, caps: Capabilities) -> St
     }
     let summary = if parts.is_empty() {
         // The daemon/inventory verdict is degraded for a reason this
-        // group's rows don't individually carry (e.g. a frontend-only
+        // group's rows don't individually carry (e.g. a filesystem-only
         // degradation); name it honestly rather than claiming zero issues.
         "needs attention".to_owned()
     } else {
@@ -561,7 +590,6 @@ async fn offer_fix(
     for (remediation, mut ledger_row) in remediations.into_iter().zip(ledger_rows) {
         let apply = match remediation.consent_policy() {
             ConsentPolicy::AutoAllowed if output.yes() => true,
-            ConsentPolicy::InteractiveOnly if output.yes() => false,
             _ if output.ensure_prompt_allowed().is_err() || !crate::ui::prompt::is_terminal() => {
                 false
             },
@@ -592,12 +620,12 @@ impl Doctor<'_> {
         let (runtime, mut findings) = self.base_findings().await;
         findings.extend(self.inventory.mounts.iter().filter_map(Finding::mount_auth));
         let daemon_health = self.inventory.daemon.health();
-        findings.extend(self.host_frontend_findings(daemon_health).await?);
+        findings.extend(self.host_filesystem_findings(daemon_health).await?);
         findings.extend(
-            self.docker_frontend_findings(runtime.as_ref(), daemon_health)
+            self.docker_filesystem_findings(runtime.as_ref(), daemon_health)
                 .await,
         );
-        findings.extend(self.libkrun_frontend_findings(daemon_health));
+        findings.extend(self.libkrun_filesystem_findings(daemon_health));
 
         let result = DoctorResult {
             inventory: self.inventory,
@@ -673,75 +701,64 @@ impl Doctor<'_> {
         (runtime, findings)
     }
 
-    fn attached(
-        &self,
-        filesystem: omnifs_api::FsType,
-        runtime: omnifs_api::FrontendRuntime,
-        location: Option<&Path>,
-    ) -> bool {
-        self.inventory.frontends.iter().any(|frontend| {
-            frontend.filesystem == filesystem
-                && frontend.runtime == runtime
-                && location.is_none_or(|path| frontend.location.as_deref() == Some(path))
-        })
+    fn attached(&self, spec: &fs::Spec) -> bool {
+        self.inventory
+            .filesystems
+            .iter()
+            .any(|filesystem| filesystem.spec == *spec)
     }
 
-    async fn host_frontend_findings(
+    async fn host_filesystem_findings(
         &self,
         daemon_health: DaemonHealth,
     ) -> anyhow::Result<Vec<Finding>> {
         let mut findings = Vec::new();
-        let observations = match crate::host_frontend::observe(self.workspace.frontend()).await {
-            Ok(observations) => observations,
+        let probes = match crate::host_fs::probe_all(self.workspace.filesystem_state()).await {
+            Ok(probes) => probes,
             Err(error) => {
                 findings.push(Finding::from_probe(
                     Section::Workspace,
-                    "frontend state",
+                    "filesystem state",
                     None,
                     ProbeResult::Err(format!("{error:#}")),
                 ));
                 return Ok(findings);
             },
         };
-        for observation in observations {
-            let (state_dir, record, confirmed) = match observation {
-                crate::host_frontend::HostObservation::Runner {
+        for probe in probes {
+            let (state_dir, record, confirmed) = match probe {
+                crate::host_fs::RunnerProbe::Runner {
                     state_dir,
                     record,
                     confirmed,
                 } => (state_dir, record, confirmed),
-                crate::host_frontend::HostObservation::Invalid { state_dir, error } => {
+                crate::host_fs::RunnerProbe::Invalid { state_dir, error } => {
                     findings.push(Finding::from_probe(
                         Section::Workspace,
-                        "frontend state",
+                        "filesystem state",
                         Some(state_dir.display().to_string()),
                         ProbeResult::Err(error),
                     ));
                     continue;
                 },
             };
-            let filesystem = record.filesystem;
-            let mount_point = record.mount_point.clone();
-            let is_attached = self.attached(
-                filesystem,
-                omnifs_api::FrontendRuntime::Host,
-                Some(&mount_point),
-            );
-            let target = Some(format!("{filesystem}/host at {}", mount_point.display()));
+            let spec = record.spec.clone();
+            let mount_point = spec.location().to_path_buf();
+            let is_attached = self.attached(&spec);
+            let target = Some(format!(
+                "`{}` {}/host at {}",
+                spec.id(),
+                spec.protocol(),
+                mount_point.display()
+            ));
             match confirmed {
                 Ok(_) if is_attached => {},
                 Ok(phase) => {
-                    let remediation = (daemon_health == DaemonHealth::Stopped).then_some(
-                        Remediation::StopHostFrontend {
-                            state_dir,
-                            instance_id: record.instance_id,
-                            filesystem,
-                            mount_point,
-                        },
-                    );
+                    let remediation = (daemon_health == DaemonHealth::Stopped)
+                        .then_some(Remediation::StopHostFilesystem { state_dir, record });
                     findings.push(Finding {
                         section: Section::Workspace,
-                        check: "stray frontend".to_owned(),
+                        check: "stray filesystem".to_owned(),
                         target,
                         severity: Severity::Attention,
                         message: format!(
@@ -753,16 +770,11 @@ impl Doctor<'_> {
                 },
                 Err(error) => {
                     let mount_active = omnifs_nfs::mount_is_active_checked(&mount_point)?;
-                    let remediation = (!mount_active && !is_attached).then_some(
-                        Remediation::CleanStaleHostRecord {
-                            state_dir,
-                            instance_id: record.instance_id,
-                            mount_point,
-                        },
-                    );
+                    let remediation = (!mount_active && !is_attached)
+                        .then_some(Remediation::CleanStaleHostRecord { state_dir, record });
                     findings.push(Finding {
                         section: Section::Workspace,
-                        check: "stale frontend state".to_owned(),
+                        check: "stale filesystem state".to_owned(),
                         target,
                         severity: if mount_active || is_attached {
                             Severity::Error
@@ -787,106 +799,246 @@ impl Doctor<'_> {
         Ok(findings)
     }
 
-    async fn docker_frontend_findings(
+    async fn docker_filesystem_findings(
         &self,
         runtime: Option<&DockerClient>,
         daemon_health: DaemonHealth,
     ) -> Vec<Finding> {
-        let (Some(runtime), Ok(target)) = (runtime, self.docker_target.as_ref()) else {
+        let Some(runtime) = runtime else {
             return Vec::new();
         };
-        match runtime
-            .confirmed_frontend(self.workspace.identity().container_label())
+        let candidates = match runtime
+            .owned_filesystem_containers(self.workspace.identity().container_label())
             .await
         {
-            Ok(Some(identity))
-                if !self.attached(
-                    omnifs_api::FsType::Fuse,
-                    omnifs_api::FrontendRuntime::Docker,
+            Ok(candidates) => candidates,
+            Err(error) => {
+                return vec![docker_ownership_finding(
                     None,
-                ) =>
-            {
+                    ProbeResult::Err(error.to_string()),
+                )];
+            },
+        };
+        let mut findings = Vec::new();
+        for candidate in candidates {
+            let finding_target = candidate.filesystem_id.clone().or(candidate
+                .identity
+                .as_ref()
+                .map(|identity| identity.id.clone()));
+            let candidate = match self.resolve_docker_candidate(candidate) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    findings.push(docker_ownership_finding(
+                        finding_target,
+                        ProbeResult::Err(format!("{error:#}")),
+                    ));
+                    continue;
+                },
+            };
+            let client = match DockerClient::connect_for(&candidate.target, self.output.clone()) {
+                Ok(client) => client,
+                Err(error) => {
+                    findings.push(docker_ownership_finding(
+                        candidate.spec.id().to_string(),
+                        ProbeResult::Err(format!("{error:#}")),
+                    ));
+                    continue;
+                },
+            };
+            let confirmed = client
+                .confirmed_container_for_spec(
+                    self.workspace.identity().container_label(),
+                    &candidate.spec,
+                )
+                .await;
+            let (confirmed_identity, running) = match confirmed {
+                Ok(Some(confirmed)) => confirmed,
+                Ok(None) => {
+                    findings.push(docker_ownership_finding(
+                        candidate.spec.id().to_string(),
+                        ProbeResult::Warn("container disappeared during inspection".to_owned()),
+                    ));
+                    continue;
+                },
+                Err(error) => {
+                    findings.push(docker_ownership_finding(
+                        candidate.spec.id().to_string(),
+                        ProbeResult::Err(format!("{error:#}")),
+                    ));
+                    continue;
+                },
+            };
+            if confirmed_identity != candidate.listed_identity {
+                findings.push(docker_ownership_finding(
+                    candidate.spec.id().to_string(),
+                    ProbeResult::Err(
+                        "container identity changed during inspection; refusing remediation"
+                            .to_owned(),
+                    ),
+                ));
+                continue;
+            }
+            if !self.attached(&candidate.spec) {
                 let remediation = (daemon_health == DaemonHealth::Stopped).then_some(
-                    Remediation::StopDockerFrontend {
-                        target: target.clone(),
-                        identity,
+                    Remediation::StopDockerFilesystem {
+                        target: candidate.target,
+                        identity: confirmed_identity,
                         workspace_home: self.workspace.identity().container_label().to_path_buf(),
+                        spec: candidate.spec.clone(),
                     },
                 );
-                vec![Finding {
+                let state = if running { "running" } else { "stopped" };
+                findings.push(Finding {
                     section: Section::Workspace,
-                    check: "stray frontend".to_owned(),
-                    target: Some("fuse/docker".to_owned()),
+                    check: "stray filesystem".to_owned(),
+                    target: Some(candidate.spec.id().to_string()),
                     severity: Severity::Attention,
                     message: format!(
-                        "container identity is confirmed but daemon health is {daemon_health:?} and reports no matching attachment"
+                        "{state} container identity is confirmed but daemon health is {daemon_health:?} and reports no matching attachment"
                     ),
                     fix: remediation.as_ref().map(Remediation::command_line),
                     remediation,
-                }]
-            },
-            Ok(Some(_) | None) => Vec::new(),
-            Err(error) => vec![Finding::from_probe(
-                Section::Workspace,
-                "docker frontend ownership",
-                Some("fuse/docker".to_owned()),
-                ProbeResult::Err(format!("{error:#}")),
-            )],
+                });
+            }
         }
+        findings
     }
 
-    fn libkrun_frontend_findings(&self, daemon_health: DaemonHealth) -> Vec<Finding> {
-        let state_dir = self.workspace.frontend().libkrun_root();
-        let runner = crate::libkrun_runner::LibkrunRunner::new(state_dir.clone());
-        match runner.confirmed_record() {
-            Ok(Some(record))
-                if !self.attached(
-                    omnifs_api::FsType::Fuse,
-                    omnifs_api::FrontendRuntime::Libkrun,
-                    None,
-                ) =>
-            {
-                let remediation = (daemon_health == DaemonHealth::Stopped)
-                    .then_some(Remediation::StopLibkrunFrontend { state_dir, record });
-                vec![Finding {
-                    section: Section::Workspace,
-                    check: "stray frontend".to_owned(),
-                    target: Some("fuse/libkrun".to_owned()),
-                    severity: Severity::Attention,
-                    message: format!(
-                        "helper identity is confirmed but daemon health is {daemon_health:?} and reports no matching attachment"
-                    ),
-                    fix: remediation.as_ref().map(Remediation::command_line),
-                    remediation,
-                }]
+    fn resolve_docker_candidate(
+        &self,
+        candidate: OwnedFilesystemContainer,
+    ) -> anyhow::Result<DockerCandidate> {
+        let identity = candidate
+            .identity
+            .context("Docker did not return an immutable container ID")?;
+        let id_label = candidate
+            .filesystem_id
+            .context("workspace-owned container has no filesystem identity label")?;
+        let id = fs::Id::new(id_label)?;
+        let target = resolve_docker_target(self.workspace, &id)?;
+        let canonical_name = format!("/{}", target.container_name());
+        anyhow::ensure!(
+            candidate.names.iter().any(|name| name == &canonical_name),
+            "workspace labels are on a non-canonical container name; expected `{canonical_name}`"
+        );
+        let spec = fs::Spec::new(
+            id,
+            fs::Protocol::Fuse,
+            fs::Runtime::Docker,
+            PathBuf::from(fs::GUEST_LOCATION),
+        )
+        .expect("the fixed Docker filesystem identity is valid");
+        Ok(DockerCandidate {
+            listed_identity: identity,
+            target,
+            spec,
+        })
+    }
+
+    fn libkrun_filesystem_findings(&self, daemon_health: DaemonHealth) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        let runtime_root = self.workspace.filesystem_state().runtime_root();
+        let entries = match std::fs::read_dir(&runtime_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return findings,
+            Err(error) => {
+                findings.push(Finding::from_probe(
+                    Section::Workspace,
+                    "libkrun filesystem ownership",
+                    Some(runtime_root.display().to_string()),
+                    ProbeResult::Err(error.to_string()),
+                ));
+                return findings;
             },
-            Ok(Some(_) | None) => Vec::new(),
-            Err(error) => vec![Finding::from_probe(
-                Section::Workspace,
-                "libkrun frontend ownership",
-                Some("fuse/libkrun".to_owned()),
-                ProbeResult::Err(format!("{error:#}")),
-            )],
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    findings.push(Finding::from_probe(
+                        Section::Workspace,
+                        "libkrun filesystem ownership",
+                        None,
+                        ProbeResult::Err(error.to_string()),
+                    ));
+                    continue;
+                },
+            };
+            let state_dir = entry.path().join("libkrun");
+            if !state_dir.exists() {
+                continue;
+            }
+            let raw_id = entry.file_name().to_string_lossy().into_owned();
+            let id = match fs::Id::new(raw_id.clone()) {
+                Ok(id) => id,
+                Err(error) => {
+                    findings.push(Finding::from_probe(
+                        Section::Workspace,
+                        "libkrun filesystem ownership",
+                        Some(raw_id),
+                        ProbeResult::Err(error.to_string()),
+                    ));
+                    continue;
+                },
+            };
+            let runner = crate::libkrun_runner::LibkrunRunner::new(state_dir.clone());
+            match runner.confirmed_record() {
+                Ok(Some(record)) if record.spec.id() != &id => {
+                    findings.push(Finding::from_probe(
+                        Section::Workspace,
+                        "libkrun filesystem ownership",
+                        Some(id.to_string()),
+                        ProbeResult::Err(format!(
+                            "helper claims filesystem `{}` instead of matching its state path",
+                            record.spec.id()
+                        )),
+                    ));
+                },
+                Ok(Some(record)) => {
+                    if self.attached(&record.spec) {
+                        continue;
+                    }
+                    let remediation = (daemon_health == DaemonHealth::Stopped)
+                        .then_some(Remediation::StopLibkrunFilesystem { state_dir, record });
+                    findings.push(Finding {
+                        section: Section::Workspace,
+                        check: "stray filesystem".to_owned(),
+                        target: Some(id.to_string()),
+                        severity: Severity::Attention,
+                        message: format!(
+                            "helper identity is confirmed but daemon health is {daemon_health:?} and reports no matching attachment"
+                        ),
+                        fix: remediation.as_ref().map(Remediation::command_line),
+                        remediation,
+                    });
+                },
+                Ok(None) => {},
+                Err(error) => findings.push(Finding::from_probe(
+                    Section::Workspace,
+                    "libkrun filesystem ownership",
+                    Some(id.to_string()),
+                    ProbeResult::Err(format!("{error:#}")),
+                )),
+            }
         }
+        findings
     }
 
     async fn probe_docker_reachable(&self) -> (Option<DockerClient>, ProbeResult) {
-        use crate::docker::DockerProbeOutcome;
-
         let target = match &self.docker_target {
             Ok(target) => target,
             Err(error) => return (None, ProbeResult::Err(error.clone())),
         };
-
-        match DockerClient::probe_docker(target).await {
-            DockerProbeOutcome::Reachable(runtime) => (
+        let runtime = match DockerClient::connect_for(target, self.output.clone()) {
+            Ok(runtime) => runtime,
+            Err(error) => return (None, ProbeResult::Err(format!("connect: {error}"))),
+        };
+        match runtime.ping().await {
+            Ok(()) => (
                 Some(runtime),
                 ProbeResult::Ok("docker daemon responds".into()),
             ),
-            DockerProbeOutcome::ConnectFailed(e) => {
-                (None, ProbeResult::Err(format!("connect: {e}")))
-            },
-            DockerProbeOutcome::PingFailed(e) => (None, ProbeResult::Err(format!("ping: {e}"))),
+            Err(error) => (None, ProbeResult::Err(format!("ping: {error}"))),
         }
     }
 
@@ -909,7 +1061,7 @@ impl Doctor<'_> {
         #[cfg(not(target_os = "linux"))]
         {
             ProbeResult::Skipped(
-                "macOS: native mount is NFS loopback; FUSE runs only inside the optional frontend container",
+                "macOS: native mount is NFS loopback; FUSE runs only inside the optional filesystem container",
             )
         }
     }
@@ -920,13 +1072,13 @@ impl Doctor<'_> {
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
             }) if image.has_registry() => ProbeResult::Warn(format!(
-                "{image} not cached (will pull on `omnifs frontend enable`)"
+                "{image} not cached (will pull on the next Docker `omnifs fs attach`)"
             )),
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
             }) => ProbeResult::Err(format!(
-                "{image} not present locally; a dev image is never pulled, so `omnifs frontend enable` \
-                 cannot start (build it with `just frontend-image`)"
+                "{image} not present locally; a dev image is never pulled, so `omnifs fs attach` \
+                 cannot start (build it with `just filesystem-image`)"
             )),
             Err(error) => ProbeResult::Err(format!("inspect: {error}")),
         }

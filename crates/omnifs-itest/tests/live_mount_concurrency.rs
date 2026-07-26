@@ -1,8 +1,8 @@
-//! Live-kernel concurrency acceptance for both filesystem frontends.
+//! Live-kernel concurrency acceptance for both filesystem protocols.
 //!
 //! One provider read waits on a captured host callout while independent reads
 //! and metadata operations use the same mount. The fast work must finish before
-//! the captured callout is answered, proving that neither frontend serializes
+//! the captured callout is answered, proving that neither filesystem serializes
 //! unrelated namespace work behind one suspended provider operation.
 
 use omnifs_engine::{MountTable, TreeNamespace};
@@ -17,12 +17,12 @@ const FAST_BUDGET: Duration = Duration::from_secs(2);
 const SLOW_BODY: &[u8] = b"slow-upstream-body";
 
 #[derive(Clone, Copy)]
-enum Frontend {
+enum Filesystem {
     Fuse,
     Nfs,
 }
 
-impl Frontend {
+impl Filesystem {
     fn name(self) -> &'static str {
         match self {
             Self::Fuse => "FUSE",
@@ -89,7 +89,7 @@ impl Frontend {
             },
             Self::Nfs => {
                 // Separate processes get separate NFSv4.0 open owners, so this
-                // measures frontend concurrency rather than client OPEN ordering.
+                // measures filesystem concurrency rather than client OPEN ordering.
                 let stat = std::process::Command::new("stat")
                     .arg(&greeting_path)
                     .output()
@@ -154,22 +154,22 @@ impl Frontend {
 
 #[test]
 fn fuse_serves_fast_ops_while_provider_read_is_parked() {
-    run_concurrency(Frontend::Fuse);
+    run_concurrency(Filesystem::Fuse);
 }
 
 #[test]
 fn nfs_serves_fast_ops_while_provider_read_is_parked() {
-    run_concurrency(Frontend::Nfs);
+    run_concurrency(Filesystem::Nfs);
 }
 
 #[allow(clippy::too_many_lines)]
-fn run_concurrency(frontend: Frontend) {
+fn run_concurrency(filesystem: Filesystem) {
     if std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_none() {
         eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run live-mount acceptance tests");
         return;
     }
-    if !frontend.supported() {
-        eprintln!("skip: {} is unavailable on this host", frontend.name());
+    if !filesystem.supported() {
+        eprintln!("skip: {} is unavailable on this host", filesystem.name());
         return;
     }
     let wasm = provider_wasm_path("test_provider.wasm");
@@ -178,7 +178,7 @@ fn run_concurrency(frontend: Frontend) {
         return;
     }
 
-    let _nfs_lock = matches!(frontend, Frontend::Nfs).then(omnifs_itest::live::nfs_serial_lock);
+    let _nfs_lock = matches!(filesystem, Filesystem::Nfs).then(omnifs_itest::live::nfs_serial_lock);
     let home = tempfile::tempdir().expect("home dir");
     let fixture = MountFixture::new(home.path(), &wasm);
     let runtime = Arc::clone(&fixture.runtime);
@@ -188,19 +188,19 @@ fn run_concurrency(frontend: Frontend) {
         let mount_point = mount_point.clone();
         let registry = Arc::clone(&fixture.registry);
         let handle = fixture.rt.handle().clone();
-        move || frontend.mount(&home, &mount_point, registry, handle)
+        move || filesystem.mount(&home, &mount_point, registry, handle)
     });
 
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if frontend.is_active(&mount_point) {
+        if filesystem.is_active(&mount_point) {
             break;
         }
         if mount_thread.is_finished() {
             let result = mount_thread.join().expect("mount thread panicked");
             eprintln!(
                 "skip: {} mount did not establish: {result:?}",
-                frontend.name()
+                filesystem.name()
             );
             fixture.registry.shutdown_all();
             return;
@@ -208,9 +208,9 @@ fn run_concurrency(frontend: Frontend) {
         if Instant::now() >= deadline {
             eprintln!(
                 "skip: {} mount never became active within 30s",
-                frontend.name()
+                filesystem.name()
             );
-            frontend.force_unmount(&mount_point);
+            filesystem.force_unmount(&mount_point);
             let _ = mount_thread.join();
             fixture.registry.shutdown_all();
             return;
@@ -218,7 +218,7 @@ fn run_concurrency(frontend: Frontend) {
         std::thread::sleep(Duration::from_millis(50));
     }
     let guard = UnmountGuard {
-        frontend,
+        filesystem,
         mount_point: mount_point.clone(),
     };
 
@@ -277,12 +277,12 @@ fn run_concurrency(frontend: Frontend) {
     });
 
     let fast_started = Instant::now();
-    frontend.fast_ops(&mount_point, &message_path);
+    filesystem.fast_ops(&mount_point, &message_path);
     let fast_elapsed = fast_started.elapsed();
     assert!(
         fast_elapsed < FAST_BUDGET,
         "{} fast ops took {fast_elapsed:?} while a slow read was parked",
-        frontend.name()
+        filesystem.name()
     );
     assert!(
         !slow_done.load(Ordering::SeqCst),
@@ -298,12 +298,12 @@ fn run_concurrency(frontend: Frontend) {
     stop_answering.store(true, Ordering::SeqCst);
     answer_thread.join().expect("answer thread panicked");
 
-    frontend.graceful_unmount(&mount_point);
+    filesystem.graceful_unmount(&mount_point);
     drop(guard);
     mount_thread
         .join()
         .expect("mount thread panicked")
-        .expect("frontend exits cleanly after unmount");
+        .expect("filesystem exits cleanly after unmount");
     fixture.registry.shutdown_all();
 }
 
@@ -368,14 +368,14 @@ impl MountFixture {
 }
 
 struct UnmountGuard {
-    frontend: Frontend,
+    filesystem: Filesystem,
     mount_point: PathBuf,
 }
 
 impl Drop for UnmountGuard {
     fn drop(&mut self) {
-        if self.frontend.is_active(&self.mount_point) {
-            self.frontend.force_unmount(&self.mount_point);
+        if self.filesystem.is_active(&self.mount_point) {
+            self.filesystem.force_unmount(&self.mount_point);
         }
     }
 }

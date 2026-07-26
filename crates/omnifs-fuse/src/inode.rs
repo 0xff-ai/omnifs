@@ -3,7 +3,7 @@
 //! FUSE owns kernel identity: it maps a stable namespace path to a kernel
 //! inode number and builds `fuser::FileAttr` replies from namespace attributes.
 
-use crate::Frontend;
+use crate::FuseAdapter;
 use crate::common::{Inode, NodeKind, ROOT_INO};
 use fuser::{FileAttr, INodeNo};
 use omnifs_core::path::Path;
@@ -25,7 +25,7 @@ fn current_gid() -> u32 {
     unsafe { libc::getgid() }
 }
 
-impl Frontend {
+impl FuseAdapter {
     pub(crate) fn alloc_ino(&self) -> u64 {
         self.next_ino.fetch_add(1, Ordering::Relaxed)
     }

@@ -24,8 +24,8 @@ use crate::frame::{
     Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, MAX_FRAME, read_frame, write_frame,
 };
 use crate::{
-    AttachTarget, Endpoint, FrontendIdentity, FsType, Handshake, PROTOCOL, VfsServer, WireError,
-    WireNamespace, WireRequest, WireResponse, serve_connection,
+    AttachTarget, Endpoint, Handshake, PROTOCOL, VfsServer, WireError, WireNamespace, WireRequest,
+    WireResponse, serve_connection,
 };
 
 const EVENT_CAPACITY: usize = 1024;
@@ -36,12 +36,14 @@ fn path(value: &str) -> Path {
 
 /// A canned identity for tests that don't care about the specific value, only
 /// that a `Hello` carries one.
-fn test_identity() -> FrontendIdentity {
-    FrontendIdentity {
-        runtime: omnifs_core::FrontendRuntime::Host,
-        kind: FsType::Fuse,
-        mount_point: PathBuf::from("/mnt/test"),
-    }
+fn test_identity() -> omnifs_core::fs::Spec {
+    omnifs_core::fs::Spec::new(
+        "test".parse().unwrap(),
+        omnifs_core::fs::Protocol::Fuse,
+        omnifs_core::fs::Runtime::Host,
+        PathBuf::from("/mnt/test"),
+    )
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +187,7 @@ impl Namespace for StubNamespace {
 async fn client_handshake(io: &mut DuplexStream, protocol: u32) -> Result<(), WireError> {
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol,
-        frontend: test_identity(),
+        filesystem: test_identity(),
     })
     .unwrap();
     write_frame(io, &Frame::new(0, KIND_REQUEST, hello)).await?;
@@ -521,7 +523,7 @@ async fn handshake_version_mismatch_is_rejected() {
     // The client offers the immediately previous strict protocol version.
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL - 1,
-        frontend: test_identity(),
+        filesystem: test_identity(),
     })
     .unwrap();
     write_frame(&mut io, &Frame::new(0, KIND_REQUEST, hello))
@@ -608,7 +610,7 @@ async fn startup_gate_holds_listener_until_ready_publication() {
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
-        frontend: test_identity(),
+        filesystem: test_identity(),
     })
     .unwrap();
     write_frame(&mut stream, &Frame::new(0, KIND_REQUEST, hello))
@@ -657,6 +659,51 @@ async fn tcp_listener_end_to_end() {
 }
 
 #[tokio::test]
+async fn one_name_allows_reconnect_overlap_but_rejects_conflicting_resolved_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("ns.sock");
+    let server = start_local_server(StubNamespace::new(), &socket);
+    let first = WireNamespace::attach(
+        AttachTarget::Unix(socket.clone()),
+        test_identity(),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+    let overlap = WireNamespace::attach(
+        AttachTarget::Unix(socket.clone()),
+        test_identity(),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(server.attachments().len(), 1);
+
+    let conflicting = omnifs_core::fs::Spec::new(
+        "test".parse().unwrap(),
+        omnifs_core::fs::Protocol::Nfs,
+        omnifs_core::fs::Runtime::Host,
+        PathBuf::from("/mnt/other"),
+    )
+    .unwrap();
+    let error = WireNamespace::attach(
+        AttachTarget::Unix(socket),
+        conflicting,
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .err()
+    .expect("one filesystem name must not carry conflicting resolved fields");
+    assert!(
+        matches!(error, WireError::Rejected(reason) if reason.contains("different resolved fields"))
+    );
+
+    drop(overlap);
+    drop(first);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn server_stop_reaches_client_and_drain_waits_for_detach() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
@@ -676,7 +723,7 @@ async fn server_stop_reaches_client_and_drain_waits_for_detach() {
         assert!(tokio::time::Instant::now() < deadline);
         tokio::task::yield_now().await;
     }
-    server.stop_frontends();
+    server.stop_filesystems();
     let request = tokio::time::timeout(Duration::from_secs(1), teardown_rx.recv())
         .await
         .unwrap()
@@ -712,7 +759,7 @@ async fn busy_client_remains_a_named_drain_straggler_and_new_admission_is_reject
         assert!(tokio::time::Instant::now() < deadline);
         tokio::task::yield_now().await;
     }
-    server.stop_frontends();
+    server.stop_filesystems();
     let request = teardown_rx.recv().await.unwrap();
     request.complete(crate::TeardownOutcome::Busy);
     let stragglers = server.drain_attachments(Duration::from_millis(20)).await;

@@ -1,4 +1,4 @@
-//! FUSE filesystem frontend over the engine [`Namespace`] surface.
+//! FUSE protocol adapter over the shared [`Namespace`] surface.
 //!
 //! The adapter bridges the omnifs projected tree to the kernel FUSE subsystem.
 //! It consumes only the plain-data namespace surface (validated paths, policied attrs,
@@ -66,7 +66,7 @@ pub fn invalidate_root_child(notifier: &NotifierHandle, name: &str) {
 }
 
 #[derive(Clone)]
-pub(crate) struct Frontend {
+pub(crate) struct FuseAdapter {
     rt: Handle,
     /// The projection surface. Every name resolution, attribute, listing, and
     /// read goes through it; the adapter holds nothing else of the engine.
@@ -92,7 +92,7 @@ pub(crate) struct Frontend {
     flush_tx: Arc<Mutex<Option<mpsc::UnboundedSender<FlushRequest>>>>,
 }
 
-impl Frontend {
+impl FuseAdapter {
     pub(crate) fn new(rt: Handle, namespace: Arc<dyn Namespace>, notifier: NotifierHandle) -> Self {
         let inodes = Arc::new(DashMap::new());
         let by_node = Arc::new(DashMap::new());

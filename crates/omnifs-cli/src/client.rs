@@ -293,10 +293,10 @@ impl DaemonClient {
         Ok(&reply.outcome)
     }
 
-    pub(crate) async fn shutdown(&self, stop_frontends: bool) -> Result<Option<ShutdownResult>> {
+    pub(crate) async fn shutdown(&self, stop_filesystems: bool) -> Result<Option<ShutdownResult>> {
         let Some(reply) = self
             .request_with_timeout(
-                ControlOperation::Shutdown { stop_frontends },
+                ControlOperation::Shutdown { stop_filesystems },
                 SHUTDOWN_REQUEST_TIMEOUT,
             )
             .await?

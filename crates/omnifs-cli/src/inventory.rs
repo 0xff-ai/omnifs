@@ -5,8 +5,8 @@
 //! verdict decisions below are pure.
 
 use anyhow::Result;
-use omnifs_api::{DaemonStatus, FrontendRuntime as Runtime, FsType as Filesystem, HealthState};
-use omnifs_core::MountName;
+use omnifs_api::{DaemonStatus, HealthState};
+use omnifs_core::{MountName, fs};
 use omnifs_workspace::creds::FileStore;
 use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::mounts::{Registry, Revision};
@@ -25,15 +25,15 @@ pub(crate) struct Inventory {
     pub(crate) home: PathBuf,
     pub(crate) mount_revision: Option<Revision>,
     pub(crate) applied_revision: Option<Revision>,
-    pub(crate) daemon: DaemonObservation,
-    pub(crate) frontends: Vec<FrontendStatus>,
+    pub(crate) daemon: DaemonFacts,
+    pub(crate) filesystems: Vec<FilesystemStatus>,
     pub(crate) mounts: Vec<MountStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) warmup: Option<WarmupStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct DaemonObservation {
+pub(crate) struct DaemonFacts {
     pub(crate) status: Option<DaemonStatus>,
     pub(crate) probe: DaemonProbe,
     #[serde(skip_serializing)]
@@ -73,7 +73,7 @@ impl DaemonHealth {
     }
 }
 
-impl DaemonObservation {
+impl DaemonFacts {
     pub(crate) fn health(&self) -> DaemonHealth {
         match (&self.probe, self.status.as_ref()) {
             (DaemonProbe::Stopped, _) => DaemonHealth::Stopped,
@@ -131,7 +131,7 @@ impl DaemonObservation {
                 config_dir: "/tmp/omnifs".into(),
                 cache_dir: "/tmp/omnifs/cache".into(),
                 attach_tcp: None,
-                frontends: Vec::new(),
+                filesystems: Vec::new(),
                 mounts: Vec::new(),
                 offline: false,
                 health: Box::new(omnifs_api::DaemonHealth::new(
@@ -158,7 +158,7 @@ impl DaemonObservation {
     }
 }
 
-impl From<Result<Option<DaemonStatus>, anyhow::Error>> for DaemonObservation {
+impl From<Result<Option<DaemonStatus>, anyhow::Error>> for DaemonFacts {
     fn from(probe: Result<Option<DaemonStatus>, anyhow::Error>) -> Self {
         match probe {
             Ok(Some(status)) => Self {
@@ -198,35 +198,38 @@ pub(crate) enum Severity {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct FrontendStatus {
-    pub(crate) filesystem: Filesystem,
-    pub(crate) runtime: Runtime,
-    pub(crate) location: Option<PathBuf>,
-    pub(crate) state: FrontendState,
+pub(crate) struct FilesystemStatus {
+    #[serde(flatten)]
+    pub(crate) spec: fs::Spec,
+    pub(crate) state: FilesystemState,
     pub(crate) mount_count: usize,
     pub(crate) fix: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum FrontendState {
+pub(crate) enum FilesystemState {
     Attached,
-    Running,
+    Detached,
+    Unknown,
     Failed,
 }
 
-impl FrontendState {
+impl FilesystemState {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Attached => "attached",
-            Self::Running => "running",
+            Self::Detached => "detached",
+            Self::Unknown => "unknown",
             Self::Failed => "failed",
         }
     }
 
     pub(crate) const fn severity(self) -> Severity {
         match self {
-            Self::Attached | Self::Running => Severity::Positive,
+            Self::Attached => Severity::Positive,
+            Self::Detached => Severity::Neutral,
+            Self::Unknown => Severity::Attention,
             Self::Failed => Severity::Error,
         }
     }
@@ -234,16 +237,16 @@ impl FrontendState {
     pub(crate) const fn fix(self) -> Option<&'static str> {
         match self {
             Self::Failed => Some("omnifs logs"),
-            Self::Attached | Self::Running => None,
+            Self::Attached | Self::Detached | Self::Unknown => None,
         }
     }
 
-    /// Whether a frontend in this state counts as a live access surface
+    /// Whether a filesystem in this state counts as a live access surface
     /// The one owner of that predicate: the access lines,
-    /// `status`'s frontend count, and each mount's `access_count` all filter
+    /// `status`'s filesystem count, and each mount's `access_count` all filter
     /// through it.
     pub(crate) const fn provides_access(self) -> bool {
-        matches!(self, Self::Attached | Self::Running)
+        matches!(self, Self::Attached)
     }
 }
 
@@ -414,8 +417,8 @@ impl ServingState {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct AccessPath {
-    pub(crate) filesystem: Filesystem,
-    pub(crate) runtime: Runtime,
+    pub(crate) protocol: fs::Protocol,
+    pub(crate) runtime: fs::Runtime,
     pub(crate) path: PathBuf,
     pub(crate) state: AccessState,
 }
@@ -428,16 +431,6 @@ pub(crate) enum AccessState {
     Failed,
 }
 
-impl AccessState {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Available => "available",
-            Self::Offline => "offline",
-            Self::Failed => "failed",
-        }
-    }
-}
-
 impl Inventory {
     pub(crate) async fn collect(workspace: &Workspace) -> Result<Self> {
         let repository = workspace.desired_state().observe_repository()?;
@@ -445,9 +438,12 @@ impl Inventory {
         let mount_revision = repository.head_revision()?;
         let applied_revision = repository.applied()?;
         let client = crate::client::DaemonClient::for_workspace(workspace);
+        // Capture process identity before a refused control connection can
+        // clean the stale record. Doctor must distinguish an unexpected dead
+        // daemon from a cleanly stopped workspace.
+        let runtime = client.record().ok().flatten();
         let daemon_probe = client.status_optional_checked().await;
         let daemon_status = daemon_probe.as_ref().ok().and_then(Option::as_ref);
-        let runtime = client.record().ok().flatten();
         let mut mounts = if let Some(status) = daemon_status.filter(|status| status.offline) {
             offline_mount_statuses(registry, status)
         } else {
@@ -455,27 +451,33 @@ impl Inventory {
             online_mount_statuses(registry, catalog, workspace.credentials(), daemon_status)
         };
         let mount_count = mounts.len();
-        let frontends = frontend_statuses(daemon_status, mount_count);
+        let configured_filesystems = workspace.filesystems().list()?;
+        let filesystems = filesystem_statuses(
+            &configured_filesystems,
+            daemon_status,
+            daemon_probe.is_ok(),
+            mount_count,
+        );
         let warmup = crate::provider_warmup::ProviderWarmup::new(
             workspace.warmup().clone(),
             workspace.catalog().clone(),
         )
         .status();
-        let access_count = frontends
+        let access_count = filesystems
             .iter()
-            .filter(|frontend| frontend.state.provides_access())
+            .filter(|filesystem| filesystem.state.provides_access())
             .count();
         for mount in &mut mounts {
             mount.access_count = access_count;
         }
-        let mut daemon = DaemonObservation::from(daemon_probe);
+        let mut daemon = DaemonFacts::from(daemon_probe);
         daemon.runtime = runtime;
         Ok(Self {
             home: workspace.identity().output_home(),
             mount_revision,
             applied_revision,
             daemon,
-            frontends,
+            filesystems,
             mounts,
             warmup,
         })
@@ -489,40 +491,38 @@ impl Inventory {
         else {
             return Vec::new();
         };
-        self.frontends
+        self.filesystems
             .iter()
-            .filter_map(|frontend| {
-                let location = frontend.location.as_ref()?;
-                let path = location.join(
+            .map(|filesystem| {
+                let path = filesystem.spec.location().join(
                     mount_status
                         .root
                         .strip_prefix("/")
                         .unwrap_or(&mount_status.root),
                 );
-                let state = match frontend.state {
-                    FrontendState::Attached | FrontendState::Running => {
-                        match mount_status.serving {
-                            ServingState::Live => AccessState::Available,
-                            ServingState::Failed { .. } => AccessState::Failed,
-                            ServingState::Offline
-                            | ServingState::Stopped
-                            | ServingState::NotLoaded => AccessState::Offline,
-                        }
+                let state = match filesystem.state {
+                    FilesystemState::Attached => match mount_status.serving {
+                        ServingState::Live => AccessState::Available,
+                        ServingState::Failed { .. } => AccessState::Failed,
+                        ServingState::Offline | ServingState::Stopped | ServingState::NotLoaded => {
+                            AccessState::Offline
+                        },
                     },
-                    FrontendState::Failed => AccessState::Failed,
+                    FilesystemState::Detached | FilesystemState::Unknown => AccessState::Offline,
+                    FilesystemState::Failed => AccessState::Failed,
                 };
-                Some(AccessPath {
-                    filesystem: frontend.filesystem,
-                    runtime: frontend.runtime,
+                AccessPath {
+                    protocol: filesystem.spec.protocol(),
+                    runtime: filesystem.spec.runtime(),
                     path,
                     state,
-                })
+                }
             })
             .collect()
     }
 
     pub(crate) fn verdict(&self) -> Verdict {
-        let degraded = self.frontends.iter().any(|entry| {
+        let degraded = self.filesystems.iter().any(|entry| {
             entry.state.severity() >= Severity::Attention
                 && matches!(
                     self.daemon.health(),
@@ -551,15 +551,15 @@ impl Inventory {
     #[cfg(test)]
     pub(crate) fn test(
         state: DaemonHealth,
-        frontends: Vec<FrontendStatus>,
+        filesystems: Vec<FilesystemStatus>,
         mounts: Vec<MountStatus>,
     ) -> Self {
         Self {
             home: PathBuf::from("/tmp/omnifs"),
             mount_revision: None,
             applied_revision: None,
-            daemon: DaemonObservation::test(state),
-            frontends,
+            daemon: DaemonFacts::test(state),
+            filesystems,
             mounts,
             warmup: None,
         }
@@ -573,34 +573,67 @@ pub(crate) enum Verdict {
     Degraded,
 }
 
-/// Build canonical frontend rows from the daemon's live attachments.
-pub(crate) fn frontend_statuses(
+/// Build canonical filesystem rows from the daemon's live attachments.
+pub(crate) fn filesystem_statuses(
+    configured: &[fs::Spec],
     daemon: Option<&DaemonStatus>,
+    daemon_known: bool,
     mount_count: usize,
-) -> Vec<FrontendStatus> {
-    let mut rows = daemon
-        .into_iter()
-        .flat_map(|status| status.frontends.iter())
-        .map(|observed| {
-            let state = if daemon
-                .is_some_and(|status| status.health.overall_state() == HealthState::Unhealthy)
+) -> Vec<FilesystemStatus> {
+    let mut rows = configured
+        .iter()
+        .map(|spec| {
+            let observed = daemon.and_then(|status| {
+                status
+                    .filesystems
+                    .iter()
+                    .find(|observed| observed.id() == spec.id())
+            });
+            let attached = observed == Some(spec);
+            let identity_conflict = observed.is_some() && !attached;
+            let state = if !daemon_known {
+                FilesystemState::Unknown
+            } else if identity_conflict
+                || attached
+                    && daemon.is_some_and(|status| {
+                        status.health.overall_state() == HealthState::Unhealthy
+                    })
             {
-                FrontendState::Failed
+                FilesystemState::Failed
+            } else if attached {
+                FilesystemState::Attached
             } else {
-                FrontendState::Attached
+                FilesystemState::Detached
             };
-            FrontendStatus {
-                filesystem: observed.fs_type,
-                runtime: observed.runtime,
-                location: Some(observed.mount_point.clone()),
+            FilesystemStatus {
+                spec: spec.clone(),
                 state,
                 mount_count,
-                fix: state.fix().map(str::to_owned),
+                fix: if identity_conflict {
+                    Some("omnifs doctor".to_owned())
+                } else {
+                    state.fix().map(str::to_owned)
+                },
             }
         })
         .collect::<Vec<_>>();
 
-    rows.sort_by(frontend_cmp);
+    if let Some(daemon) = daemon {
+        rows.extend(
+            daemon
+                .filesystems
+                .iter()
+                .filter(|observed| !configured.iter().any(|spec| spec.id() == observed.id()))
+                .map(|observed| FilesystemStatus {
+                    spec: observed.clone(),
+                    state: FilesystemState::Failed,
+                    mount_count,
+                    fix: Some("omnifs doctor".to_owned()),
+                }),
+        );
+    }
+
+    rows.sort_by(filesystem_cmp);
     rows
 }
 
@@ -668,7 +701,7 @@ fn desired_mount_rows(
             );
             let auth = mount_auth_state(&name_string, local_auth, daemon);
             let provider_present = matches!(provider.state, ProviderPinState::Available);
-            let serving = derive_serving_state(MountObservation {
+            let serving = derive_serving_state(MountFacts {
                 provider: if provider_present {
                     Presence::Present
                 } else {
@@ -853,37 +886,43 @@ enum Health {
 }
 
 #[derive(Clone, Copy)]
-struct MountObservation {
+struct MountFacts {
     provider: Presence,
     daemon: Presence,
     loaded: Presence,
     health: Health,
 }
 
-fn derive_serving_state(observation: MountObservation) -> ServingState {
-    if matches!(observation.daemon, Presence::Absent) {
+fn derive_serving_state(facts: MountFacts) -> ServingState {
+    if matches!(facts.daemon, Presence::Absent) {
         return ServingState::Stopped;
     }
-    if matches!(observation.provider, Presence::Absent) {
+    if matches!(facts.provider, Presence::Absent) {
         return ServingState::NotLoaded;
     }
-    if matches!(observation.health, Health::Unhealthy) {
+    if matches!(facts.health, Health::Unhealthy) {
         return ServingState::Failed {
             message: "daemon health is unhealthy".into(),
         };
     }
-    if matches!(observation.loaded, Presence::Present) {
+    if matches!(facts.loaded, Presence::Present) {
         ServingState::Live
     } else {
         ServingState::NotLoaded
     }
 }
 
-fn frontend_cmp(left: &FrontendStatus, right: &FrontendStatus) -> Ordering {
-    left.runtime
-        .cmp(&right.runtime)
-        .then_with(|| left.filesystem.as_str().cmp(right.filesystem.as_str()))
-        .then_with(|| left.location.cmp(&right.location))
+fn filesystem_cmp(left: &FilesystemStatus, right: &FilesystemStatus) -> Ordering {
+    left.spec
+        .runtime()
+        .cmp(&right.spec.runtime())
+        .then_with(|| {
+            left.spec
+                .protocol()
+                .as_str()
+                .cmp(right.spec.protocol().as_str())
+        })
+        .then_with(|| left.spec.location().cmp(right.spec.location()))
 }
 
 #[cfg(test)]
@@ -908,8 +947,8 @@ mod tests {
 
     #[test]
     fn live_daemon_auth_health_overrides_fresh_local_store_readiness() {
-        let mut observation = DaemonObservation::test(DaemonHealth::Running);
-        observation.status.as_mut().unwrap().mounts = vec![
+        let mut daemon = DaemonFacts::test(DaemonHealth::Running);
+        daemon.status.as_mut().unwrap().mounts = vec![
             omnifs_api::MountInfo {
                 mount: "consent".into(),
                 provider_name: "test".into(),
@@ -923,7 +962,7 @@ mod tests {
                 auth_health: Some(omnifs_api::CredentialHealth::RefreshFailed),
             },
         ];
-        let daemon = observation.status.as_ref();
+        let daemon = daemon.status.as_ref();
 
         let consent = mount_auth_state("consent", AuthState::Ready, daemon);
         assert!(matches!(consent, AuthState::Error { .. }));
@@ -983,11 +1022,15 @@ mod tests {
     fn access_paths_are_derived_on_request() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
-            vec![FrontendStatus {
-                filesystem: Filesystem::Fuse,
-                runtime: Runtime::Host,
-                location: Some("/mnt".into()),
-                state: FrontendState::Attached,
+            vec![FilesystemStatus {
+                spec: fs::Spec::new(
+                    "test".parse().unwrap(),
+                    fs::Protocol::Fuse,
+                    fs::Runtime::Host,
+                    "/mnt".into(),
+                )
+                .unwrap(),
+                state: FilesystemState::Attached,
                 mount_count: 1,
                 fix: None,
             }],
@@ -1016,7 +1059,7 @@ mod tests {
     #[test]
     fn serving_state_matrix_joins_loaded_mounts() {
         assert_eq!(
-            derive_serving_state(MountObservation {
+            derive_serving_state(MountFacts {
                 provider: Presence::Absent,
                 daemon: Presence::Present,
                 loaded: Presence::Absent,
@@ -1026,7 +1069,7 @@ mod tests {
             "missing artifact outranks daemon failure"
         );
         assert_eq!(
-            derive_serving_state(MountObservation {
+            derive_serving_state(MountFacts {
                 provider: Presence::Present,
                 daemon: Presence::Present,
                 loaded: Presence::Absent,
@@ -1037,7 +1080,7 @@ mod tests {
             }
         );
         assert_eq!(
-            derive_serving_state(MountObservation {
+            derive_serving_state(MountFacts {
                 provider: Presence::Present,
                 daemon: Presence::Present,
                 loaded: Presence::Absent,
@@ -1047,7 +1090,7 @@ mod tests {
             "a reachable daemon does not imply every spec converged"
         );
         assert_eq!(
-            derive_serving_state(MountObservation {
+            derive_serving_state(MountFacts {
                 provider: Presence::Present,
                 daemon: Presence::Present,
                 loaded: Presence::Present,
@@ -1056,7 +1099,7 @@ mod tests {
             ServingState::Live
         );
         assert_eq!(
-            derive_serving_state(MountObservation {
+            derive_serving_state(MountFacts {
                 provider: Presence::Present,
                 daemon: Presence::Absent,
                 loaded: Presence::Absent,
@@ -1071,16 +1114,16 @@ mod tests {
         let probe = Err(anyhow::anyhow!("connection refused"));
         let expected = DaemonRecord::new(
             omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
-            PathBuf::from("/home/.omnifs/frontends/local.sock"),
+            PathBuf::from("/home/.omnifs/filesystems/runtime/local.sock"),
             42,
             "instance".into(),
             false,
         );
-        let mut unreachable = DaemonObservation::from(probe);
+        let mut unreachable = DaemonFacts::from(probe);
         unreachable.runtime = Some(expected);
         assert_eq!(unreachable.health(), DaemonHealth::Unreachable);
         assert_eq!(
-            DaemonObservation::from(Err(anyhow::anyhow!("connection refused"))).health(),
+            DaemonFacts::from(Err(anyhow::anyhow!("connection refused"))).health(),
             DaemonHealth::Stopped
         );
     }
@@ -1101,7 +1144,7 @@ mod tests {
                 config_dir: "/home/.omnifs".into(),
                 cache_dir: "/home/.omnifs/cache".into(),
                 attach_tcp: None,
-                frontends: Vec::new(),
+                filesystems: Vec::new(),
                 mounts: Vec::new(),
                 offline: false,
                 health: Box::new(omnifs_api::DaemonHealth::new(
@@ -1110,28 +1153,36 @@ mod tests {
                     omnifs_api::HealthReport::new(HealthState::Healthy, "test"),
                 )),
             };
-            assert_eq!(DaemonObservation::from(Ok(Some(status))).health(), expected);
+            assert_eq!(DaemonFacts::from(Ok(Some(status))).health(), expected);
         }
     }
 
     #[test]
-    fn access_paths_cover_every_frontend_and_mount_state() {
+    fn access_paths_cover_every_filesystem_and_mount_state() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
             vec![
-                FrontendStatus {
-                    filesystem: Filesystem::Fuse,
-                    runtime: Runtime::Host,
-                    location: Some("/host".into()),
-                    state: FrontendState::Attached,
+                FilesystemStatus {
+                    spec: fs::Spec::new(
+                        "host".parse().unwrap(),
+                        fs::Protocol::Fuse,
+                        fs::Runtime::Host,
+                        "/host".into(),
+                    )
+                    .unwrap(),
+                    state: FilesystemState::Attached,
                     mount_count: 1,
                     fix: None,
                 },
-                FrontendStatus {
-                    filesystem: Filesystem::Fuse,
-                    runtime: Runtime::Docker,
-                    location: Some("/omnifs".into()),
-                    state: FrontendState::Attached,
+                FilesystemStatus {
+                    spec: fs::Spec::new(
+                        "docker".parse().unwrap(),
+                        fs::Protocol::Fuse,
+                        fs::Runtime::Docker,
+                        "/omnifs".into(),
+                    )
+                    .unwrap(),
+                    state: FilesystemState::Attached,
                     mount_count: 1,
                     fix: None,
                 },
@@ -1160,9 +1211,50 @@ mod tests {
     }
 
     #[test]
-    fn daemon_down_inventory_has_no_frontend_rows() {
-        let rows = frontend_statuses(None, 1);
+    fn daemon_down_inventory_has_no_filesystem_rows() {
+        let rows = filesystem_statuses(&[], None, true, 1);
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn daemon_down_inventory_retains_configured_detached_filesystems() {
+        let spec = fs::Spec::new(
+            fs::Id::new("local").unwrap(),
+            fs::Protocol::Nfs,
+            fs::Runtime::Host,
+            PathBuf::from("/mnt/local"),
+        )
+        .unwrap();
+        let rows = filesystem_statuses(&[spec], None, true, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].spec.id().as_str(), "local");
+        assert_eq!(rows[0].state, FilesystemState::Detached);
+    }
+
+    #[test]
+    fn configured_identity_conflict_is_failed_not_hidden_as_detached() {
+        let spec = fs::Spec::new(
+            fs::Id::new("local").unwrap(),
+            fs::Protocol::Nfs,
+            fs::Runtime::Host,
+            PathBuf::from("/mnt/local"),
+        )
+        .unwrap();
+        let mut daemon = DaemonFacts::test(DaemonHealth::Running).status.unwrap();
+        daemon.filesystems.push(
+            fs::Spec::new(
+                spec.id().clone(),
+                fs::Protocol::Fuse,
+                fs::Runtime::Docker,
+                PathBuf::from(fs::GUEST_LOCATION),
+            )
+            .unwrap(),
+        );
+
+        let rows = filesystem_statuses(&[spec], Some(&daemon), true, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, FilesystemState::Failed);
+        assert_eq!(rows[0].fix.as_deref(), Some("omnifs doctor"));
     }
 
     #[test]
@@ -1196,18 +1288,22 @@ mod tests {
         };
         assert_eq!(expired.verdict(), Verdict::Degraded);
         let mut unmanaged = base.clone();
-        unmanaged.daemon = DaemonObservation::test(DaemonHealth::Running);
-        unmanaged.frontends.push(FrontendStatus {
-            filesystem: Filesystem::Fuse,
-            runtime: Runtime::Host,
-            location: Some("/mnt".into()),
-            state: FrontendState::Failed,
+        unmanaged.daemon = DaemonFacts::test(DaemonHealth::Running);
+        unmanaged.filesystems.push(FilesystemStatus {
+            spec: fs::Spec::new(
+                "test".parse().unwrap(),
+                fs::Protocol::Fuse,
+                fs::Runtime::Host,
+                "/mnt".into(),
+            )
+            .unwrap(),
+            state: FilesystemState::Failed,
             mount_count: 1,
-            fix: Some("omnifs frontend disable".into()),
+            fix: Some("omnifs fs detach --name test".into()),
         });
         assert_eq!(unmanaged.verdict(), Verdict::Degraded);
         let mut unreachable = base;
-        unreachable.daemon = DaemonObservation::test(DaemonHealth::Unreachable);
+        unreachable.daemon = DaemonFacts::test(DaemonHealth::Unreachable);
         assert_eq!(unreachable.verdict(), Verdict::Degraded);
     }
 

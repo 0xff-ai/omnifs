@@ -8,7 +8,7 @@
 //! tests drive them directly. Whole-mode files buffer once per open; ranged
 //! files read through per request.
 
-use super::Frontend;
+use super::FuseAdapter;
 use super::common::{DirSnapshot, NodeKind, ROOT_INO, TTL};
 use super::errno::ns_error_errno;
 use super::read_helpers::data_slice;
@@ -17,7 +17,7 @@ use omnifs_core::path::Path;
 use omnifs_vfs::{DirCursor, EntryKind, LookupState};
 use std::time::Duration;
 
-impl Frontend {
+impl FuseAdapter {
     async fn settle<T>(&self, result: Result<T, Errno>) -> Result<T, Errno> {
         self.flush_events().await?;
         result

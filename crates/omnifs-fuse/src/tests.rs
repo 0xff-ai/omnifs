@@ -20,7 +20,7 @@
 
 #![allow(clippy::wildcard_imports)]
 
-use super::Frontend;
+use super::FuseAdapter;
 use super::common::{DirSnapshot, ROOT_INO};
 use crate::new_notifier_handle;
 use omnifs_core::path::Path;
@@ -51,7 +51,7 @@ fn wasm_artifact_path(file_name: &str) -> PathBuf {
 }
 
 struct FuseHarness {
-    fs: Frontend,
+    fs: FuseAdapter,
     ns: Arc<TreeNamespace>,
     _registry: Arc<MountTable>,
     _cache_dir: TempDir,
@@ -59,7 +59,7 @@ struct FuseHarness {
     _providers_dir: TempDir,
 }
 
-/// Build a `Frontend` over the production mount-enumeration namespace. Test
+/// Build a `FuseAdapter` over the production mount-enumeration namespace. Test
 /// provider paths are reached through `ROOT_INO -> test -> hello`.
 fn build_harness() -> FuseHarness {
     let cache_dir = tempfile::tempdir().expect("cache dir");
@@ -107,7 +107,7 @@ fn build_harness() -> FuseHarness {
 
     let rt = tokio::runtime::Handle::current();
     let ns = TreeNamespace::online(Arc::clone(&registry), rt.clone());
-    let fs = Frontend::new(
+    let fs = FuseAdapter::new(
         rt,
         Arc::clone(&ns) as Arc<dyn Namespace>,
         new_notifier_handle(),
@@ -426,7 +426,7 @@ impl Namespace for PathNamespace {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ranged_handle_keeps_path_through_invalidation() {
     let namespace = PathNamespace::new();
-    let fs = Frontend::new(
+    let fs = FuseAdapter::new(
         tokio::runtime::Handle::current(),
         Arc::clone(&namespace) as Arc<dyn Namespace>,
         new_notifier_handle(),

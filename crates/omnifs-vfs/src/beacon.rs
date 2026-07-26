@@ -1,6 +1,6 @@
 //! The libkrun readiness beacon.
 //!
-//! The libkrun guest's FUSE frontend runner has no way to observe its own mount
+//! The libkrun guest's FUSE filesystem runner has no way to observe its own mount
 //! from outside the guest, so once its mount is live it dials host vsock on a
 //! well-known port and writes a single `ready\n` line; the invocation-scoped
 //! Libkrun launch lease accepts that beacon before publishing launch success
@@ -99,7 +99,7 @@ pub fn spawn_ready_signal(rt: &Handle, mount_point: PathBuf, port: u32) {
 /// Poll until `path` is a distinct filesystem from its parent (i.e. is
 /// mounted), or [`MOUNT_POLL_TIMEOUT`] elapses. A generic "is this a mount
 /// point" check rather than a FUSE-specific one: by construction only the
-/// frontend this process itself mounts will ever change `path`'s device.
+/// filesystem this process itself mounts will ever change `path`'s device.
 #[cfg(target_os = "linux")]
 async fn wait_until_mounted(path: &std::path::Path) -> bool {
     use std::os::unix::fs::MetadataExt as _;

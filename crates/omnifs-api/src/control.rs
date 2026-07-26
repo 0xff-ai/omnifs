@@ -4,7 +4,7 @@ use crate::DaemonStatus;
 use serde::{Deserialize, Serialize};
 
 /// The only control protocol version understood by this build.
-pub const CONTROL_PROTOCOL_VERSION: u16 = 6;
+pub const CONTROL_PROTOCOL_VERSION: u16 = 7;
 
 /// Maximum size of one request, reply, or inspector event line, including its
 /// trailing newline. The control plane is local and bounded, so oversized
@@ -27,10 +27,10 @@ pub enum ControlOperation {
     Ready,
     Status,
     Shutdown {
-        /// Stop attached frontends for an explicit `omnifs down`. Daemon
+        /// Stop attached filesystems for an explicit `omnifs down`. Daemon
         /// replacement leaves them alive so they reconnect.
         #[serde(default)]
-        stop_frontends: bool,
+        stop_filesystems: bool,
     },
     ValidateOffline {
         revision: String,
@@ -128,12 +128,12 @@ mod tests {
         let request = ControlRequest {
             version: CONTROL_PROTOCOL_VERSION,
             operation: ControlOperation::Shutdown {
-                stop_frontends: true,
+                stop_filesystems: true,
             },
         };
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
-            r#"{"version":6,"operation":"shutdown","stop_frontends":true}"#
+            r#"{"version":7,"operation":"shutdown","stop_filesystems":true}"#
         );
 
         let validate = ControlRequest {
@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&validate).unwrap(),
             format!(
-                r#"{{"version":6,"operation":"validate_offline","revision":"{}"}}"#,
+                r#"{{"version":7,"operation":"validate_offline","revision":"{}"}}"#,
                 "a".repeat(40)
             )
         );
@@ -156,12 +156,12 @@ mod tests {
         ));
         assert_eq!(
             serde_json::to_string(&reply).unwrap(),
-            r#"{"version":6,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
+            r#"{"version":7,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
         );
 
         assert_eq!(
             serde_json::to_string(&ControlReply::inspector_ready("epoch-1")).unwrap(),
-            r#"{"version":6,"result":"inspector_ready","value":{"instance_id":"epoch-1"}}"#
+            r#"{"version":7,"result":"inspector_ready","value":{"instance_id":"epoch-1"}}"#
         );
 
         assert!(
