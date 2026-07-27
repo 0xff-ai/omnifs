@@ -9,10 +9,11 @@ The primary contributor workflow is `just dev`, which runs `scripts/dev.ts`. The
 ```bash
 just dev            # build providers and the CLI, start the native daemon, attach the filesystem, open /omnifs
 target/debug/omnifs status                     # host-native: runs directly, no docker exec needed
+target/debug/omnifs fs shell --name dev-docker -- pwd # run one command at /omnifs in the guest
 FILESYSTEM=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
 docker exec -it -w /omnifs "$FILESYSTEM" /bin/sh # reattach to the browsing shell
 target/debug/omnifs fs detach --name dev-docker # stop the Docker runner
-target/debug/omnifs fs detach --name dev-host   # stop the host runner
+target/debug/omnifs fs detach --name dev-host   # stop the host filesystem process
 target/debug/omnifs down                       # stop the daemon
 ```
 
@@ -69,6 +70,7 @@ For provider path-surface changes, test the whole shell traversal, not only the 
 - Clone failures should surface in the daemon log with `git clone` stderr.
 - FUSE `access(...)` warnings are expected noise unless they correlate with a real failure.
 - Use `omnifs status` directly (host-native, no `docker exec` needed) for fast mount/config/provider/cache triage.
+- Use `target/debug/omnifs inspect` for the live TUI, or add `--plain` when capturing the typed activity as lines.
 - The filesystem container is credential-free and carries no `OMNIFS_HOME`: `docker exec` into it only ever sees `/omnifs`, never host paths or credentials.
 
 When a repo path returns `Input/output error`, check:

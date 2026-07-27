@@ -15,6 +15,8 @@ use crate::token_source::TokenSource;
 use crate::ui::output::{Output, ResultVerdict};
 
 #[derive(Args, Debug, Clone)]
+// These booleans are independent CLI switches, not hidden state.
+#[allow(clippy::struct_excessive_bools)]
 #[command(
     group(
         ArgGroup::new("change")
