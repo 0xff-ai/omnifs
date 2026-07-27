@@ -19,7 +19,13 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         Self {
-            home: tempfile::tempdir().expect("home tempdir"),
+            // These snapshots normalize the home path after rendering. Keep
+            // its pre-normalization length stable so table padding does not
+            // depend on the host's temporary-directory path.
+            home: tempfile::Builder::new()
+                .prefix("omnifs-cli-transcripts-")
+                .tempdir_in("/tmp")
+                .expect("home tempdir"),
         }
     }
 
