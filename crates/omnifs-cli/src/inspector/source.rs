@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Lines, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -17,6 +17,9 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::net::UnixStream;
 
 use crate::client::read_control_line;
+
+const SOURCE_QUEUE_CAPACITY: usize = 1024;
+const MESSAGES_PER_FRAME: usize = 256;
 
 /// Outcome of one [`EventsClient::attach`] call.
 pub enum AttachOutcome {
@@ -178,7 +181,7 @@ pub struct EventSource {
 
 impl EventSource {
     pub fn spawn(kind: SourceKind) -> Self {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(SOURCE_QUEUE_CAPACITY);
         let handle = match kind {
             SourceKind::Replay(path) => Some(thread::spawn(move || replay_path(&path, &tx))),
             SourceKind::Socket { endpoint, record } => {
@@ -194,9 +197,13 @@ impl EventSource {
         Self { rx, handle }
     }
 
-    pub fn drain(&self) -> Vec<SourceMessage> {
-        let mut messages = Vec::new();
-        while let Ok(message) = self.rx.try_recv() {
+    /// Drain bounded work for one draw tick. A hot stream can neither grow
+    /// memory without limit nor starve keyboard input and screen redraws.
+    pub fn drain_frame(&self) -> Vec<SourceMessage> {
+        let mut messages = Vec::with_capacity(MESSAGES_PER_FRAME);
+        while messages.len() < MESSAGES_PER_FRAME
+            && let Ok(message) = self.rx.try_recv()
+        {
             messages.push(message);
         }
         messages
@@ -211,7 +218,7 @@ impl Drop for EventSource {
     fn drop(&mut self) {
         // Close the receiver before joining finite replay workers so
         // they break out on their next send instead of finishing replay.
-        let (_tx, rx) = mpsc::channel();
+        let (_tx, rx) = mpsc::sync_channel(1);
         drop(std::mem::replace(&mut self.rx, rx));
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -253,7 +260,7 @@ impl ReplayReader {
     }
 }
 
-fn replay_path(path: &Path, tx: &Sender<SourceMessage>) {
+fn replay_path(path: &Path, tx: &SyncSender<SourceMessage>) {
     let result: Result<bool> = (|| -> Result<bool> {
         let mut reader = ReplayReader::open(path)?;
         while let Some(line) = reader.next_line()? {
@@ -278,7 +285,7 @@ fn replay_path(path: &Path, tx: &Sender<SourceMessage>) {
 /// Subscribe to the daemon's event stream and forward every received typed
 /// line into `tx`. Reconnects with a short backoff if the daemon is not yet
 /// listening, which is useful for `omnifs inspect` racing `just dev`.
-fn socket_source(endpoint: PathBuf, record: Option<&Path>, tx: &Sender<SourceMessage>) {
+fn socket_source(endpoint: PathBuf, record: Option<&Path>, tx: &SyncSender<SourceMessage>) {
     let mut record_file = match record {
         Some(path) => match OpenOptions::new().create(true).append(true).open(path) {
             Ok(file) => Some(file),

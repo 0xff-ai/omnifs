@@ -2,6 +2,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
@@ -20,18 +21,6 @@ use super::ui;
 use crate::ui::render::{Capabilities, LedgerRow, ledger_block, sentence, stdout_capabilities};
 use crate::ui::style::Glyph;
 
-/// Undo `enable_raw_mode` + `EnterAlternateScreen`, in that order's mirror,
-/// so the user's shell is usable again. Shared by the normal quit path and
-/// [`install_panic_hook`] so a panic mid-draw can't leave either one behind:
-/// a `Drop` guard alone isn't enough here because panics unwind through
-/// ratatui's own draw calls, which can themselves leave the terminal in a
-/// state a guard's `Drop` impl doesn't expect.
-///
-/// Leaving the alternate screen and showing the cursor are attempted even
-/// when disabling raw mode fails (and vice versa): a partial restore is
-/// still better than none, and it's what makes this function's write-side
-/// effects observable in a test that never had a real raw-mode terminal to
-/// begin with (see the `restore_terminal_*` tests below).
 fn restore_terminal(out: &mut impl Write) -> anyhow::Result<()> {
     let raw_mode = disable_raw_mode().context("disable raw mode");
     let screen = execute!(out, LeaveAlternateScreen, Show).context("leave alternate screen");
@@ -40,32 +29,132 @@ fn restore_terminal(out: &mut impl Write) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Install a panic hook that restores the terminal before the default panic
-/// message prints, then chains to whatever hook was previously installed
-/// (so backtraces, `RUST_BACKTRACE`, and test harness hooks keep working).
-/// Must run before [`enable_raw_mode`]/`EnterAlternateScreen` so a panic
-/// during setup itself is still covered.
-fn install_panic_hook() {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = restore_terminal(&mut std::io::stdout());
-        previous(info);
-    }));
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
+
+struct PanicHookGuard {
+    previous: Arc<Mutex<Option<PanicHook>>>,
+}
+
+impl PanicHookGuard {
+    fn install() -> Self {
+        let previous = Arc::new(Mutex::new(Some(std::panic::take_hook())));
+        let chained = Arc::clone(&previous);
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = restore_terminal(&mut std::io::stdout());
+            if let Some(previous) = chained
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                previous(info);
+            }
+        }));
+        Self { previous }
+    }
+}
+
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        let _inspector_hook = std::panic::take_hook();
+        if let Some(previous) = self
+            .previous
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            std::panic::set_hook(previous);
+        }
+    }
+}
+
+struct TerminalGuard {
+    active: bool,
+}
+
+impl TerminalGuard {
+    fn enter() -> anyhow::Result<Self> {
+        enable_raw_mode().context("enable raw mode")?;
+        let mut guard = Self { active: true };
+        let mut stdout = std::io::stdout();
+        if let Err(error) = execute!(stdout, EnterAlternateScreen).context("enter alternate screen")
+        {
+            let _ = guard.restore(&mut stdout);
+            return Err(error);
+        }
+        Ok(guard)
+    }
+
+    fn restore(&mut self, out: &mut impl Write) -> anyhow::Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        self.active = false;
+        restore_terminal(out)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = self.restore(&mut std::io::stdout());
+    }
+}
+
+fn enter_terminal() -> anyhow::Result<(TerminalGuard, Terminal<CrosstermBackend<std::io::Stdout>>)>
+{
+    let guard = TerminalGuard::enter()?;
+    let backend = CrosstermBackend::new(std::io::stdout());
+    let terminal = Terminal::new(backend).context("create terminal")?;
+    Ok((guard, terminal))
+}
+
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+    event_source: &EventSource,
+) -> anyhow::Result<()> {
+    let tick_rate = Duration::from_millis(50);
+    let mut last_tick = Instant::now();
+    loop {
+        terminal
+            .draw(|frame| ui::render(frame, app))
+            .context("draw frame")?;
+        if app.quit {
+            return Ok(());
+        }
+
+        let timeout = tick_rate
+            .checked_sub(last_tick.elapsed())
+            .unwrap_or_else(|| Duration::from_secs(0));
+        if event::poll(timeout).context("poll events")?
+            && let Event::Key(key) = event::read().context("read event")?
+            && key.kind == KeyEventKind::Press
+        {
+            app.handle_key(key);
+        }
+
+        if last_tick.elapsed() >= tick_rate {
+            for message in event_source.drain_frame() {
+                match message {
+                    super::source::SourceMessage::Failed(error) => {
+                        return Err(anyhow!(error));
+                    },
+                    super::source::SourceMessage::Finished => {},
+                    message => app.apply_source_message(message),
+                }
+            }
+            last_tick = Instant::now();
+        }
+    }
 }
 
 pub fn run_tui(
     mode: ConnectionMode,
     container: String,
     source: SourceKind,
-    teaching_path: String,
+    teaching_path: Option<String>,
 ) -> anyhow::Result<()> {
-    install_panic_hook();
-
-    enable_raw_mode().context("enable raw mode")?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen).context("enter alternate screen")?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend).context("create terminal")?;
+    let panic_hook = PanicHookGuard::install();
+    let (mut terminal_guard, mut terminal) = enter_terminal()?;
 
     let addr = match &source {
         SourceKind::Socket { endpoint, .. } => Some(format!("unix:{}", endpoint.display())),
@@ -80,50 +169,10 @@ pub fn run_tui(
     let mut app = App::new(mode, container, addr, teaching_path);
     let event_source = EventSource::spawn(source);
     let session_start = Instant::now();
-
-    let tick_rate = Duration::from_millis(50);
-    let mut last_tick = Instant::now();
-
-    let run_result = (|| -> anyhow::Result<()> {
-        loop {
-            terminal
-                .draw(|frame| ui::render(frame, &app))
-                .context("draw frame")?;
-
-            if app.quit {
-                break;
-            }
-
-            let timeout = tick_rate
-                .checked_sub(last_tick.elapsed())
-                .unwrap_or_else(|| Duration::from_secs(0));
-
-            if event::poll(timeout).context("poll events")?
-                && let Event::Key(key) = event::read().context("read event")?
-                && key.kind == KeyEventKind::Press
-            {
-                app.handle_key(key);
-            }
-
-            if last_tick.elapsed() >= tick_rate {
-                for message in event_source.drain() {
-                    match message {
-                        super::source::SourceMessage::Failed(error) => {
-                            return Err(anyhow!(error));
-                        },
-                        super::source::SourceMessage::Finished => {},
-                        message => app.apply_source_message(message),
-                    }
-                }
-                last_tick = Instant::now();
-            }
-        }
-        Ok(())
-    })();
-
-    let cleanup_result = restore_terminal(terminal.backend_mut());
-    run_result?;
-    cleanup_result?;
+    let run_result = run_loop(&mut terminal, &mut app, &event_source);
+    let cleanup_result = terminal_guard.restore(terminal.backend_mut());
+    drop(terminal);
+    drop(panic_hook);
 
     let summary = SessionSummary {
         duration: session_start.elapsed(),
@@ -131,7 +180,8 @@ pub fn run_tui(
         record_path,
     };
     crate::ui::print_raw(&render_receipt(&summary, stdout_capabilities()));
-    Ok(())
+    cleanup_result?;
+    run_result
 }
 
 /// Everything the quit receipt needs, captured once so [`render_receipt`]
@@ -336,31 +386,27 @@ mod tests {
     }
 
     #[test]
-    fn quit_path_and_panic_hook_both_run_restore_terminal() {
-        // Quit path: `run_tui` calls `restore_terminal` directly (proven by
-        // the test above sharing that exact function). Panic hook: prove
-        // `install_panic_hook`'s closure body calls it too, by installing
-        // the same closure shape and triggering a synthetic panic through
-        // `catch_unwind`. Nextest runs each test in its own process, so
-        // mutating the global panic hook here can't leak into other tests.
-        let previous = std::panic::take_hook();
-        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-        let observed_in_hook = observed.clone();
-        std::panic::set_hook(Box::new(move |_info| {
-            let mut buf = Vec::new();
-            let _ = restore_terminal(&mut buf);
-            *observed_in_hook.lock().expect("hook mutex") = buf;
+    fn panic_hook_chains_and_restores_the_previous_hook() {
+        let original = std::panic::take_hook();
+        let previous_called = Arc::new(Mutex::new(false));
+        let called_by_hook = Arc::clone(&previous_called);
+        std::panic::set_hook(Box::new(move |_| {
+            *called_by_hook.lock().expect("hook mutex") = true;
         }));
 
-        let result = std::panic::catch_unwind(|| panic!("synthetic panic for restore test"));
-
-        std::panic::set_hook(previous);
+        let guard = PanicHookGuard::install();
+        let result = std::panic::catch_unwind(|| panic!("panic while Inspector owns the hook"));
         assert!(result.is_err());
-        let buf = observed.lock().expect("hook mutex").clone();
-        assert!(
-            contains_restore_sequence(&buf),
-            "panic hook must call restore_terminal: {buf:?}"
-        );
+        assert!(*previous_called.lock().expect("hook mutex"));
+
+        drop(guard);
+        *previous_called.lock().expect("hook mutex") = false;
+        let result = std::panic::catch_unwind(|| panic!("panic after Inspector exits"));
+        assert!(result.is_err());
+        assert!(*previous_called.lock().expect("hook mutex"));
+
+        let _test_hook = std::panic::take_hook();
+        std::panic::set_hook(original);
     }
 
     #[test]

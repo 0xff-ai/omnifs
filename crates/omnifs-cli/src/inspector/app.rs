@@ -74,7 +74,7 @@ pub struct App {
     pub dropped_events: u64,
     pub events_per_sec: f64,
     /// A usable path shown in the activity view's empty state.
-    pub teaching_path: String,
+    pub teaching_path: Option<String>,
     /// Currently highlighted trace. View state, not fold state: a later
     /// time-travel slice refolds `TraceReducer` from scratch, so this
     /// must survive independently of the fold.
@@ -238,7 +238,7 @@ impl App {
         mode: ConnectionMode,
         container: impl Into<String>,
         addr: Option<String>,
-        teaching_path: impl Into<String>,
+        teaching_path: Option<String>,
     ) -> Self {
         Self {
             mode,
@@ -259,7 +259,7 @@ impl App {
             quit: false,
             dropped_events: 0,
             events_per_sec: 0.0,
-            teaching_path: teaching_path.into(),
+            teaching_path,
             selected: None,
             collapsed: HashSet::new(),
             traces: TraceReducer::default(),
@@ -485,7 +485,7 @@ impl App {
     }
 
     /// Consume one source message: line payload or a connection-state
-    /// transition. Pairs with [`super::source::EventSource::drain`].
+    /// transition. Pairs with [`super::source::EventSource::drain_frame`].
     pub fn apply_source_message(&mut self, message: SourceMessage) {
         match message {
             SourceMessage::Line(line) => {
@@ -1027,7 +1027,7 @@ mod tests {
 
     #[test]
     fn pause_is_lossless_new_records_land_live_but_not_in_the_frozen_view() {
-        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        let mut app = App::new(ConnectionMode::Replay, "test", None, Some("/omnifs".into()));
         app.apply_record(fuse_start(1, 10, "github", "/a"));
         app.apply_record(fuse_end(1, 20, 10));
 
@@ -1056,7 +1056,7 @@ mod tests {
             ConnectionMode::Inspector,
             "test",
             Some("daemon".into()),
-            "/omnifs",
+            Some("/omnifs".into()),
         );
         app.apply_source_message(SourceMessage::Connected {
             epoch: "one".into(),
@@ -1083,7 +1083,7 @@ mod tests {
 
     #[test]
     fn scrub_stepping_reflects_prefix_state() {
-        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        let mut app = App::new(ConnectionMode::Replay, "test", None, Some("/omnifs".into()));
         app.apply_record(fuse_start(1, 10, "github", "/a"));
         app.apply_record(fuse_end(1, 20, 10));
         app.apply_record(fuse_start(2, 30, "github", "/b"));
@@ -1137,7 +1137,7 @@ mod tests {
 
     #[test]
     fn v_toggles_between_activity_and_sandbox_views() {
-        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        let mut app = App::new(ConnectionMode::Replay, "test", None, Some("/omnifs".into()));
         assert_eq!(app.view, AppView::Activity);
         app.handle_key(key(crossterm::event::KeyCode::Char('v')));
         assert_eq!(app.view, AppView::Sandbox);
@@ -1149,7 +1149,7 @@ mod tests {
     fn port_cursor_moves_through_exports_then_imports_and_clamps_at_both_ends() {
         use crossterm::event::KeyCode;
 
-        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        let mut app = App::new(ConnectionMode::Replay, "test", None, Some("/omnifs".into()));
         app.apply_record(provider_start(1, 10, "github", "lookup_child"));
         app.view = AppView::Sandbox;
 
@@ -1178,7 +1178,7 @@ mod tests {
     fn m_cycles_active_mount_through_sandbox_activity_order() {
         use crossterm::event::KeyCode;
 
-        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        let mut app = App::new(ConnectionMode::Replay, "test", None, Some("/omnifs".into()));
         app.apply_record(provider_start(1, 10, "github", "lookup_child"));
         app.apply_record(provider_start(2, 20, "gitlab", "lookup_child"));
         app.view = AppView::Sandbox;
@@ -1197,7 +1197,7 @@ mod tests {
     fn footer_and_dispatch_use_the_same_contextual_keymap() {
         use crossterm::event::KeyCode;
 
-        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        let mut app = App::new(ConnectionMode::Replay, "test", None, Some("/omnifs".into()));
         let activity_footer = footer_text(&app);
         assert!(activity_footer.contains("tab focus"));
         assert!(!activity_footer.contains("m mount"));
@@ -1264,7 +1264,7 @@ mod tests {
 
     #[test]
     fn pause_time_selection_and_collapse_survive_resume() {
-        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        let mut app = App::new(ConnectionMode::Replay, "test", None, Some("/omnifs".into()));
         app.apply_record(fuse_start(1, 10, "github", "/dir/one"));
         app.apply_record(fuse_start(2, 20, "github", "/dir/two"));
         assert_eq!(app.selected_trace(), Some(1));
@@ -1289,7 +1289,7 @@ mod tests {
 
     #[test]
     fn idle_toggle_hides_and_restores_mounts() {
-        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        let mut app = App::new(ConnectionMode::Replay, "test", None, Some("/omnifs".into()));
         app.apply_record(fuse_start(1, 10, "github", "/a"));
         assert!(app.mount_is_idle("github"));
         assert_eq!(app.ordered_mounts_for_strip(8), vec!["github"]);

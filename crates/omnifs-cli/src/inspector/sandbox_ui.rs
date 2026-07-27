@@ -407,7 +407,7 @@ fn port_row_line(
 
     let mut line = Line::from(spans);
     if is_cursor {
-        line = line.patch_style(Style::default().bg(ui::CURSOR_BG));
+        line = line.patch_style(ui::CURSOR_STYLE);
     }
     line
 }
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn traced_port_with_open_call_renders_hot_wire_and_lifetime_count() {
-        let mut app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        let mut app = App::new(ConnectionMode::Replay, "test", None, Some("/omnifs".into()));
         app.apply_record(provider_start(1, 10, "github", "lookup_child"));
 
         let sandbox = app.mount_sandbox("github");
@@ -468,7 +468,7 @@ mod tests {
 
     #[test]
     fn untraced_port_renders_the_untraced_tag_and_dotted_wire() {
-        let app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        let app = App::new(ConnectionMode::Replay, "test", None, Some("/omnifs".into()));
         let line = port_row_line(&app, None, &PortId::Export("initialize".to_string()), true);
         let text = line.to_string();
         assert!(text.contains("untraced"));

@@ -17,10 +17,9 @@ use super::metrics::{MountWindow, render_sparkline};
 use super::trace_state::{Operation, OperationStatus, Stage, StageKind};
 use super::tree::{NodeStatus, RenderRow};
 
-// Shared with `sandbox_ui`: both full-screen views highlight a cursor
-// row the same way. ANSI-16 color keeps the cue visible on terminals
-// without truecolor support, while `CURSOR_MARKER` provides a non-color cue.
-pub(super) const CURSOR_BG: Color = Color::DarkGray;
+// Shared with `sandbox_ui`: reverse video works without color support, while
+// `CURSOR_MARKER` keeps the selection visible in plain captures.
+pub(super) const CURSOR_STYLE: Style = Style::new().add_modifier(Modifier::REVERSED);
 const CURSOR_MARKER: &str = "› ";
 
 const SPARK_BUCKETS: usize = 12;
@@ -238,19 +237,17 @@ fn render_main(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn empty_state_lines(app: &App) -> Vec<Line<'static>> {
-    vec![
-        Line::from(Span::styled(
-            "Nothing yet. Generate some:",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("cat {}/...", app.teaching_path),
-                Style::default().fg(Color::Cyan),
-            ),
-        ]),
-    ]
+    let mut lines = vec![Line::from(Span::styled(
+        "Nothing yet.",
+        Style::default().fg(Color::DarkGray),
+    ))];
+    if let Some(path) = &app.teaching_path {
+        lines.push(Line::from(vec![
+            Span::raw("  Generate activity: "),
+            Span::styled(format!("ls {path}"), Style::default().fg(Color::Cyan)),
+        ]));
+    }
+    lines
 }
 
 fn render_tree(frame: &mut Frame, app: &App, area: Rect) {
@@ -352,11 +349,7 @@ impl TreeRowView<'_> {
         }
         let mut line = Line::from(spans);
         if is_cursor {
-            // patch_style layers a bg under each span without inverting
-            // their fg. REVERSED would swap each span's fg into its bg,
-            // producing a mosaic of colored backgrounds instead of a
-            // uniform highlight band.
-            line = line.patch_style(Style::default().bg(CURSOR_BG));
+            line = line.patch_style(CURSOR_STYLE);
         }
         line
     }
@@ -417,7 +410,7 @@ fn render_operations_log(frame: &mut Frame, app: &App, area: Rect) {
                 raw.clone()
             };
             if is_selected {
-                line = line.patch_style(Style::default().bg(CURSOR_BG));
+                line = line.patch_style(CURSOR_STYLE);
             }
             lines.push(line);
         }
@@ -610,7 +603,7 @@ mod tests {
 
     #[test]
     fn tree_rollup_badge_explains_failure_count() {
-        let app = App::new(ConnectionMode::Replay, "test", None, "/omnifs");
+        let app = App::new(ConnectionMode::Replay, "test", None, Some("/omnifs".into()));
         let row = RenderRow {
             depth: 0,
             name: "github".to_string(),
