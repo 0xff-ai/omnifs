@@ -43,7 +43,7 @@ pub(crate) fn up_key_width() -> usize {
 /// `Already serving revision <sha>. Files at <location>` sentence instead.
 pub(crate) enum LaunchOutcome {
     AlreadyServing,
-    Started,
+    Started { reconnect_pending: Option<fs::Id> },
 }
 
 /// Command-owned daemon launcher.
@@ -249,11 +249,13 @@ impl<'a> Launcher<'a> {
         let status = client.status().await?;
         let key_width = up_key_width();
         report_launch_status(&self.output, &status, revision, offline, key_width);
-        if !expected_reattach.is_empty() {
+        let reconnect_pending = if expected_reattach.is_empty() {
+            None
+        } else {
             self.wait_for_reattachment(expected_reattach, key_width)
-                .await?;
-        }
-        Ok(LaunchOutcome::Started)
+                .await?
+        };
+        Ok(LaunchOutcome::Started { reconnect_pending })
     }
 
     /// Wait a short grace period for every filesystem observed just before
@@ -264,7 +266,7 @@ impl<'a> Launcher<'a> {
         &self,
         expected: Vec<fs::Spec>,
         key_width: usize,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<fs::Id>> {
         let total = expected.len();
         let mut region = LiveRegion::new(self.output.clone(), ["filesystems"]);
         let deadline = tokio::time::Instant::now() + RECONNECT_GRACE;
@@ -293,7 +295,7 @@ impl<'a> Launcher<'a> {
                     reattached_value(reattached, total, &detail),
                     key_width,
                 );
-                return Ok(());
+                return Ok(None);
             }
 
             if tokio::time::Instant::now() >= deadline {
@@ -304,9 +306,7 @@ impl<'a> Launcher<'a> {
                     pending_value(reattached, total, &describe_filesystem(first)),
                     key_width,
                 );
-                self.output
-                    .narrate(format!("  fix:  `omnifs fs restart --name {}`", first.id()));
-                return Ok(());
+                return Ok(Some(first.id().clone()));
             }
 
             match LiveRegion::race(tokio::time::sleep(RECONNECT_POLL)).await {

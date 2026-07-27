@@ -362,17 +362,12 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
         return Ok(exit_code);
     }
 
-    let running = inventory.daemon_health() == crate::inventory::DaemonHealth::Running;
     let report = crate::status::InventoryReport { inventory };
+    let closing_action = report.closing_action();
     report.render().print();
-    output.narrate("");
-    if running {
-        output.narrate(format!(
-            "Browse:  `{}`",
-            crate::ui::access::browse_command(&report.inventory)
-        ));
-    } else {
-        output.narrate("Start serving:  `omnifs up`");
+    if let Some(action) = closing_action {
+        output.narrate("");
+        output.narrate(crate::ui::access::action_line(&action).render());
     }
     Ok(exit_code)
 }
