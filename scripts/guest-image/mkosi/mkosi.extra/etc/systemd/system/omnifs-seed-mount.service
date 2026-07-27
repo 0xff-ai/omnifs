@@ -2,7 +2,7 @@
 Description=Mount the omnifs attach-parameter seed volume (label OMNIFS-SEED)
 DefaultDependencies=no
 Conflicts=shutdown.target
-Before=omnifs-frontend.service shutdown.target
+Before=omnifs-filesystem.service shutdown.target
 After=local-fs-pre.target
 
 [Service]

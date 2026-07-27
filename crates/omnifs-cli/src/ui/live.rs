@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn spinner_line_aligns_to_the_block_scoped_key_width() {
-        // `key_width` 9 mirrors `up`'s real block (`providers`/`frontends`
+        // `key_width` 9 mirrors `up`'s real block (`providers`/`filesystems`
         // tie at 9 chars): "daemon" (6) plus the 3-space gap this test's
         // width leaves after the wider sibling keys lands "starting" at
         // column 16 (2-space indent + 1 frame + 1 space + 6 key + 6 pad).
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn live_region_update_is_a_no_op_for_unknown_keys() {
         let output = Output::new(super::super::output::OutputMode::Human, true);
-        let mut region = LiveRegion::new(output, ["frontends"]);
+        let mut region = LiveRegion::new(output, ["filesystems"]);
         region.update("missing", "ignored");
         assert!(region.units.iter().all(|unit| unit.text.is_empty()));
     }
@@ -439,7 +439,7 @@ mod tests {
         let sink_seen = std::sync::Arc::clone(&seen);
         let output = Output::new(super::super::output::OutputMode::Human, false)
             .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
-        let mut spinner = Spinner::new(output, "frontend image", 9);
+        let mut spinner = Spinner::new(output, "filesystem image", 9);
         spinner.update("pulling layer 1/3");
         assert_eq!(*seen.lock().unwrap(), ["pulling layer 1/3".to_owned()]);
     }
@@ -450,7 +450,7 @@ mod tests {
         let sink_seen = std::sync::Arc::clone(&seen);
         let output = Output::new(super::super::output::OutputMode::Human, false)
             .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
-        let mut spinner = Spinner::new(output, "frontend image", 9);
+        let mut spinner = Spinner::new(output, "filesystem image", 9);
         spinner.update("pulling");
         spinner.settle_ok("ghcr.io/omnifs:latest ready");
         let seen = seen.lock().unwrap();

@@ -67,7 +67,7 @@ function dayKey(ms) {
  * - sessions: number of `daemon_start` events.
  * - medianSessionMs: median duration from each `daemon_start` to the first
  *   `daemon_stop` before the next `daemon_start` (unfinished sessions excluded).
- * - recoveries: a `frontend_stopped` with no `daemon_stop` before the next
+ * - recoveries: a `filesystem_stopped` with no `daemon_stop` before the next
  *   `daemon_start`, where that next start lands within 5 minutes (an unplanned
  *   restart, counted toward the manual-recovery rate).
  * - weeklyActiveDays: distinct UTC days with any event in the trailing 7 days.
@@ -93,7 +93,7 @@ export function computeReport(daemonRecords, cliRecords, now = Date.now()) {
 
   let recoveries = 0;
   for (let i = 0; i < events.length; i++) {
-    if (events[i].event !== "frontend_stopped") continue;
+    if (events[i].event !== "filesystem_stopped") continue;
     for (let j = i + 1; j < events.length; j++) {
       if (events[j].event === "daemon_stop") {
         break;

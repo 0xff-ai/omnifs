@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{Read as _, Write as _};
+use std::io::{BufRead as _, Read as _, Write as _};
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -11,7 +11,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::{Api, Disk, Feature, LibraryApi, PortDirection, ShutdownFd};
-use crate::{Config, Error, SHUTDOWN_REPLY, SHUTDOWN_REQUEST};
+use crate::{CONTROL_MAX_LINE_BYTES, Config, Error, HelperRecord};
 
 pub fn run(config: &Config) -> Result<(), Error> {
     if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
@@ -27,9 +27,9 @@ fn run_with<A: Api>(api: &A, config: &Config, diagnostic: &File) -> Result<(), E
     api.init_log(diagnostic.as_raw_fd())?;
     let bridge = AttachBridge::bind(&config.attach_bridge_socket, &config.attach_socket)?;
     let mut context = Context::configure(api, config)?;
-    let control = Control::bind(&config.control_socket)?;
+    let control = Control::bind(&config.control_socket, &config.spec, &config.instance_id)?;
     let shutdown_fd = context.shutdown_fd()?;
-    let files = PublishedPid::publish(&config.pid_file)?;
+    let files = PublishedPid::publish(&config.pid_file, &config.spec, &config.instance_id)?;
     let stop = Arc::new(AtomicBool::new(false));
     let control_thread = control.spawn(shutdown_fd, Arc::clone(&stop));
     let bridge_thread = bridge.spawn(shutdown_fd, Arc::clone(&stop));
@@ -265,10 +265,11 @@ impl Drop for AttachBridge {
 struct Control {
     path: PathBuf,
     listener: UnixListener,
+    record: HelperRecord,
 }
 
 impl Control {
-    fn bind(path: &Path) -> Result<Self, Error> {
+    fn bind(path: &Path, spec: &omnifs_core::fs::Spec, instance_id: &str) -> Result<Self, Error> {
         let listener = UnixListener::bind(path)
             .map_err(|error| Error::io("bind control socket", path, error))?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -279,6 +280,7 @@ impl Control {
         Ok(Self {
             path: path.to_path_buf(),
             listener,
+            record: HelperRecord::new(std::process::id(), spec.clone(), instance_id)?,
         })
     }
 
@@ -299,25 +301,73 @@ impl Control {
                         .map_err(|error| {
                             Error::io("set control request timeout for", &self.path, error)
                         })?;
-                    let mut request = [0_u8; SHUTDOWN_REQUEST.len()];
-                    if let Err(error) = stream.read_exact(&mut request) {
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(1)))
+                        .map_err(|error| {
+                            Error::io("set control reply timeout for", &self.path, error)
+                        })?;
+                    let mut request = String::new();
+                    let read = std::io::BufReader::new(&mut stream)
+                        .take(CONTROL_MAX_LINE_BYTES)
+                        .read_line(&mut request);
+                    let Ok(read) = read else {
+                        let error = read.unwrap_err();
                         eprintln!(
                             "omnifs-libkrun: invalid control request on {}: {error}",
                             self.path.display()
                         );
                         continue;
-                    }
-                    if request != SHUTDOWN_REQUEST {
+                    };
+                    if read == 0
+                        || !request.ends_with('\n')
+                        || read as u64 == CONTROL_MAX_LINE_BYTES
+                    {
                         eprintln!(
-                            "omnifs-libkrun: rejected unknown control request on {}",
+                            "omnifs-libkrun: rejected incomplete or oversized control request on {}",
                             self.path.display()
                         );
                         continue;
                     }
-                    shutdown_fd.signal()?;
+                    let expected_ping = format!(
+                        "ping {} {}\n",
+                        self.record.spec.id(),
+                        self.record.instance_id
+                    );
+                    let expected_shutdown = format!(
+                        "shutdown {} {}\n",
+                        self.record.spec.id(),
+                        self.record.instance_id
+                    );
+                    let reply = if request == expected_ping {
+                        format!(
+                            "pong {} {} {}\n",
+                            self.record.pid,
+                            self.record.spec.id(),
+                            self.record.instance_id
+                        )
+                    } else if request == expected_shutdown {
+                        format!(
+                            "ok {} {} {}\n",
+                            self.record.pid,
+                            self.record.spec.id(),
+                            self.record.instance_id
+                        )
+                    } else {
+                        eprintln!(
+                            "omnifs-libkrun: rejected unknown or mismatched control request on {}",
+                            self.path.display()
+                        );
+                        continue;
+                    };
                     stream
-                        .write_all(SHUTDOWN_REPLY)
+                        .write_all(reply.as_bytes())
                         .map_err(|error| Error::io("write control reply to", &self.path, error))?;
+                    stream
+                        .flush()
+                        .map_err(|error| Error::io("flush control reply to", &self.path, error))?;
+                    if request == expected_shutdown {
+                        shutdown_fd.signal()?;
+                    }
                 },
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(50));
@@ -342,17 +392,25 @@ struct PublishedPid {
 }
 
 impl PublishedPid {
-    fn publish(pid_file: &Path) -> Result<Self, Error> {
+    fn publish(
+        pid_file: &Path,
+        spec: &omnifs_core::fs::Spec,
+        instance_id: &str,
+    ) -> Result<Self, Error> {
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .mode(0o600)
             .open(pid_file)
-            .map_err(|error| Error::io("create pid file", pid_file, error))?;
-        write!(file, "{}", std::process::id())
-            .map_err(|error| Error::io("write pid file", pid_file, error))?;
+            .map_err(|error| Error::io("create helper record", pid_file, error))?;
+        let record = HelperRecord::new(std::process::id(), spec.clone(), instance_id)?;
+        let mut bytes = serde_json::to_vec(&record)
+            .map_err(|error| Error::Control(format!("serialize helper record: {error}")))?;
+        bytes.push(b'\n');
+        file.write_all(&bytes)
+            .map_err(|error| Error::io("write helper record", pid_file, error))?;
         file.sync_all()
-            .map_err(|error| Error::io("sync pid file", pid_file, error))?;
+            .map_err(|error| Error::io("sync helper record", pid_file, error))?;
         Ok(Self {
             pid_file: pid_file.to_path_buf(),
         })
@@ -383,7 +441,7 @@ impl Config {
         }
         if self.pid_file.exists() {
             return Err(Error::Config(format!(
-                "pid file already exists: {}",
+                "helper record already exists: {}",
                 self.pid_file.display()
             )));
         }
@@ -530,7 +588,21 @@ mod tests {
 
     fn config() -> Config {
         let install = Installation::for_executable("/opt/omnifs/omnifs").unwrap();
-        Config::omnifs("/tmp/omnifs/libkrun", "/tmp/omnifs/attach.sock", &install).unwrap()
+        let spec = omnifs_core::fs::Spec::new(
+            "demo".parse().unwrap(),
+            omnifs_core::fs::Protocol::Fuse,
+            omnifs_core::fs::Runtime::Libkrun,
+            omnifs_core::fs::GUEST_LOCATION.into(),
+        )
+        .unwrap();
+        Config::omnifs(
+            "/tmp/omnifs/libkrun",
+            "/tmp/omnifs/attach.sock",
+            spec,
+            "0123456789abcdef0123456789abcdef",
+            &install,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -648,5 +720,39 @@ mod tests {
         stop.store(true, Ordering::Release);
         bridge_thread.join().unwrap().unwrap();
         assert!(!bridge_path.exists());
+    }
+
+    #[test]
+    fn helper_control_proves_identity_before_shutdown() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(crate::CONTROL_SOCKET_NAME);
+        let instance = "0123456789abcdef0123456789abcdef";
+        let spec = omnifs_core::fs::Spec::new(
+            "demo".parse().unwrap(),
+            omnifs_core::fs::Protocol::Fuse,
+            omnifs_core::fs::Runtime::Libkrun,
+            omnifs_core::fs::GUEST_LOCATION.into(),
+        )
+        .unwrap();
+        let control = Control::bind(&path, &spec, instance).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut signal_reader, signal_writer) = UnixStream::pair().unwrap();
+        let thread = control.spawn(
+            ShutdownFd::from_raw(signal_writer.as_raw_fd()),
+            Arc::clone(&stop),
+        );
+        let client = crate::ControlSocket::new(path).unwrap();
+        let record = client.ping(&spec, instance).unwrap();
+        assert_eq!(record.pid, std::process::id());
+        assert_eq!(record.spec, spec);
+        assert_eq!(record.instance_id, instance);
+
+        client.request_shutdown(&record).unwrap();
+        let mut signal = [0_u8; 8];
+        signal_reader.read_exact(&mut signal).unwrap();
+
+        stop.store(true, Ordering::Release);
+        thread.join().unwrap().unwrap();
+        drop(signal_writer);
     }
 }

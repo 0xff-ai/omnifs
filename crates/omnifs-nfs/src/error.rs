@@ -1,7 +1,7 @@
 use std::io;
 
 #[derive(Debug, thiserror::Error)]
-pub enum NfsFrontendError {
+pub enum NfsFilesystemError {
     #[error("mount command failed: {0}")]
     Mount(String),
     #[error("mount state failed: {0}")]

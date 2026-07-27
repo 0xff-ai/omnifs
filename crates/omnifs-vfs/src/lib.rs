@@ -1,13 +1,13 @@
 //! Omnifs VFS facade and optional wire transport.
 //!
-//! Always available: [`Namespace`] and the plain answer types frontends consume.
+//! Always available: [`Namespace`] and the plain answer types filesystems consume.
 //! With the `wire` feature: postcard framing, handshake, attach/reconnect,
 //! readiness, [`WireNamespace`], and [`VfsServer`]. Projection semantics stay
 //! in `omnifs-engine`.
 
 mod facade;
 pub use facade::*;
-pub use omnifs_core::{FsType, Stability};
+pub use omnifs_core::Stability;
 
 #[cfg(feature = "wire")]
 mod beacon;
@@ -34,21 +34,21 @@ pub use beacon::spawn_ready_signal;
 #[cfg(feature = "wire")]
 pub use beacon::{ReadyPortError, resolve_ready_vsock_port};
 #[cfg(feature = "wire")]
-pub use client::{AttachTarget, AttachTargetError, WireNamespace};
+pub use client::{
+    AttachTarget, AttachTargetError, TeardownOutcome, TeardownReason, TeardownRequest,
+    WireNamespace,
+};
 #[cfg(feature = "wire")]
-pub use server::{ListenerEvent, ListenerTarget, VfsServer, serve_connection};
+pub use server::{Endpoint, ListenerEvent, VfsServer, serve_connection};
 
 /// The Omnifs VFS wire protocol version. Peers that disagree refuse to serve.
 #[cfg(feature = "wire")]
-pub const PROTOCOL: u32 = 7;
+pub const PROTOCOL: u32 = 9;
 
-/// Identity a connecting frontend presents in its handshake `Hello`.
 #[cfg(feature = "wire")]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrontendIdentity {
-    pub kind: FsType,
-    /// Guest-side mount point. Display-only; not host-visible authority.
-    pub mount_point: PathBuf,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum ServerControl {
+    Stop,
 }
 
 #[cfg(feature = "wire")]
@@ -95,7 +95,7 @@ pub(crate) enum WireResponse {
 pub(crate) enum Handshake {
     Hello {
         protocol: u32,
-        frontend: FrontendIdentity,
+        filesystem: omnifs_core::fs::Spec,
     },
     Welcome {
         protocol: u32,

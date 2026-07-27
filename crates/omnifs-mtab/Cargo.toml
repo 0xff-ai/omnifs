@@ -10,9 +10,17 @@ categories = ["filesystem"]
 keywords = ["omnifs", "filesystem", "mount"]
 
 [dependencies]
+fs2 = { workspace = true }
+omnifs-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", features = ["process", "signal"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

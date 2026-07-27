@@ -38,7 +38,7 @@ pub enum MountCommand {
     Add(AddArgs),
     /// List configured mounts with their provider and auth state.
     Ls,
-    /// Show one configured mount and every derived frontend access path.
+    /// Show one configured mount and every derived filesystem access path.
     Show(ShowArgs),
     /// Re-authenticate an existing mount.
     Reauth(ReauthArgs),
@@ -123,7 +123,7 @@ pub(crate) struct MountsResult {
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct MountShowResult {
     mount: crate::inventory::MountStatus,
-    frontends: Vec<crate::inventory::FrontendStatus>,
+    filesystems: Vec<crate::inventory::FilesystemStatus>,
     access_paths: Vec<crate::inventory::AccessPath>,
     verdict: crate::inventory::Verdict,
     /// Local desired-state spec path. Absent when the mount is only observed
@@ -208,7 +208,7 @@ pub(crate) async fn show_with_output(
         .and_then(config_summary_line);
     Ok(MountShowResult {
         mount,
-        frontends: inventory.frontends,
+        filesystems: inventory.filesystems,
         access_paths,
         verdict,
         spec_path,
@@ -288,7 +288,7 @@ fn detail_card_facts(result: &MountShowResult) -> Vec<(&'static str, String)> {
         .map(crate::ui::access::access_row)
         .collect();
     if access_rows.is_empty() {
-        facts.push(("access", "no frontend attached yet".to_owned()));
+        facts.push(("access", "no filesystem attached yet".to_owned()));
     } else {
         facts.extend(access_rows.into_iter().map(|row| ("access", row)));
     }
@@ -679,7 +679,7 @@ mod tests {
 
     /// `omnifs mount ls` renders exactly the Mounts section of the status
     /// report, never the context strip or
-    /// the Frontends table alongside it.
+    /// the Filesystems table alongside it.
     #[test]
     fn render_mounts_is_exactly_the_status_mounts_section() {
         let mounts = vec![crate::inventory::MountStatus {
@@ -704,7 +704,7 @@ mod tests {
         assert!(rendered.contains("Mounts"));
         assert!(rendered.contains("github"));
         assert!(!rendered.contains("omnifs  "), "{rendered:?}");
-        assert!(!rendered.contains("Frontends"), "{rendered:?}");
+        assert!(!rendered.contains("Filesystems"), "{rendered:?}");
 
         let mut expected = crate::ui::table::Report::new();
         expected.push(crate::ui::table::Block::Resources(
@@ -716,7 +716,7 @@ mod tests {
     fn show_result(mount: crate::inventory::MountStatus) -> MountShowResult {
         MountShowResult {
             mount,
-            frontends: Vec::new(),
+            filesystems: Vec::new(),
             access_paths: Vec::new(),
             verdict: crate::inventory::Verdict::Ok,
             spec_path: Some("/home/.omnifs/mounts/github.json".into()),
@@ -783,10 +783,10 @@ mod tests {
         );
     }
 
-    /// `access` states "no frontend attached yet" rather than silently
+    /// `access` states "no filesystem attached yet" rather than silently
     /// omitting the row when nothing currently reaches the mount.
     #[test]
-    fn detail_card_access_row_falls_back_without_a_reachable_frontend() {
+    fn detail_card_access_row_falls_back_without_a_reachable_filesystem() {
         let mut result = show_result(healthy_mount());
         result.access_paths = Vec::new();
         let facts = detail_card_facts(&result);
@@ -794,7 +794,7 @@ mod tests {
             .iter()
             .find(|(key, _)| *key == "access")
             .expect("access fact");
-        assert_eq!(access.1, "no frontend attached yet");
+        assert_eq!(access.1, "no filesystem attached yet");
     }
 
     /// `auth` and `config` are omitted, not shown empty, when the mount has

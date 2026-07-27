@@ -110,12 +110,17 @@ impl InspectArgs {
 /// before probing daemon readiness, and cheap enough to call unconditionally.
 fn pick_teaching_path(workspace: &Workspace) -> Option<String> {
     let registry = workspace.desired_state().registry().ok()?;
+    let host_location = workspace
+        .filesystems()
+        .list()
+        .ok()?
+        .into_iter()
+        .find(|spec| spec.runtime() == omnifs_core::fs::Runtime::Host)?
+        .location()
+        .to_path_buf();
     let mut fallback = None;
     for (name, spec) in registry.iter() {
-        let location = workspace
-            .frontend()
-            .default_host_location()
-            .join(name.as_str());
+        let location = host_location.join(name.as_str());
         let text = location.display().to_string();
         let no_auth = mounts::pinned_manifest(workspace.catalog(), spec)
             .ok()

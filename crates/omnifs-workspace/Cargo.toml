@@ -10,6 +10,7 @@ categories = ["filesystem"]
 keywords = ["omnifs", "filesystem", "paths"]
 
 [dependencies]
+anyhow = { workspace = true }
 omnifs-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

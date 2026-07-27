@@ -1,9 +1,9 @@
-//! Restart survival for the out-of-process NFS frontend.
+//! Restart survival for the out-of-process NFS filesystem.
 //!
 //! This is the structural answer to the ESTALE row in the NFS quirk catalog. Two
 //! restart cases, run in order against one live mount:
 //!
-//! - **Frontend process restart.** SIGKILL `omnifs-thin nfs`, the shipped
+//! - **Filesystem process restart.** SIGKILL `omnifs-thin --protocol nfs`, the shipped
 //!   out-of-process NFS runner over the Omnifs VFS wire protocol,
 //!   mid-workload and relaunch it with the same argv. The state directory
 //!   recovers the active mount's ephemeral NFS port.
@@ -12,7 +12,7 @@
 //!   remounting. A held fd keeps reading, a fresh open works, and a previously
 //!   listed directory still lists. No unmount happened.
 //! - **Daemon restart.** SIGKILL the daemon under the live
-//!   frontend and relaunch it. The frontend's VFS wire client reconnects onto a
+//!   filesystem and relaunch it. The filesystem's VFS wire client reconnects onto a
 //!   root invalidation, and resumes using the persisted structural `Path`
 //!   identities. The held fd keeps working and a new open succeeds; no ESTALE
 //!   for surviving handles.
@@ -44,7 +44,7 @@ fn acceptance_gated() -> bool {
 /// the test relaunches them, so the guard always holds the current pair.
 struct Cleanup {
     mount_point: PathBuf,
-    frontend: Option<Child>,
+    filesystem: Option<Child>,
     daemon: Option<Child>,
     _lock: TcpListener,
 }
@@ -52,7 +52,7 @@ struct Cleanup {
 impl Drop for Cleanup {
     fn drop(&mut self) {
         detach_mount(&self.mount_point);
-        for child in [self.frontend.as_mut(), self.daemon.as_mut()]
+        for child in [self.filesystem.as_mut(), self.daemon.as_mut()]
             .into_iter()
             .flatten()
         {
@@ -146,7 +146,7 @@ fn wait_readable(path: &Path, timeout: Duration) -> bool {
 /// available (CI installs `nfs-common`); it skips when the platform cannot mount.
 #[test]
 #[allow(clippy::too_many_lines)] // linear end-to-end, two legs
-fn wire_reattach_survives_frontend_and_daemon_restart() {
+fn wire_reattach_survives_filesystem_and_daemon_restart() {
     if !acceptance_gated() {
         return;
     }
@@ -160,7 +160,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     let home = hermetic.home.path().to_path_buf();
 
     let control_socket = home.join("control.sock");
-    let socket = home.join("frontends/local.sock");
+    let socket = home.join("filesystems/runtime/local.sock");
     let mount_point = home.join("mnt-reattach");
     std::fs::create_dir_all(&mount_point).expect("mount point");
     let state_dir = home.join("nfs-state");
@@ -170,38 +170,25 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
         Command::new(live::omnifs_bin())
             .args(&daemon_args)
             .env("OMNIFS_HOME", &home)
-            .env_remove("OMNIFS_MOUNT_POINT")
             .env("RUST_LOG", "warn")
             .spawn()
             .expect("spawn omnifs daemon")
     };
 
-    // Same argv every launch: port zero chooses an ephemeral address initially,
-    // then the active-mount restart must recover that address from state.
-    let frontend_argv: Vec<String> = vec![
-        "nfs".into(),
-        "--attach".into(),
-        socket.to_str().expect("socket utf-8").into(),
-        "--mount-point".into(),
-        mount_point.to_str().expect("mount utf-8").into(),
-        "--state-dir".into(),
-        state_dir.to_str().expect("state dir utf-8").into(),
-    ];
-    let spawn_frontend = || {
-        Command::new(live::thin_runner_bin())
-            .args(&frontend_argv)
+    let spawn_filesystem = || {
+        live::thin_host_runner_command("reattach", "nfs", &mount_point, &state_dir, Some(&socket))
             .env("OMNIFS_HOME", &home)
             .env(
                 "RUST_LOG",
-                std::env::var("REATTACH_FRONTEND_LOG").unwrap_or_else(|_| "warn".into()),
+                std::env::var("REATTACH_FILESYSTEM_LOG").unwrap_or_else(|_| "warn".into()),
             )
             .spawn()
-            .expect("spawn omnifs-thin nfs")
+            .expect("spawn omnifs-thin --protocol nfs")
     };
 
     let mut guard = Cleanup {
         mount_point: mount_point.clone(),
-        frontend: None,
+        filesystem: None,
         daemon: Some(spawn_daemon()),
         _lock: nfs_lock,
     };
@@ -217,10 +204,12 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     }
     assert!(socket.exists(), "attach socket absent after daemon ready");
 
-    guard.frontend = Some(spawn_frontend());
+    guard.filesystem = Some(spawn_filesystem());
     let message = mount_point.join("test/hello/message");
     if !wait_readable(&message, Duration::from_secs(30)) {
-        eprintln!("skip: frontend never served the mount (renderer unavailable on this platform)");
+        eprintln!(
+            "skip: filesystem never served the mount (renderer unavailable on this platform)"
+        );
         return;
     }
 
@@ -242,18 +231,23 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     // SIGKILL.
     std::thread::sleep(Duration::from_millis(400));
 
-    // Restart the frontend process with the kernel mount still active.
+    // Restart the filesystem process with the kernel mount still active.
     {
-        let mut frontend = guard.frontend.take().expect("frontend running");
-        frontend.kill().expect("SIGKILL frontend"); // std Child::kill sends SIGKILL
-        let _ = frontend.wait();
+        let mut filesystem = guard.filesystem.take().expect("filesystem running");
+        filesystem.kill().expect("SIGKILL filesystem"); // std Child::kill sends SIGKILL
+        let _ = filesystem.wait();
     }
     assert!(
         omnifs_nfs::mount_is_active(&mount_point),
-        "the kernel client must keep the mount across a frontend restart"
+        "the kernel client must keep the mount across a filesystem restart"
     );
+    // SIGKILL skips the runner-record guard. This test owns and reaped the
+    // exact child, so remove only that stale operational record before
+    // starting the replacement against the still-live NFS mount.
+    std::fs::remove_file(state_dir.join("runner.json"))
+        .expect("remove stale runner record after reaping the exact child");
 
-    guard.frontend = Some(spawn_frontend());
+    guard.filesystem = Some(spawn_filesystem());
     // The restarted runner serves the export (skipping remount); the mount stays
     // active throughout, so wait on a fresh read succeeding instead of the mount
     // point appearing.
@@ -267,33 +261,33 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
         }
         assert!(
             Instant::now() < deadline,
-            "the restarted frontend never served a fresh read"
+            "the restarted filesystem never served a fresh read"
         );
         // A restarted runner exiting early is a hard failure.
-        if let Some(child) = guard.frontend.as_mut()
+        if let Some(child) = guard.filesystem.as_mut()
             && matches!(child.try_wait(), Ok(Some(_)))
         {
-            panic!("the restarted frontend exited before serving");
+            panic!("the restarted filesystem exited before serving");
         }
         std::thread::sleep(Duration::from_millis(250));
     }
 
     // The held fd keeps working and bytes match.
     let after_kill = read_held_timeout(&held, Duration::from_secs(30))
-        .expect("held fd must not hang after the frontend restart")
-        .expect("held fd must keep reading after frontend restart");
+        .expect("held fd must not hang after the filesystem restart")
+        .expect("held fd must keep reading after filesystem restart");
     assert_eq!(
         after_kill, baseline,
-        "held-fd bytes must be identical after the frontend restart"
+        "held-fd bytes must be identical after the filesystem restart"
     );
     // A fresh open+read works.
     let fresh = read_path_timeout(&message, Duration::from_secs(15))
         .expect("fresh read must not hang")
-        .expect("fresh open+read after frontend restart");
+        .expect("fresh open+read after filesystem restart");
     assert_eq!(fresh, baseline, "fresh read must match baseline");
     // The previously listed directory still lists.
     let listed_after: Vec<String> = std::fs::read_dir(&hello_dir)
-        .expect("relist hello dir after frontend restart")
+        .expect("relist hello dir after filesystem restart")
         .filter_map(|entry| entry.ok().and_then(|e| e.file_name().into_string().ok()))
         .collect();
     assert!(
@@ -302,10 +296,10 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     );
     assert!(
         omnifs_nfs::mount_is_active(&mount_point),
-        "no unmount happened across the frontend restart"
+        "no unmount happened across the filesystem restart"
     );
 
-    // Restart the daemon under the live frontend and let the wire client reattach.
+    // Restart the daemon under the live filesystem and let the wire client reattach.
     {
         let mut daemon = guard.daemon.take().expect("daemon running");
         daemon.kill().expect("SIGKILL daemon");
@@ -322,7 +316,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    // The frontend reconnects onto the fresh instance and re-resolves. The held fd
+    // The filesystem reconnects onto the fresh instance and re-resolves. The held fd
     // keeps working and a new open succeeds; reads during the outage are not
     // asserted.
     let deadline = Instant::now() + Duration::from_secs(45);
@@ -340,7 +334,7 @@ fn wire_reattach_survives_frontend_and_daemon_restart() {
     };
     assert!(
         reattached,
-        "the frontend never re-resolved against the restarted daemon"
+        "the filesystem never re-resolved against the restarted daemon"
     );
     let after_reattach = read_held_timeout(&held, Duration::from_secs(30))
         .expect("held fd must not hang after the daemon restart")

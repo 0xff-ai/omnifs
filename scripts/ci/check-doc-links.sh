@@ -11,6 +11,7 @@ cd "$(dirname "$0")/../.."
 
 report=""
 while IFS= read -r -d '' f; do
+  [ -f "$f" ] || continue
   dir=$(dirname "$f")
   # Candidate targets: markdown link destinations, plus inline repo-root docs paths.
   targets=$(

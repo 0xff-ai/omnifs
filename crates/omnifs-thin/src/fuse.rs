@@ -1,41 +1,32 @@
 //! FUSE runner command for `omnifs-thin`.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::host_control::RunnerPhase;
+use crate::lifecycle::{Lifecycle, LifecycleConfig, coordinate_mount, preflight};
 use anyhow::Context as _;
-use clap::Args as ClapArgs;
 use omnifs_mtab::StateFile;
 use omnifs_vfs::Namespace;
-use omnifs_vfs::{AttachTarget, FrontendIdentity, FsType, WireNamespace, resolve_ready_vsock_port};
-use tokio::runtime::Handle;
-use tracing::{info, warn};
+use omnifs_vfs::{AttachTarget, WireNamespace, resolve_ready_vsock_port};
+use tracing::info;
 
-/// Arguments for the Linux FUSE frontend.
-#[derive(Debug, ClapArgs)]
-pub(crate) struct Args {
-    /// Host-visible mount point to serve the projected tree at.
-    #[arg(long)]
-    mount_point: PathBuf,
-    /// Directory for local-process mount discovery. Omit for guest/container
-    /// delivery, whose runtime owns process discovery and teardown.
-    #[arg(long)]
-    state_dir: Option<PathBuf>,
-    /// Path to the daemon's namespace attach socket to connect to. When
-    /// absent, the attach target is resolved from the environment.
-    #[arg(long)]
-    attach: Option<PathBuf>,
-}
-
-pub(crate) fn run(args: Args) -> anyhow::Result<()> {
+pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     crate::init_tracing();
+    let crate::RunnerArgs {
+        spec,
+        state_dir,
+        attach,
+        port,
+        host_control,
+    } = args;
+    anyhow::ensure!(port == 0, "--port is valid only with --protocol nfs");
+    let mount_point = spec.location().to_path_buf();
 
     // Parsed (and platform-checked) before the attach dial, so a
     // misconfigured seed fails fast rather than after a 30s connect attempt.
     let ready_port =
         resolve_ready_vsock_port().context("resolve the readiness-beacon vsock port")?;
-    let target =
-        AttachTarget::resolve(args.attach).context("resolve the namespace attach target")?;
+    let target = AttachTarget::resolve(attach).context("resolve the namespace attach target")?;
     let target_label = target.to_string();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -43,13 +34,25 @@ pub(crate) fn run(args: Args) -> anyhow::Result<()> {
         .build()
         .context("build the tokio runtime")?;
     let handle = rt.handle().clone();
-
-    let identity = FrontendIdentity {
-        kind: FsType::Fuse,
-        mount_point: args.mount_point.clone(),
+    let runner_control = host_control.into_config()?;
+    let mut lifecycle = {
+        let _runtime_guard = rt.enter();
+        Lifecycle::prepare(LifecycleConfig {
+            spec: &spec,
+            state_dir: state_dir.as_deref(),
+            runner_control,
+        })?
     };
+    preflight(&spec, state_dir.as_deref()).context("check the FUSE mount location")?;
+    lifecycle.phase.send_replace(RunnerPhase::Attaching);
+
     let namespace = rt
-        .block_on(WireNamespace::attach(target, identity, handle.clone()))
+        .block_on(WireNamespace::attach_with_teardown(
+            target,
+            spec.clone(),
+            handle.clone(),
+            lifecycle.wire_teardown_tx.clone(),
+        ))
         .context("attach to the namespace")?;
     info!(
         target = %target_label,
@@ -57,58 +60,43 @@ pub(crate) fn run(args: Args) -> anyhow::Result<()> {
     );
 
     if let Some(port) = ready_port {
-        omnifs_vfs::spawn_ready_signal(&handle, args.mount_point.clone(), port);
+        omnifs_vfs::spawn_ready_signal(&handle, mount_point.clone(), port);
     }
-
-    install_signal_handler(&handle, args.mount_point.clone());
 
     let namespace_dyn = Arc::clone(&namespace) as Arc<dyn Namespace>;
     let notifier = omnifs_fuse::new_notifier_handle();
-    let _state_file = args
-        .state_dir
-        .as_deref()
-        .map(|state_dir| StateFile::write_fuse(&args.mount_point, state_dir))
-        .transpose()
-        .context("write FUSE mount discovery state")?;
-    omnifs_fuse::mount::run_blocking(&args.mount_point, namespace_dyn, &handle, &notifier)
-        .context("serve the FUSE mount")?;
+    let cancelled = Arc::clone(&lifecycle.cancelled);
+    let mount_point_owned = mount_point.clone();
+    let mount_handle = handle.clone();
+    let (mount_done_tx, mount_done_rx) = tokio::sync::oneshot::channel();
+    lifecycle.phase.send_replace(RunnerPhase::Mounting);
+    let mount_thread = std::thread::Builder::new()
+        .name("omnifs-fuse-mount".to_owned())
+        .spawn(move || {
+            let result = (|| -> anyhow::Result<()> {
+                let _state_file = state_dir
+                    .as_deref()
+                    .map(|dir| StateFile::write_fuse(&mount_point_owned, dir))
+                    .transpose()
+                    .context("write FUSE mount discovery state")?;
+                omnifs_fuse::mount::run_blocking_cancellable(
+                    &mount_point_owned,
+                    namespace_dyn,
+                    &mount_handle,
+                    &notifier,
+                    &cancelled,
+                )
+                .context("serve the FUSE mount")
+            })();
+            let _ = mount_done_tx.send(result);
+        })
+        .context("start the FUSE mount owner")?;
+    let result = rt.block_on(coordinate_mount(&spec, &mut lifecycle, mount_done_rx));
+    mount_thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("FUSE mount owner panicked"))?;
+    result?;
 
-    info!(mount = %args.mount_point.display(), "frontend exited");
+    info!(mount = %mount_point.display(), "filesystem exited");
     Ok(())
 }
-
-/// On `SIGTERM`/`SIGINT`, unmount the mount point so the blocking FUSE loop
-/// unblocks and the runner exits.
-#[cfg(unix)]
-fn install_signal_handler(rt: &Handle, mount_point: PathBuf) {
-    use tokio::signal::unix::{SignalKind, signal};
-
-    drop(rt.spawn(async move {
-        let (mut term, mut interrupt) = match (
-            signal(SignalKind::terminate()),
-            signal(SignalKind::interrupt()),
-        ) {
-            (Ok(term), Ok(interrupt)) => (term, interrupt),
-            (term, interrupt) => {
-                if let Err(error) = term {
-                    warn!(%error, "failed to install SIGTERM handler");
-                }
-                if let Err(error) = interrupt {
-                    warn!(%error, "failed to install SIGINT handler");
-                }
-                return;
-            },
-        };
-        let signal = tokio::select! {
-            _ = term.recv() => "SIGTERM",
-            _ = interrupt.recv() => "SIGINT",
-        };
-        info!(signal, "received shutdown signal; unmounting frontend");
-        if let Err(error) = omnifs_fuse::mount::unmount(&mount_point) {
-            warn!(%error, "frontend self-unmount failed");
-        }
-    }));
-}
-
-#[cfg(not(unix))]
-fn install_signal_handler(_rt: &Handle, _mount_point: PathBuf) {}

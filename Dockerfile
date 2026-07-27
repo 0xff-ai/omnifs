@@ -27,12 +27,12 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     --mount=type=cache,id=omnifs-host-target,target=/src/target,sharing=locked \
     cargo chef cook --release --recipe-path recipe.json
 
-# --- Build the slim omnifs-thin frontend runner ---
+# --- Build the slim omnifs-thin filesystem runner ---
 #
-# `omnifs-thin` is the dedicated credential-free frontend runner: it attaches
+# `omnifs-thin` is the dedicated credential-free filesystem runner: it attaches
 # a wire-backed namespace and serves FUSE or NFS, and needs no
 # engine, no Wasmtime, and no provider bundle. This stage builds it alone, so
-# the frontend images below need no provider artifacts.
+# the filesystem images below need no provider artifacts.
 
 FROM deps AS thin-builder
 WORKDIR /src
@@ -43,11 +43,11 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
     cargo build --release -p omnifs-thin --bin omnifs-thin \
     && cp /src/target/release/omnifs-thin /omnifs-thin
 
-# --- Docker-hosted FUSE frontend ---
+# --- Docker-hosted FUSE filesystem ---
 #
-# `omnifs frontend up` (see `crates/omnifs-cli/src/frontend_container.rs`)
+# `omnifs fs attach` (see `crates/omnifs-cli/src/fs_container.rs`)
 # launches a separate, credential-free container that only ever runs the slim
-# `omnifs-thin fuse` binary, attached over TCP to a host-native daemon's shared
+# `omnifs-thin` binary, attached over TCP to a host-native daemon's shared
 # namespace. It never runs a provider, so it gets its own minimal base: no
 # `OMNIFS_HOME`, no provider store, no control socket, none of an
 # interactive-shell toolbox (zsh, gum, git, ripgrep, nfs-common...) — and,
@@ -55,9 +55,9 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
 #
 # Debian, not Ubuntu: this is the same Debian family the compile `toolchain`
 # stage above already uses, and Debian's default coreutils/findutils are GNU
-# (uutils is opt-in, not the default `tail`), which is what the frontend
+# (uutils is opt-in, not the default `tail`), which is what the filesystem
 # conformance matrix's `tail -f` case requires.
-FROM debian:trixie-slim AS frontend-base
+FROM debian:trixie-slim AS filesystem-base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -65,14 +65,14 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir /omnifs
 
-ENTRYPOINT ["/usr/local/bin/omnifs-thin", "fuse", "--mount-point", "/omnifs"]
+ENTRYPOINT ["/usr/local/bin/omnifs-thin"]
 
 # Contributor image: the binary compiled in this Dockerfile's `thin-builder`
-# stage. `just frontend-image` builds this target.
-FROM frontend-base AS frontend-dev
+# stage. `just filesystem-image` builds this target.
+FROM filesystem-base AS filesystem-dev
 COPY --from=thin-builder /omnifs-thin /usr/local/bin/
 
 # Release image: a prebuilt binary injected as the `omnifs-thin-bin` build
-# context. `scripts/ci/build-frontend-image.sh` builds this target.
-FROM frontend-base AS frontend-release
+# context. `scripts/ci/build-filesystem-image.sh` builds this target.
+FROM filesystem-base AS filesystem-release
 COPY --from=omnifs-thin-bin omnifs-thin /usr/local/bin/omnifs-thin

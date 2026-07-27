@@ -250,7 +250,7 @@ pub(crate) fn sentence(text: &str, caps: Capabilities) -> String {
         .join("\n")
 }
 
-/// A bold section heading word (`Frontends`, `Mounts`). Plain bold, not the
+/// A bold section heading word (`Filesystems`, `Mounts`). Plain bold, not the
 /// blue heading role: this uses plain bold for report sections.
 pub(crate) fn heading(text: &str, caps: Capabilities) -> String {
     style::bold(text, caps.color)
@@ -533,10 +533,10 @@ mod tests {
     #[test]
     fn heading_is_bold_only_when_color_is_on() {
         assert_eq!(
-            heading("Frontends", caps(120, true)),
-            style::bold("Frontends", true)
+            heading("Filesystems", caps(120, true)),
+            style::bold("Filesystems", true)
         );
-        assert_eq!(heading("Frontends", caps(120, false)), "Frontends");
+        assert_eq!(heading("Filesystems", caps(120, false)), "Filesystems");
     }
 
     #[test]
@@ -600,7 +600,7 @@ mod tests {
 
     #[test]
     fn key_field_width_matches_ledger_key_width_for_the_same_keys() {
-        let keys = ["providers", "daemon", "mounts", "frontends"];
+        let keys = ["providers", "daemon", "mounts", "filesystems"];
         let rows = keys
             .iter()
             .map(|key| LedgerRow::new(Glyph::Done, (*key).to_owned(), String::new()))
@@ -608,8 +608,8 @@ mod tests {
         assert_eq!(key_field_width(&keys), ledger_key_width(&rows));
         assert_eq!(
             key_field_width(&keys),
-            9,
-            "`providers`/`frontends` tie at 9"
+            11,
+            "`filesystems` is the longest key"
         );
     }
 

@@ -92,7 +92,7 @@ pub fn platform_can_mount() -> bool {
 }
 
 /// Acquire the cross-process NFS serialization lock. The port constant and the
-/// bind loop have one owner in `omnifs-itest`, shared with the frontend
+/// bind loop have one owner in `omnifs-itest`, shared with the filesystem
 /// conformance matrix so both binaries serialize against the same port.
 pub fn nfs_serial_lock() -> TcpListener {
     omnifs_itest::live::nfs_serial_lock()

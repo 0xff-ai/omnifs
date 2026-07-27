@@ -4,14 +4,16 @@ use anyhow::Context as _;
 
 use super::app::DaemonArgs;
 use omnifs_api::{
-    CredentialHealth, DaemonHealth, DaemonStatus, FrontendInfo, HealthReport, HealthState,
-    MountInfo,
+    CredentialHealth, DaemonHealth, DaemonStatus, HealthReport, HealthState, MountInfo,
 };
+use omnifs_core::fs;
 use omnifs_engine::{Host, HostOffline, HostOfflineOpen, HostOnline, HostOpen};
 use omnifs_workspace::daemon_record::DaemonRecord;
 use omnifs_workspace::mounts::Revision;
-use omnifs_workspace::{DaemonState, FrontendState, Workspace};
+use omnifs_workspace::{DaemonState, Workspace};
 use std::fmt::Write as _;
+use std::net::SocketAddr;
+use std::num::NonZeroU16;
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -19,17 +21,14 @@ use std::sync::Arc;
 
 pub(crate) struct DaemonContext {
     daemon: DaemonState,
-    frontend: FrontendState,
+    attach_socket: PathBuf,
+    attach_port: NonZeroU16,
     metrics: omnifs_workspace::metrics::Store,
     host: Host,
     mount_revision: Revision,
     offline: bool,
     /// Random per-start id reported in status and written to the daemon record.
     instance_id: String,
-    /// `--attach-tcp <port>`: bind a TCP namespace attach listener eagerly at
-    /// start (`0` = ephemeral). `None` when the flag was not passed; a TCP
-    /// attach listener can still be bound later through the control socket.
-    attach_tcp: Option<u16>,
     process: ProcessInfo,
 }
 
@@ -41,8 +40,9 @@ struct ProcessInfo {
 
 impl DaemonContext {
     pub(crate) fn resolve(args: &DaemonArgs) -> anyhow::Result<Self> {
-        let attach_tcp = args.attach_tcp;
         let workspace = Workspace::resolve()?;
+        let attach_socket = workspace.filesystem_state().attach_socket();
+        let attach_port = workspace.attach_port()?;
         let process = ProcessInfo::current();
         anyhow::ensure!(
             args.mount_snapshot.is_dir(),
@@ -66,13 +66,13 @@ impl DaemonContext {
 
         Ok(Self {
             daemon: workspace.daemon().clone(),
-            frontend: workspace.frontend().clone(),
+            attach_socket,
+            attach_port,
             metrics: workspace.metrics().clone(),
             host,
             mount_revision: args.mount_revision.clone(),
             offline: args.offline,
             instance_id: generate_instance_id(),
-            attach_tcp,
             process,
         })
     }
@@ -97,16 +97,12 @@ impl DaemonContext {
         &self.instance_id
     }
 
-    pub(crate) fn attach_store(&self) -> anyhow::Result<omnifs_workspace::attach::Store> {
-        Ok(self.frontend.attach_store()?)
+    pub(crate) fn attach_socket(&self) -> PathBuf {
+        self.attach_socket.clone()
     }
 
-    pub(crate) fn vsock_attach_socket(&self) -> PathBuf {
-        self.frontend.vsock_attach_socket()
-    }
-
-    pub(crate) fn local_attach_socket(&self) -> PathBuf {
-        self.frontend.local_attach_socket()
+    pub(crate) fn attach_port(&self) -> NonZeroU16 {
+        self.attach_port
     }
 
     /// Bind the host-native control socket at `<config_dir>/control.sock`.
@@ -206,20 +202,15 @@ impl DaemonContext {
         &self.metrics
     }
 
-    /// The `--attach-tcp` port request, if the flag was passed. `Some(0)` asks
-    /// for an ephemeral port.
-    pub(crate) fn attach_tcp_port(&self) -> Option<u16> {
-        self.attach_tcp
-    }
-
     /// Build status from the live attach registry.
     pub(crate) fn status(
         &self,
         attach_serving: bool,
-        frontends: Vec<FrontendInfo>,
+        attach_tcp: Option<SocketAddr>,
+        filesystems: Vec<fs::Spec>,
         mounts: Vec<MountInfo>,
     ) -> DaemonStatus {
-        let health = self.health(attach_serving, &frontends, &mounts);
+        let health = self.health(attach_serving, &filesystems, &mounts);
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             pid: self.process.pid,
@@ -227,7 +218,8 @@ impl DaemonContext {
             executable: self.process.executable.clone(),
             config_dir: self.daemon.config_dir().to_path_buf(),
             cache_dir: self.daemon.cache_dir(),
-            frontends,
+            attach_tcp,
+            filesystems,
             mounts,
             offline: self.offline,
             health: Box::new(health),
@@ -237,7 +229,7 @@ impl DaemonContext {
     fn health(
         &self,
         attach_serving: bool,
-        frontends: &[FrontendInfo],
+        filesystems: &[fs::Spec],
         mounts: &[MountInfo],
     ) -> DaemonHealth {
         DaemonHealth::new(
@@ -248,22 +240,23 @@ impl DaemonContext {
                     self.daemon.control_socket().display()
                 ),
             ),
-            Self::frontend_health(attach_serving, frontends),
+            Self::filesystem_health(attach_serving, filesystems),
             mount_health(mounts),
         )
     }
 
-    /// Listener readiness is independent of whether a frontend is currently
+    /// Listener readiness is independent of whether a filesystem is currently
     /// attached. Startup flips this subsystem healthy only after mount loading and
     /// every requested listener bind have completed.
-    fn frontend_health(attach_serving: bool, frontends: &[FrontendInfo]) -> HealthReport {
+    fn filesystem_health(attach_serving: bool, filesystems: &[fs::Spec]) -> HealthReport {
         let mut listed = vec!["attach socket local".to_string()];
-        listed.extend(frontends.iter().map(|frontend| {
+        listed.extend(filesystems.iter().map(|filesystem| {
             format!(
-                "attached {} at {} via {}",
-                frontend.fs_type,
-                frontend.mount_point.display(),
-                frontend.runtime
+                "attached `{}` ({}) at {} via {}",
+                filesystem.id(),
+                filesystem.protocol(),
+                filesystem.location().display(),
+                filesystem.runtime()
             )
         }));
         let listed = listed.join(", ");
@@ -360,13 +353,13 @@ mod tests {
         );
         DaemonContext {
             daemon: workspace.daemon().clone(),
-            frontend: workspace.frontend().clone(),
+            attach_socket: workspace.filesystem_state().attach_socket(),
+            attach_port: workspace.attach_port().unwrap(),
             metrics: workspace.metrics().clone(),
             host,
             mount_revision,
             offline: false,
             instance_id: "test-instance".to_owned(),
-            attach_tcp: None,
             process: ProcessInfo {
                 pid: std::process::id(),
                 executable: PathBuf::new(),

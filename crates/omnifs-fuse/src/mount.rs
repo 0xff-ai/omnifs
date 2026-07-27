@@ -4,17 +4,18 @@
 //! [`Namespace`](omnifs_vfs::Namespace) and `unmount` for clean teardown via
 //! fusermount.
 
-use crate::{Frontend, NotifierHandle};
+use crate::{FuseAdapter, NotifierHandle};
 use fuser::Session;
 use omnifs_mtab::{Platform, UnmountCommand};
 use omnifs_vfs::Namespace;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::runtime::Handle;
 use tracing::info;
 
 /// Mount the FUSE filesystem over `namespace` and block until it exits. The
-/// daemon owns namespace construction and hands the frontend a `dyn Namespace`.
+/// daemon owns namespace construction and hands the filesystem a `dyn Namespace`.
 /// Provider teardown is the daemon's responsibility after `serve` returns, not
 /// this function's, so FUSE and NFS tear down symmetrically. `notifier` is the
 /// caller's handle for kernel invalidation; it is filled once the session is up
@@ -25,16 +26,46 @@ pub fn run_blocking(
     rt: &Handle,
     notifier: &NotifierHandle,
 ) -> Result<(), Error> {
-    let fs = Frontend::new(rt.clone(), namespace, Arc::clone(notifier));
+    run_blocking_cancellable(
+        mount_point,
+        namespace,
+        rt,
+        notifier,
+        &AtomicBool::new(false),
+    )
+}
+
+/// Mount and serve until unmounted, while honoring a cancellation request that
+/// may arrive during `Session::new`.
+pub fn run_blocking_cancellable(
+    mount_point: &Path,
+    namespace: Arc<dyn Namespace>,
+    rt: &Handle,
+    notifier: &NotifierHandle,
+    cancelled: &AtomicBool,
+) -> Result<(), Error> {
+    let fs = FuseAdapter::new(rt.clone(), namespace, Arc::clone(notifier));
     // Apply invalidation/growth events out of band so the kernel drops
     // huge-TTL dentries even when no op is in flight.
     fs.spawn_event_pump();
-    let config = Frontend::mount_config();
+    let config = FuseAdapter::mount_config();
 
     info!(mount = %mount_point.display(), "starting FUSE mount");
 
     let session =
         Session::new(fs, mount_point, &config).map_err(|e| Error::FuseFailed(e.to_string()))?;
+
+    // A stop can arrive while `Session::new` is inside the kernel mount call.
+    // Observe it before handing the session to the blocking join so a late
+    // successful mount is immediately driven through normal unmount.
+    if cancelled.load(Ordering::Acquire)
+        && let Err(error) = unmount(mount_point)
+    {
+        tracing::warn!(
+            %error,
+            "FUSE mount completed while cancellation won; keeping the session alive until teardown succeeds"
+        );
+    }
 
     // Extract the notifier before spawning the session — `spawn` takes
     // `Session` by value. The notifier only needs the message channel,

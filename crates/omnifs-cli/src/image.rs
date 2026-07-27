@@ -1,4 +1,4 @@
-//! Shared image identity and build-channel policy for frontend runtimes.
+//! Shared image identity and build-channel policy for filesystem runtimes.
 
 use std::fmt;
 
@@ -18,7 +18,7 @@ impl BuildChannel {
     pub(crate) const fn pull_refusal_reason(self) -> &'static str {
         match self {
             Self::Dev => {
-                "this omnifs binary is a dev build; it uses the locally built frontend image \
+                "this omnifs binary is a dev build; it uses the locally built filesystem image \
                  and never pulls from a registry"
             },
             Self::Release => {
@@ -65,7 +65,7 @@ impl ImageRef {
     }
 
     /// Whether this reference names a registry host. Bare references such as
-    /// `omnifs-frontend:dev` are local build products.
+    /// `omnifs-filesystem:dev` are local build products.
     pub(crate) fn has_registry(&self) -> bool {
         match self.0.split_once('/') {
             None => false,
@@ -87,12 +87,12 @@ mod tests {
     #[test]
     fn names_registry_table() {
         let cases = [
-            ("omnifs-frontend:dev", false),
-            ("omnifs-frontend:abc123-dev", false),
-            ("myorg/omnifs-frontend:1.0", false),
-            ("ghcr.io/0xff-ai/omnifs-frontend:0.2.1", true),
-            ("localhost:5000/omnifs-frontend:x", true),
-            ("registry.local/omnifs-frontend", true),
+            ("omnifs-filesystem:dev", false),
+            ("omnifs-filesystem:abc123-dev", false),
+            ("myorg/omnifs-filesystem:1.0", false),
+            ("ghcr.io/0xff-ai/omnifs-filesystem:0.2.1", true),
+            ("localhost:5000/omnifs-filesystem:x", true),
+            ("registry.local/omnifs-filesystem", true),
         ];
         for (image, expected) in cases {
             let image = ImageRef::new(image).unwrap();

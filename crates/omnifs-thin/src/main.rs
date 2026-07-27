@@ -1,54 +1,20 @@
-//! The credential-free out-of-process frontend runner.
-//!
-//! `omnifs-thin` attaches to a host daemon's shared namespace through the
-//! Omnifs VFS wire protocol and delegates protocol mechanics to the FUSE or
-//! NFS frontend crates. It has no provider runtime, Wasmtime, daemon, or CLI
-//! control plane.
+//! The credential-free out-of-process filesystem runner.
 
-#[cfg(target_os = "linux")]
-mod fuse;
-mod nfs;
-
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "omnifs-thin",
     version,
-    about = "Credential-free out-of-process omnifs frontend runner"
+    about = "Credential-free guest omnifs filesystem runner"
 )]
 struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Attach to the daemon and serve a FUSE mount.
-    #[cfg(target_os = "linux")]
-    Fuse(fuse::Args),
-    /// Attach to the daemon and serve an `NFSv4` loopback mount.
-    Nfs(nfs::Args),
+    #[command(flatten)]
+    runner: omnifs_thin::RunFsArgs,
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    match cli.command {
-        #[cfg(target_os = "linux")]
-        Command::Fuse(args) => fuse::run(args),
-        Command::Nfs(args) => nfs::run(args),
-    }
-}
-
-fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .with_env_filter(filter)
-        .init();
+    omnifs_thin::run(Cli::parse().runner)
 }
 
 #[cfg(test)]
@@ -56,31 +22,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn top_level_help_lists_protocol_commands() {
+    fn top_level_help_lists_named_flags() {
         let error = Cli::try_parse_from(["omnifs-thin", "--help"]).unwrap_err();
         let help = error.to_string();
-        assert!(help.contains("nfs"));
-        #[cfg(target_os = "linux")]
-        assert!(help.contains("fuse"));
+        assert!(help.contains("--name"));
+        assert!(help.contains("--protocol"));
+        assert!(help.contains("--runtime"));
     }
 
     #[test]
-    fn nfs_surface_requires_mount_and_state_directories() {
-        let error = Cli::try_parse_from(["omnifs-thin", "nfs", "--help"]).unwrap_err();
+    fn flat_surface_lists_protocol_runtime_location_and_state_arguments() {
+        let error = Cli::try_parse_from(["omnifs-thin", "--help"]).unwrap_err();
         let help = error.to_string();
-        assert!(help.contains("--mount-point"));
+        assert!(help.contains("--name"));
+        assert!(help.contains("--protocol"));
+        assert!(help.contains("--runtime"));
+        assert!(help.contains("--location"));
         assert!(help.contains("--state-dir"));
         assert!(help.contains("--attach"));
         assert!(help.contains("--port"));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn fuse_surface_requires_mount_point_and_keeps_optional_attach_state() {
-        let error = Cli::try_parse_from(["omnifs-thin", "fuse", "--help"]).unwrap_err();
-        let help = error.to_string();
-        assert!(help.contains("--mount-point"));
-        assert!(help.contains("--state-dir"));
-        assert!(help.contains("--attach"));
+        assert!(!help.contains("Commands:"));
     }
 }

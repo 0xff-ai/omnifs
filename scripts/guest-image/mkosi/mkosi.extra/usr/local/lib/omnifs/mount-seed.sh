@@ -6,12 +6,12 @@
 # identified purely by its label so the guest never has to guess which
 # device node the runtime assigned it.
 #
-# Runs as omnifs-seed-mount.service, ordered before omnifs-frontend.service,
+# Runs as omnifs-seed-mount.service, ordered before omnifs-filesystem.service,
 # which sources the config file this mounts via EnvironmentFile=. Failing
 # here (seed never attached, or attached but not yet enumerated by udev) must
 # be loud in the journal, not a silent hang: this script bounds its wait and
 # exits non-zero with a clear message, and the seed-mount unit's failure
-# blocks omnifs-frontend.service from starting.
+# blocks omnifs-filesystem.service from starting.
 set -eu
 
 label=OMNIFS-SEED
@@ -27,7 +27,7 @@ while [ ! -e "$device" ] && [ "$tries" -lt "$max_tries" ]; do
 done
 
 if [ ! -e "$device" ]; then
-  echo "omnifs-seed-mount: no volume labeled ${label} found after waiting; the guest has no attach parameters and cannot start the frontend runner" >&2
+  echo "omnifs-seed-mount: no volume labeled ${label} found after waiting; the guest has no attach parameters and cannot start the filesystem runner" >&2
   exit 1
 fi
 

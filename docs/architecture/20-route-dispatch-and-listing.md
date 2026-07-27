@@ -60,7 +60,7 @@ Do not duplicate static sibling merge logic across list and lookup paths. The ro
 
 Negative lookup is authoritative only when no route candidate, explicit child, dynamic capture sibling, or parent handler can own the child.
 
-Negative cache policy must be shared by the tree or host layer. Frontends should not add local dotfile exceptions, lookup suppression lists, or provider-specific negative heuristics.
+Negative cache policy must be shared by the tree or host layer. Filesystems should not add local dotfile exceptions, lookup suppression lists, or provider-specific negative heuristics.
 
 ## Provider authoring guidance
 
@@ -76,4 +76,4 @@ Use captures to model parsed domain values. Do not pass raw strings inward after
 - fake exhaustive listings over capped data
 - static route scaffolding that binds as a dynamic capture
 - prefix deletion or prefix lookup where exact route ownership is required
-- host or frontend provider-specific route behavior
+- host or filesystem provider-specific route behavior

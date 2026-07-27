@@ -1,37 +1,37 @@
-//! The libkrun environment end to end: `omnifs frontend enable fuse --runtime libkrun` boots
+//! The libkrun filesystem environment end to end.
 //! the mkosi guest image under libkrun on Apple Silicon macOS, attaches the
-//! guest's `omnifs-thin fuse` runner to a host-native daemon's shared namespace
+//! guest's `omnifs-thin --protocol fuse` runner to a host-native daemon's shared namespace
 //! over vsock, and serves `/omnifs` inside the guest. This suite proves the
 //! guest mount behaves like a real filesystem for the standard toolbox (the
 //! `fuse-libkrun` conformance column, reusing the shared matrix machinery
-//! from `omnifs_itest::matrix`, exactly as `tests/frontend_docker` does for
-//! the Docker-hosted frontend), plus lifecycle and teardown cleanliness.
+//! from `omnifs_itest::matrix`, exactly as `tests/filesystem_docker` does for
+//! the Docker-hosted filesystem), plus lifecycle and teardown cleanliness.
 //!
 //! LOCAL-ONLY, never CI: GitHub-hosted macOS runners cannot nest
 //! virtualization, so this suite can never boot libkrun there. It is gated on
 //! **both** `cfg(target_os = "macos")` and the `OMNIFS_ACCEPTANCE_LIVE`
-//! opt-in env var (the same convention the live NFS/Docker-frontend lanes
+//! opt-in env var (the same convention the live NFS/Docker-filesystem lanes
 //! use), and prints a loud `skip:` line rather than silently passing when
 //! either is absent. See `docs/contracts/60-build-validation.md` for the
 //! exact command and the "why no CI" rationale, and `just libkrun-conformance`
 //! for the wrapped invocation.
 //!
 //! Every row's matrix execution goes over ssh-over-vsock via the real
-//! `omnifs frontend shell fuse --runtime libkrun -- <cmd>` CLI path
+//! `omnifs fs shell --name itest-libkrun --command <cmd>` CLI path
 //! (`matrix::Exec::SshLibkrun`), the same command construction
-//! `LibkrunRunner::shell_command` builds for interactive `frontend shell`. One
-//! ssh connection per row (mirroring `frontend_docker`,
+//! `LibkrunRunner::shell_command` builds for interactive `filesystem shell`. One
+//! ssh connection per row (mirroring `filesystem_docker`,
 //! which is also one `docker exec` per row, not batched): a single libkrun
 //! guest is fast enough over vsock+socat that batching bought nothing
 //! measurable in a live run (see the report for the wall-clock total).
 //!
 //! Serializes against every other live-mount lane (NFS, wire, Docker-hosted
-//! frontend) through the one cross-process lock this crate owns
+//! filesystem) through the one cross-process lock this crate owns
 //! (`omnifs_itest::live::nfs_serial_lock`), named for its original NFS-only
 //! use but reused here as-is per this crate's "do not invent a second lock"
 //! rule: nextest runs each integration-test binary as its own process, so an
 //! in-process mutex cannot serialize across binaries, and a libkrun guest's
-//! own vsock ports (fixed per-launch socket paths under `<config_dir>/libkrun/`)
+//! own vsock ports (fixed per-launch socket paths under the filesystem ID's runtime directory)
 //! would otherwise race a concurrent live lane the same way a second NFS mount
 //! would.
 //!
@@ -52,7 +52,7 @@ use omnifs_workspace::daemon_record::DaemonRecord;
 use tempfile::TempDir;
 
 /// Scratch dir inside the libkrun guest for the matrix's copy/archive rows.
-/// Distinct path namespace from `frontend_docker`'s `DOCKER_SCRATCH`, though
+/// Distinct path namespace from `filesystem_docker`'s `DOCKER_SCRATCH`, though
 /// nothing would collide even if they matched: this is a different guest.
 const GUEST_SCRATCH: &str = "/tmp/omnifs-matrix";
 
@@ -157,8 +157,8 @@ fn workspace_root() -> PathBuf {
 // ===========================================================================
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
-/// as a contributor would: `up`, explicit host and libkrun frontend enable,
-/// `frontend ls`, explicit frontend disable, `down`. No test touches the user's real
+/// as a contributor would: `up`, named filesystem create and attach,
+/// `fs ls`, explicit detach, `down`. No test touches the user's real
 /// `~/.omnifs` or default ports.
 struct Fixture {
     home: TempDir,
@@ -183,7 +183,8 @@ impl Fixture {
     }
 
     fn libkrun_dir(&self) -> PathBuf {
-        self.home_path().join("libkrun")
+        self.home_path()
+            .join("filesystems/runtime/itest-libkrun/libkrun")
     }
 
     fn record_path(&self) -> PathBuf {
@@ -206,7 +207,7 @@ impl Fixture {
     }
 
     /// Run a CLI subcommand with the hermetic env, including the guest image
-    /// override so libkrun frontend enable never falls back to a
+    /// override so libkrun filesystem attach never falls back to a
     /// cwd-relative default.
     fn run(&self, args: &[&str]) -> Output {
         self.run_with_bin(&live::omnifs_bin(), args)
@@ -225,14 +226,14 @@ impl Fixture {
     fn wait_for_libkrun_attachment(&self) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let status = self.frontend_status();
+            let status = self.filesystem_status();
             let text = String::from_utf8_lossy(&status.stdout);
             if libkrun_is_attached(&text) {
                 return;
             }
             assert!(
                 Instant::now() < deadline,
-                "libkrun frontend did not reconnect within 30s\nstdout: {text}\nstderr: {}",
+                "libkrun filesystem did not reconnect within 30s\nstdout: {text}\nstderr: {}",
                 String::from_utf8_lossy(&status.stderr)
             );
             std::thread::sleep(Duration::from_millis(100));
@@ -242,21 +243,21 @@ impl Fixture {
     fn wait_for_libkrun_detachment(&self) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let status = self.frontend_status();
+            let status = self.filesystem_status();
             let text = String::from_utf8_lossy(&status.stdout);
             if !libkrun_is_attached(&text) {
                 return;
             }
             assert!(
                 Instant::now() < deadline,
-                "libkrun frontend remained attached for 10s after helper exit\nstdout: {text}\nstderr: {}",
+                "libkrun filesystem remained attached for 10s after helper exit\nstdout: {text}\nstderr: {}",
                 String::from_utf8_lossy(&status.stderr)
             );
             std::thread::sleep(Duration::from_millis(100));
         }
     }
 
-    /// Bring up a host-native daemon, explicitly enable its host frontend, and
+    /// Bring up a host-native daemon, explicitly attach its host filesystem, and
     /// wait for it to serve the test-provider tree. Panics on a real failure: every
     /// environment gap (missing wasm, unmountable platform) was already
     /// checked by [`preconditions`] before the fixture was built.
@@ -273,8 +274,11 @@ impl Fixture {
 
         let location = self.mount_point.to_str().expect("mount point utf8");
         let out = self.run(&[
-            "frontend",
-            "enable",
+            "fs",
+            "create",
+            "--name",
+            "itest-host",
+            "--protocol",
             "nfs",
             "--runtime",
             "host",
@@ -283,7 +287,32 @@ impl Fixture {
         ]);
         assert!(
             out.status.success(),
-            "host NFS frontend enable failed (exit {})\nstdout: {}\nstderr: {}",
+            "host NFS filesystem create failed (exit {})\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let out = self.run(&["fs", "attach", "--name", "itest-host"]);
+        assert!(
+            out.status.success(),
+            "host NFS filesystem attach failed (exit {})\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let out = self.run(&[
+            "fs",
+            "create",
+            "--name",
+            "itest-libkrun",
+            "--protocol",
+            "fuse",
+            "--runtime",
+            "libkrun",
+        ]);
+        assert!(
+            out.status.success(),
+            "libkrun filesystem create failed (exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
@@ -301,15 +330,15 @@ impl Fixture {
         }
     }
 
-    fn frontend_enable(&self) -> Output {
-        self.run(&["frontend", "enable", "fuse", "--runtime", "libkrun"])
+    fn filesystem_attach(&self) -> Output {
+        self.run(&["fs", "attach", "--name", "itest-libkrun"])
     }
 
-    /// Assert libkrun frontend enable succeeded; on failure, dump the libkrun serial
+    /// Assert libkrun filesystem attach succeeded; on failure, dump the libkrun serial
     /// console log first (the fixture Drop removes the whole `libkrun/` dir,
     /// so this is the only window to capture why the guest never served),
     /// then panic with the CLI's own output.
-    fn assert_frontend_enable_ok(&self, out: &Output, context: &str) {
+    fn assert_filesystem_attach_ok(&self, out: &Output, context: &str) {
         if out.status.success() {
             return;
         }
@@ -327,15 +356,15 @@ impl Fixture {
             eprintln!("--- {} (tail) ---\n{tail}\n---", serial.display());
         }
         panic!(
-            "omnifs frontend enable fuse --runtime libkrun failed ({context}, exit {})\nstdout: {}\nstderr: {}",
+            "omnifs fs attach --name itest-libkrun failed ({context}, exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
         );
     }
 
-    fn frontend_status(&self) -> Output {
-        self.run(&["frontend", "ls"])
+    fn filesystem_status(&self) -> Output {
+        self.run(&["fs", "ls"])
     }
 
     fn down(&self) -> Output {
@@ -343,8 +372,8 @@ impl Fixture {
     }
 
     /// Every artifact `LibkrunRunner::launch` can lay down under
-    /// `<config_dir>/libkrun/`. Used both to prove teardown removed them and,
-    /// before that, to prove frontend enable created them.
+    /// the filesystem ID's libkrun runtime directory. Used both to prove teardown removed them and,
+    /// before that, to prove filesystem attach created them.
     fn libkrun_artifacts(&self) -> Vec<PathBuf> {
         let dir = self.libkrun_dir();
         [
@@ -426,10 +455,10 @@ impl Drop for Fixture {
 }
 
 /// Clear a possibly-dead-server mount without blocking. Mirrors
-/// `frontend_docker`'s own `force_unmount`: on macOS `sudo -n umount -f`
+/// `filesystem_docker`'s own `force_unmount`: on macOS `sudo -n umount -f`
 /// clears a dead-server NFS mount instantly, where `diskutil unmount force`
 /// blocks in an uninterruptible NFS syscall. A no-op when nothing is mounted
-/// (the common case after explicit frontend disable).
+/// (the common case after explicit filesystem detach).
 fn force_unmount(mount_point: &Path) {
     let unmount_once = || {
         let Some(canonical) = mount_point
@@ -457,25 +486,24 @@ fn force_unmount(mount_point: &Path) {
     }
 }
 
-/// `omnifs frontend shell fuse --runtime libkrun -- cat
+/// `omnifs fs shell --name itest-libkrun --command cat
 /// /omnifs/<mount>/hello/message` returns exact fixture bytes for every
 /// configured mount.
 fn assert_serves(fixture: &Fixture) {
     for root in ["test", "test2"] {
         let guest_path = format!("/omnifs/{root}/hello/message");
         let out = fixture.run(&[
-            "frontend",
+            "fs",
             "shell",
-            "fuse",
-            "--runtime",
-            "libkrun",
-            "--",
+            "--name",
+            "itest-libkrun",
+            "--command",
             "cat",
             &guest_path,
         ]);
         assert!(
             out.status.success(),
-            "omnifs frontend shell fuse --runtime libkrun -- cat {guest_path} failed: {}",
+            "omnifs fs shell --name itest-libkrun --command cat {guest_path} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello, world!");
@@ -484,12 +512,11 @@ fn assert_serves(fixture: &Fixture) {
 
 fn assert_guest_lockdown(fixture: &Fixture) {
     let links = fixture.run(&[
-        "frontend",
+        "fs",
         "shell",
-        "fuse",
-        "--runtime",
-        "libkrun",
-        "--",
+        "--name",
+        "itest-libkrun",
+        "--command",
         "ls",
         "-1",
         "/sys/class/net",
@@ -506,12 +533,11 @@ fn assert_guest_lockdown(fixture: &Fixture) {
     );
 
     let cmdline = fixture.run(&[
-        "frontend",
+        "fs",
         "shell",
-        "fuse",
-        "--runtime",
-        "libkrun",
-        "--",
+        "--name",
+        "itest-libkrun",
+        "--command",
         "cat",
         "/proc/cmdline",
     ]);
@@ -557,7 +583,7 @@ fn wait_for_process_exit(pid: u32) {
 // ===========================================================================
 
 /// A libkrun microVM boots a real kernel to multi-user systemd before its
-/// frontend runner can even attach — categorically slower and more
+/// filesystem runner can even attach — categorically slower and more
 /// host-load-dependent than a container start, and observed locally in the
 /// 4-15s range rather than `fuse-docker`'s sub-5s container budget. A fixed
 /// wall-clock gate at that range would be flaky across developer machines
@@ -613,7 +639,7 @@ fn libkrun_lifecycle_and_matrix() {
     };
 
     // Serialize against every other live-mount lane (NFS, wire, Docker-hosted
-    // frontend): held for this test's whole lifetime.
+    // filesystem): held for this test's whole lifetime.
     let _nfs_lock = live::nfs_serial_lock();
     let mut fixture = Fixture::new(guest_image);
     let base_hash = fixture.guest_image_hash();
@@ -623,9 +649,9 @@ fn libkrun_lifecycle_and_matrix() {
     // Cold start: the daemon is already warm, so the timed span isolates
     // libkrun-boot-to-served-mount latency from daemon bring-up cost.
     let started = Instant::now();
-    let up_out = fixture.frontend_enable();
+    let up_out = fixture.filesystem_attach();
     let elapsed = started.elapsed();
-    fixture.assert_frontend_enable_ok(&up_out, "cold start");
+    fixture.assert_filesystem_attach_ok(&up_out, "cold start");
     record_cold_start(elapsed);
     assert_eq!(fixture.guest_image_hash(), base_hash);
     assert_eq!(fixture.guest_image_mode(), base_mode);
@@ -637,13 +663,13 @@ fn libkrun_lifecycle_and_matrix() {
         "launch root must be writable only by its owner"
     );
 
-    // `frontend ls` is truthful.
-    let status_out = fixture.frontend_status();
+    // `fs ls` is truthful.
+    let status_out = fixture.filesystem_status();
     assert!(status_out.status.success());
     let status_text = String::from_utf8_lossy(&status_out.stdout);
     assert!(
         status_text.contains("libkrun") && status_text.contains("attached"),
-        "frontend ls must report the libkrun guest attached: {status_text}"
+        "fs ls must report the libkrun guest attached: {status_text}"
     );
 
     assert_serves(&fixture);
@@ -673,7 +699,7 @@ fn libkrun_lifecycle_and_matrix() {
     fixture.wait_for_libkrun_attachment();
     assert_serves(&fixture);
 
-    // An abrupt helper exit leaves a stale pidfile. A later explicit enable
+    // An abrupt helper exit leaves a stale pidfile. A later explicit attach
     // must clean that state, launch a new helper, and serve the mount again.
     let killed_pid = fixture.libkrun_pid().expect("live libkrun helper pid");
     let killed = Command::new("kill")
@@ -686,30 +712,29 @@ fn libkrun_lifecycle_and_matrix() {
     );
     wait_for_process_exit(killed_pid);
     fixture.wait_for_libkrun_detachment();
-    let recovered = fixture.frontend_enable();
-    fixture.assert_frontend_enable_ok(&recovered, "recovery after abrupt helper exit");
+    let recovered = fixture.filesystem_attach();
+    fixture.assert_filesystem_attach_ok(&recovered, "recovery after abrupt helper exit");
     assert_ne!(fixture.libkrun_pid(), Some(killed_pid));
     assert_serves(&fixture);
 
-    let restarted = fixture.run(&["frontend", "restart", "fuse", "--runtime", "libkrun"]);
-    fixture.assert_frontend_enable_ok(&restarted, "restart");
+    let restarted = fixture.run(&["fs", "restart", "--name", "itest-libkrun"]);
+    fixture.assert_filesystem_attach_ok(&restarted, "restart");
     assert_eq!(fixture.guest_image_hash(), base_hash);
     assert_eq!(fixture.guest_image_mode(), base_mode);
     assert_serves(&fixture);
 
     // A malformed packaged dylib must fail before pidfile publication, show
     // the helper's direct loader error, and roll back every launch artifact.
-    let disabled_for_failure =
-        fixture.run(&["frontend", "disable", "fuse", "--runtime", "libkrun"]);
+    let detached_for_failure = fixture.run(&["fs", "detach", "--name", "itest-libkrun"]);
     assert!(
-        disabled_for_failure.status.success(),
-        "disable before failed-launch check: {}",
-        String::from_utf8_lossy(&disabled_for_failure.stderr)
+        detached_for_failure.status.success(),
+        "detach before failed-launch check: {}",
+        String::from_utf8_lossy(&detached_for_failure.stderr)
     );
     let corrupt_payload = Fixture::corrupt_libkrun_payload();
     let failed = fixture.run_with_bin(
         &corrupt_payload.path().join("omnifs"),
-        &["frontend", "enable", "fuse", "--runtime", "libkrun"],
+        &["fs", "attach", "--name", "itest-libkrun"],
     );
     assert!(!failed.status.success(), "corrupt libkrun dylib must fail");
     let failed_stderr = String::from_utf8_lossy(&failed.stderr);
@@ -722,37 +747,36 @@ fn libkrun_lifecycle_and_matrix() {
         fixture.libkrun_artifacts().is_empty(),
         "failed helper launch must roll back launch artifacts"
     );
-    let relaunched = fixture.frontend_enable();
-    fixture.assert_frontend_enable_ok(&relaunched, "launch after direct helper failure");
+    let relaunched = fixture.filesystem_attach();
+    fixture.assert_filesystem_attach_ok(&relaunched, "launch after direct helper failure");
     assert_serves(&fixture);
 
     let mkdir_out = fixture.run(&[
-        "frontend",
+        "fs",
         "shell",
-        "fuse",
-        "--runtime",
-        "libkrun",
-        "--",
+        "--name",
+        "itest-libkrun",
+        "--command",
         "mkdir",
         "-p",
         GUEST_SCRATCH,
     ]);
     assert!(
         mkdir_out.status.success(),
-        "omnifs frontend shell fuse --runtime libkrun -- mkdir -p {GUEST_SCRATCH} failed: {}",
+        "omnifs fs shell --name itest-libkrun --command mkdir -p {GUEST_SCRATCH} failed: {}",
         String::from_utf8_lossy(&mkdir_out.stderr)
     );
 
     // The fuse-libkrun matrix column, through the shared row/executor
     // machinery, over ssh-over-vsock via the real
-    // `omnifs frontend shell fuse --runtime libkrun -- <cmd>` path.
+    // `omnifs fs shell --name itest-libkrun --command <cmd>` path.
     let exec = Exec::SshLibkrun {
         omnifs_bin: live::omnifs_bin(),
         home: fixture.home_path().to_path_buf(),
         root: "/omnifs/test".to_string(),
         scratch: GUEST_SCRATCH.to_string(),
     };
-    let scorecard = matrix::run_column(&exec, &matrix::FUSE_LIBKRUN_FRONTEND, matrix::ROWS);
+    let scorecard = matrix::run_column(&exec, &matrix::FUSE_LIBKRUN_FILESYSTEM, matrix::ROWS);
     let scorecard_path = matrix::write_scorecard(&scorecard);
     eprintln!("scorecard: {}", scorecard_path.display());
     eprintln!(
@@ -767,36 +791,27 @@ fn libkrun_lifecycle_and_matrix() {
         mismatches.join("\n  ")
     );
 
-    // Frontend runners have independent lifecycles. Disable the libkrun and
+    // Filesystem runners have independent lifecycles. Detach the libkrun and
     // host runners explicitly, then stop the daemon with `omnifs down`.
     // The host-native NFS mount can be transiently busy at shutdown because
     // macOS spawns indexer handles like mds/mdworker against a fresh mount.
-    let libkrun_disabled = fixture.run(&["frontend", "disable", "fuse", "--runtime", "libkrun"]);
+    let libkrun_detached = fixture.run(&["fs", "detach", "--name", "itest-libkrun"]);
     assert!(
-        libkrun_disabled.status.success(),
-        "disabling libkrun frontend before down failed (exit {})\nstdout: {}\nstderr: {}",
-        libkrun_disabled.status,
-        String::from_utf8_lossy(&libkrun_disabled.stdout),
-        String::from_utf8_lossy(&libkrun_disabled.stderr),
+        libkrun_detached.status.success(),
+        "detaching libkrun filesystem before down failed (exit {})\nstdout: {}\nstderr: {}",
+        libkrun_detached.status,
+        String::from_utf8_lossy(&libkrun_detached.stdout),
+        String::from_utf8_lossy(&libkrun_detached.stderr),
     );
     assert_eq!(fixture.guest_image_hash(), base_hash);
     assert_eq!(fixture.guest_image_mode(), base_mode);
-    let host_location = fixture.mount_point.to_str().expect("mount point utf8");
-    let host_disabled = fixture.run(&[
-        "frontend",
-        "disable",
-        "nfs",
-        "--runtime",
-        "host",
-        "--location",
-        host_location,
-    ]);
+    let host_detached = fixture.run(&["fs", "detach", "--name", "itest-host"]);
     assert!(
-        host_disabled.status.success(),
-        "disabling host frontend before down failed (exit {})\nstdout: {}\nstderr: {}",
-        host_disabled.status,
-        String::from_utf8_lossy(&host_disabled.stdout),
-        String::from_utf8_lossy(&host_disabled.stderr),
+        host_detached.status.success(),
+        "detaching host filesystem before down failed (exit {})\nstdout: {}\nstderr: {}",
+        host_detached.status,
+        String::from_utf8_lossy(&host_detached.stdout),
+        String::from_utf8_lossy(&host_detached.stderr),
     );
 
     let mut down_out = fixture.down();
@@ -827,6 +842,6 @@ fn libkrun_lifecycle_and_matrix() {
     let leftover = fixture.libkrun_artifacts();
     assert!(
         leftover.is_empty(),
-        "frontend disable must remove every libkrun artifact before omnifs down, found: {leftover:?}"
+        "filesystem detach must remove every libkrun artifact before omnifs down, found: {leftover:?}"
     );
 }

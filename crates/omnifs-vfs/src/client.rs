@@ -7,8 +7,8 @@
 //! back by id; event frames feed a local broadcast that [`WireNamespace::subscribe`]
 //! taps. A disconnect fails every in-flight request with
 //! [`NsError::Network`](crate::NsError::Network) and reconnects with
-//! backoff forever until the [`WireNamespace`] is dropped. A reconnect that lands
-//! A disconnect also publishes the existing root invalidation event so every
+//! backoff until its deadline or until the [`WireNamespace`] is dropped. A
+//! disconnect also publishes the existing root invalidation event so every
 //! consumer fences derived state through the same ordered stream.
 
 use std::collections::HashMap;
@@ -20,20 +20,21 @@ use crate::{
     Attrs, DirCursor, DirPage, EventStream, LookupAnswer, Namespace, NsError, NsEvent, ReadAnswer,
 };
 use futures::future::{BoxFuture, FutureExt};
-use omnifs_core::path::Path;
+use omnifs_core::{fs, path::Path};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{Instant, sleep, timeout};
 
+use crate::frame::KIND_CONTROL;
 use crate::frame::{Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame};
-use crate::{FrontendIdentity, Handshake, PROTOCOL, WireError, WireRequest, WireResponse};
+use crate::{Handshake, PROTOCOL, ServerControl, WireError, WireRequest, WireResponse};
 
-/// Initial-connect deadline for [`WireNamespace::attach`]. A socket that never
-/// answers within this window fails the attach with the socket named, rather
-/// than hanging the frontend runner forever.
-const INITIAL_CONNECT_DEADLINE: Duration = Duration::from_secs(30);
+/// Deadline for the first attach and each reconnect attempt. A target that
+/// never answers triggers filesystem-owned teardown instead of leaving a mount
+/// backed by a runner that can never regain its namespace.
+pub const ATTACH_DEADLINE: Duration = Duration::from_secs(30);
 /// First reconnect backoff, doubling up to [`MAX_BACKOFF`].
 const INITIAL_BACKOFF: Duration = Duration::from_millis(50);
 /// Backoff ceiling for reconnect attempts.
@@ -44,10 +45,10 @@ const EVENT_CAPACITY: usize = 1024;
 /// Where a [`WireNamespace`] dials the daemon it attaches to.
 ///
 /// `Unix` is the host-native path: auth is filesystem permissions on the
-/// socket. `Tcp` is the Docker path: the containerized frontend cannot share a
+/// socket. `Tcp` is the Docker path: the containerized filesystem cannot share a
 /// host Unix socket, so it dials TCP to an address bound on loopback or a
 /// verified docker0 gateway. `addr` is a `host:port` string rather than a
-/// pre-resolved `SocketAddr` because the Docker-hosted frontend dials the
+/// pre-resolved `SocketAddr` because the Docker-hosted filesystem dials the
 /// `host.docker.internal` name Docker injects into the container's DNS.
 ///
 /// `Vsock` is the libkrun-on-macOS path: the guest dials host CID 2 on `port`
@@ -77,7 +78,7 @@ impl AttachTarget {
     ///
     /// `addr` is `vsock:<port>` for a libkrun guest or `host:port` for TCP. TCP
     /// targets remain unresolved because `host.docker.internal` exists only in
-    /// the frontend container's DNS and cannot be resolved by the host CLI.
+    /// the filesystem container's DNS and cannot be resolved by the host CLI.
     fn from_env(addr: Option<String>) -> Result<Self, AttachTargetError> {
         let addr = addr.ok_or(AttachTargetError::Missing {
             env: omnifs_api::OMNIFS_ATTACH_ADDR_ENV,
@@ -112,7 +113,7 @@ impl AttachTarget {
     async fn connect_with_backoff(
         &self,
         deadline: Option<Instant>,
-        identity: &FrontendIdentity,
+        identity: &fs::Spec,
     ) -> Result<Connection, WireError> {
         let mut backoff = INITIAL_BACKOFF;
         loop {
@@ -170,7 +171,7 @@ impl AttachTarget {
     /// Connect once, spawn the reader/writer pumps, and complete the handshake.
     /// Vsock is Linux-only because the libkrun guest is Linux; other targets
     /// fail without entering the reconnect loop.
-    async fn connect_once(&self, identity: &FrontendIdentity) -> Result<Connection, WireError> {
+    async fn connect_once(&self, identity: &fs::Spec) -> Result<Connection, WireError> {
         match self {
             Self::Unix(path) => {
                 let stream = UnixStream::connect(path).await?;
@@ -211,7 +212,7 @@ impl std::fmt::Display for AttachTarget {
 /// `OMNIFS_ATTACH_ADDR`, before any connection is attempted.
 #[derive(Debug, thiserror::Error)]
 pub enum AttachTargetError {
-    #[error("neither --attach nor {env} is set; the frontend runner needs one attach target")]
+    #[error("neither --attach nor {env} is set; the filesystem runner needs one attach target")]
     Missing { env: &'static str },
     #[error("{env} `{addr}` is not a `host:port` address")]
     InvalidAddr { env: &'static str, addr: String },
@@ -230,6 +231,34 @@ struct Outgoing {
     reply: oneshot::Sender<Result<WireResponse, NsError>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeardownReason {
+    ServerStop,
+    AttachDeadline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeardownOutcome {
+    Stopped,
+    Busy,
+}
+
+pub struct TeardownRequest {
+    reason: TeardownReason,
+    reply: oneshot::Sender<TeardownOutcome>,
+}
+
+impl TeardownRequest {
+    #[must_use]
+    pub fn reason(&self) -> TeardownReason {
+        self.reason
+    }
+
+    pub fn complete(self, outcome: TeardownOutcome) {
+        let _ = self.reply.send(outcome);
+    }
+}
+
 /// A [`Namespace`] backed by a wire connection to a daemon-served socket.
 pub struct WireNamespace {
     outgoing: mpsc::UnboundedSender<Outgoing>,
@@ -242,8 +271,8 @@ pub struct WireNamespace {
 impl WireNamespace {
     /// Connect to the namespace target, perform the handshake, and return a
     /// namespace multiplexed over the connection. `identity` names this
-    /// frontend in every Hello (the initial connect and every later
-    /// reconnect), so the server-side frontend registry can track it live.
+    /// filesystem in every Hello (the initial connect and every later
+    /// reconnect), so the server-side filesystem registry can track it live.
     /// Retries the initial connect with backoff up to a 30s deadline; a later
     /// disconnect reconnects forever.
     ///
@@ -254,10 +283,21 @@ impl WireNamespace {
     /// the handshake is rejected.
     pub async fn attach(
         target: AttachTarget,
-        identity: FrontendIdentity,
+        identity: fs::Spec,
         rt: Handle,
     ) -> Result<Arc<Self>, WireError> {
-        let deadline = Instant::now() + INITIAL_CONNECT_DEADLINE;
+        let (teardown_tx, teardown_rx) = mpsc::channel(1);
+        drop(teardown_rx);
+        Self::attach_with_teardown(target, identity, rt, teardown_tx).await
+    }
+
+    pub async fn attach_with_teardown(
+        target: AttachTarget,
+        identity: fs::Spec,
+        rt: Handle,
+        teardown: mpsc::Sender<TeardownRequest>,
+    ) -> Result<Arc<Self>, WireError> {
+        let deadline = Instant::now() + ATTACH_DEADLINE;
         let connection = target
             .connect_with_backoff(Some(deadline), &identity)
             .await?;
@@ -271,6 +311,7 @@ impl WireNamespace {
                 connection,
                 outgoing_rx,
                 events: events_tx.clone(),
+                teardown,
             }
             .run(),
         );
@@ -410,12 +451,13 @@ impl Namespace for WireNamespace {
 /// The manager's owned connection and request state.
 struct ManagerState {
     target: AttachTarget,
-    /// This frontend's identity, sent in every reconnect's Hello (the initial
+    /// This filesystem's identity, sent in every reconnect's Hello (the initial
     /// connect sends it too, before the manager task is spawned).
-    identity: FrontendIdentity,
+    identity: fs::Spec,
     connection: Connection,
     outgoing_rx: mpsc::UnboundedReceiver<Outgoing>,
     events: broadcast::Sender<NsEvent>,
+    teardown: mpsc::Sender<TeardownRequest>,
 }
 
 impl ManagerState {
@@ -426,6 +468,7 @@ impl ManagerState {
             HashMap::new();
         let mut next_request_id: u64 = 1;
         let mut reconnect: Option<tokio::task::JoinHandle<Result<Connection, WireError>>> = None;
+        let mut teardown_retry: Option<Instant> = None;
 
         loop {
             tokio::select! {
@@ -435,21 +478,25 @@ impl ManagerState {
 
                 frame = self.connection.frame_rx.recv(), if reconnect.is_none() => {
                     if let Some(frame) = frame {
-                        self.handle_inbound(&frame, &mut pending);
+                        if self.handle_inbound(&frame, &mut pending) {
+                            if self.request_teardown(TeardownReason::ServerStop).await
+                                == TeardownOutcome::Stopped
+                            {
+                                return;
+                            }
+                            teardown_retry = Some(Instant::now() + ATTACH_DEADLINE);
+                        }
                     } else {
+                        teardown_retry = None;
                         let _ = self.events.send(NsEvent::reset());
                         // The root invalidation is the first observable disconnect
                         // signal. Complete requests that were already in flight only
-                        // after publishing it, so frontends cannot process Network
+                        // after publishing it, so filesystems cannot process Network
                         // without also seeing the ordering fence.
                         for (_, reply) in pending.drain() {
                             let _ = reply.send(Err(NsError::Network));
                         }
-                        let target = self.target.clone();
-                        let identity = self.identity.clone();
-                        reconnect = Some(tokio::spawn(async move {
-                            target.connect_with_backoff(None, &identity).await
-                        }));
+                        reconnect = Some(self.start_reconnect());
                     }
                 }
 
@@ -472,9 +519,27 @@ impl ManagerState {
                         },
                         Err(error) => {
                             tracing::warn!(%error, "wire: reconnect task ended");
-                            return;
+                            if self.request_teardown(TeardownReason::AttachDeadline).await
+                                == TeardownOutcome::Stopped
+                            {
+                                return;
+                            }
+                            reconnect = Some(self.start_reconnect());
                         },
                     }
+                }
+
+                () = async {
+                    tokio::time::sleep_until(
+                        teardown_retry.expect("teardown retry branch is guarded")
+                    ).await;
+                }, if teardown_retry.is_some() && reconnect.is_none() => {
+                    if self.request_teardown(TeardownReason::ServerStop).await
+                        == TeardownOutcome::Stopped
+                    {
+                        return;
+                    }
+                    teardown_retry = Some(Instant::now() + ATTACH_DEADLINE);
                 }
 
                 outgoing = self.outgoing_rx.recv() => {
@@ -514,12 +579,22 @@ impl ManagerState {
         }
     }
 
+    fn start_reconnect(&self) -> tokio::task::JoinHandle<Result<Connection, WireError>> {
+        let target = self.target.clone();
+        let identity = self.identity.clone();
+        tokio::spawn(async move {
+            target
+                .connect_with_backoff(Some(Instant::now() + ATTACH_DEADLINE), &identity)
+                .await
+        })
+    }
+
     /// Route a response to its caller or apply and re-broadcast an event.
     fn handle_inbound(
         &self,
         frame: &Frame,
         pending: &mut HashMap<u64, oneshot::Sender<Result<WireResponse, NsError>>>,
-    ) {
+    ) -> bool {
         match frame.kind {
             KIND_RESPONSE => {
                 if let Some(reply) = pending.remove(&frame.request_id) {
@@ -537,10 +612,30 @@ impl ManagerState {
                     let _ = self.events.send(event);
                 }
             },
+            KIND_CONTROL => {
+                return matches!(
+                    postcard::from_bytes::<ServerControl>(&frame.body),
+                    Ok(ServerControl::Stop)
+                );
+            },
             other => {
                 tracing::debug!(kind = other, "wire: ignoring an unknown inbound frame kind");
             },
         }
+        false
+    }
+
+    async fn request_teardown(&self, reason: TeardownReason) -> TeardownOutcome {
+        let (reply, outcome) = oneshot::channel();
+        if self
+            .teardown
+            .send(TeardownRequest { reason, reply })
+            .await
+            .is_err()
+        {
+            return TeardownOutcome::Stopped;
+        }
+        outcome.await.unwrap_or(TeardownOutcome::Stopped)
     }
 }
 
@@ -565,9 +660,9 @@ impl Drop for Connection {
 }
 
 /// Spawn the reader/writer pumps over `stream` and complete the handshake,
-/// sending `frontend` naming this connecting frontend. Generic over the stream
+/// sending `filesystem` naming this connecting filesystem. Generic over the stream
 /// type so both transports share one handshake path.
-async fn handshake_over<S>(stream: S, frontend: FrontendIdentity) -> Result<Connection, WireError>
+async fn handshake_over<S>(stream: S, filesystem: fs::Spec) -> Result<Connection, WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
@@ -575,7 +670,7 @@ where
 
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
-        frontend,
+        filesystem,
     })?;
     write_frame(&mut write_half, &Frame::new(0, KIND_REQUEST, hello)).await?;
     let welcome_frame = read_frame(&mut read_half)

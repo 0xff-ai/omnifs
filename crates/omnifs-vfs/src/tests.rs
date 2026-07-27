@@ -5,6 +5,7 @@
 //! runs a real [`WireNamespace`] over a `UnixListener` in a tempdir.
 
 use std::net::Ipv4Addr;
+use std::num::NonZeroU16;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,8 +24,8 @@ use crate::frame::{
     Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, MAX_FRAME, read_frame, write_frame,
 };
 use crate::{
-    AttachTarget, FrontendIdentity, FsType, Handshake, ListenerTarget, PROTOCOL, VfsServer,
-    WireError, WireNamespace, WireRequest, WireResponse, serve_connection,
+    AttachTarget, Endpoint, Handshake, PROTOCOL, VfsServer, WireError, WireNamespace, WireRequest,
+    WireResponse, serve_connection,
 };
 
 const EVENT_CAPACITY: usize = 1024;
@@ -35,11 +36,14 @@ fn path(value: &str) -> Path {
 
 /// A canned identity for tests that don't care about the specific value, only
 /// that a `Hello` carries one.
-fn test_identity() -> FrontendIdentity {
-    FrontendIdentity {
-        kind: FsType::Fuse,
-        mount_point: PathBuf::from("/mnt/test"),
-    }
+fn test_identity() -> omnifs_core::fs::Spec {
+    omnifs_core::fs::Spec::new(
+        "test".parse().unwrap(),
+        omnifs_core::fs::Protocol::Fuse,
+        omnifs_core::fs::Runtime::Host,
+        PathBuf::from("/mnt/test"),
+    )
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +187,7 @@ impl Namespace for StubNamespace {
 async fn client_handshake(io: &mut DuplexStream, protocol: u32) -> Result<(), WireError> {
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol,
-        frontend: test_identity(),
+        filesystem: test_identity(),
     })
     .unwrap();
     write_frame(io, &Frame::new(0, KIND_REQUEST, hello)).await?;
@@ -208,22 +212,19 @@ async fn recv_response(io: &mut DuplexStream) -> (u64, WireResponse) {
     (frame.request_id, postcard::from_bytes(&frame.body).unwrap())
 }
 
-fn start_local_server(namespace: Arc<dyn Namespace>, path: PathBuf) -> Arc<VfsServer> {
+fn start_local_server(namespace: Arc<dyn Namespace>, path: &StdPath) -> Arc<VfsServer> {
     let server = VfsServer::new(namespace);
-    server.serve_local(path).unwrap();
+    server.serve_unix(path).unwrap();
     server
 }
 
-fn start_tcp_server(namespace: Arc<dyn Namespace>) -> (Arc<VfsServer>, ListenerTarget) {
+fn start_tcp_server(namespace: Arc<dyn Namespace>) -> (Arc<VfsServer>, Endpoint) {
+    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = NonZeroU16::new(probe.local_addr().unwrap().port()).unwrap();
+    drop(probe);
     let server = VfsServer::new(namespace);
-    let target = server.ensure_tcp(Ipv4Addr::LOCALHOST, 0).unwrap();
+    let target = server.serve_tcp(Ipv4Addr::LOCALHOST, port).unwrap();
     (server, target)
-}
-
-fn start_vsock_server(namespace: Arc<dyn Namespace>, path: &StdPath) -> Arc<VfsServer> {
-    let server = VfsServer::new(namespace);
-    server.ensure_vsock(path).unwrap();
-    server
 }
 
 /// Spawn a server over the server half of a fresh duplex; return the client
@@ -522,7 +523,7 @@ async fn handshake_version_mismatch_is_rejected() {
     // The client offers the immediately previous strict protocol version.
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL - 1,
-        frontend: test_identity(),
+        filesystem: test_identity(),
     })
     .unwrap();
     write_frame(&mut io, &Frame::new(0, KIND_REQUEST, hello))
@@ -575,7 +576,7 @@ async fn unix_listener_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
     let stub = StubNamespace::new();
-    let server = start_local_server(stub, socket.clone());
+    let server = start_local_server(stub, &socket);
 
     let namespace = WireNamespace::attach(
         AttachTarget::Unix(socket),
@@ -604,12 +605,12 @@ async fn startup_gate_holds_listener_until_ready_publication() {
     let socket = dir.path().join("ns.sock");
     let server = VfsServer::new(StubNamespace::new());
     let _control_gate = server.begin_startup();
-    server.serve_local(socket.clone()).unwrap();
+    server.serve_unix(&socket).unwrap();
 
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
-        frontend: test_identity(),
+        filesystem: test_identity(),
     })
     .unwrap();
     write_frame(&mut stream, &Frame::new(0, KIND_REQUEST, hello))
@@ -639,7 +640,7 @@ async fn startup_gate_holds_listener_until_ready_publication() {
 #[tokio::test]
 async fn tcp_listener_end_to_end() {
     let stub = StubNamespace::new();
-    let (server, ListenerTarget::Tcp { addr }) = start_tcp_server(stub) else {
+    let (server, Endpoint::Tcp { addr }) = start_tcp_server(stub) else {
         panic!("TCP server returned a non-TCP target")
     };
 
@@ -657,60 +658,123 @@ async fn tcp_listener_end_to_end() {
     server.shutdown().await;
 }
 
-/// The libkrun vsock-proxy path's host-side shape: a dynamically bound UDS
-/// listener (as opposed to the fixed local socket) that a connecting peer
-/// dials directly. Driven with the raw frame helpers (not
-/// `WireNamespace::attach`/`AttachTarget::Unix`) since production reaches this
-/// socket through libkrun's vsock proxy, not a bare Unix dial.
 #[tokio::test]
-async fn vsock_listener_end_to_end() {
+async fn one_name_allows_reconnect_overlap_but_rejects_conflicting_resolved_fields() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
-    let stub = StubNamespace::new();
-    let server = start_vsock_server(stub.clone(), &socket);
-
-    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
-    let hello = postcard::to_allocvec(&Handshake::Hello {
-        protocol: PROTOCOL,
-        frontend: test_identity(),
-    })
+    let server = start_local_server(StubNamespace::new(), &socket);
+    let first = WireNamespace::attach(
+        AttachTarget::Unix(socket.clone()),
+        test_identity(),
+        tokio::runtime::Handle::current(),
+    )
+    .await
     .unwrap();
-    write_frame(&mut stream, &Frame::new(0, KIND_REQUEST, hello))
-        .await
-        .unwrap();
-    let welcome = read_frame(&mut stream)
-        .await
-        .unwrap()
-        .expect("welcome frame");
-    match postcard::from_bytes::<Handshake>(&welcome.body).unwrap() {
-        Handshake::Welcome { protocol } => assert_eq!(protocol, PROTOCOL),
-        other => panic!("expected Welcome, got {other:?}"),
-    }
-    drop(stream);
-    server.shutdown().await;
-    assert!(!socket.exists(), "dynamic UDS must be removed on shutdown");
+    let overlap = WireNamespace::attach(
+        AttachTarget::Unix(socket.clone()),
+        test_identity(),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(server.attachments().len(), 1);
 
-    let rebound = start_vsock_server(stub, &socket);
-    assert!(socket.exists(), "dynamic UDS must be bindable again");
-    rebound.shutdown().await;
-    assert!(!socket.exists(), "rebound UDS must be cleaned too");
+    let conflicting = omnifs_core::fs::Spec::new(
+        "test".parse().unwrap(),
+        omnifs_core::fs::Protocol::Nfs,
+        omnifs_core::fs::Runtime::Host,
+        PathBuf::from("/mnt/other"),
+    )
+    .unwrap();
+    let error = WireNamespace::attach(
+        AttachTarget::Unix(socket),
+        conflicting,
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .err()
+    .expect("one filesystem name must not carry conflicting resolved fields");
+    assert!(
+        matches!(error, WireError::Rejected(reason) if reason.contains("different resolved fields"))
+    );
+
+    drop(overlap);
+    drop(first);
+    server.shutdown().await;
 }
 
 #[tokio::test]
-async fn removing_dynamic_listener_recovers_readiness() {
+async fn server_stop_reaches_client_and_drain_waits_for_detach() {
     let dir = tempfile::tempdir().unwrap();
-    let server = VfsServer::new(StubNamespace::new());
-    server.serve_local(dir.path().join("local.sock")).unwrap();
-    let (target, newly_bound) = server
-        .ensure_tcp_with_status(Ipv4Addr::LOCALHOST, 0)
+    let socket = dir.path().join("ns.sock");
+    let server = start_local_server(StubNamespace::new(), &socket);
+    let (teardown_tx, mut teardown_rx) = tokio::sync::mpsc::channel(1);
+    let namespace = WireNamespace::attach_with_teardown(
+        AttachTarget::Unix(socket),
+        test_identity(),
+        tokio::runtime::Handle::current(),
+        teardown_tx,
+    )
+    .await
+    .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while server.attachments().is_empty() {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::task::yield_now().await;
+    }
+    server.stop_filesystems();
+    let request = tokio::time::timeout(Duration::from_secs(1), teardown_rx.recv())
+        .await
+        .unwrap()
         .unwrap();
-    assert!(newly_bound);
+    assert_eq!(request.reason(), crate::TeardownReason::ServerStop);
+    request.complete(crate::TeardownOutcome::Stopped);
+    assert!(
+        server
+            .drain_attachments(Duration::from_secs(1))
+            .await
+            .is_empty()
+    );
+    drop(namespace);
+    server.shutdown().await;
+}
 
-    server.mark_ready();
-    assert!(server.ready());
-    assert!(server.remove_listener(&target));
-    assert!(server.ready());
+#[tokio::test]
+async fn busy_client_remains_a_named_drain_straggler_and_new_admission_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("ns.sock");
+    let server = start_local_server(StubNamespace::new(), &socket);
+    let (teardown_tx, mut teardown_rx) = tokio::sync::mpsc::channel(1);
+    let namespace = WireNamespace::attach_with_teardown(
+        AttachTarget::Unix(socket.clone()),
+        test_identity(),
+        tokio::runtime::Handle::current(),
+        teardown_tx,
+    )
+    .await
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while server.attachments().is_empty() {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::task::yield_now().await;
+    }
+    server.stop_filesystems();
+    let request = teardown_rx.recv().await.unwrap();
+    request.complete(crate::TeardownOutcome::Busy);
+    let stragglers = server.drain_attachments(Duration::from_millis(20)).await;
+    assert_eq!(stragglers, vec![test_identity()]);
 
+    let rejected = WireNamespace::attach(
+        AttachTarget::Unix(socket),
+        test_identity(),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .err()
+    .expect("draining server must reject a new attachment");
+    assert!(matches!(rejected, WireError::Rejected(_)));
+    drop(namespace);
     server.shutdown().await;
 }
 
@@ -725,7 +789,7 @@ async fn unix_listener_never_follows_an_existing_symlink() {
     symlink(&target, &socket).unwrap();
     let server = VfsServer::new(StubNamespace::new());
 
-    server.serve_local(socket.clone()).unwrap();
+    server.serve_unix(&socket).unwrap();
 
     assert!(
         !std::fs::symlink_metadata(&socket)

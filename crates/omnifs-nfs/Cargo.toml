@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Read-only NFSv4.0 loopback frontend for omnifs"
+description = "Read-only NFSv4.0 loopback filesystem for omnifs"
 categories = ["filesystem"]
 keywords = ["omnifs", "nfs", "filesystem"]
 

@@ -1,19 +1,19 @@
-//! The Docker-hosted FUSE frontend end to end.
+//! Docker-hosted FUSE filesystem acceptance.
 //!
-//! `omnifs frontend enable fuse --runtime docker` attaches a separate, credential-free container to a
+//! `omnifs fs attach --name itest-docker` attaches a separate, credential-free container to a
 //! host-native daemon's shared namespace over TCP and renders kernel FUSE
 //! inside it. This suite proves the container behaves like a real mount for
 //! the standard toolbox (the `fuse-docker` conformance column, reusing the
 //! shared matrix machinery from `omnifs_itest::matrix` rather than forking
 //! it), plus the surrounding lifecycle, timing, and security guarantees:
-//! `omnifs frontend {enable,disable,ls}`, explicit frontend teardown before
+//! `omnifs fs {create,attach,detach,ls}`, explicit filesystem teardown before
 //! `omnifs down`, a cold-start budget, cross-mount byte identity,
 //! kill/reattach behavior, and
 //! the no-credentials contract.
 //!
 //! Gated on `OMNIFS_ACCEPTANCE_LIVE`, matching every other live-mount lane.
-//! Requires Docker, the `omnifs-frontend:*dev*` image (`just frontend-image`,
-//! or `OMNIFS_FRONTEND_IMAGE` naming a different local tag), and a platform
+//! Requires Docker, the `omnifs-filesystem:*dev*` image (`just filesystem-image`,
+//! or `OMNIFS_FILESYSTEM_IMAGE` naming a different local tag), and a platform
 //! that can serve a host-native mount. Missing any of those is a skip, not a
 //! failure, so a contributor without Docker still sees the suite pass.
 
@@ -29,12 +29,12 @@ use omnifs_itest::{live, provider_artifact_dir};
 use omnifs_workspace::daemon_record::DaemonRecord;
 use tempfile::TempDir;
 
-/// Scratch dir inside the frontend container for the matrix's copy/archive
+/// Scratch dir inside the filesystem container for the matrix's copy/archive
 /// rows. Distinct container per test, so no collision with
-/// `frontend_matrix`'s own `DOCKER_SCRATCH` in a different container.
+/// `filesystem_matrix`'s own `DOCKER_SCRATCH` in a different container.
 const DOCKER_SCRATCH: &str = "/tmp/omnifs-matrix";
 
-/// The Docker label `frontend_container.rs` stamps on every frontend
+/// The Docker label `fs_container.rs` stamps on every filesystem
 /// container with the workspace's config dir. Discovering containers by this
 /// label (rather than recomputing the launcher's naming hash) keeps the
 /// naming rule owned in one place.
@@ -49,7 +49,7 @@ fn acceptance_gated() -> bool {
 }
 
 /// Every precondition this suite needs beyond the live-acceptance gate: the
-/// test provider artifact, a mountable platform, Docker, and the frontend dev
+/// test provider artifact, a mountable platform, Docker, and the filesystem dev
 /// image. Returns the image ref to use, or `None` (skip, with a message
 /// already printed) when any precondition is missing.
 fn preconditions() -> Option<String> {
@@ -69,8 +69,10 @@ fn preconditions() -> Option<String> {
         eprintln!("skip: Docker not reachable");
         return None;
     }
-    let Some(image) = frontend_image() else {
-        eprintln!("skip: no local `omnifs-frontend:*dev*` image found; run `just frontend-image`");
+    let Some(image) = filesystem_image() else {
+        eprintln!(
+            "skip: no local `omnifs-filesystem:*dev*` image found; run `just filesystem-image`"
+        );
         return None;
     };
     Some(image)
@@ -85,21 +87,21 @@ fn docker_reachable() -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Resolve the frontend image to launch: an explicit `OMNIFS_FRONTEND_IMAGE`
-/// override, else the floating `omnifs-frontend:dev` tag, else the newest
-/// local `omnifs-frontend` image whose tag contains `dev` (CI tags per-arch
+/// Resolve the filesystem image to launch: an explicit `OMNIFS_FILESYSTEM_IMAGE`
+/// override, else the floating `omnifs-filesystem:dev` tag, else the newest
+/// local `omnifs-filesystem` image whose tag contains `dev` (CI tags per-arch
 /// images as `docker-<arch>-<sha>`, so this also matches those once pulled
 /// and retagged by the caller).
-fn frontend_image() -> Option<String> {
-    if let Ok(image) = std::env::var("OMNIFS_FRONTEND_IMAGE") {
+fn filesystem_image() -> Option<String> {
+    if let Ok(image) = std::env::var("OMNIFS_FILESYSTEM_IMAGE") {
         return Some(image);
     }
-    if docker_output(&["image", "inspect", "omnifs-frontend:dev"]).is_some() {
-        return Some("omnifs-frontend:dev".to_string());
+    if docker_output(&["image", "inspect", "omnifs-filesystem:dev"]).is_some() {
+        return Some("omnifs-filesystem:dev".to_string());
     }
     let listing = docker_output(&[
         "images",
-        "omnifs-frontend",
+        "omnifs-filesystem",
         "--format",
         "{{.Repository}}:{{.Tag}}",
     ])?;
@@ -124,22 +126,22 @@ fn docker_output(args: &[&str]) -> Option<String> {
 // ===========================================================================
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
-/// as a contributor would: `up`, `frontend enable/disable/ls`, `down`. No test
+/// as a contributor would: `up`, `fs create/attach/detach/ls`, `down`. No test
 /// touches the user's real `~/.omnifs` or default ports.
 struct Fixture {
     home: TempDir,
     mount_point: PathBuf,
-    frontend_image: String,
+    filesystem_image: String,
     daemon_pid: Option<u32>,
 }
 
 impl Fixture {
-    fn new(frontend_image: String) -> Self {
+    fn new(filesystem_image: String) -> Self {
         let live::HermeticHome { home, mount_point } = live::hermetic_home();
         Self {
             home,
             mount_point,
-            frontend_image,
+            filesystem_image,
             daemon_pid: None,
         }
     }
@@ -160,24 +162,7 @@ impl Fixture {
         Some(self.record()?.pid)
     }
 
-    /// Run a CLI subcommand with the hermetic env, including the frontend
-    /// image override so Docker enable never reaches for a registry.
-    fn run(&self, args: &[&str]) -> Output {
-        Command::new(live::omnifs_bin())
-            .args(args)
-            .env("OMNIFS_HOME", self.home_path())
-            .env("OMNIFS_MOUNT_POINT", &self.mount_point)
-            .env("OMNIFS_FRONTEND_IMAGE", &self.frontend_image)
-            .env("RUST_LOG", "warn")
-            .output()
-            .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
-    }
-
-    /// Bring up a host-native daemon, explicitly enable its host frontend,
-    /// and wait for it to serve the test-provider tree. Panics on a real failure: every
-    /// environment gap (missing wasm, unmountable platform) was already
-    /// checked by [`preconditions`] before the fixture was built.
-    fn up_native(&mut self) {
+    fn start_daemon(&mut self) {
         let out = self.run(&["up"]);
         assert!(
             out.status.success(),
@@ -187,6 +172,26 @@ impl Fixture {
             String::from_utf8_lossy(&out.stderr),
         );
         self.daemon_pid = self.daemon_pid_from_record();
+    }
+
+    /// Run a CLI subcommand with the hermetic env, including the filesystem
+    /// image override so Docker attach never reaches for a registry.
+    fn run(&self, args: &[&str]) -> Output {
+        Command::new(live::omnifs_bin())
+            .args(args)
+            .env("OMNIFS_HOME", self.home_path())
+            .env("OMNIFS_FILESYSTEM_IMAGE", &self.filesystem_image)
+            .env("RUST_LOG", "warn")
+            .output()
+            .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
+    }
+
+    /// Bring up a host-native daemon, explicitly attach its host filesystem,
+    /// and wait for it to serve the test-provider tree. Panics on a real failure: every
+    /// environment gap (missing wasm, unmountable platform) was already
+    /// checked by [`preconditions`] before the fixture was built.
+    fn up_native(&mut self) {
+        self.start_daemon();
 
         let filesystem = if cfg!(target_os = "linux") {
             "fuse"
@@ -195,8 +200,11 @@ impl Fixture {
         };
         let location = self.mount_point.to_str().expect("mount point utf8");
         let out = self.run(&[
-            "frontend",
-            "enable",
+            "fs",
+            "create",
+            "--name",
+            "itest-host",
+            "--protocol",
             filesystem,
             "--runtime",
             "host",
@@ -205,7 +213,32 @@ impl Fixture {
         ]);
         assert!(
             out.status.success(),
-            "host frontend enable failed (exit {})\nstdout: {}\nstderr: {}",
+            "host filesystem create failed (exit {})\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let out = self.run(&["fs", "attach", "--name", "itest-host"]);
+        assert!(
+            out.status.success(),
+            "host filesystem attach failed (exit {})\nstdout: {}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        let out = self.run(&[
+            "fs",
+            "create",
+            "--name",
+            "itest-docker",
+            "--protocol",
+            "fuse",
+            "--runtime",
+            "docker",
+        ]);
+        assert!(
+            out.status.success(),
+            "Docker filesystem create failed (exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
@@ -223,27 +256,60 @@ impl Fixture {
         }
     }
 
-    fn frontend_enable(&self) -> Output {
+    fn filesystem_attach(&self) -> Output {
+        self.run(&["fs", "attach", "--name", "itest-docker", "--output", "json"])
+    }
+
+    fn filesystem_restart(&self) -> Output {
         self.run(&[
-            "frontend",
-            "enable",
-            "fuse",
-            "--runtime",
-            "docker",
+            "fs",
+            "restart",
+            "--name",
+            "itest-docker",
             "--output",
             "json",
         ])
     }
 
-    /// Assert Docker frontend enable succeeded; on failure, dump the runner logs of
+    fn wait_for_filesystem_attachment(&self, id: &str, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let output = self.run(&["fs", "ls", "--output", "json"]);
+            if output.status.success()
+                && serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                    .ok()
+                    .is_some_and(|value| {
+                        value["result"]["filesystems"]
+                            .as_array()
+                            .is_some_and(|filesystems| {
+                                filesystems.iter().any(|filesystem| {
+                                    filesystem["id"] == id && filesystem["state"] == "attached"
+                                })
+                            })
+                    })
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "filesystem `{id}` did not reattach within {}s\nstdout: {}\nstderr: {}",
+                timeout.as_secs(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Assert a Docker filesystem lifecycle command succeeded; on failure, dump the runner logs of
     /// every labeled container first (the fixture Drop removes them, so this
     /// is the only window to capture why the mount never served), then panic
     /// with the CLI's own output.
-    fn assert_frontend_enable_ok(&self, out: &Output, context: &str) {
+    fn assert_filesystem_action_ok(&self, out: &Output, context: &str) {
         if out.status.success() {
             assert!(
                 out.stderr.is_empty(),
-                "structured Docker frontend enable leaked stderr: {}",
+                "structured Docker filesystem command leaked stderr: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
             return;
@@ -253,24 +319,24 @@ impl Fixture {
             eprintln!("--- docker logs {name} (tail) ---\n{logs}\n---");
         }
         panic!(
-            "omnifs frontend enable fuse --runtime docker failed ({context}, exit {})\nstdout: {}\nstderr: {}",
+            "Docker filesystem lifecycle command failed ({context}, exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
         );
     }
 
-    fn frontend_status(&self) -> Output {
-        self.run(&["frontend", "ls"])
+    fn filesystem_status(&self) -> Output {
+        self.run(&["fs", "ls"])
     }
 
     fn down(&self) -> Output {
         self.run(&["down"])
     }
 
-    /// Every frontend container labeled for this fixture's home. Discovery by
+    /// Every filesystem container labeled for this fixture's home. Discovery by
     /// label (not by recomputing the launcher's naming hash) keeps the naming
-    /// rule owned solely by `frontend_container.rs`.
+    /// rule owned solely by `fs_container.rs`.
     fn containers(&self) -> Vec<String> {
         let filter = format!("label={HOME_LABEL}={}", self.home_path().display());
         docker_output(&["ps", "-a", "--filter", &filter, "--format", "{{.Names}}"])
@@ -278,15 +344,14 @@ impl Fixture {
             .unwrap_or_default()
     }
 
-    /// The single frontend container for this workspace. Panics if none or
-    /// more than one exists: one frontend container per workspace is the
-    /// contract (`frontend_container_name`).
+    /// The fixture's single configured Docker filesystem. Product workspaces
+    /// may have more than one when their IDs differ.
     fn container_name(&self) -> String {
         let names = self.containers();
         assert_eq!(
             names.len(),
             1,
-            "expected exactly one frontend container for this workspace, found {names:?}"
+            "expected exactly one filesystem container for this workspace, found {names:?}"
         );
         names.into_iter().next().unwrap()
     }
@@ -310,7 +375,7 @@ impl Drop for Fixture {
 /// in an uninterruptible NFS syscall (observed hanging this suite's Drop);
 /// the path is resolved via the parent so the dead mount itself is never
 /// stat-ed. A no-op when nothing is mounted (the common case after explicit
-/// frontend disable). Retries briefly: a just-killed server can leave the mount
+/// filesystem detach). Retries briefly: a just-killed server can leave the mount
 /// transiently busy before the kernel gives up on it.
 fn force_unmount(mount_point: &Path) {
     #[cfg(target_os = "linux")]
@@ -423,7 +488,7 @@ fn assert_serves(container: &str) {
 // ===========================================================================
 
 /// The fail-closed contract `assert_locked_down`
-/// (`crates/omnifs-cli/src/frontend_container.rs`) enforces at launch time,
+/// (`crates/omnifs-cli/src/fs_container.rs`) enforces at launch time,
 /// re-checked here from the outside with plain `docker inspect`/`docker exec`:
 /// no mounts of any kind, an env set of exactly the two attach vars plus the
 /// image's own defaults, and no guest home or credentials file anywhere in the
@@ -432,7 +497,7 @@ fn assert_no_credentials_contract(container: &str) {
     let mounts = docker_json(container, "{{json .Mounts}}");
     assert!(
         mounts.as_array().is_some_and(Vec::is_empty),
-        "frontend container must have no mounts: {mounts}"
+        "filesystem container must have no mounts: {mounts}"
     );
 
     let env_value = docker_json(container, "{{json .Config.Env}}");
@@ -453,7 +518,7 @@ fn assert_no_credentials_contract(container: &str) {
     for name in &names {
         assert!(
             matches!(*name, "OMNIFS_ATTACH_ADDR" | "PATH" | "HOME"),
-            "unexpected env var `{name}` leaked into the credential-free frontend container: {env:?}"
+            "unexpected env var `{name}` leaked into the credential-free filesystem container: {env:?}"
         );
     }
 
@@ -466,7 +531,7 @@ fn assert_no_credentials_contract(container: &str) {
             .status();
         assert!(
             status.is_ok_and(|status| !status.success()),
-            "`{path}` must not exist inside the credential-free frontend container"
+            "`{path}` must not exist inside the credential-free filesystem container"
         );
     }
 }
@@ -532,7 +597,7 @@ fn assert_byte_identity(host_path: &Path, container: &str, guest_path: &str, lim
 // (c) Cold start: docker-run-to-served-mount
 // ===========================================================================
 
-/// Gate: Docker frontend enable must go from container start to a served mount
+/// Gate: Docker filesystem attach must go from container start to a served mount
 /// in under 15s. Timed with the daemon already warm (a prior `up_native` call),
 /// so the span isolates container start cost from daemon bring-up. Sized for
 /// shared CI runners (measured ~7.5s on GitHub-hosted Linux); the scorecard
@@ -603,16 +668,16 @@ fn fuse_docker_lifecycle_and_matrix() {
     // (c) cold start: the daemon is already warm, so the timed span isolates
     // container-run-to-served-mount latency from daemon bring-up cost.
     let started = Instant::now();
-    let up_out = fixture.frontend_enable();
+    let up_out = fixture.filesystem_attach();
     let elapsed = started.elapsed();
-    fixture.assert_frontend_enable_ok(&up_out, "cold start");
+    fixture.assert_filesystem_action_ok(&up_out, "cold start");
     record_cold_start(elapsed);
 
-    // (a) `frontend ls` is truthful.
-    let status_out = fixture.frontend_status();
+    // (a) `fs ls` is truthful.
+    let status_out = fixture.filesystem_status();
     assert!(
         status_out.status.success(),
-        "frontend ls failed (exit {})\nstdout: {}\nstderr: {}",
+        "fs ls failed (exit {})\nstdout: {}\nstderr: {}",
         status_out.status,
         String::from_utf8_lossy(&status_out.stdout),
         String::from_utf8_lossy(&status_out.stderr),
@@ -620,7 +685,7 @@ fn fuse_docker_lifecycle_and_matrix() {
     let status_text = String::from_utf8_lossy(&status_out.stdout);
     assert!(
         status_text.contains("attached"),
-        "frontend ls must report an attached Docker frontend: {status_text}"
+        "fs ls must report an attached Docker filesystem: {status_text}"
     );
 
     let container = fixture.container_name();
@@ -656,7 +721,7 @@ fn fuse_docker_lifecycle_and_matrix() {
 
     // (b) the fuse-docker matrix column, through the shared row/executor
     // machinery: every read row must pass, including tar and tail-f-growing
-    // (the debian frontend image ships GNU coreutils); write rows stay
+    // (the debian filesystem image ships GNU coreutils); write rows stay
     // expected-fail (no write path yet). The recursive grep excludes the
     // provider's deliberately invalid `checkout` tree-ref fixture while still
     // traversing the paged comments collection and live stream leaf.
@@ -665,7 +730,7 @@ fn fuse_docker_lifecycle_and_matrix() {
         root: "/omnifs/test".to_string(),
         scratch: DOCKER_SCRATCH.to_string(),
     };
-    let scorecard = matrix::run_column(&exec, &matrix::FUSE_DOCKER_FRONTEND, matrix::ROWS);
+    let scorecard = matrix::run_column(&exec, &matrix::FUSE_DOCKER_FILESYSTEM, matrix::ROWS);
     let scorecard_path = matrix::write_scorecard(&scorecard);
     eprintln!("scorecard: {}", scorecard_path.display());
     eprintln!(
@@ -680,15 +745,15 @@ fn fuse_docker_lifecycle_and_matrix() {
         mismatches.join("\n  ")
     );
 
-    // Disabling Docker leaves the host frontend serving every mount; enabling
+    // Detaching Docker leaves the host filesystem serving every mount; attaching
     // it again restores the same whole-namespace view.
-    let disabled = fixture.run(&["frontend", "disable", "fuse", "--runtime", "docker"]);
+    let detached = fixture.run(&["fs", "detach", "--name", "itest-docker"]);
     assert!(
-        disabled.status.success(),
-        "disabling Docker frontend failed (exit {})\nstdout: {}\nstderr: {}",
-        disabled.status,
-        String::from_utf8_lossy(&disabled.stdout),
-        String::from_utf8_lossy(&disabled.stderr),
+        detached.status.success(),
+        "detaching Docker filesystem failed (exit {})\nstdout: {}\nstderr: {}",
+        detached.status,
+        String::from_utf8_lossy(&detached.stdout),
+        String::from_utf8_lossy(&detached.stderr),
     );
     for root in ["test", "test2"] {
         assert!(
@@ -697,43 +762,30 @@ fn fuse_docker_lifecycle_and_matrix() {
                 .join(root)
                 .join("hello/message")
                 .is_file(),
-            "host frontend lost mount {root} while Docker frontend was disabled"
+            "host filesystem lost mount {root} while Docker filesystem was detached"
         );
     }
-    let reenabled = fixture.frontend_enable();
-    fixture.assert_frontend_enable_ok(&reenabled, "re-enable after disable");
+    let reattached = fixture.filesystem_attach();
+    fixture.assert_filesystem_action_ok(&reattached, "reattach after detach");
     assert_serves(&fixture.container_name());
 
-    // Frontend runners have independent lifecycles. Disable Docker and the
+    // Filesystem runners have independent lifecycles. Detach Docker and the
     // host runner explicitly, then stop the daemon with `omnifs down`.
-    let disabled = fixture.run(&["frontend", "disable", "fuse", "--runtime", "docker"]);
+    let detached = fixture.run(&["fs", "detach", "--name", "itest-docker"]);
     assert!(
-        disabled.status.success(),
-        "disabling Docker frontend before down failed (exit {})\nstdout: {}\nstderr: {}",
-        disabled.status,
-        String::from_utf8_lossy(&disabled.stdout),
-        String::from_utf8_lossy(&disabled.stderr),
+        detached.status.success(),
+        "detaching Docker filesystem before down failed (exit {})\nstdout: {}\nstderr: {}",
+        detached.status,
+        String::from_utf8_lossy(&detached.stdout),
+        String::from_utf8_lossy(&detached.stderr),
     );
-    let host_location = fixture.mount_point.to_str().expect("mount point utf8");
-    let disabled = fixture.run(&[
-        "frontend",
-        "disable",
-        if cfg!(target_os = "linux") {
-            "fuse"
-        } else {
-            "nfs"
-        },
-        "--runtime",
-        "host",
-        "--location",
-        host_location,
-    ]);
+    let detached = fixture.run(&["fs", "detach", "--name", "itest-host"]);
     assert!(
-        disabled.status.success(),
-        "disabling host frontend before down failed (exit {})\nstdout: {}\nstderr: {}",
-        disabled.status,
-        String::from_utf8_lossy(&disabled.stdout),
-        String::from_utf8_lossy(&disabled.stderr),
+        detached.status.success(),
+        "detaching host filesystem before down failed (exit {})\nstdout: {}\nstderr: {}",
+        detached.status,
+        String::from_utf8_lossy(&detached.stdout),
+        String::from_utf8_lossy(&detached.stderr),
     );
     let down_out = fixture.down();
     assert!(
@@ -745,7 +797,7 @@ fn fuse_docker_lifecycle_and_matrix() {
     );
     assert!(
         fixture.containers().is_empty(),
-        "frontend disable must remove the frontend container before omnifs down"
+        "filesystem detach must remove the filesystem container before omnifs down"
     );
 }
 
@@ -758,11 +810,10 @@ fn fuse_docker_lifecycle_and_matrix() {
 /// 1. **Kill the container.** The FUSE mount lives entirely inside the
 ///    container's own mount namespace, so killing it leaves nothing to clean
 ///    up host-side; the only observable effect is the container going away.
-///    Docker frontend enable again creates a fresh container that serves.
+///    Docker filesystem restart creates a fresh container that serves.
 /// 2. **Kill the daemon, leaving the container alive.** The VFS wire client
-///    reconnects with backoff forever (`omnifs-vfs`), and daemon startup
-///    restores the predecessor TCP address and token before publishing
-///    readiness. The same container therefore reattaches without replacement.
+///    reconnects with backoff forever (`omnifs-vfs`) to the fixed attach
+///    endpoint. The same container therefore reattaches without replacement.
 ///    This test deliberately avoids a filesystem read while the daemon is
 ///    absent because an unreachable FUSE attach can block in the kernel.
 #[test]
@@ -778,8 +829,8 @@ fn kill_and_reattach_fuse_semantics() {
     let mut fixture = Fixture::new(image);
     fixture.up_native();
 
-    let up1 = fixture.frontend_enable();
-    fixture.assert_frontend_enable_ok(&up1, "first bring-up");
+    let up1 = fixture.filesystem_attach();
+    fixture.assert_filesystem_action_ok(&up1, "first bring-up");
     let container = fixture.container_name();
     assert_serves(&container);
     let id_1 = container_id(&container);
@@ -794,12 +845,12 @@ fn kill_and_reattach_fuse_semantics() {
     );
     wait_for_container_state(&container, "exited", Duration::from_secs(10));
 
-    let up2 = fixture.frontend_enable();
-    fixture.assert_frontend_enable_ok(&up2, "after a killed container");
+    let up2 = fixture.filesystem_restart();
+    fixture.assert_filesystem_action_ok(&up2, "restart after a killed container");
     let id_2 = container_id(&container);
     assert_ne!(
         id_1, id_2,
-        "frontend enable must create a genuinely fresh container, not reuse the killed one"
+        "filesystem restart must create a genuinely fresh container, not reuse the killed one"
     );
     assert_serves(&container);
 
@@ -823,22 +874,22 @@ fn kill_and_reattach_fuse_semantics() {
     assert_eq!(
         container_state(&container).as_deref(),
         Some("running"),
-        "the frontend container must survive a bare daemon kill without a graceful teardown"
+        "the filesystem container must survive a bare daemon kill without a graceful teardown"
     );
 
     // A bare `kill -9` (bypassing `omnifs down`'s graceful unmount) leaves the
     // native mount a zombie: a dead-server NFS/FUSE mount at the same path
     // that blocks a fresh daemon from mounting there again. This is a
-    // pre-existing rough edge independent of the Docker frontend (observed
+    // pre-existing rough edge independent of the Docker filesystem (observed
     // manually against a plain `omnifs up` after a bare kill); the product's
-    // supported recovery is to disable the stale frontend before stopping the
+    // supported recovery is to detach the stale filesystem before stopping the
     // daemon, but calling it here would also tear down the very container this
     // test is keeping alive on purpose. So this test sweeps the host mount by
     // hand: force-unmount, then brings up a fresh daemon on the same home.
     // The daemon instance changes while its approved attach authority stays
     // stable for the surviving container.
     force_unmount(&fixture.mount_point);
-    fixture.up_native();
+    fixture.start_daemon();
     let new_instance = fixture
         .record()
         .expect("daemon record present after restart")
@@ -848,16 +899,15 @@ fn kill_and_reattach_fuse_semantics() {
         "a restarted daemon must mint a new instance id"
     );
 
-    // `up` publishes daemon readiness before surviving frontends finish their
-    // independent reconnect backoff. `frontend enable` observes the live
-    // container and waits for its attachment without replacing it.
-    let reattached = fixture.frontend_enable();
-    fixture.assert_frontend_enable_ok(&reattached, "after daemon restart");
+    // `up` publishes daemon readiness before surviving filesystems finish their
+    // independent reconnect backoff. The runner reattaches without another
+    // lifecycle command or replacement.
+    fixture.wait_for_filesystem_attachment("itest-docker", Duration::from_secs(15));
 
     let id_3 = container_id(&container);
     assert_eq!(
         id_2, id_3,
-        "daemon restart must preserve the existing frontend container"
+        "daemon restart must preserve the existing filesystem container"
     );
     assert_serves(&container);
 }

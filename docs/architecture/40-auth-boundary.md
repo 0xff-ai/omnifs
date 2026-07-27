@@ -45,9 +45,9 @@ Refresh and retry are host protocol behavior. Providers should model permission 
 
 ## Runtime trust boundary
 
-The CLI and host-native daemon are trusted local control-plane code. Provider WASM is untrusted. A frontend runner is deliberately credential-free, whatever its driver: it receives only the authority to attach through the daemon's Omnifs VFS wire protocol.
+The CLI and host-native daemon are trusted local control-plane code. Provider WASM is untrusted. A filesystem runner is deliberately credential-free, whatever its driver: it receives only the authority to attach through the daemon's Omnifs VFS wire protocol.
 
-Do not design credential boundaries around hiding `OMNIFS_HOME` from the trusted daemon, which owns that state. Do prevent provider WASM and optional frontend guests from reading secrets or escalating host resources.
+Do not design credential boundaries around hiding `OMNIFS_HOME` from the trusted daemon, which owns that state. Do prevent provider WASM and optional filesystem guests from reading secrets or escalating host resources.
 
 ## Rejected shapes
 

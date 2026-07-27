@@ -61,10 +61,10 @@ pub fn enabled_from_env() -> bool {
 pub enum DaemonEvent {
     /// The daemon process has started.
     DaemonStart,
-    /// The filesystem frontend has begun serving the mount.
-    FrontendServing,
-    /// The filesystem frontend has stopped serving (unmounted).
-    FrontendStopped,
+    /// The filesystem has begun serving the mount.
+    FilesystemServing,
+    /// The filesystem has stopped serving (unmounted).
+    FilesystemStopped,
     /// The daemon process is shutting down.
     DaemonStop,
 }
@@ -253,7 +253,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sink = sink(tmp.path(), true);
         sink.daemon_event(DaemonEvent::DaemonStart, 0);
-        sink.daemon_event(DaemonEvent::FrontendServing, 3);
+        sink.daemon_event(DaemonEvent::FilesystemServing, 3);
 
         let path = tmp.path().join(SUBDIR).join(DAEMON_FILE);
         let contents = std::fs::read_to_string(&path).unwrap();
@@ -266,7 +266,7 @@ mod tests {
         assert!(first["ts"].as_str().unwrap().contains('T'), "ts is rfc3339");
 
         let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(second["event"], "frontend_serving");
+        assert_eq!(second["event"], "filesystem_serving");
         assert_eq!(second["mounts"], 3);
     }
 

@@ -42,7 +42,7 @@ declare const Bun: {
 
 type DevOptions = {
   profile: string;
-  frontendImage: string | null;
+  filesystemImage: string | null;
   yes: boolean;
   detach: boolean;
   noShell: boolean;
@@ -99,23 +99,30 @@ type Fixtures = {
   dbContainerId: string | null;
 };
 
+type FilesystemRow = {
+  id: string;
+  protocol: "fuse" | "nfs";
+  runtime: "host" | "docker" | "libkrun";
+  location: string;
+  state: "attached" | "detached" | "unknown";
+};
+
 const $ = Bun.$;
 const DB_IMAGE = "omnifs-dev-db:local";
 const DB_CONTAINER = "omnifs-dev-db";
 const K8S_COMPOSE_PROJECT = "omnifs-devcluster";
-const FRONTEND_DEV_IMAGE = "omnifs-frontend:dev";
-// The frontend guest-mount constant (`crates/omnifs-cli/src/commands/frontend/mod.rs`
-// `GUEST_MOUNT`); the frontend container always mounts here.
+const FILESYSTEM_DEV_IMAGE = "omnifs-filesystem:dev";
+// The fixed guest location in `omnifs_core::fs`; guest filesystems always mount here.
 const GUEST_MOUNT = "/omnifs";
-// The frontend image ships a minimal Debian base (fuse3, coreutils, findutils,
-// jq, rsync, tar, xxd) with no bash/zsh (`Dockerfile`'s `frontend-base`), so
+// The filesystem image ships a minimal Debian base (fuse3, coreutils, findutils,
+// jq, rsync, tar, xxd) with no bash/zsh (`Dockerfile`'s `filesystem-base`), so
 // the interactive dev shell and any container-side probe use POSIX `/bin/sh`.
 const GUEST_SHELL = "/bin/sh";
-// Label `crates/omnifs-cli/src/frontend_container.rs` stamps on the frontend
+// Label `crates/omnifs-cli/src/fs_container.rs` stamps on the filesystem
 // container with the workspace's config dir (== `OMNIFS_HOME`): the single
 // owner of the home->container-name mapping, so this script discovers the
 // container by label instead of re-deriving its hashed name.
-const FRONTEND_HOME_LABEL = "ai.0xff.omnifs.home";
+const FILESYSTEM_HOME_LABEL = "ai.0xff.omnifs.home";
 
 // Dev mounts whose provider needs a static token, and the host env var that
 // holds it. Dev orchestration, not provider or mount data, so it lives here
@@ -138,7 +145,7 @@ async function main() {
   const devHome =
     options.home || process.env.OMNIFS_HOME || join(homedir(), ".omnifs-dev");
   const profileMounts = readProfile(options.profile);
-  const frontendImage = options.frontendImage || `omnifs-frontend:${await gitShortHead()}-dev`;
+  const filesystemImage = options.filesystemImage || `omnifs-filesystem:${await gitShortHead()}-dev`;
   const providerStore = resolve(
     options.providerStore || join(workspace, "target/omnifs-provider-store"),
   );
@@ -152,7 +159,7 @@ async function main() {
   const builds: Promise<void>[] = [];
   if (!options.skipCliBuild) {
     // The full CLI package includes the host-native daemon process owner and
-    // NFS frontend support, which `omnifs up` needs to launch the daemon.
+    // NFS filesystem support, which `omnifs up` needs to launch the daemon.
     builds.push(
       run($`cargo build -p omnifs-cli`.env({
         ...process.env,
@@ -160,8 +167,8 @@ async function main() {
       })),
     );
   }
-  if (!options.frontendImage) {
-    builds.push(buildFrontendImage(frontendImage).then(() => tagFloatingFrontendImage(frontendImage)));
+  if (!options.filesystemImage) {
+    builds.push(buildFilesystemImage(filesystemImage).then(() => tagFloatingFilesystemImage(filesystemImage)));
   }
   await Promise.all(builds);
 
@@ -170,9 +177,9 @@ async function main() {
     if (!options.skipCliBuild) {
       built.push("the omnifs CLI");
     }
-    if (!options.frontendImage) {
-      const tags = frontendImage === FRONTEND_DEV_IMAGE ? [frontendImage] : [frontendImage, FRONTEND_DEV_IMAGE];
-      built.push(`the frontend image (${tags.join(" and ")})`);
+    if (!options.filesystemImage) {
+      const tags = filesystemImage === FILESYSTEM_DEV_IMAGE ? [filesystemImage] : [filesystemImage, FILESYSTEM_DEV_IMAGE];
+      built.push(`the filesystem image (${tags.join(" and ")})`);
     }
     console.log(`✓ Built ${built.join(" and ")}`);
     return;
@@ -189,7 +196,7 @@ async function main() {
   if (!options.yes) {
     printPlan({
       devHome,
-      frontendImage,
+      filesystemImage,
       profile: options.profile,
       render,
       keepRunning: keepRunning(options),
@@ -200,50 +207,60 @@ async function main() {
     }
   }
 
-  await writeDevHome(devHome, frontendImage, omnifsCli, render);
+  await writeDevHome(devHome, filesystemImage, omnifsCli, render);
 
   const fixtures = await startFixtures(render.mounts, fixturePaths);
   try {
     console.log("Starting the host-native daemon");
     await run($`${omnifsCli} up`.env(cliEnv(devHome)));
 
-    console.log("Starting the Docker-hosted FUSE frontend");
-    const hostFilesystem = process.platform === "linux" ? "fuse" : "nfs";
+    const hostProtocol = process.platform === "linux" ? "fuse" : "nfs";
     const hostLocation = join(devHome, "mnt");
     mkdirSync(hostLocation, { recursive: true });
-    console.log(`Starting the host ${hostFilesystem.toUpperCase()} frontend`);
-    await run(
-      $`${omnifsCli} frontend enable ${hostFilesystem} --runtime host --location ${hostLocation}`.env(
-        cliEnv(devHome),
-      ),
+    console.log(`Attaching the host ${hostProtocol.toUpperCase()} filesystem`);
+    await ensureFilesystemAttached(
+      omnifsCli,
+      devHome,
+      {
+        id: "dev-host",
+        protocol: hostProtocol,
+        runtime: "host",
+        location: hostLocation,
+      },
     );
 
-    await run(
-      $`${omnifsCli} frontend enable fuse --runtime docker`.env({
-        ...cliEnv(devHome),
-        OMNIFS_FRONTEND_IMAGE: frontendImage,
-      }),
+    console.log("Attaching the Docker-hosted FUSE filesystem");
+    await ensureFilesystemAttached(
+      omnifsCli,
+      devHome,
+      {
+        id: "dev-docker",
+        protocol: "fuse",
+        runtime: "docker",
+        location: GUEST_MOUNT,
+      },
+      { OMNIFS_FILESYSTEM_IMAGE: filesystemImage },
     );
 
-    const frontendContainer = await discoverFrontendContainer(devHome);
+    const filesystemContainer = await discoverFilesystemContainer(devHome);
     if (keepRunning(options)) {
       if (options.detach) {
         console.log(
-          `Detached. Stop with \`${omnifsCli} frontend disable fuse --runtime docker && ${omnifsCli} frontend disable ${hostFilesystem} --runtime host --location ${hostLocation} && ${omnifsCli} down\`.`,
+          `Detached. Stop with \`${omnifsCli} fs detach --name dev-docker && ${omnifsCli} fs detach --name dev-host && ${omnifsCli} down\`.`,
         );
       }
       return;
     }
 
     try {
-      console.log(`Opening a shell in \`${frontendContainer}\` at ${GUEST_MOUNT}`);
+      console.log(`Opening a shell in \`${filesystemContainer}\` at ${GUEST_MOUNT}`);
       await runInteractive([
         "docker",
         "exec",
         "-it",
         "-w",
         GUEST_MOUNT,
-        frontendContainer,
+        filesystemContainer,
         GUEST_SHELL,
       ]);
     } finally {
@@ -258,7 +275,7 @@ async function main() {
 function parseArgs(args: string[]): DevOptions {
   const options: DevOptions = {
     profile: "default",
-    frontendImage: null,
+    filesystemImage: null,
     yes: false,
     detach: false,
     noShell: false,
@@ -273,8 +290,8 @@ function parseArgs(args: string[]): DevOptions {
       options.yes = true;
     } else if (arg === "--profile") {
       options.profile = requireValue(args, ++i, "--profile");
-    } else if (arg === "--frontend-image") {
-      options.frontendImage = requireValue(args, ++i, "--frontend-image");
+    } else if (arg === "--filesystem-image") {
+      options.filesystemImage = requireValue(args, ++i, "--filesystem-image");
     } else if (arg === "--home") {
       options.home = requireValue(args, ++i, "--home");
     } else if (arg === "--provider-store") {
@@ -310,7 +327,7 @@ async function checkPrerequisites(options: DevOptions): Promise<void> {
   if (!options.skipCliBuild) {
     commands.push("cargo");
   }
-  if (!options.frontendImage) {
+  if (!options.filesystemImage) {
     commands.push("git");
   }
 
@@ -491,13 +508,13 @@ async function resolveToken(
 
 function printPlan({
   devHome,
-  frontendImage,
+  filesystemImage,
   profile,
   render,
   keepRunning,
 }: {
   devHome: string;
-  frontendImage: string;
+  filesystemImage: string;
   profile: string;
   render: DevHomeRender;
   keepRunning: boolean;
@@ -509,13 +526,13 @@ function printPlan({
   if (render.skipped.length > 0) {
     console.log(`  Skipped         ${render.skipped.join("; ")}`);
   }
-  console.log(`  Frontend image  ${frontendImage}`);
+  console.log(`  Filesystem image  ${filesystemImage}`);
   console.log(`  Dev home        ${devHome}`);
   console.log("");
   if (keepRunning) {
-    console.log("Start the native daemon and the frontend container, then return.");
+    console.log("Start the native daemon and the filesystem container, then return.");
   } else {
-    console.log(`Start the native daemon and the frontend container, then open a shell at ${GUEST_MOUNT}.`);
+    console.log(`Start the native daemon and the filesystem container, then open a shell at ${GUEST_MOUNT}.`);
   }
   console.log("");
 }
@@ -527,7 +544,7 @@ function cliEnv(devHome: string, extra: Record<string, string | undefined> = {})
 
 async function writeDevHome(
   devHome: string,
-  frontendImage: string,
+  filesystemImage: string,
   omnifsCli: string,
   render: DevHomeRender,
 ): Promise<void> {
@@ -540,12 +557,12 @@ async function writeDevHome(
   rmSync(credentialsPath, { force: true });
   mkdirSync(mountsDir, { recursive: true });
 
-  // The daemon always runs host-native. Keep the Docker frontend image in the
-  // workspace config so `frontend enable` resolves the local build without a
-  // registry lookup. Frontend lifecycle itself is imperative and explicit.
+  // The daemon always runs host-native. Keep the Docker filesystem image in the
+  // workspace config so `fs attach` resolves the local build without a
+  // registry lookup. Filesystem lifecycle itself is imperative and explicit.
   writeFileSync(
     join(devHome, "config.toml"),
-    [`[frontend]`, `docker_image = ${JSON.stringify(frontendImage)}`, ``].join("\n"),
+    [`[filesystem]`, `docker_image = ${JSON.stringify(filesystemImage)}`, ``].join("\n"),
   );
 
   for (const mount of render.mounts) {
@@ -635,19 +652,65 @@ async function startFixtures(mounts: DevMountRender[], fixturePaths: FixturePath
   return fixtures;
 }
 
-/// Discover the running frontend container by the workspace-home label
-/// `crates/omnifs-cli/src/frontend_container.rs` stamps on it, rather than
+/// Discover the running filesystem container by the workspace-home label
+/// `crates/omnifs-cli/src/fs_container.rs` stamps on it, rather than
 /// re-deriving its (possibly hashed) name in this script.
-async function discoverFrontendContainer(devHome: string): Promise<string> {
+async function discoverFilesystemContainer(devHome: string): Promise<string> {
   const name = (await awaitText(
-    $`docker ps --filter ${`label=${FRONTEND_HOME_LABEL}=${devHome}`} --format {{.Names}}`.quiet(),
+    $`docker ps --filter ${`label=${FILESYSTEM_HOME_LABEL}=${devHome}`} --format {{.Names}}`.quiet(),
   )).trim();
   if (!name) {
     throw new Error(
-      `no frontend container found for home ${devHome}; the Docker frontend may have exited without one`,
+      `no filesystem container found for home ${devHome}; the Docker filesystem may have exited without one`,
     );
   }
   return name;
+}
+
+async function ensureFilesystemAttached(
+  omnifsCli: string,
+  devHome: string,
+  expected: Omit<FilesystemRow, "state">,
+  extraEnv: Record<string, string | undefined> = {},
+): Promise<void> {
+  const env = cliEnv(devHome, extraEnv);
+  const raw = await awaitText($`${omnifsCli} fs ls --output json`.env(env));
+  const envelope = JSON.parse(raw) as {
+    result: { filesystems: FilesystemRow[] };
+  };
+  let row = envelope.result.filesystems.find((filesystem) => filesystem.id === expected.id);
+  if (!row) {
+    const args = [
+      "fs",
+      "create",
+      "--name",
+      expected.id,
+      "--protocol",
+      expected.protocol,
+      "--runtime",
+      expected.runtime,
+    ];
+    if (expected.runtime === "host") {
+      args.push("--location", expected.location);
+    }
+    await run($`${omnifsCli} ${args}`.env(env));
+    row = { ...expected, state: "detached" };
+  }
+  if (
+    row.protocol !== expected.protocol ||
+    row.runtime !== expected.runtime ||
+    row.location !== expected.location
+  ) {
+    throw new Error(
+      `filesystem ${expected.id} has ${row.protocol}/${row.runtime} at ${row.location}, expected ${expected.protocol}/${expected.runtime} at ${expected.location}`,
+    );
+  }
+  if (row.state === "unknown") {
+    throw new Error(`filesystem ${expected.id} has unknown state; run omnifs doctor`);
+  }
+  if (row.state === "detached") {
+    await run($`${omnifsCli} fs attach --name ${expected.id}`.env(env));
+  }
 }
 
 async function teardownSession(
@@ -656,12 +719,11 @@ async function teardownSession(
   fixturePaths: FixturePaths,
   fixtures: Fixtures,
 ): Promise<void> {
-  await $`${omnifsCli} frontend disable fuse --runtime docker`
+  await $`${omnifsCli} fs detach --name dev-docker`
     .env(cliEnv(devHome))
     .quiet()
     .nothrow();
-  const hostFilesystem = process.platform === "linux" ? "fuse" : "nfs";
-  await $`${omnifsCli} frontend disable ${hostFilesystem} --runtime host --location ${join(devHome, "mnt")}`
+  await $`${omnifsCli} fs detach --name dev-host`
     .env(cliEnv(devHome))
     .quiet()
     .nothrow();
@@ -685,18 +747,18 @@ async function removeContainer(name: string): Promise<void> {
   await run($`docker rm -f ${name}`.quiet().nothrow());
 }
 
-async function tagFloatingFrontendImage(image: string): Promise<void> {
-  if (image === FRONTEND_DEV_IMAGE) {
+async function tagFloatingFilesystemImage(image: string): Promise<void> {
+  if (image === FILESYSTEM_DEV_IMAGE) {
     return;
   }
-  await run($`docker tag ${image} ${FRONTEND_DEV_IMAGE}`);
+  await run($`docker tag ${image} ${FILESYSTEM_DEV_IMAGE}`);
 }
 
-function buildFrontendImage(image: string): Promise<void> {
-  // No `provider-wasm` build context: the frontend image runs the slim
-  // `omnifs-thin fuse` binary (`thin-builder` stage), which needs no engine runtime, no
+function buildFilesystemImage(image: string): Promise<void> {
+  // No `provider-wasm` build context: the filesystem image runs the slim
+  // `omnifs-thin --protocol fuse` binary (`thin-builder` stage), which needs no engine runtime, no
   // Wasmtime, and no provider bundle.
-  return run($`docker build -t ${image} --target frontend-dev .`);
+  return run($`docker build -t ${image} --target filesystem-dev .`);
 }
 
 async function gitShortHead(): Promise<string> {

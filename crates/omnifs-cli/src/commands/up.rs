@@ -78,7 +78,7 @@ impl UpArgs {
 
 /// `Already serving revision <sha>. Files at <location>`, or a
 /// shorter fallback when there is no revision yet or no attached host
-/// frontend to name.
+/// filesystem to name.
 fn no_op_message(inventory: &Inventory) -> String {
     let revision = inventory
         .applied_revision
@@ -117,8 +117,8 @@ async fn emit_receipt(workspace: &Workspace, output: Output) -> anyhow::Result<E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inventory::{DaemonHealth, FrontendState, FrontendStatus};
-    use omnifs_api::{FrontendRuntime as Runtime, FsType as Filesystem};
+    use crate::inventory::{DaemonHealth, FilesystemState, FilesystemStatus};
+    use omnifs_core::fs;
     use omnifs_workspace::mounts::Revision;
     use std::path::PathBuf;
 
@@ -131,11 +131,15 @@ mod tests {
         // A path outside any real $HOME, so `omnifs_workspace::display`'s
         // `~`-collapse never fires and the assertion stays independent of
         // the test machine's environment.
-        inventory.frontends.push(FrontendStatus {
-            filesystem: Filesystem::Nfs,
-            runtime: Runtime::Host,
-            location: Some(PathBuf::from("/mnt/omnifs-test-home/omnifs")),
-            state: FrontendState::Attached,
+        inventory.filesystems.push(FilesystemStatus {
+            spec: fs::Spec::new(
+                "host".parse().unwrap(),
+                fs::Protocol::Nfs,
+                fs::Runtime::Host,
+                PathBuf::from("/mnt/omnifs-test-home/omnifs"),
+            )
+            .unwrap(),
+            state: FilesystemState::Attached,
             mount_count: 0,
             fix: None,
         });
@@ -149,13 +153,13 @@ mod tests {
     }
 
     #[test]
-    fn no_op_message_degrades_gracefully_without_a_revision_or_a_host_frontend() {
+    fn no_op_message_degrades_gracefully_without_a_revision_or_a_host_filesystem() {
         let inventory = Inventory::test(DaemonHealth::Running, Vec::new(), Vec::new());
         assert_eq!(no_op_message(&inventory), "Already serving.");
     }
 
     #[test]
-    fn no_op_message_still_names_the_revision_without_an_attached_host_frontend() {
+    fn no_op_message_still_names_the_revision_without_an_attached_host_filesystem() {
         let mut inventory = Inventory::test(DaemonHealth::Running, Vec::new(), Vec::new());
         inventory.applied_revision = Some(Revision::new("4".repeat(40)).unwrap());
         assert_eq!(

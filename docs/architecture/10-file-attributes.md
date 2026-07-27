@@ -15,7 +15,7 @@ A projected file has these facts:
 - content type: the requested representation
 - byte source: inline, whole-file deferred, ranged deferred, canonical, or blob-backed
 
-These are provider-declared facts, not frontend instructions. The host and tree derive cache placement, direct I/O, learned-size publication, and protocol attributes from them.
+These are provider-declared facts, not filesystem instructions. The host and tree derive cache placement, direct I/O, learned-size publication, and protocol attributes from them.
 
 ## Tool compatibility
 
@@ -80,6 +80,6 @@ The other old failure mode was compressing "dynamic" and "live" into one volatil
 
 - fake large stat sizes for unknown files
 - read termination based on stat-size guesses
-- frontend-local learned-size policy
+- filesystem-local learned-size policy
 - live files served through inline bytes or whole-file reads
 - provider-local caches for projected file bytes

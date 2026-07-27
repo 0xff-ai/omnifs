@@ -14,64 +14,46 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::NonZeroU16;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::{Namespace, NsEvent};
-use omnifs_api::FrontendInfo;
-use omnifs_core::FrontendRuntime;
+use omnifs_core::fs;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
-use crate::frame::{Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame};
-use crate::{FrontendIdentity, Handshake, PROTOCOL, WireError, WireRequest, WireResponse};
+use crate::frame::{
+    Frame, KIND_CONTROL, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame,
+};
+use crate::{Handshake, PROTOCOL, ServerControl, WireError, WireRequest, WireResponse};
 
 const UDS_PATH_BYTE_LIMIT: usize = 100;
 
-/// The listener path determines both runtime authority and delivery labeling.
-/// The guest identity in the handshake remains display-only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ListenerTarget {
-    /// The fixed host-native Unix listener authenticated by filesystem mode.
-    Local { path: PathBuf },
-    /// The Docker runtime listener bound to loopback or a verified docker0 address.
+pub enum Endpoint {
+    Unix { path: PathBuf },
     Tcp { addr: SocketAddr },
-    /// The libkrun vsock-proxy listener on the host UDS path.
-    Vsock { socket_path: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListenerEvent {
-    /// A listener stopped and its target is no longer live.
-    Exited { target: ListenerTarget },
+    /// A required endpoint stopped and is no longer live.
+    Exited { endpoint: Endpoint },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum ListenerKind {
-    Local,
-    Tcp,
-    Vsock,
-}
-
-impl ListenerTarget {
-    fn kind(&self) -> ListenerKind {
-        match self {
-            Self::Local { .. } => ListenerKind::Local,
-            Self::Tcp { .. } => ListenerKind::Tcp,
-            Self::Vsock { .. } => ListenerKind::Vsock,
-        }
-    }
-
+impl Endpoint {
     fn path(&self) -> Option<&Path> {
         match self {
-            Self::Local { path } => Some(path),
+            Self::Unix { path } => Some(path),
             Self::Tcp { .. } => None,
-            Self::Vsock { socket_path, .. } => Some(socket_path),
         }
     }
 }
@@ -79,92 +61,103 @@ impl ListenerTarget {
 type Connection = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
 struct ListenerRecord {
-    target: ListenerTarget,
+    endpoint: Endpoint,
     identity: Arc<()>,
     task: tokio::task::JoinHandle<()>,
 }
 
 struct VfsState {
-    listeners: BTreeMap<ListenerKind, ListenerRecord>,
+    listeners: BTreeMap<Endpoint, ListenerRecord>,
     ready: bool,
     readiness_enabled: bool,
     shutting_down: bool,
     startup_gate: Option<watch::Sender<bool>>,
 }
 
-#[derive(Debug, Clone)]
-struct AttachedFrontend {
-    kind: crate::FsType,
-    mount_point: PathBuf,
-    runtime: FrontendRuntime,
-}
-
-impl AttachedFrontend {
-    fn key(&self) -> AttachmentKey {
-        AttachmentKey {
-            runtime: self.runtime,
-            kind: self.kind,
-            mount_point: self.mount_point.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct AttachmentKey {
-    runtime: FrontendRuntime,
-    kind: crate::FsType,
-    mount_point: PathBuf,
-}
-
-struct AttachedEntry {
-    frontend: AttachedFrontend,
+struct AttachmentEntry {
+    spec: fs::Spec,
     connections: usize,
+}
+
+struct AttachedConnection {
+    key: fs::Id,
+    control: mpsc::UnboundedSender<Frame>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachmentPhase {
+    Running,
+    Draining,
+    ShuttingDown,
 }
 
 struct AttachmentState {
     next_attachment_id: u64,
-    ids: BTreeMap<u64, AttachmentKey>,
-    entries: BTreeMap<AttachmentKey, AttachedEntry>,
+    connections: BTreeMap<u64, AttachedConnection>,
+    entries: BTreeMap<fs::Id, AttachmentEntry>,
+    phase: AttachmentPhase,
 }
 
 struct Attachments {
     state: Mutex<AttachmentState>,
+    changed: watch::Sender<usize>,
 }
 
 impl Attachments {
     fn new() -> Arc<Self> {
+        let (changed, _) = watch::channel(0);
         Arc::new(Self {
             state: Mutex::new(AttachmentState {
                 next_attachment_id: 1,
-                ids: BTreeMap::new(),
+                connections: BTreeMap::new(),
                 entries: BTreeMap::new(),
+                phase: AttachmentPhase::Running,
             }),
+            changed,
         })
     }
 
-    fn attached(&self, identity: &crate::FrontendIdentity, runtime: FrontendRuntime) -> u64 {
-        let frontend = AttachedFrontend {
-            kind: identity.kind,
-            mount_point: identity.mount_point.clone(),
-            runtime,
-        };
-        let key = frontend.key();
+    fn attached(
+        &self,
+        spec: &fs::Spec,
+        control: mpsc::UnboundedSender<Frame>,
+    ) -> Result<u64, String> {
+        let key = spec.id().clone();
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.phase != AttachmentPhase::Running {
+            return Err(
+                "daemon is draining and is not accepting filesystem attachments".to_owned(),
+            );
+        }
+        if let Some(existing) = state.entries.get(&key)
+            && existing.spec != *spec
+        {
+            return Err(format!(
+                "filesystem `{key}` is already attached with different resolved fields"
+            ));
+        }
         let id = state.next_attachment_id;
         state.next_attachment_id += 1;
-        state.ids.insert(id, key.clone());
+        state.connections.insert(
+            id,
+            AttachedConnection {
+                key: key.clone(),
+                control,
+            },
+        );
         state
             .entries
             .entry(key)
             .and_modify(|entry| entry.connections += 1)
-            .or_insert(AttachedEntry {
-                frontend,
+            .or_insert(AttachmentEntry {
+                spec: spec.clone(),
                 connections: 1,
             });
-        id
+        Self::publish_locked(&mut state, &self.changed);
+        Ok(id)
     }
 
     fn detached(&self, id: u64) {
@@ -172,9 +165,10 @@ impl Attachments {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(key) = state.ids.remove(&id) else {
+        let Some(connection) = state.connections.remove(&id) else {
             return;
         };
+        let key = connection.key;
         let remove = state.entries.get_mut(&key).is_some_and(|entry| {
             entry.connections -= 1;
             entry.connections == 0
@@ -182,9 +176,10 @@ impl Attachments {
         if remove {
             state.entries.remove(&key);
         }
+        Self::publish_locked(&mut state, &self.changed);
     }
 
-    fn snapshot(&self) -> Vec<FrontendInfo> {
+    fn snapshot(&self) -> Vec<fs::Spec> {
         let state = self
             .state
             .lock()
@@ -192,12 +187,80 @@ impl Attachments {
         state
             .entries
             .values()
-            .map(|entry| FrontendInfo {
-                fs_type: entry.frontend.kind,
-                mount_point: entry.frontend.mount_point.clone(),
-                runtime: entry.frontend.runtime,
-            })
+            .map(|entry| entry.spec.clone())
             .collect()
+    }
+
+    fn stop_filesystems(&self) {
+        let controls = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.phase == AttachmentPhase::ShuttingDown {
+                return;
+            }
+            state.phase = AttachmentPhase::Draining;
+            Self::publish_locked(&mut state, &self.changed);
+            state
+                .connections
+                .values()
+                .map(|connection| connection.control.clone())
+                .collect::<Vec<_>>()
+        };
+        let Ok(body) = postcard::to_allocvec(&ServerControl::Stop) else {
+            return;
+        };
+        for control in controls {
+            let _ = control.send(Frame::new(0, KIND_CONTROL, body.clone()));
+        }
+    }
+
+    async fn drain(&self, timeout: Duration) -> Vec<fs::Spec> {
+        let deadline = Instant::now() + timeout;
+        let mut changed = self.changed.subscribe();
+        loop {
+            let remaining = {
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.entries.is_empty() {
+                    return Vec::new();
+                }
+                deadline.saturating_duration_since(Instant::now())
+            };
+            if remaining.is_zero()
+                || tokio::time::timeout(remaining, changed.changed())
+                    .await
+                    .is_err()
+            {
+                return self.identities();
+            }
+        }
+    }
+
+    fn identities(&self) -> Vec<fs::Spec> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .values()
+            .map(|entry| entry.spec.clone())
+            .collect()
+    }
+
+    fn shut_down(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.phase = AttachmentPhase::ShuttingDown;
+        Self::publish_locked(&mut state, &self.changed);
+    }
+
+    fn publish_locked(state: &mut AttachmentState, changed: &watch::Sender<usize>) {
+        changed.send_replace(state.connections.len());
     }
 }
 
@@ -209,7 +272,7 @@ pub struct VfsServer {
     state: Mutex<VfsState>,
     connection_tx: mpsc::UnboundedSender<Connection>,
     connection_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    exit_tx: mpsc::UnboundedSender<(ListenerTarget, Arc<()>)>,
+    exit_tx: mpsc::UnboundedSender<(Endpoint, Arc<()>)>,
     event_tx: broadcast::Sender<ListenerEvent>,
     reaper_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -258,7 +321,7 @@ impl VfsServer {
 
         let weak = Arc::downgrade(&server);
         let reaper_task = tokio::spawn(async move {
-            while let Some((target, identity)) = exit_rx.recv().await {
+            while let Some((endpoint, identity)) = exit_rx.recv().await {
                 let Some(server) = weak.upgrade() else {
                     break;
                 };
@@ -269,16 +332,18 @@ impl VfsServer {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if state.shutting_down {
                         false
-                    } else if state.listeners.get(&target.kind()).is_some_and(|record| {
-                        record.target == target && Arc::ptr_eq(&record.identity, &identity)
-                    }) {
-                        let record = state.listeners.remove(&target.kind());
-                        state.ready = if state.readiness_enabled {
-                            listener_set_ready(&state)
-                        } else {
-                            false
-                        };
-                        if let Some(path) = record.as_ref().and_then(|record| record.target.path())
+                    } else if state
+                        .listeners
+                        .get(&endpoint)
+                        .is_some_and(|record| Arc::ptr_eq(&record.identity, &identity))
+                    {
+                        let record = state.listeners.remove(&endpoint);
+                        // Every installed endpoint is required. Once one
+                        // exits, this daemon lifetime cannot become ready
+                        // again without rebuilding the complete listener set.
+                        state.ready = false;
+                        if let Some(path) =
+                            record.as_ref().and_then(|record| record.endpoint.path())
                         {
                             unlink_socket(path);
                         }
@@ -288,7 +353,7 @@ impl VfsServer {
                     }
                 };
                 if removed {
-                    let _ = server.event_tx.send(ListenerEvent::Exited { target });
+                    let _ = server.event_tx.send(ListenerEvent::Exited { endpoint });
                 }
             }
         });
@@ -300,15 +365,26 @@ impl VfsServer {
     }
 
     #[must_use]
-    /// Subscribe to listener failure observations.
+    /// Subscribe to listener failure events.
     pub fn listener_events(&self) -> broadcast::Receiver<ListenerEvent> {
         self.event_tx.subscribe()
     }
 
     #[must_use]
     /// Return the current deduplicated live attachment rows.
-    pub fn attachments(&self) -> Vec<FrontendInfo> {
+    pub fn attachments(&self) -> Vec<fs::Spec> {
         self.attachments.snapshot()
+    }
+
+    /// Stop admitting attachments and push a stop command to every live
+    /// connection.
+    pub fn stop_filesystems(&self) {
+        self.attachments.stop_filesystems();
+    }
+
+    /// Wait until every attachment has detached or `timeout` expires.
+    pub async fn drain_attachments(&self, timeout: Duration) -> Vec<fs::Spec> {
+        self.attachments.drain(timeout).await
     }
 
     #[must_use]
@@ -320,7 +396,7 @@ impl VfsServer {
             .ready
     }
 
-    /// Mark the currently bound listeners ready after startup restoration.
+    /// Mark the currently bound fixed listeners ready after startup.
     pub fn mark_ready(&self) {
         let startup_gate = {
             let mut state = self
@@ -351,111 +427,38 @@ impl VfsServer {
         receiver
     }
 
-    /// Bind the fixed local UDS before starting its accept task.
-    pub fn serve_local(self: &Arc<Self>, path: PathBuf) -> io::Result<ListenerTarget> {
-        if let Some(target) = self.existing(ListenerKind::Local) {
-            return Ok(target);
+    /// Bind one Unix endpoint before starting its accept task.
+    pub fn serve_unix(self: &Arc<Self>, path: &Path) -> io::Result<Endpoint> {
+        let endpoint = Endpoint::Unix {
+            path: path.to_path_buf(),
+        };
+        if let Some(endpoint) = self.existing(&endpoint) {
+            return Ok(endpoint);
         }
-        let listener = bind_unix(&path, "local attach socket")?;
-        self.install(ListenerTarget::Local { path }, Listener::Unix(listener))
-            .map(|(target, _)| target)
+        let listener = bind_unix(path, "local attach socket")?;
+        self.install(endpoint, Listener::Unix(listener))
     }
 
-    /// Bind or return the TCP listener for Docker runtime.
-    pub fn ensure_tcp(
+    /// Bind one TCP endpoint before starting its accept task.
+    pub fn serve_tcp(
         self: &Arc<Self>,
         bind_addr: Ipv4Addr,
-        port: u16,
-    ) -> io::Result<ListenerTarget> {
-        self.ensure_tcp_with_status(bind_addr, port)
-            .map(|(target, _)| target)
-    }
-
-    /// Bind or return the TCP listener and report whether this call created it.
-    /// Daemon persistence uses the ownership bit to roll back only a listener
-    /// created by the failing control operation.
-    pub fn ensure_tcp_with_status(
-        self: &Arc<Self>,
-        bind_addr: Ipv4Addr,
-        port: u16,
-    ) -> io::Result<(ListenerTarget, bool)> {
-        if let Some(target) = self.existing(ListenerKind::Tcp) {
-            return Ok((target, false));
+        port: NonZeroU16,
+    ) -> io::Result<Endpoint> {
+        let addr = SocketAddr::from((bind_addr, port.get()));
+        let endpoint = Endpoint::Tcp { addr };
+        if let Some(endpoint) = self.existing(&endpoint) {
+            return Ok(endpoint);
         }
-        let std_listener = std::net::TcpListener::bind((bind_addr, port))?;
+        let std_listener = std::net::TcpListener::bind(addr)?;
         std_listener.set_nonblocking(true)?;
-        let addr = std_listener.local_addr()?;
         let listener = TcpListener::from_std(std_listener)?;
-        self.install(ListenerTarget::Tcp { addr }, Listener::Tcp(listener))
-    }
-
-    /// Bind or return the UDS used by the vsock proxy.
-    pub fn ensure_vsock(self: &Arc<Self>, path: &Path) -> io::Result<ListenerTarget> {
-        self.ensure_vsock_with_status(path)
-            .map(|(target, _)| target)
-    }
-
-    /// Bind or return the vsock listener and report whether this call created it.
-    /// Daemon persistence uses the ownership bit to roll back only a listener
-    /// created by the failing control operation.
-    pub fn ensure_vsock_with_status(
-        self: &Arc<Self>,
-        path: &Path,
-    ) -> io::Result<(ListenerTarget, bool)> {
-        if let Some(target) = self.existing(ListenerKind::Vsock) {
-            return Ok((target, false));
-        }
-        let target = ListenerTarget::Vsock {
-            socket_path: path.to_path_buf(),
-        };
-        let listener = bind_unix(path, "vsock attach socket")?;
-        match self.install(target, Listener::Unix(listener)) {
-            Ok(binding) => {
-                if !binding.1 && binding.0.path() != Some(path) {
-                    unlink_socket(path);
-                }
-                Ok(binding)
-            },
-            Err(error) => {
-                unlink_socket(path);
-                Err(error)
-            },
-        }
-    }
-
-    /// Remove one exact listener owned by this server.
-    pub fn remove_listener(&self, target: &ListenerTarget) -> bool {
-        let (task, path) = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(record) = state.listeners.get(&target.kind()) else {
-                return false;
-            };
-            if &record.target != target {
-                return false;
-            }
-            let record = state
-                .listeners
-                .remove(&target.kind())
-                .expect("listener existed immediately before removal");
-            state.ready = if state.readiness_enabled {
-                listener_set_ready(&state)
-            } else {
-                false
-            };
-            (record.task, record.target.path().map(PathBuf::from))
-        };
-        task.abort();
-        if let Some(path) = path {
-            unlink_socket(&path);
-        }
-        true
+        self.install(endpoint, Listener::Tcp(listener))
     }
 
     /// Stop listeners and connection tasks, then remove owned UDS paths.
     pub async fn shutdown(&self) {
+        self.attachments.shut_down();
         let (tasks, paths, connection_task, reaper_task) = {
             let mut state = self
                 .state
@@ -466,7 +469,7 @@ impl VfsServer {
             let records = std::mem::take(&mut state.listeners);
             let paths = records
                 .values()
-                .filter_map(|record| record.target.path().map(PathBuf::from))
+                .filter_map(|record| record.endpoint.path().map(PathBuf::from))
                 .collect::<Vec<_>>();
             let tasks = records
                 .into_values()
@@ -507,42 +510,30 @@ impl VfsServer {
         }
     }
 
-    fn existing(&self, kind: ListenerKind) -> Option<ListenerTarget> {
+    fn existing(&self, endpoint: &Endpoint) -> Option<Endpoint> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state
             .listeners
-            .get(&kind)
+            .get(endpoint)
             .is_some_and(|record| !record.task.is_finished())
         {
-            return state
-                .listeners
-                .get(&kind)
-                .map(|record| record.target.clone());
+            return Some(endpoint.clone());
         }
-        if let Some(record) = state.listeners.remove(&kind) {
-            state.ready = if state.readiness_enabled {
-                listener_set_ready(&state)
-            } else {
-                false
-            };
-            if let Some(path) = record.target.path() {
+        if let Some(record) = state.listeners.remove(endpoint) {
+            state.ready = false;
+            if let Some(path) = record.endpoint.path() {
                 unlink_socket(path);
             }
         }
         None
     }
 
-    fn install(
-        self: &Arc<Self>,
-        target: ListenerTarget,
-        listener: Listener,
-    ) -> io::Result<(ListenerTarget, bool)> {
-        let kind = target.kind();
-        if let Some(existing) = self.existing(kind) {
-            return Ok((existing, false));
+    fn install(self: &Arc<Self>, endpoint: Endpoint, listener: Listener) -> io::Result<Endpoint> {
+        if let Some(existing) = self.existing(&endpoint) {
+            return Ok(existing);
         }
         let startup_gate = self
             .state
@@ -551,7 +542,7 @@ impl VfsServer {
             .startup_gate
             .as_ref()
             .map(watch::Sender::subscribe);
-        let target_for_task = target.clone();
+        let endpoint_for_task = endpoint.clone();
         let identity = Arc::new(());
         let task_identity = Arc::clone(&identity);
         let (start_tx, start_rx) = tokio::sync::oneshot::channel();
@@ -559,11 +550,6 @@ impl VfsServer {
         let attachments = Arc::clone(&self.attachments);
         let connection_tx = self.connection_tx.clone();
         let exit_tx = self.exit_tx.clone();
-        let runtime = match kind {
-            ListenerKind::Local => FrontendRuntime::Host,
-            ListenerKind::Tcp => FrontendRuntime::Docker,
-            ListenerKind::Vsock => FrontendRuntime::Libkrun,
-        };
         let task = tokio::spawn(async move {
             if start_rx.await.is_err() {
                 return;
@@ -578,8 +564,8 @@ impl VfsServer {
                     return;
                 }
             }
-            accept_loop(listener, namespace, runtime, attachments, connection_tx).await;
-            let _ = exit_tx.send((target_for_task, task_identity));
+            accept_loop(listener, namespace, attachments, connection_tx).await;
+            let _ = exit_tx.send((endpoint_for_task, task_identity));
         });
         let mut state = self
             .state
@@ -593,9 +579,9 @@ impl VfsServer {
             ));
         }
         state.listeners.insert(
-            kind,
+            endpoint.clone(),
             ListenerRecord {
-                target: target.clone(),
+                endpoint: endpoint.clone(),
                 identity,
                 task,
             },
@@ -605,7 +591,7 @@ impl VfsServer {
         }
         drop(state);
         let _ = start_tx.send(());
-        Ok((target, true))
+        Ok(endpoint)
     }
 }
 
@@ -616,10 +602,7 @@ enum Listener {
 
 fn listener_set_ready(state: &VfsState) -> bool {
     !state.shutting_down
-        && state
-            .listeners
-            .get(&ListenerKind::Local)
-            .is_some_and(|record| !record.task.is_finished())
+        && !state.listeners.is_empty()
         && state
             .listeners
             .values()
@@ -637,7 +620,6 @@ fn unlink_socket(path: &Path) {
 async fn accept_loop(
     listener: Listener,
     namespace: Arc<dyn Namespace>,
-    runtime: FrontendRuntime,
     attachments: Arc<Attachments>,
     connection_tx: mpsc::UnboundedSender<Connection>,
 ) {
@@ -652,7 +634,7 @@ async fn accept_loop(
                             if let Err(error) = serve_connection_with_registry(
                                 namespace,
                                 stream,
-                                Some((attachments, runtime)),
+                                Some(attachments),
                             )
                             .await
                             {
@@ -680,7 +662,7 @@ async fn accept_loop(
                             if let Err(error) = serve_connection_with_registry(
                                 namespace,
                                 stream,
-                                Some((attachments, runtime)),
+                                Some(attachments),
                             )
                             .await
                             {
@@ -768,32 +750,33 @@ where
 async fn serve_connection_with_registry<S>(
     namespace: Arc<dyn Namespace>,
     stream: S,
-    attachment: Option<(Arc<Attachments>, FrontendRuntime)>,
+    attachments: Option<Arc<Attachments>>,
 ) -> Result<(), WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(stream);
 
-    // A single writer task owns the write half; responses (from per-request
-    // tasks) and events (from the forwarder) are serialized through its channel,
-    // so frames never interleave on the wire.
-    // Complete the handshake before subscribing to namespace events so Welcome
-    // is always the first server frame on a new connection.
-    let handshake_result = server_handshake(&mut reader, &mut writer).await;
-    let identity = match handshake_result {
-        Ok(identity) => identity,
-        Err(error) => {
-            return Err(error);
-        },
-    };
-
-    let _attach_guard = attachment.map(|(attachments, runtime)| AttachGuard {
-        id: attachments.attached(&identity, runtime),
-        attachments,
-    });
-
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Frame>();
+    let spec = read_hello(&mut reader, &mut writer).await?;
+    let attach_guard = if let Some(attachments) = attachments {
+        let id = match attachments.attached(&spec, outbound_tx.clone()) {
+            Ok(id) => id,
+            Err(reason) => {
+                send_rejected(&mut writer, reason.clone()).await?;
+                return Err(WireError::Rejected(reason));
+            },
+        };
+        Some(AttachGuard { attachments, id })
+    } else {
+        None
+    };
+    send_welcome(&mut writer).await?;
+
+    // A single writer task owns the write half; responses (from per-request
+    // tasks), events, and server controls are serialized through its channel,
+    // so frames never interleave on the wire. Registration and Welcome occur
+    // before the task starts, preserving handshake ordering.
     let mut events = namespace.subscribe();
     let writer_task = tokio::spawn(async move {
         let mut writer = writer;
@@ -827,18 +810,19 @@ where
 
     let read_result = read_loop(&mut reader, &namespace, &outbound_tx).await;
 
-    // Dropping the last outbound sender lets the writer task drain and exit.
+    // The attachment registry also holds an outbound sender. Abort the writer
+    // before dropping the guard so disconnect cannot form a sender/guard
+    // lifetime cycle that leaves the attachment registered forever.
     drop(outbound_tx);
+    writer_task.abort();
     let _ = writer_task.await;
+    drop(attach_guard);
     read_result
 }
 
-/// Read the client's `Hello`, check the protocol, and answer with `Welcome` or
-/// `Rejected`. On success returns the connecting frontend's identity.
-async fn server_handshake<R, W>(
-    reader: &mut R,
-    writer: &mut W,
-) -> Result<FrontendIdentity, WireError>
+/// Read the client's `Hello` and check the protocol. The caller performs
+/// attachment admission before sending `Welcome`.
+async fn read_hello<R, W>(reader: &mut R, writer: &mut W) -> Result<fs::Spec, WireError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -850,7 +834,11 @@ where
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
     }
     let hello: Handshake = postcard::from_bytes(&frame.body)?;
-    let Handshake::Hello { protocol, frontend } = hello else {
+    let Handshake::Hello {
+        protocol,
+        filesystem,
+    } = hello
+    else {
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
     };
     if protocol != PROTOCOL {
@@ -861,10 +849,17 @@ where
         send_rejected(writer, error.to_string()).await?;
         return Err(error);
     }
+    Ok(filesystem)
+}
+
+async fn send_welcome<W>(writer: &mut W) -> Result<(), WireError>
+where
+    W: AsyncWrite + Unpin,
+{
     let welcome = Handshake::Welcome { protocol: PROTOCOL };
     let body = postcard::to_allocvec(&welcome)?;
     write_frame(writer, &Frame::new(0, KIND_RESPONSE, body)).await?;
-    Ok(frontend)
+    Ok(())
 }
 
 struct AttachGuard {

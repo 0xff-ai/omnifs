@@ -5,9 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Credential-free out-of-process frontend runner for omnifs"
+description = "Credential-free guest filesystem runner for omnifs"
 categories = ["filesystem"]
-keywords = ["omnifs", "filesystem", "frontend"]
+keywords = ["omnifs", "fuse", "nfs"]
 
 [[bin]]
 name = "omnifs-thin"
@@ -16,12 +16,18 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+omnifs-core = { workspace = true }
 omnifs-mtab = { workspace = true }
 omnifs-nfs = { workspace = true, default-features = false }
 omnifs-vfs = { workspace = true, features = ["wire"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 omnifs-fuse = { workspace = true, default-features = false }

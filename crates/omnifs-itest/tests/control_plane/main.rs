@@ -43,7 +43,7 @@ impl Daemon {
     }
 
     /// Spawn a host-native daemon for a fresh hermetic home. The daemon binds
-    /// its fixed local frontend socket but launches no runner, so its control
+    /// its fixed local filesystem socket but launches no runner, so its control
     /// API is reachable only through its own workspace's record.
     fn spawn() -> Option<Self> {
         let hermetic = hermetic_home();
@@ -66,8 +66,8 @@ impl Daemon {
     }
 
     /// Wait for the daemon to publish its record. This fixture intentionally
-    /// starts the pure namespace daemon without a frontend: the control-plane
-    /// assertion is socket ownership, not a frontend mount.
+    /// starts the pure namespace daemon without a filesystem: the control-plane
+    /// assertion is socket ownership, not a filesystem mount.
     fn wait_serving(&mut self) -> Option<()> {
         let record = self.record_path();
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -160,7 +160,11 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         u64::from(daemon_a.pid()),
         "status A must report A's pid"
     );
-    assert!(result_a["frontends"].as_array().is_some_and(Vec::is_empty));
+    assert!(
+        result_a["filesystems"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    );
     assert!(
         result_a["mounts"]
             .as_array()
@@ -179,7 +183,7 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         "status B must report B's pid"
     );
     assert!(
-        json_b["result"]["frontends"]
+        json_b["result"]["filesystems"]
             .as_array()
             .is_some_and(Vec::is_empty)
     );

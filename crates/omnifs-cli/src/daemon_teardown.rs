@@ -7,8 +7,8 @@
 use crate::inventory::{DaemonProbe, Inventory};
 use crate::ui::consent::Outcome;
 use crate::ui::render::{self, Capabilities};
-use crate::ui::style;
 use omnifs_workspace::Workspace;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 const SHUTDOWN_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -18,13 +18,23 @@ const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// command to choose severity and wording without parsing internal prose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TeardownOutcome {
-    DaemonStopped { pid: u32 },
+    DaemonStopped {
+        pid: u32,
+        detached: usize,
+        still_attached: Vec<String>,
+    },
     DaemonAlreadyStopped,
-    DaemonShutdownFailed { error: String },
+    DaemonShutdownFailed {
+        error: String,
+    },
     StaleRecordRemoved,
     StaleRecordAbsent,
-    StaleRecordKept { error: String },
-    OwnershipUnknown { error: String },
+    StaleRecordKept {
+        error: String,
+    },
+    OwnershipUnknown {
+        error: String,
+    },
 }
 
 impl TeardownOutcome {
@@ -42,7 +52,21 @@ impl TeardownOutcome {
 
     pub(crate) fn outcome(&self) -> Outcome {
         match self {
-            Self::DaemonStopped { pid } => Outcome::done(self.id(), format!("stopped (pid {pid})")),
+            Self::DaemonStopped {
+                pid,
+                detached,
+                still_attached,
+            } => {
+                let mut value = format!("stopped (pid {pid}, detached {detached} filesystems)");
+                if !still_attached.is_empty() {
+                    let _ = write!(
+                        value,
+                        "; still attached: {} (run `omnifs doctor`)",
+                        still_attached.join(", ")
+                    );
+                }
+                Outcome::done(self.id(), value)
+            },
             Self::DaemonAlreadyStopped => Outcome::skip(self.id(), "already stopped"),
             Self::DaemonShutdownFailed { error } => {
                 Outcome::fail(self.id(), format!("shutdown failed: {error}"))
@@ -108,12 +132,12 @@ impl DaemonTeardown {
         Ok(())
     }
 
-    /// Stop only the namespace daemon, leaving every frontend process in
+    /// Stop only the namespace daemon, leaving every filesystem process in
     /// place. Apply uses this path when switching desired mount revisions;
-    /// surviving frontends reconnect when the daemon returns.
+    /// surviving filesystems reconnect when the daemon returns.
     pub(crate) async fn stop_daemon(&self) -> anyhow::Result<()> {
         let outcome = match self.client.status_optional().await {
-            Ok(Some(status)) => self.shutdown_and_wait(status.pid).await,
+            Ok(Some(status)) => self.shutdown_and_wait(status.pid, false).await,
             Ok(None) => self.remove_stale_record(),
             Err(error) => anyhow::bail!(
                 "cannot stop the running daemon before applying desired state: {error:#}"
@@ -139,7 +163,7 @@ impl DaemonTeardown {
         let mut outcomes = Vec::new();
         match self.initial_or_status().await {
             Ok(Some(status)) => {
-                let outcome = self.shutdown_and_wait(status.pid).await;
+                let outcome = self.shutdown_and_wait(status.pid, true).await;
                 if matches!(
                     outcome,
                     TeardownOutcome::DaemonStopped { .. } | TeardownOutcome::DaemonAlreadyStopped
@@ -172,15 +196,19 @@ impl DaemonTeardown {
     /// Request shutdown and wait until the control surface and process are gone.
     /// The daemon acknowledges shutdown before its serving task exits, so a
     /// successful POST alone is not enough to report `DaemonStopped`.
-    async fn shutdown_and_wait(&self, pid: u32) -> TeardownOutcome {
-        match self.client.shutdown().await {
-            Ok(Some(())) => {
+    async fn shutdown_and_wait(&self, pid: u32, stop_filesystems: bool) -> TeardownOutcome {
+        match self.client.shutdown(stop_filesystems).await {
+            Ok(Some(shutdown)) => {
                 let deadline = tokio::time::Instant::now() + SHUTDOWN_SETTLE_TIMEOUT;
                 let mut last_error = None;
                 loop {
                     match self.client.status_optional().await {
                         Ok(None) if !crate::process::is_alive(pid) => {
-                            return TeardownOutcome::DaemonStopped { pid };
+                            return TeardownOutcome::DaemonStopped {
+                                pid,
+                                detached: shutdown.detached,
+                                still_attached: shutdown.still_attached,
+                            };
                         },
                         Ok(Some(_) | None) => {},
                         Err(error) => last_error = Some(format!("{error:#}")),
@@ -270,22 +298,10 @@ fn transcript(outcomes: &[TeardownOutcome], caps: Capabilities) -> Vec<String> {
     }
     let keys: Vec<&str> = visible.iter().map(|outcome| outcome.id()).collect();
     let key_width = render::key_field_width(&keys);
-    let mut lines = visible
+    visible
         .iter()
         .map(|outcome| render::ledger_row_line(&outcome.outcome().ledger_row(), key_width, caps))
-        .collect::<Vec<_>>();
-    // Frontends are independent processes and outlive a daemon stop; this is
-    // the one fact worth restating, never shown for a failed/no-op teardown.
-    if outcomes
-        .iter()
-        .any(|outcome| matches!(outcome, TeardownOutcome::DaemonStopped { .. }))
-    {
-        lines.push(style::accentuate(
-            "  Frontends stay attached. Your files return with `omnifs up`.",
-            caps.color,
-        ));
-    }
-    lines
+        .collect::<Vec<_>>()
 }
 
 #[cfg(test)]
@@ -304,7 +320,12 @@ mod tests {
 
     #[test]
     fn teardown_outcomes_have_truthful_severity_and_ids() {
-        let stopped = TeardownOutcome::DaemonStopped { pid: 42 }.outcome();
+        let stopped = TeardownOutcome::DaemonStopped {
+            pid: 42,
+            detached: 2,
+            still_attached: Vec::new(),
+        }
+        .outcome();
         assert_eq!(stopped.id, "daemon");
         assert_eq!(stopped.glyph(), Glyph::Done);
 
@@ -322,22 +343,22 @@ mod tests {
     /// one key (`daemon`, 6 columns), so the field width is `6 + 3 = 9`, a
     /// 3-space gap rather than the retired fixed-14-column rail's 8:
     /// ```text
-    /// ✓ daemon   stopped (pid 31114)
-    ///   Frontends stay attached. Your files return with omnifs up.
+    /// ✓ daemon   stopped (pid 31114, detached 2 filesystems)
     /// ```
     #[test]
     fn transcript_matches_the_stopped_daemon_shape() {
         let outcomes = vec![
-            TeardownOutcome::DaemonStopped { pid: 31114 },
+            TeardownOutcome::DaemonStopped {
+                pid: 31114,
+                detached: 2,
+                still_attached: Vec::new(),
+            },
             TeardownOutcome::StaleRecordRemoved,
         ];
         let lines = transcript(&outcomes, caps(false));
         assert_eq!(
             lines,
-            vec![
-                "✓ daemon   stopped (pid 31114)".to_owned(),
-                "  Frontends stay attached. Your files return with omnifs up.".to_owned(),
-            ]
+            vec!["✓ daemon   stopped (pid 31114, detached 2 filesystems)".to_owned(),]
         );
     }
 
@@ -373,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn a_teardown_failure_never_shows_the_frontends_stay_attached_line() {
+    fn a_teardown_failure_never_shows_the_filesystems_stay_attached_line() {
         let outcomes = vec![TeardownOutcome::DaemonShutdownFailed {
             error: "busy".to_owned(),
         }];

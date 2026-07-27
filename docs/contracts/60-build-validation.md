@@ -27,11 +27,11 @@ The provider manifest schema is generated from provider model types. The local c
 
 Run `just schema` after provider manifest schema changes. Keep the generated provider schema checked in when its source model changes.
 
-The control protocol has one current version in every request and reply envelope. `DaemonStatus` retains operational nested types consumed by Inventory, and `FrontendInfo.mount_point` remains the per-frontend wire field. Protocol tests exercise the typed request/reply shapes directly.
+The control protocol has one current version in every request and reply envelope. `DaemonStatus` retains operational nested types consumed by Inventory, and `FilesystemInfo.mount_point` remains the per-filesystem wire field. Protocol tests exercise the typed request/reply shapes directly.
 
 ### Live runtime validation
 
-Mount, provider, clone, traversal, frontend, or runtime behavior changes need live runtime validation. Rust checks alone are not enough.
+Mount, provider, clone, traversal, filesystem, or runtime behavior changes need live runtime validation. Rust checks alone are not enough.
 
 Use `just dev -y` for the supported contributor runtime path. Check status with `omnifs status` directly (host-native, no `docker exec` needed). Exercise shell traversal and real file tools for path-surface changes.
 
@@ -43,37 +43,37 @@ Run `just check` before a push or PR handoff; it composes formatting, justfile a
 
 ### Cross-language facts on the container boundary
 
-The daemon always runs host-native, so `OMNIFS_HOME` and `OMNIFS_MOUNT_POINT` resolve directly from the host environment on every platform. Their name constants and home-root env resolution live on `omnifs_workspace::Workspace`, which is the only type that binds those names to behavior-owning components. The only remaining guest-container path is the optional Docker-hosted FUSE frontend's fixed mount point, `/omnifs`. It is not env-var-driven (the frontend container is credential-free and gets no `OMNIFS_HOME`), so the literal is hardcoded at its owners instead: the frontend image's `ENTRYPOINT` (`Dockerfile`), `commands::frontend::GUEST_MOUNT` for production launchers, and `scripts/dev.ts`'s `GUEST_MOUNT` for dev. The value is frozen; a change breaks `just dev` and the integration tests loudly.
+The daemon always runs host-native, so `OMNIFS_HOME` resolves from the host environment on every platform. `omnifs_workspace::Workspace` owns that resolution and all derived paths. Guest runtimes use the fixed location `/omnifs`; `fs::Spec` stores it, launchers pass it through `--location`, and `scripts/dev.ts` uses the same value. The image entrypoint contains only `/usr/local/bin/omnifs-thin`; the launcher supplies the flat ID, protocol, runtime, and location arguments.
 
-### Frontend image artifact
+### Filesystem image artifact
 
 Linux and Darwin x64 CLI archives include exactly `omnifs` and the sibling `omnifs-thin` runner. Linux thin supports `fuse` and `nfs`; Darwin thin supports `nfs`. Darwin arm64 also carries `omnifs-libkrun` plus `libexec/omnifs/{libkrun.1.dylib,KRUN_EFI.silent.fd,runtime-manifest.json,licenses/}`. The matching npm platform package must whitelist the same files, and CI extraction smokes assert every expected executable before running acceptance lanes.
 
-CI has one authoritative Linux `omnifs-thin` producer per architecture. CLI packaging consumes that binary together with the separately built full CLI, while frontend and guest-image jobs consume the same artifact. Darwin x64 cross-links on Linux. Darwin arm64 builds on the standard native `macos-15` Apple Silicon runner, builds pinned libkrun 1.19.4 from revision `728df8125077d0db44265f6e997c72b81b65c015` with only its EFI feature set, stages the pinned EFI firmware and license sources, rejects GPU and forbidden dynamic links, and applies an ad hoc CI signature so the payload can be checked. CI never boots the guest because hosted runners do not support nested virtualization.
+CI has one authoritative Linux `omnifs-thin` producer per architecture. CLI packaging consumes that binary together with the separately built full CLI, while filesystem and guest-image jobs consume the same artifact. Darwin x64 cross-links on Linux. Darwin arm64 builds on the standard native `macos-15` Apple Silicon runner, builds pinned libkrun 1.19.4 from revision `728df8125077d0db44265f6e997c72b81b65c015` with only its EFI feature set, stages the pinned EFI firmware and license sources, rejects GPU and forbidden dynamic links, and applies an ad hoc CI signature so the payload can be checked. CI never boots the guest because hosted runners do not support nested virtualization.
 
 Release replaces the CI Darwin arm64 archive with the same payload signed under one Developer ID team. It signs the dylib before the helper, grants only the Hypervisor entitlement to `omnifs-libkrun`, submits one zip to Apple's notary service, records that submission ID, and polls the same submission in a later job. GitHub and npm publication cannot start until the status is `Accepted`; rejected, invalid, missing, or timed-out submissions fail the release. The final archive comes from the signed payload saved before submission, so polling never rebuilds, resigns, or resubmits it.
 
-The Docker-hosted FUSE frontend (`omnifs frontend enable fuse --runtime docker`) ships a minimal image from `Dockerfile`: `frontend-base` (`debian:trixie-slim`, chosen because Debian's default coreutils/findutils are GNU, which `tail -f` fidelity requires), `frontend-dev` (contributor, built by `just frontend-image`, copies the binary from the `thin-builder` stage), and `frontend-release` (built by `scripts/ci/build-frontend-image.sh`, injects a prebuilt Linux binary as the `omnifs-thin-bin` build context). The image runs `omnifs-thin fuse` with no engine runtime, Wasmtime, or provider bundle, not the full `omnifs` CLI/daemon binary, so neither stage needs a provider-store build context. The frontend image carries no launch-protocol/min-launcher-version label: `DockerRunner::launch` (`crates/omnifs-cli/src/docker.rs`) starts the container and checks its credential-free shape without consulting such a label.
+The Docker-hosted FUSE filesystem ships a minimal image from `Dockerfile`: `filesystem-base`, `filesystem-dev`, and `filesystem-release`. The image runs the flat `omnifs-thin` interface with no engine runtime, Wasmtime, or provider bundle, so neither stage needs a provider-store build context. The launcher supplies `--name`, `--protocol`, `--runtime`, and `--location`, while `OMNIFS_ATTACH_ADDR` remains the only Omnifs launch env variable.
 
-CI builds and pushes the frontend image per architecture in the PR lane (`frontend-amd64`/`frontend-arm64`), smokes it directly with `scripts/ci/smoke-frontend-image.sh` (version, GNU `tail`, fails loudly with no `OMNIFS_ATTACH_ADDR`), and on a `main` push merges the per-arch digests into one multi-platform manifest via `scripts/ci/publish-manifest.sh`. Release promotes that manifest to `ghcr.io/0xff-ai/omnifs-frontend:<version>` through `scripts/ci/promote-image.sh`. The `fuse-docker` job (needs `frontend-amd64`'s image digest and the packaged Linux CLI, mirroring `conformance-fuse`'s input shape) runs `crates/omnifs-itest/tests/frontend_docker` against a live host-native daemon and the real amd64 image: the `fuse-docker` conformance column, `omnifs frontend enable|disable|restart|ls` lifecycle, `omnifs down` teardown ordering, a cold-start budget, cross-mount byte identity, kill/reattach behavior, and the no-credentials contract. Its scorecards upload as `conformance-scorecards-fuse-docker`, next to `conformance-fuse`'s own artifact.
+CI builds and pushes the filesystem image per architecture in the PR lane (`filesystem-amd64`/`filesystem-arm64`), smokes it directly with `scripts/ci/smoke-filesystem-image.sh`, and on a `main` push merges the per-arch digests into one multi-platform manifest. The `fuse-docker` job runs `crates/omnifs-itest/tests/filesystem_docker` against a live host-native daemon and the real image: named `fs create|attach|detach|restart|ls` lifecycle, `omnifs down` ordering, cold start, cross-mount byte identity, kill/reattach behavior, and the no-credentials contract.
 
 ### Guest disk image artifact (libkrun runtime)
 
 The libkrun runtime's guest ships as a bootable raw disk image, not a container: `scripts/guest-image/` holds an `mkosi` project (`mkosi/mkosi.conf` plus `mkosi/mkosi.extra/` for the systemd units and tmpfiles rules) that assembles a minimal Debian trixie arm64 EFI image (systemd-boot, fuse3, dropbear-bin, no cloud-init). `just guest-image` (`scripts/guest-image/build.sh`) extracts the linux/arm64 `omnifs-thin` binary from the shared `thin-builder` Dockerfile stage (or reuses one passed via `OMNIFS_THIN_BIN`), then runs `mkosi` inside a privileged container to bake it in at `/usr/local/bin/omnifs-thin`. No provider-store bundle is needed: `omnifs-thin` needs no engine runtime or Wasmtime, unlike the full `omnifs` CLI/daemon binary.
 
-Root login is split into two `mkosi` profiles selected by `--profile` (`build.sh`'s passthrough, or `GUEST_IMAGE_PROFILE`), via `mkosi.profiles/{dev,release}/mkosi.conf`: `dev` (the `just guest-image` default) keeps an unlocked, autologin-enabled root console for the boot smoke and manual debugging; `release` sets neither `RootPassword=` nor `Autologin=`, so root has no password login (mkosi never touches `/etc/shadow` when `RootPassword=` is unset, leaving Debian's own locked default) and no getty unit autologins. `scripts/ci/check-guest-image.sh IMAGE_PATH {dev|release}` asserts the built image's static shape — fail-closed, non-zero exit on any violation — by loop-mounting it read-only inside a throwaway privileged container (works identically on macOS and Linux, since loop-mounting a GPT image needs kernel facilities macOS lacks natively): `/usr/local/bin/omnifs-thin` present and executable; all six `omnifs-*` units present, with the three that declare `[Install]` (`omnifs-seed-mount.service`, `omnifs-frontend.service`, `omnifs-ssh-setup.service`) enabled; no cloud-init anywhere; and, for `release` only, the locked `/etc/shadow` root entry and the absence of the three autologin drop-ins (`console-getty.service.d`, `getty@tty1.service.d`, `serial-getty@hvc0.service.d`). It is runnable locally against either profile's build output, not just in CI.
+Root login is split into two `mkosi` profiles selected by `--profile` (`build.sh`'s passthrough, or `GUEST_IMAGE_PROFILE`), via `mkosi.profiles/{dev,release}/mkosi.conf`: `dev` (the `just guest-image` default) keeps an unlocked, autologin-enabled root console for the boot smoke and manual debugging; `release` sets neither `RootPassword=` nor `Autologin=`, so root has no password login (mkosi never touches `/etc/shadow` when `RootPassword=` is unset, leaving Debian's own locked default) and no getty unit autologins. `scripts/ci/check-guest-image.sh IMAGE_PATH {dev|release}` asserts the built image's static shape — fail-closed, non-zero exit on any violation — by loop-mounting it read-only inside a throwaway privileged container (works identically on macOS and Linux, since loop-mounting a GPT image needs kernel facilities macOS lacks natively): `/usr/local/bin/omnifs-thin` present and executable; all six `omnifs-*` units present, with the three that declare `[Install]` (`omnifs-seed-mount.service`, `omnifs-filesystem.service`, `omnifs-ssh-setup.service`) enabled; no cloud-init anywhere; and, for `release` only, the locked `/etc/shadow` root entry and the absence of the three autologin drop-ins (`console-getty.service.d`, `getty@tty1.service.d`, `serial-getty@hvc0.service.d`). It is runnable locally against either profile's build output, not just in CI.
 
-Attach parameters (`OMNIFS_ATTACH_ADDR`, `OMNIFS_READY_VSOCK_PORT`, `OMNIFS_SSH_PUBKEY`) reach the guest through a per-launch seed ISO, not cloud-init: `LibkrunRunner::launch` (`crates/omnifs-cli/src/libkrun_runner.rs`) builds an ISO9660+Joliet volume labeled `OMNIFS-SEED` with `hdiutil makehybrid`, auditing the staging directory against the exact expected key set before burning it. The guest's `omnifs-seed-mount.service` mounts it by label before `omnifs-frontend.service` and `omnifs-ssh-setup.service` source it via `EnvironmentFile=`/a plain read. A missing seed volume or config file fails both units loudly in the journal; neither hangs silently, and an omitted `OMNIFS_SSH_PUBKEY` leaves the guest's vsock ssh socket un-started (logged, not silent) rather than accepting into a guest with no `authorized_keys`. `scripts/guest-image/make-seed-iso.sh` is the standalone bash equivalent `just guest-image-smoke` (`scripts/guest-image/smoke.sh`) uses to boot the image through `omnifs-libkrun` with a throwaway seed and no ssh key, checking the serial console log for the guest reaching `multi-user.target` and `omnifs-frontend.service` starting.
+Attach parameters (`OMNIFS_FS_ID`, `OMNIFS_ATTACH_ADDR`, `OMNIFS_READY_VSOCK_PORT`, `OMNIFS_SSH_PUBKEY`) reach the guest through a per-launch seed ISO, not cloud-init. `LibkrunRunner::launch` builds an ISO9660+Joliet volume labeled `OMNIFS-SEED` and audits the exact key set before burning it. The guest services source that seed and invoke flat `omnifs-thin --name ... --protocol fuse --runtime libkrun --location /omnifs` arguments. Missing identity or attach data fails loudly.
 
 The libkrun BOOT smoke (`just guest-image-smoke`) and the libkrun conformance lane are both local-only gates: GitHub-hosted runners cannot nest virtualization, so neither runs in CI. Run them yourself before landing a change that touches guest boot behavior, the seed protocol, or the libkrun runtime.
 
-CI builds the guest image on a native arm64 runner (`guest-image-arm64` in `ci.yml`, gated by `scripts/guest-image/**`, `crates/omnifs-thin/**`, both protocol crates, `crates/omnifs-vfs/**`, or a push to `main`): it consumes the `thin-linux-arm64` job's binary artifact, builds the `release` profile, runs `check-guest-image.sh release` against it, compresses the result with `zstd -19`, and pushes it as an OCI artifact (`oras push`, artifact type `application/vnd.omnifs.guest-image.v1+zstd`, one blob) to `ghcr.io/0xff-ai/omnifs-guest:sha-<commit>`. `oras` is a CI-only tool; it is never a CLI or product dependency. A fork PR builds and asserts the image but skips the push with a loud warning (no registry write access from a fork's `GITHUB_TOKEN`). On ship, `release.yml`'s `promote` job retags the sha-keyed artifact to the version (`scripts/ci/promote-guest-image.sh`, mirroring `promote-image.sh`'s wait-for-artifact retry loop but using `oras tag` instead of `docker buildx imagetools create`, since the guest image is a single-arch non-container artifact) and attests its provenance, exactly like the frontend image.
+CI builds the guest image on a native arm64 runner (`guest-image-arm64` in `ci.yml`, gated by `scripts/guest-image/**`, `crates/omnifs-thin/**`, both protocol crates, `crates/omnifs-vfs/**`, or a push to `main`): it consumes the `thin-linux-arm64` job's binary artifact, builds the `release` profile, runs `check-guest-image.sh release` against it, compresses the result with `zstd -19`, and pushes it as an OCI artifact (`oras push`, artifact type `application/vnd.omnifs.guest-image.v1+zstd`, one blob) to `ghcr.io/0xff-ai/omnifs-guest:sha-<commit>`. `oras` is a CI-only tool; it is never a CLI or product dependency. A fork PR builds and asserts the image but skips the push with a loud warning (no registry write access from a fork's `GITHUB_TOKEN`). On ship, `release.yml`'s `promote` job retags the sha-keyed artifact to the version (`scripts/ci/promote-guest-image.sh`, mirroring `promote-image.sh`'s wait-for-artifact retry loop but using `oras tag` instead of `docker buildx imagetools create`, since the guest image is a single-arch non-container artifact) and attests its provenance, exactly like the filesystem image.
 
-The CLI's libkrun runtime mirrors the frontend image's channel split (`resolve_guest_image` in `crates/omnifs-cli/src/libkrun_runner.rs`): a release build defaults to `ghcr.io/0xff-ai/omnifs-guest:<version>` and pulls it on first use via `crate::guest_image_pull` (plain `reqwest`, not `oras`: anonymous ghcr token, manifest fetch accepting both the OCI image manifest and legacy artifact manifest media types, blob fetch, sha256 verification against the manifest before the file is trusted, cached under `<cache_dir>/guest-images/`); a dev build never downloads and defaults to the local `target/guest-image/omnifs-guest.raw`, naming `just guest-image` in its not-found error.
+The CLI's libkrun runtime mirrors the filesystem image's channel split (`resolve_guest_image` in `crates/omnifs-cli/src/libkrun_runner.rs`): a release build defaults to `ghcr.io/0xff-ai/omnifs-guest:<version>` and pulls it on first use via `crate::guest_image_pull` (plain `reqwest`, not `oras`: anonymous ghcr token, manifest fetch accepting both the OCI image manifest and legacy artifact manifest media types, blob fetch, sha256 verification against the manifest before the file is trusted, cached under `<cache_dir>/guest-images/`); a dev build never downloads and defaults to the local `target/guest-image/omnifs-guest.raw`, naming `just guest-image` in its not-found error.
 
 ### Libkrun conformance lane (local-only, never CI)
 
-`crates/omnifs-itest/tests/frontend_libkrun` runs the `fuse-libkrun` conformance column (the same shared row table and scorecard machinery `tests/frontend_docker` uses for the Docker-hosted frontend) against a live libkrun guest: `omnifs up --no-frontend`, `omnifs frontend enable fuse --runtime libkrun`, the matrix over ssh-over-vsock via `omnifs frontend shell fuse --runtime libkrun -- <cmd>`, then `omnifs down` with a teardown-cleanliness assertion (no leftover libkrun process, pidfile, or socket). It also asserts that the guest sees only loopback networking and no `tsi_hijack` kernel argument. Run it with `just libkrun-conformance`, which builds and stages the private helper runtime, builds the guest image first if missing, sets `OMNIFS_ACCEPTANCE_LIVE=1`, and runs the suite. Gated on `cfg(target_os = "macos")` plus the `OMNIFS_ACCEPTANCE_LIVE` opt-in, mirroring the live NFS lanes' skip-not-pass convention, and serialized against every other live-mount lane through this crate's one cross-process lock (`omnifs_itest::live::nfs_serial_lock`).
+`crates/omnifs-itest/tests/filesystem_libkrun` runs the `fuse-libkrun` conformance column against a live guest: it creates and attaches `itest-libkrun`, runs the matrix through `omnifs fs shell --name itest-libkrun --command <cmd>`, and proves detach cleanliness. Run it with `just libkrun-conformance`; it remains a local-only, opt-in lane serialized with other live mount tests.
 
 This lane can **never** run in GitHub-hosted CI: libkrun boots a libkrun microVM, and GitHub's hosted macOS runners do not support nested virtualization. It stays a declared local-only gate a contributor runs by hand before a libkrun-affecting change, not a lane that silently skips in CI and reads green.
 
@@ -94,12 +94,12 @@ This lane can **never** run in GitHub-hosted CI: libkrun boots a libkrun microVM
 - Treat a local aggregate command as the source of truth when CI runs the lanes directly.
 - Run host tests that rebuild providers in parallel without prebuilding providers when contention matters.
 - Treat `just docs-check` as code-symbol validation.
-- Reintroduce a second copy of the frontend apt block; edit `frontend-base` instead.
-- Add a fourth literal for the frontend's fixed `/omnifs` guest mount point instead of updating its three existing owners together.
-- Give the frontend image an `OMNIFS_HOME` or a provider store. It only ever runs `omnifs-thin fuse`.
+- Reintroduce a second copy of the filesystem apt block; edit `filesystem-base` instead.
+- Add a fourth literal for the filesystem's fixed `/omnifs` guest mount point instead of updating its three existing owners together.
+- Give the filesystem image an `OMNIFS_HOME` or a provider store. It only ever runs `omnifs-thin --protocol fuse`.
 - Push the guest image to ghcr from a contributor machine; only the `guest-image-arm64` CI job and `release`'s `promote` job do that.
 - Weaken `check-guest-image.sh`'s release-profile assertions to make a build pass instead of fixing the image.
-- Expect `crates/omnifs-itest/tests/frontend_libkrun` to ever run in GitHub-hosted CI, or weaken its skip-when-not-opted-in behavior into a silent pass.
+- Expect `crates/omnifs-itest/tests/filesystem_libkrun` to ever run in GitHub-hosted CI, or weaken its skip-when-not-opted-in behavior into a silent pass.
 
 ## Code
 
@@ -113,12 +113,12 @@ This lane can **never** run in GitHub-hosted CI: libkrun boots a libkrun microVM
 - `crates/omnifs-workspace/schema/omnifs.provider.schema.json`
 - `crates/omnifs-itest/src/lib.rs`
 - `crates/omnifs-itest/src/matrix.rs`
-- `crates/omnifs-itest/tests/frontend_libkrun/main.rs`
+- `crates/omnifs-itest/tests/filesystem_libkrun/main.rs`
 - `crates/omnifs-cli/src/provider_bundle.rs`
 - `Dockerfile`
 - `scripts/ci/common.sh`
-- `scripts/ci/build-frontend-image.sh`
-- `scripts/ci/smoke-frontend-image.sh`
+- `scripts/ci/build-filesystem-image.sh`
+- `scripts/ci/smoke-filesystem-image.sh`
 - `scripts/ci/publish-manifest.sh`
 - `scripts/ci/promote-image.sh`
 - `scripts/ci/check-guest-image.sh`
@@ -150,23 +150,23 @@ This lane can **never** run in GitHub-hosted CI: libkrun boots a libkrun microVM
 - `just libkrun-runtime` (macOS Apple Silicon only; stages the pinned private helper payload under `target/debug`)
 - `just libkrun-conformance` (macOS Apple Silicon only, local-only, never CI: see "Libkrun conformance lane" above)
 
-Live runtime path (the daemon runs host-native; only the frontend needs `docker exec`):
+Live runtime path (the daemon runs host-native; only the filesystem needs `docker exec`):
 
 ```bash
 just dev -y
 target/debug/omnifs status
-FRONTEND=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
-docker exec -it -w /omnifs "$FRONTEND" /bin/sh
+FILESYSTEM=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
+docker exec -it -w /omnifs "$FILESYSTEM" /bin/sh
 tail -n 80 ~/.omnifs-dev/cache/daemon.log
 ```
 
-Frontend image, built standalone (no daemon, no attach):
+Filesystem image, built standalone (no daemon, no attach):
 
 ```bash
-just frontend-image
-docker run --rm --entrypoint /usr/local/bin/omnifs-thin omnifs-frontend:dev --version
-docker run --rm --entrypoint tail omnifs-frontend:dev --version | head -1
-docker run --rm omnifs-frontend:dev # fails loudly: OMNIFS_ATTACH_ADDR is unset
+just filesystem-image
+docker run --rm --entrypoint /usr/local/bin/omnifs-thin omnifs-filesystem:dev --version
+docker run --rm --entrypoint tail omnifs-filesystem:dev --version | head -1
+docker run --rm omnifs-filesystem:dev # fails loudly: OMNIFS_ATTACH_ADDR is unset
 ```
 
 Guest image, both `mkosi` profiles plus the libkrun boot smoke (local-only; `just guest-image-smoke` and the conformance lane build the private runtime through `just libkrun-runtime`):

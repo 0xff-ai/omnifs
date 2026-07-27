@@ -1,5 +1,5 @@
 //! Renderer-neutral, async-first projection core shared by the omnifs
-//! frontends (FUSE, NFS, and the kernel-free itest).
+//! filesystems (FUSE, NFS, and the kernel-free itest).
 //!
 //! The namespace projection owns NO kernel state (no inode table, no handle table, no
 //! DirSnapshot, no notifier). It wraps the provider registry and re-homes the

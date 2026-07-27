@@ -2,82 +2,77 @@
 //! and bare `omnifs` all speak through this module rather than each
 //! reimplementing the join.
 //!
-//! There is no persisted frontend desired state by design, so this module
-//! never invents a claim: every line here is derived from
-//! [`Inventory::frontends`], the same join of the daemon's live attachments
-//! with workspace runner observations that `omnifs status` renders as the
-//! Frontends table. An attached host frontend names its location; an
-//! attached guest frontend (Docker, libkrun) names the shell command instead,
+//! Configured filesystem identity comes from persisted specs while attachment
+//! state comes from the daemon. An attached host filesystem names its location; an
+//! attached guest filesystem (Docker, libkrun) names the shell command instead,
 //! since its wire mount point is display-only and not host-reachable; no
-//! observed frontend at all names the enable command instead of claiming any
+//! observed filesystem at all names the create command instead of claiming any
 //! path.
 
-use omnifs_api::FrontendRuntime as Runtime;
+use omnifs_core::fs::Runtime;
 use std::path::Path;
 
-use crate::inventory::{FrontendStatus, Inventory};
+use crate::inventory::{FilesystemStatus, Inventory};
 
-fn attached_frontends(inventory: &Inventory) -> Vec<&FrontendStatus> {
+fn attached_filesystems(inventory: &Inventory) -> Vec<&FilesystemStatus> {
     inventory
-        .frontends
+        .filesystems
         .iter()
-        .filter(|frontend| frontend.state.provides_access())
+        .filter(|filesystem| filesystem.state.provides_access())
         .collect()
 }
 
-/// The first attached host frontend's location, if any. `up`'s no-op
+/// The first attached host filesystem's location, if any. `up`'s no-op
 /// one-liner and every other "Files at" surface name only this primary
 /// surface; a full access block (see [`lines`]) still lists every attached
 /// host location.
 pub(crate) fn primary_host_location(inventory: &Inventory) -> Option<&Path> {
-    attached_frontends(inventory)
+    attached_filesystems(inventory)
         .into_iter()
-        .find(|frontend| frontend.runtime == Runtime::Host)
-        .and_then(|frontend| frontend.location.as_deref())
+        .find(|filesystem| filesystem.spec.runtime() == Runtime::Host)
+        .map(|filesystem| filesystem.spec.location())
 }
 
-fn host_location_line(frontend: &FrontendStatus) -> String {
-    let location = frontend
-        .location
-        .as_deref()
-        .map_or_else(|| "~/omnifs".to_owned(), omnifs_workspace::display);
-    format!("Files at {location}  ({})", frontend.filesystem.as_str())
-}
-
-fn guest_shell_command(frontend: &FrontendStatus) -> String {
+fn host_location_line(filesystem: &FilesystemStatus) -> String {
+    let location = omnifs_workspace::display(filesystem.spec.location());
     format!(
-        "omnifs frontend shell {} --runtime {}",
-        frontend.filesystem.as_str(),
-        frontend.runtime.as_str()
+        "Files at {location}  ({})",
+        filesystem.spec.protocol().as_str()
     )
 }
 
-pub(crate) fn guest_shell_line(frontend: &FrontendStatus) -> String {
-    format!("In the microVM:  `{}`", guest_shell_command(frontend))
+fn guest_shell_command(filesystem: &FilesystemStatus) -> String {
+    format!("omnifs fs shell --name {}", filesystem.spec.id())
 }
 
-fn no_frontend_line(mount_count: usize) -> String {
+pub(crate) fn guest_shell_line(filesystem: &FilesystemStatus) -> String {
+    format!("In the microVM:  `{}`", guest_shell_command(filesystem))
+}
+
+fn no_filesystem_line(mount_count: usize) -> String {
     let noun = if mount_count == 1 { "mount" } else { "mounts" };
-    format!("Serving {mount_count} {noun}. No frontend attached yet:  `omnifs frontend enable nfs`")
+    format!(
+        "Serving {mount_count} {noun}. No filesystem attached yet:  `omnifs fs create --name main`"
+    )
 }
 
 /// The full access block for a surface's closing lines (`up`, bare
 /// `omnifs`): one line per attached host location, one per attached guest
-/// runtime, or the single "no frontend attached yet" nudge when nothing is
+/// runtime, or the single "no filesystem attached yet" nudge when nothing is
 /// observed at all. Commands are backtick-marked, per the crate-wide
 /// convention that the caller's narration (`Output::narrate`) turns
 /// backtick spans into the accent color and drops the backticks,
 /// so this module never has to probe or receive real terminal capabilities.
 pub(crate) fn lines(inventory: &Inventory) -> Vec<String> {
-    let attached = attached_frontends(inventory);
+    let attached = attached_filesystems(inventory);
     if attached.is_empty() {
-        return vec![no_frontend_line(inventory.mounts.len())];
+        return vec![no_filesystem_line(inventory.mounts.len())];
     }
     attached
         .into_iter()
-        .map(|frontend| match frontend.runtime {
-            Runtime::Host => host_location_line(frontend),
-            Runtime::Docker | Runtime::Libkrun => guest_shell_line(frontend),
+        .map(|filesystem| match filesystem.spec.runtime() {
+            Runtime::Host => host_location_line(filesystem),
+            Runtime::Docker | Runtime::Libkrun => guest_shell_line(filesystem),
         })
         .collect()
 }
@@ -87,16 +82,16 @@ fn browse_from_location(location: &Path, mount: Option<&str>) -> String {
     format!("ls {}", omnifs_workspace::display(&target))
 }
 
-/// The guest-shell-or-enable-nudge tail shared by every browse action that
-/// found no attached host frontend to name a path against.
+/// The guest-shell-or-create-nudge tail shared by every browse action that
+/// found no attached host filesystem to name a path against.
 fn browse_or_guest_fallback(inventory: &Inventory) -> String {
-    if let Some(guest) = attached_frontends(inventory)
+    if let Some(guest) = attached_filesystems(inventory)
         .into_iter()
-        .find(|frontend| frontend.runtime != Runtime::Host)
+        .find(|filesystem| filesystem.spec.runtime() != Runtime::Host)
     {
         return guest_shell_command(guest);
     }
-    "omnifs frontend enable nfs".to_owned()
+    "omnifs fs create --name main".to_owned()
 }
 
 /// Whether `omnifs status`'s closing `Browse:` line should print at all
@@ -110,7 +105,7 @@ pub(crate) fn show_browse_line(daemon_health: crate::inventory::DaemonHealth) ->
 }
 
 /// The single derived browse action for `omnifs status`'s closing
-/// `Browse:` line: a host `ls` example when a host frontend is attached,
+/// `Browse:` line: a host `ls` example when a host filesystem is attached,
 /// else the guest shell command, else the enable nudge. Never a bare path
 /// claim when nothing is observed. Names whichever mount sorts first, since
 /// no single mount is more relevant than another to a whole-workspace
@@ -133,7 +128,7 @@ pub(crate) fn access_row(path: &crate::inventory::AccessPath) -> String {
     format!(
         "{}  ({} {})",
         omnifs_workspace::display(&path.path),
-        path.filesystem.as_str(),
+        path.protocol.as_str(),
         path.runtime.as_str()
     )
 }
@@ -141,10 +136,10 @@ pub(crate) fn access_row(path: &crate::inventory::AccessPath) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inventory::{AuthState, FrontendState, ServingState};
+    use crate::inventory::{AuthState, FilesystemState, ServingState};
     use crate::inventory::{DaemonHealth, MountStatus, ProviderPin, ProviderPinState};
-    use omnifs_api::FsType as Filesystem;
     use omnifs_core::MountName;
+    use omnifs_core::fs;
     use std::path::PathBuf;
 
     fn mount(name: &str) -> MountStatus {
@@ -164,11 +159,15 @@ mod tests {
         }
     }
 
-    fn frontend(runtime: Runtime, location: Option<&str>, state: FrontendState) -> FrontendStatus {
-        FrontendStatus {
-            filesystem: Filesystem::Fuse,
-            runtime,
-            location: location.map(PathBuf::from),
+    fn filesystem(runtime: Runtime, location: &str, state: FilesystemState) -> FilesystemStatus {
+        FilesystemStatus {
+            spec: fs::Spec::new(
+                format!("fuse-{runtime}").parse().unwrap(),
+                fs::Protocol::Fuse,
+                runtime,
+                PathBuf::from(location),
+            )
+            .unwrap(),
             state,
             mount_count: 1,
             fix: None,
@@ -199,23 +198,23 @@ mod tests {
     }
 
     #[test]
-    fn no_observed_frontend_names_the_enable_command_not_a_path() {
+    fn no_observed_filesystem_names_the_create_command_not_a_path() {
         let inventory = Inventory::test(DaemonHealth::Running, Vec::new(), vec![mount("github")]);
         let rendered = lines(&inventory);
         assert_eq!(rendered.len(), 1);
-        assert!(rendered[0].starts_with("Serving 1 mount. No frontend attached yet:"));
-        assert!(rendered[0].contains("omnifs frontend enable nfs"));
-        assert_eq!(browse_command(&inventory), "omnifs frontend enable nfs");
+        assert!(rendered[0].starts_with("Serving 1 mount. No filesystem attached yet:"));
+        assert!(rendered[0].contains("omnifs fs create --name main"));
+        assert_eq!(browse_command(&inventory), "omnifs fs create --name main");
     }
 
     #[test]
-    fn attached_host_frontend_names_its_location() {
+    fn attached_host_filesystem_names_its_location() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
-            vec![frontend(
+            vec![filesystem(
                 Runtime::Host,
-                Some("/mnt/omnifs-test-home/omnifs"),
-                FrontendState::Attached,
+                "/mnt/omnifs-test-home/omnifs",
+                FilesystemState::Attached,
             )],
             vec![mount("github")],
         );
@@ -235,23 +234,23 @@ mod tests {
     }
 
     #[test]
-    fn attached_guest_frontend_names_the_shell_command_not_the_wire_mount_point() {
+    fn attached_guest_filesystem_names_the_shell_command_not_the_wire_mount_point() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
-            vec![frontend(
+            vec![filesystem(
                 Runtime::Libkrun,
-                Some("/omnifs"),
-                FrontendState::Attached,
+                "/omnifs",
+                FilesystemState::Attached,
             )],
             vec![mount("github")],
         );
         let rendered = lines(&inventory);
         assert_eq!(rendered.len(), 1);
         assert!(rendered[0].starts_with("In the microVM:"));
-        assert!(rendered[0].contains("omnifs frontend shell fuse --runtime libkrun"));
+        assert!(rendered[0].contains("omnifs fs shell --name fuse-libkrun"));
         assert_eq!(
             browse_command(&inventory),
-            "omnifs frontend shell fuse --runtime libkrun"
+            "omnifs fs shell --name fuse-libkrun"
         );
     }
 
@@ -260,11 +259,11 @@ mod tests {
         let inventory = Inventory::test(
             DaemonHealth::Running,
             vec![
-                frontend(Runtime::Libkrun, Some("/omnifs"), FrontendState::Attached),
-                frontend(
+                filesystem(Runtime::Libkrun, "/omnifs", FilesystemState::Attached),
+                filesystem(
                     Runtime::Host,
-                    Some("/mnt/omnifs-test-home/omnifs"),
-                    FrontendState::Attached,
+                    "/mnt/omnifs-test-home/omnifs",
+                    FilesystemState::Attached,
                 ),
             ],
             vec![mount("github")],
@@ -280,10 +279,10 @@ mod tests {
     fn browse_command_defers_to_the_first_mount() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
-            vec![frontend(
+            vec![filesystem(
                 Runtime::Host,
-                Some("/mnt/omnifs-test-home/omnifs"),
-                FrontendState::Attached,
+                "/mnt/omnifs-test-home/omnifs",
+                FilesystemState::Attached,
             )],
             vec![mount("aaa-sorts-first"), mount("github")],
         );
@@ -297,10 +296,10 @@ mod tests {
     fn access_row_names_path_filesystem_and_runtime() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
-            vec![frontend(
+            vec![filesystem(
                 Runtime::Host,
-                Some("/mnt/omnifs-test-home/omnifs"),
-                FrontendState::Attached,
+                "/mnt/omnifs-test-home/omnifs",
+                FilesystemState::Attached,
             )],
             vec![mount("github")],
         );
@@ -313,13 +312,13 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_frontend_is_not_treated_as_observed_access() {
+    fn a_failed_filesystem_is_not_treated_as_observed_access() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
-            vec![frontend(Runtime::Host, Some("/mnt"), FrontendState::Failed)],
+            vec![filesystem(Runtime::Host, "/mnt", FilesystemState::Failed)],
             vec![mount("github")],
         );
         assert!(primary_host_location(&inventory).is_none());
-        assert_eq!(browse_command(&inventory), "omnifs frontend enable nfs");
+        assert_eq!(browse_command(&inventory), "omnifs fs create --name main");
     }
 }

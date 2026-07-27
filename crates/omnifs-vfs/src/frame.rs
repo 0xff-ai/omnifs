@@ -24,6 +24,9 @@ pub(crate) const KIND_RESPONSE: u8 = 1;
 /// An event frame: a server-pushed [`NsEvent`](crate::NsEvent), always
 /// carried with `request_id = 0`.
 pub(crate) const KIND_EVENT: u8 = 2;
+/// A server-pushed [`ServerControl`](crate::ServerControl), always carried
+/// with `request_id = 0`.
+pub(crate) const KIND_CONTROL: u8 = 3;
 
 /// Maximum accepted frame size (`len` field), 16 MiB. A larger `len` is a
 /// protocol error; the connection is dropped.

@@ -202,10 +202,10 @@ Each auth scheme is self-contained: it carries its own injection domains, header
 cargo build -p <provider-crate> --target wasm32-wasip2          # the component artifact
 cargo clippy -p 'omnifs-provider-*' -p test-provider --target wasm32-wasip2 -- -D warnings
 just check providers                                             # the repo gate
-just dev -y --detach                                             # live host daemon and frontends
+just dev -y --detach                                             # live host daemon and filesystems
 target/debug/omnifs status
-FRONTEND=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
-docker exec "$FRONTEND" sh -c 'ls /omnifs'
+FILESYSTEM=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
+docker exec "$FILESYSTEM" sh -c 'ls /omnifs'
 ```
 
 For any path-surface change, test whole-shell traversal in the live container, not just the leaf: `ll`, `cd`, and `find` from the provider root through every intermediate directory; verify parents do not synthesize duplicate roots, scaffolding names do not bind as captures, and the standard toolbox (`cat`, `grep -r`, `find`, `tar`, `diff`, editors) behaves. That toolbox compatibility list in AGENTS.md is the acceptance bar.

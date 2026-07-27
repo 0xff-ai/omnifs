@@ -154,7 +154,7 @@ impl TreeNamespace {
 
     /// Probe a deferred ranged file's real attrs by opening it through the
     /// provider, then immediately closing the provider handle. This is for
-    /// frontends such as NFS that must render child attrs during directory
+    /// filesystems such as NFS that must render child attrs during directory
     /// flattening. The probe is intentionally named as provider I/O, and the
     /// learned attrs are published through the shared view cache before returning.
     pub(crate) async fn probe_ranged_attrs(
@@ -189,8 +189,8 @@ impl TreeNamespace {
 /// `probe_len` at the current `observed_end` purely to learn whether the file
 /// grew, advancing `observed_end` monotonically. Returns the new end when it
 /// grew, `None` when it did not. The renderer's follow loop calls this on its
-/// own cadence; both frontends share this learning so a live file's size source
-/// is neutral and the reporting stays frontend-specific.
+/// own cadence; both filesystems share this learning so a live file's size source
+/// is neutral and the reporting stays filesystem-specific.
 pub(crate) async fn probe_live_growth(
     runtime: &Runtime,
     provider_handle: u64,
@@ -212,7 +212,7 @@ pub(crate) async fn probe_live_growth(
 }
 
 /// Spawn the shared live-file growth probe loop. Renderers own the reported
-/// size table, so `record_growth` is frontend-specific.
+/// size table, so `record_growth` is filesystem-specific.
 pub(crate) fn spawn_live_follow_pump(
     rt: &Handle,
     registry: Arc<MountTable>,

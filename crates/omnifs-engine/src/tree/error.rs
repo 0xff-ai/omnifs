@@ -116,7 +116,7 @@ impl From<crate::EngineError> for TreeError {
 }
 
 /// Preserve the shared semantic partition across the engine and renderer-neutral
-/// tree layers. Each frontend maps this class to its own protocol status.
+/// tree layers. Each filesystem maps this class to its own protocol status.
 impl From<ProviderErrorClass> for TreeErrorKind {
     fn from(kind: ProviderErrorClass) -> Self {
         match kind {

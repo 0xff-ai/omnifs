@@ -1,13 +1,13 @@
-# NFS frontend
+# NFS filesystem architecture
 
 Status: current-architecture
-Scope: why the macOS frontend is NFSv4 loopback, what it owns, and what must stay shared with the projection tree. Binding rules live in `docs/contracts/40-frontends.md`.
+Scope: why the macOS filesystem is NFSv4 loopback, what it owns, and what must stay shared with the projection tree. Binding rules live in `docs/contracts/40-filesystems.md`.
 
-macOS host-native integration uses a read-only NFSv4.0 loopback frontend. It is a protocol adapter over the same projected tree as FUSE, not a separate product mode and not a provider-facing architecture.
+macOS host-native integration uses a read-only NFSv4.0 loopback filesystem. It is a protocol adapter over the same projected tree as FUSE, not a separate product mode and not a provider-facing architecture.
 
 ## Boundary
 
-The NFS frontend owns NFS protocol state:
+The NFS filesystem owns NFS protocol state:
 
 - filehandles
 - stateids
@@ -21,15 +21,15 @@ It does not own projection semantics. It must not decide provider route preceden
 
 ## Filehandles
 
-Filehandles are frontend-owned stable identifiers for protocol clients. They should identify projected nodes through tree-owned handles or stable frontend mappings, not by re-deriving provider meaning.
+Filehandles are filesystem-owned stable identifiers for protocol clients. They should identify projected nodes through tree-owned handles or stable filesystem mappings, not by re-deriving provider meaning.
 
-The frontend can keep protocol-local tables as long as they are adapters over tree answers.
+The filesystem can keep protocol-local tables as long as they are adapters over tree answers.
 
 ## Stateids and leases
 
 NFS open state is a protocol requirement. Stateids and leases guard client protocol sequencing; they are not provider locks and do not imply upstream mutation authority.
 
-Because the current NFS frontend is read-only, write-state handling should remain explicit and narrow. Do not grow write semantics through accidental support for projected file writes.
+Because the current NFS filesystem is read-only, write-state handling should remain explicit and narrow. Do not grow write semantics through accidental support for projected file writes.
 
 ## Attributes
 
@@ -39,13 +39,13 @@ Unknown and non-zero sizes follow the shared file-attribute contract. NFS must n
 
 ## Cache and invalidation
 
-Frontend caches are protocol caches. Shared cache records and projection policy belong to host/tree code.
+Filesystem caches are protocol caches. Shared cache records and projection policy belong to host/tree code.
 
 NFS keeps one bounded, process-local protocol cache for plain attribute and lookup answers because its mount options disable those kernel caches. The engine sets each positive or negative answer's cache lifetime; NFS may retain only that answer, seeds positive entries from directory listings, and evicts by namespace invalidation. Zero-TTL answers always cross the wire. The cache is never persisted and contains no provider or projection cache schema.
 
 ## Mount lifecycle
 
-NFS loopback mount startup and teardown belong to the host runner lifecycle. The CLI launches `omnifs-thin nfs` as a host runner; the daemon serves the projected tree over the fixed local socket and reports readiness through the control plane. The runner attaches and serves until unmount.
+NFS loopback mount startup and teardown belong to the filesystem process. The CLI launches hidden `omnifs run-fs --name <id> --protocol nfs --runtime host`; that process owns preflight, attach, mount startup cancellation, serving, and unmount. Its private instance-bound control socket handles detach and doctor requests.
 
 Do not describe macFUSE, `diskutil`, or macOS FUSE mounting as current behavior. macOS host-native integration is NFSv4 loopback.
 
@@ -64,33 +64,33 @@ Mitigated by mount options today:
   which makes a dead loopback mount harder to tear down. The macOS mount uses
   `nobrowse`, the export serves a synthetic lookup-only
   `/.metadata_never_index` marker, and the runner asks `mdutil` to disable
-  indexing and searching. The marker is frontend-owned and omitted from
+  indexing and searching. The marker is filesystem-owned and omitted from
   provider listings; the `mdutil` command is best effort because macOS can
   report a disabled NFS volume as having no manageable metadata store.
 
 Deferred by the read-only contract (these arrive with any write path and must be designed for, not discovered):
 
-- **Silly rename.** Open-unlink becomes a client-issued rename to `.nfsXXXX`, visible in listings until last close. A write-capable frontend must decide whether the server hides these names from readdir.
+- **Silly rename.** Open-unlink becomes a client-issued rename to `.nfsXXXX`, visible in listings until last close. A write-capable filesystem must decide whether the server hides these names from readdir.
 - **AppleDouble spray.** With no xattr support in NFSv4.0, the macOS client materializes `._*` companion files on writes carrying Finder metadata, quarantine flags, and resource forks. These would pollute the projected tree and confuse providers.
 - **Write-back and mmap coherence.** Client-side write caching weakens read-after-write visibility across processes; mmap-heavy editors are best effort per the product contract.
-- **Locking.** NFSv4.0 mandatory lock state (and its recovery) is protocol machinery the read-only frontend deliberately keeps narrow.
+- **Locking.** NFSv4.0 mandatory lock state (and its recovery) is protocol machinery the read-only filesystem deliberately keeps narrow.
 
-Structurally addressed for the restartable out-of-process frontend:
+Structurally addressed for the restartable out-of-process filesystem:
 
 - **Size pinned across OPEN.** The macOS client latches the file size it held before OPEN for the lifetime of that open, and serves that pinned value even to `fstat` on the open fd, so a cold unknown-length file's reads would stay clamped to the 1-byte size-unknown sentinel. `Export::lookup` (`crates/omnifs-nfs/src/adapter.rs`) probes with a one-byte read whenever `getattr_exact` still reports the sentinel, so the exact size is learned and cached before the client's pre-OPEN attrs are captured; `Export::open_state` repeats the same probe as a backstop for opens that arrive without a fresh lookup. Proven by the engine's `one_byte_probe_read_learns_size_for_next_getattr` (`crates/omnifs-engine/tests/namespace_surface.rs`) plus the adapter's `lookup_probes_unknown_size_file_and_learns_exact_size` (`crates/omnifs-nfs/src/adapter.rs`).
-- **Path identity across restarts.** A kernel client holds filehandles across a frontend or daemon restart. The shipped `omnifs-thin nfs` runner persists validated namespace `Path` values with its protocol-local parent/name/scope and inode identity, so a fresh engine can recursively rediscover provider anchors and host descendants without a daemon-local identity table. A daemon disconnect publishes the existing root `NsEvent::InvalidateSubtree`; NFS drains it inline, clears derived sizes and advances `PendingListings`, while preserving path-backed inodes, opens, stateids, leases, clients, and the filehandle generation. The runner also recovers the NFS server address recorded for an active mount and serves the export without remounting. An unknown stateid still returns the protocol error that drives the client's transparent re-open against a still-valid filehandle. FUSE and tests use the same direct `Path` namespace identity, with process-local protocol tables. Proven by the persisted-path and root-invalidation acceptance fixtures.
+- **Path identity across restarts.** A kernel client holds filehandles across a filesystem or daemon restart. The NFS runner persists validated namespace `Path` values with its protocol-local parent/name/scope and inode identity, so a fresh engine can rediscover provider anchors and host descendants without a daemon-local identity table. A daemon disconnect publishes the existing root `NsEvent::InvalidateSubtree`; NFS drains it inline while preserving path-backed protocol identity. The runner also recovers the NFS server address recorded for an active mount and serves the export without remounting.
 
 Open, inherent to the transport:
 
 - **Sleep/wake and lease churn.** The v4.0 lease/grace machinery interacts with laptop sleep; live tests serialize for related reasons.
 - **No xattr surface at all** (until v4.2 is on the table), independent of writes: `xattr -l` answers differently than FUSE would.
 
-When comparing frontends or debating defaults, this catalog is the checklist: a quirk is either mitigated (name the mount option), deferred (name the contract gate), structurally addressed (name the mechanism and its proof), or open (name the consequence). The conformance target for both frontends is the same product-contract toolbox; NFS earns default status per platform by passing it, not by assertion.
+When comparing filesystems or debating defaults, this catalog is the checklist: a quirk is either mitigated (name the mount option), deferred (name the contract gate), structurally addressed (name the mechanism and its proof), or open (name the consequence). The conformance target for both filesystems is the same product-contract toolbox; NFS earns default status per platform by passing it, not by assertion.
 
 ## Rejected shapes
 
 - NFS-specific projection semantics
 - provider-specific behavior in NFS protocol handlers
-- frontend-owned cache schema
+- filesystem-owned cache schema
 - macFUSE or macOS FUSE as the current integration path
 - write behavior hidden behind ordinary projected file writes

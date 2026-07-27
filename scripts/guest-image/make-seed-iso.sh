@@ -3,11 +3,11 @@
 #
 # Plain config-drive, not cloud-init and not NoCloud: an ISO9660+Joliet volume
 # labeled OMNIFS-SEED containing one KEY=VALUE file the guest's
-# omnifs-frontend.service reads via systemd's EnvironmentFile=. macOS builds
+# omnifs-filesystem.service reads via systemd's EnvironmentFile=. macOS builds
 # it with the native hdiutil (no mkisofs/xorriso dependency); a libkrun launch
 # regenerates it fresh every time.
 #
-# Usage: make-seed-iso.sh --out PATH --attach-addr HOST:PORT
+# Usage: make-seed-iso.sh --out PATH --filesystem-id ID --attach-addr HOST:PORT
 #   [--ready-vsock-port PORT] [--ssh-pubkey KEY]
 set -euo pipefail
 
@@ -15,6 +15,7 @@ seed_label=OMNIFS-SEED
 
 out=""
 attach_addr=""
+filesystem_id=""
 ready_vsock_port="0"
 ssh_pubkey=""
 
@@ -26,6 +27,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --attach-addr)
       attach_addr="$2"
+      shift 2
+      ;;
+    --filesystem-id)
+      filesystem_id="$2"
       shift 2
       ;;
     --ready-vsock-port)
@@ -44,6 +49,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 : "${out:?--out PATH is required}"
+: "${filesystem_id:?--filesystem-id ID is required}"
 : "${attach_addr:?--attach-addr HOST:PORT is required}"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -55,9 +61,9 @@ staging="$(mktemp -d)"
 trap 'rm -rf "$staging"' EXIT
 
 # EnvironmentFile= format (systemd.exec(5)): KEY=VALUE lines, no quoting.
-# OMNIFS_ATTACH_ADDR is the same env var the Docker frontend launcher injects
+# OMNIFS_ATTACH_ADDR is the same env var the Docker filesystem launcher injects
 # (crates/omnifs-api/src/lib.rs), addressed as `vsock:<port>` instead of
-# `host:port` for the libkrun runtime (docs/contracts/40-frontends.md).
+# `host:port` for the libkrun runtime (docs/contracts/40-filesystems.md).
 # OMNIFS_READY_VSOCK_PORT is the port the runner dials on host CID to signal
 # the FUSE mount is serving (crates/omnifs-vfs/src/beacon.rs).
 # OMNIFS_SSH_PUBKEY, when given, is installed into root's authorized_keys
@@ -66,6 +72,7 @@ trap 'rm -rf "$staging"' EXIT
 # The boot smoke omits the key, which leaves ssh disabled for that launch.
 cat >"$staging/omnifs-seed.conf" <<EOF
 OMNIFS_ATTACH_ADDR=${attach_addr}
+OMNIFS_FS_ID=${filesystem_id}
 OMNIFS_READY_VSOCK_PORT=${ready_vsock_port}
 EOF
 if [[ -n "$ssh_pubkey" ]]; then

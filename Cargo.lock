@@ -2778,6 +2778,7 @@ dependencies = [
  "omnifs-libkrun",
  "omnifs-mtab",
  "omnifs-nfs",
+ "omnifs-thin",
  "omnifs-vfs",
  "omnifs-workspace",
  "owo-colors",
@@ -2899,6 +2900,9 @@ version = "0.2.1"
 dependencies = [
  "libc",
  "libloading",
+ "omnifs-core",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
 ]
@@ -2907,8 +2911,12 @@ dependencies = [
 name = "omnifs-mtab"
 version = "0.2.1"
 dependencies = [
+ "fs2",
+ "nix 0.30.1",
+ "omnifs-core",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 
@@ -3062,10 +3070,14 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
+ "omnifs-core",
  "omnifs-fuse",
  "omnifs-mtab",
  "omnifs-nfs",
  "omnifs-vfs",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3102,6 +3114,7 @@ dependencies = [
 name = "omnifs-workspace"
 version = "0.2.1"
 dependencies = [
+ "anyhow",
  "atomic-write-file",
  "blake3",
  "fs2",

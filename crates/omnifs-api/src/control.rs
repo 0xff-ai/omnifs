@@ -1,13 +1,10 @@
 //! Typed local control-plane wire types.
 
-use serde::{Deserialize, Serialize};
-use std::net::Ipv4Addr;
-use std::path::PathBuf;
-
 use crate::DaemonStatus;
+use serde::{Deserialize, Serialize};
 
 /// The only control protocol version understood by this build.
-pub const CONTROL_PROTOCOL_VERSION: u16 = 5;
+pub const CONTROL_PROTOCOL_VERSION: u16 = 7;
 
 /// Maximum size of one request, reply, or inspector event line, including its
 /// trailing newline. The control plane is local and bounded, so oversized
@@ -29,15 +26,15 @@ pub struct ControlRequest {
 pub enum ControlOperation {
     Ready,
     Status,
-    Shutdown,
+    Shutdown {
+        /// Stop attached filesystems for an explicit `omnifs down`. Daemon
+        /// replacement leaves them alive so they reconnect.
+        #[serde(default)]
+        stop_filesystems: bool,
+    },
     ValidateOffline {
         revision: String,
     },
-    AttachTcp {
-        #[serde(default)]
-        bind_ip: Option<Ipv4Addr>,
-    },
-    AttachVsock,
     SubscribeInspector,
 }
 
@@ -53,24 +50,15 @@ pub struct ControlReply {
 pub enum ControlOutcome {
     Ready,
     Status(DaemonStatus),
-    Shutdown,
+    Shutdown {
+        detached: usize,
+        still_attached: Vec<String>,
+    },
     OfflineValidated,
-    AttachTcp(TcpAttachTarget),
-    AttachVsock(VsockAttachTarget),
-    InspectorReady { instance_id: String },
+    InspectorReady {
+        instance_id: String,
+    },
     Error(ControlError),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TcpAttachTarget {
-    pub addr: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VsockAttachTarget {
-    pub socket_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,13 +127,13 @@ mod tests {
     fn request_and_reply_shapes_are_operation_specific() {
         let request = ControlRequest {
             version: CONTROL_PROTOCOL_VERSION,
-            operation: ControlOperation::AttachTcp {
-                bind_ip: Some(Ipv4Addr::LOCALHOST),
+            operation: ControlOperation::Shutdown {
+                stop_filesystems: true,
             },
         };
         assert_eq!(
             serde_json::to_string(&request).unwrap(),
-            r#"{"version":5,"operation":"attach_tcp","bind_ip":"127.0.0.1"}"#
+            r#"{"version":7,"operation":"shutdown","stop_filesystems":true}"#
         );
 
         let validate = ControlRequest {
@@ -157,7 +145,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&validate).unwrap(),
             format!(
-                r#"{{"version":5,"operation":"validate_offline","revision":"{}"}}"#,
+                r#"{{"version":7,"operation":"validate_offline","revision":"{}"}}"#,
                 "a".repeat(40)
             )
         );
@@ -168,26 +156,18 @@ mod tests {
         ));
         assert_eq!(
             serde_json::to_string(&reply).unwrap(),
-            r#"{"version":5,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
+            r#"{"version":7,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
         );
 
         assert_eq!(
             serde_json::to_string(&ControlReply::inspector_ready("epoch-1")).unwrap(),
-            r#"{"version":5,"result":"inspector_ready","value":{"instance_id":"epoch-1"}}"#
+            r#"{"version":7,"result":"inspector_ready","value":{"instance_id":"epoch-1"}}"#
         );
 
         assert!(
-            serde_json::from_value::<TcpAttachTarget>(serde_json::json!({
-                "addr": "127.0.0.1:1234",
-                "token": "secret",
-                "unexpected": true
-            }))
-            .is_err()
-        );
-        assert!(
             serde_json::from_value::<ControlRequest>(serde_json::json!({
                 "version": CONTROL_PROTOCOL_VERSION,
-                "operation": "attach_tcp"
+                "operation": "shutdown"
             }))
             .is_ok()
         );

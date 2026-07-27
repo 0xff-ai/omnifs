@@ -19,10 +19,9 @@ mod daemon_launch;
 mod daemon_teardown;
 mod docker;
 mod error;
-mod frontend_container;
+mod fs_container;
 mod guest_image_pull;
-mod host_runner;
-mod host_teardown;
+mod host_fs;
 mod image;
 mod inspector;
 mod inventory;
@@ -46,8 +45,7 @@ use cli::{Cli, raw_command_path, raw_output_mode};
 use error::ExitCode;
 use ui::output::{ErrorEnvelope, ErrorPayload, ErrorVerdict, Output};
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let provisional_mode = raw_output_mode(raw_args.clone());
     // Map clap's parse outcome at the boundary, not per command: a usage error
@@ -95,6 +93,31 @@ async fn main() {
             std::process::exit(code.code());
         },
     };
+    match cli.command {
+        Some(cli::Commands::RunFs(args)) => {
+            let code = match omnifs_thin::run(args) {
+                Ok(()) => ExitCode::Success.code(),
+                Err(error) => {
+                    ui::eprint_raw(&format!("Error: {error:#}\n"));
+                    ExitCode::GenericFailure.code()
+                },
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
+        },
+        command => {
+            let cli = Cli { command, ..cli };
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build the CLI tokio runtime")
+                .block_on(cli_main(cli));
+        },
+    }
+}
+
+async fn cli_main(cli: Cli) {
     let inspector = cli
         .runs_daemon()
         .then(omnifs_engine::init_global_from_env)
