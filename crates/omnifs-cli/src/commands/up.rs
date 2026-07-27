@@ -60,10 +60,18 @@ impl UpArgs {
         match Inventory::collect(&workspace).await {
             Ok(inventory) => match outcome {
                 LaunchOutcome::AlreadyServing => output.outro(no_op_message(&inventory)),
-                LaunchOutcome::Started => {
-                    output.narrate("");
-                    for line in crate::ui::access::lines(&inventory) {
-                        output.narrate(line);
+                LaunchOutcome::Started {
+                    reconnect_pending: Some(id),
+                } => output.outro(format!(
+                    "Filesystem `{id}` did not reconnect in time. Restart it: `omnifs fs restart --name {id}`"
+                )),
+                LaunchOutcome::Started {
+                    reconnect_pending: None,
+                } => {
+                    if let Some(action) = inventory.next_action() {
+                        output.outro(crate::ui::access::action_line(&action).render());
+                    } else {
+                        output.outro("Daemon is ready.");
                     }
                 },
             },
@@ -82,7 +90,8 @@ fn no_op_message(inventory: &Inventory) -> String {
     let revision = inventory
         .applied_revision
         .as_ref()
-        .or(inventory.mount_revision.as_ref());
+        .or(inventory.mount_revision.as_ref())
+        .map(short_revision);
     let location =
         crate::ui::access::primary_host_location(inventory).map(omnifs_workspace::display);
     match (revision, location) {
@@ -92,6 +101,10 @@ fn no_op_message(inventory: &Inventory) -> String {
         (Some(revision), None) => format!("Already serving revision {revision}."),
         (None, _) => "Already serving.".to_owned(),
     }
+}
+
+fn short_revision(revision: &omnifs_workspace::mounts::Revision) -> &str {
+    &revision.as_str()[..revision.as_str().len().min(8)]
 }
 
 /// Collect the post-launch status and emit the `up` receipt. The verdict and
@@ -144,10 +157,7 @@ mod tests {
         });
         assert_eq!(
             no_op_message(&inventory),
-            format!(
-                "Already serving revision {}. Files at /mnt/omnifs-test-home/omnifs",
-                "3".repeat(40)
-            )
+            "Already serving revision 33333333. Files at /mnt/omnifs-test-home/omnifs"
         );
     }
 
@@ -163,7 +173,7 @@ mod tests {
         inventory.applied_revision = Some(Revision::new("4".repeat(40)).unwrap());
         assert_eq!(
             no_op_message(&inventory),
-            format!("Already serving revision {}.", "4".repeat(40))
+            "Already serving revision 44444444."
         );
     }
 }

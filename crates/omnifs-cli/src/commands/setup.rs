@@ -501,7 +501,7 @@ fn render_tree_lines(
 }
 
 /// The closing block's ordered content: a blank line, the tree
-/// reveal, a blank line, the access lines, then the closing sentence
+/// reveal, then the one Inventory-selected action in the closing sentence
 /// (rendered separately through [`Output::outro`] so its wrapping and
 /// "already closed" bookkeeping stay owned by `Output`).
 struct ClosingBlock {
@@ -512,14 +512,14 @@ struct ClosingBlock {
 fn closing_block(inventory: &Inventory, tree: Vec<String>, elapsed: Duration) -> ClosingBlock {
     let mut body = vec![String::new()];
     body.extend(tree);
-    body.push(String::new());
-    body.extend(crate::ui::access::lines(inventory));
+    let action = inventory
+        .next_action()
+        .map(|action| crate::ui::access::action_line(&action).render());
     ClosingBlock {
         body,
-        closing_sentence: format!(
-            "All set in {}. Browse:  `{}`",
-            format_elapsed(elapsed),
-            crate::ui::access::browse_command(inventory)
+        closing_sentence: action.map_or_else(
+            || format!("All set in {}.", format_elapsed(elapsed)),
+            |action| format!("All set in {}. {action}", format_elapsed(elapsed)),
         ),
     }
 }
@@ -686,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_block_orders_tree_then_access_lines_then_the_closing_sentence() {
+    fn closing_block_ends_with_one_inventory_action() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
             vec![host_fs()],
@@ -696,15 +696,10 @@ mod tests {
         let block = closing_block(&inventory, tree.clone(), Duration::from_secs(38));
         let mut expected_body = vec![String::new()];
         expected_body.extend(tree);
-        expected_body.push(String::new());
-        expected_body.extend(crate::ui::access::lines(&inventory));
         assert_eq!(block.body, expected_body);
         assert_eq!(
             block.closing_sentence,
-            format!(
-                "All set in 38s. Browse:  `{}`",
-                crate::ui::access::browse_command(&inventory)
-            )
+            "All set in 38s. Browse:  `ls /Users/raulk/omnifs/github`"
         );
     }
 
