@@ -4,7 +4,7 @@ expression: "fixture.transcript(&fixture.run(&[\"status\"]))"
 ---
 exit: 0
 stdout:
-omnifs  $OMNIFS_HOME                                            ○ stopped
+omnifs  $OMNIFS_HOME                                                                     ○ stopped
 0 mounts configured
 
 Mounts  none configured
