@@ -14,8 +14,12 @@ use omnifs_workspace::Workspace;
 #[derive(Args, Debug, Clone, Default)]
 pub struct UpArgs {
     /// Maximum time to wait for daemon readiness, failing with exit code 3 on timeout.
-    #[arg(long, value_name = "DURATION")]
-    pub wait: Option<String>,
+    #[arg(
+        long,
+        value_name = "DURATION",
+        value_parser = crate::stages::parse_wait_duration
+    )]
+    pub wait: Option<Duration>,
     /// Start a cache-only daemon from the exact current mount revision.
     #[arg(long)]
     pub offline: bool,
@@ -27,12 +31,7 @@ impl UpArgs {
         workspace: &Workspace,
         output: Output,
     ) -> anyhow::Result<LaunchOutcome> {
-        let wait = self
-            .wait
-            .as_deref()
-            .map(crate::stages::parse_wait_duration)
-            .transpose()?
-            .unwrap_or(Duration::from_mins(2));
+        let wait = self.wait.unwrap_or(Duration::from_mins(2));
         let outcome = Launcher::new(workspace, "omnifs up", output.clone(), self.offline, wait)
             .launch()
             .await?;

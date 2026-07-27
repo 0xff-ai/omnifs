@@ -27,6 +27,9 @@ use omnifs_core::fs;
 use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(
+    after_help = "Examples:\n  omnifs setup\n  omnifs setup --providers github,dns\n  omnifs setup --providers dns --no-up"
+)]
 pub struct SetupArgs {
     /// Configure these exact embedded provider names. Repeat or comma-separate.
     #[arg(long, value_name = "PROVIDER", value_delimiter = ',')]
@@ -65,7 +68,7 @@ impl SetupArgs {
             crate::stages::configure_mount(
                 AddArgs {
                     provider: Some(provider),
-                    as_name: None,
+                    name: None,
                     no_browser: self.no_browser,
                     token: None,
                     token_env: None,

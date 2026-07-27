@@ -49,6 +49,9 @@ pub enum FsCommand {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(
+    after_help = "Examples:\n  omnifs fs create --name work\n  omnifs fs create --name native --protocol nfs --runtime host --location /mnt/omnifs"
+)]
 pub struct CreateArgs {
     #[arg(long)]
     pub name: fs::Id,
@@ -67,14 +70,22 @@ pub struct NameArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(
+    after_help = "Examples:\n  omnifs fs shell --name work\n  omnifs fs shell --name work -- ls -la"
+)]
 pub struct ShellArgs {
     #[arg(long)]
     pub name: fs::Id,
     /// Shell to launch in a guest filesystem.
     #[arg(long)]
     pub shell: Option<String>,
-    /// Run a command in the projected tree instead of an interactive shell.
-    #[arg(long, num_args = 1.., trailing_var_arg = true)]
+    /// Command and arguments to run in the projected tree.
+    #[arg(
+        num_args = 0..,
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        conflicts_with = "shell"
+    )]
     pub command: Vec<String>,
 }
 
@@ -729,6 +740,37 @@ mod tests {
         assert_eq!(args.protocol, Some(fs::Protocol::Nfs));
 
         assert!(crate::cli::Cli::try_parse_from(["omnifs", "fs", "attach", "work"]).is_err());
+
+        let cli = crate::cli::Cli::try_parse_from([
+            "omnifs",
+            "fs",
+            "shell",
+            "--name",
+            "work",
+            "--",
+            "sh",
+            "-lc",
+            "printf '%s' 'two words'",
+        ])
+        .unwrap();
+        let Some(crate::cli::Commands::Fs(args)) = cli.command else {
+            panic!("expected fs command");
+        };
+        let FsCommand::Shell(args) = args.command else {
+            panic!("expected shell");
+        };
+        assert_eq!(
+            args.command,
+            ["sh", "-lc", "printf '%s' 'two words'"],
+            "the parser must preserve argv boundaries"
+        );
+        assert!(
+            crate::cli::Cli::try_parse_from([
+                "omnifs", "fs", "shell", "--name", "work", "--shell", "/bin/zsh", "--", "pwd"
+            ])
+            .is_err(),
+            "--shell and a command have distinct meanings"
+        );
     }
 
     #[test]

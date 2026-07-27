@@ -76,7 +76,7 @@ fn ensure_unique_name(
     }
     if !interactive {
         anyhow::bail!(
-            "mount `{proposed}` already exists; pass --as explicitly (suggested: `{suggestion}`)"
+            "mount `{proposed}` already exists; pass --name explicitly (suggested: `{suggestion}`)"
         );
     }
     let name = crate::ui::prompt::Text::new("New mount name")

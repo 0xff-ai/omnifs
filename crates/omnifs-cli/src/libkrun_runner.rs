@@ -960,20 +960,37 @@ impl LibkrunRunner {
             cmd.arg("-t");
         }
         cmd.arg(SSH_GUEST_TARGET);
-        // ssh has no argv-array remote exec (unlike `docker exec`): every
-        // trailing argument is space-joined into one remote command string,
-        // so an argument containing embedded spaces can still split apart on
-        // the guest. Acceptable for the same reason most ssh-wrapping CLIs
-        // accept it: building real remote shell-quoting here would trade one
-        // narrow edge case for a much larger footgun surface.
-        cmd.arg("cd").arg(fs::GUEST_LOCATION).arg("&&").arg("exec");
-        if trailing.is_empty() {
-            cmd.arg(shell_override.unwrap_or("/bin/sh"));
+        let program = if trailing.is_empty() {
+            vec![shell_override.unwrap_or("/bin/sh").to_owned()]
         } else {
-            cmd.args(trailing);
-        }
+            trailing.to_vec()
+        };
+        let remote = format!(
+            "cd {} && exec {}",
+            shell_word(fs::GUEST_LOCATION),
+            program
+                .iter()
+                .map(|word| shell_word(word))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        cmd.arg(remote);
         cmd
     }
+}
+
+/// Quote one argv element for the POSIX shell used by OpenSSH's remote
+/// command. OpenSSH exposes one remote command string, so quoting each word is
+/// required to preserve the CLI's argv boundary.
+fn shell_word(word: &str) -> String {
+    if !word.is_empty()
+        && word
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&byte))
+    {
+        return word.to_owned();
+    }
+    format!("'{}'", word.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
@@ -1089,6 +1106,28 @@ mod tests {
         assert!(
             default_guest_image_for(BuildChannel::Release)
                 .starts_with("ghcr.io/0xff-ai/omnifs-guest:")
+        );
+    }
+
+    #[test]
+    fn remote_shell_command_preserves_each_argv_element() {
+        let runner = LibkrunRunner::new(PathBuf::from("/tmp/omnifs-libkrun-test"));
+        let command = runner.shell_command(
+            None,
+            &[
+                "printf".to_owned(),
+                "two words".to_owned(),
+                "single'quote".to_owned(),
+            ],
+        );
+        let remote = command
+            .get_args()
+            .last()
+            .expect("remote command")
+            .to_string_lossy();
+        assert_eq!(
+            remote,
+            "cd /omnifs && exec printf 'two words' 'single'\"'\"'quote'"
         );
     }
 

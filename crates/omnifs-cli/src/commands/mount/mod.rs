@@ -650,7 +650,7 @@ mod tests {
         let workspace = fixture_workspace(tmp.path());
         AddArgs {
             provider: Some("dns".to_string()),
-            as_name: None,
+            name: None,
             no_browser: true,
             token: None,
             token_env: None,

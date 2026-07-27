@@ -209,13 +209,23 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
-pub fn run_plain(source: SourceKind, output: &crate::ui::output::Output) -> anyhow::Result<()> {
+#[derive(Debug, Clone, Copy)]
+pub enum PlainFormat {
+    Human,
+    Jsonl,
+}
+
+pub fn run_plain(
+    source: SourceKind,
+    output: &crate::ui::output::Output,
+    format: PlainFormat,
+) -> anyhow::Result<()> {
     use super::source::SourceMessage;
 
     match source {
         SourceKind::Replay(path) => {
             for line in super::source::replay_file_blocking(&path)? {
-                emit_plain_line(&line)?;
+                emit_plain_line(&line, format)?;
             }
         },
         SourceKind::Socket { endpoint, record } => {
@@ -224,7 +234,7 @@ pub fn run_plain(source: SourceKind, output: &crate::ui::output::Output) -> anyh
             let event_source = EventSource::spawn(SourceKind::Socket { endpoint, record });
             while let Some(message) = event_source.recv() {
                 match message {
-                    SourceMessage::Line(line) => emit_plain_line(&line)?,
+                    SourceMessage::Line(line) => emit_plain_line(&line, format)?,
                     SourceMessage::Connected { .. } => {
                         output.narrate(format!("omnifs inspect: connected to {addr}"));
                     },
@@ -242,12 +252,64 @@ pub fn run_plain(source: SourceKind, output: &crate::ui::output::Output) -> anyh
     Ok(())
 }
 
-fn emit_plain_line(line: &omnifs_api::events::InspectorLine) -> anyhow::Result<()> {
-    let line = line
-        .to_json_line()
-        .context("serialize inspector line for plain output")?;
-    crate::ui::print_raw(&line);
+fn emit_plain_line(
+    line: &omnifs_api::events::InspectorLine,
+    format: PlainFormat,
+) -> anyhow::Result<()> {
+    let rendered = match format {
+        PlainFormat::Human => format_human_line(line),
+        PlainFormat::Jsonl => line
+            .to_json_line()
+            .context("serialize inspector line for JSONL output")?,
+    };
+    crate::ui::print_raw(&rendered);
     Ok(())
+}
+
+fn format_human_line(line: &omnifs_api::events::InspectorLine) -> String {
+    use omnifs_api::events::{InspectorEvent, InspectorLine};
+
+    let record = match line {
+        InspectorLine::Record(record) => record,
+        InspectorLine::Dropped { count } => return format!("dropped {count} events\n"),
+    };
+    let event = match &record.event {
+        InspectorEvent::FuseStart { op, mount, path } => format!("{mount} {op} {path}"),
+        InspectorEvent::FuseEnd { op, end } => {
+            format!("{op} {} {}us", end.result.outcome, end.elapsed_us)
+        },
+        InspectorEvent::ProviderStart {
+            mount,
+            provider,
+            method,
+            path,
+            ..
+        } => format!("{mount} {provider} {method} {path}"),
+        InspectorEvent::ProviderEnd { end, .. } => {
+            format!("provider {} {}us", end.result.outcome, end.elapsed_us)
+        },
+        InspectorEvent::CalloutStart { kind, summary, .. } => {
+            format!("callout {kind} {summary}")
+        },
+        InspectorEvent::CalloutEnd { end, .. } => {
+            format!("callout {} {}us", end.result.outcome, end.elapsed_us)
+        },
+        InspectorEvent::SubtreeStart { tree_ref, .. } => format!("subtree {tree_ref}"),
+        InspectorEvent::SubtreeEnd { tree_ref, end, .. } => {
+            format!(
+                "subtree {tree_ref} {} {}us",
+                end.result.outcome, end.elapsed_us
+            )
+        },
+        InspectorEvent::CloneStart { remote, .. } => format!("clone {remote}"),
+        InspectorEvent::CloneEnd { end, .. } => {
+            format!("clone {} {}us", end.result.outcome, end.elapsed_us)
+        },
+        InspectorEvent::CacheEvent {
+            mount, path, kind, ..
+        } => format!("{mount} cache {kind} {path}"),
+    };
+    format!("{}  trace {}  {event}\n", record.ts, record.trace_id)
 }
 
 #[cfg(test)]

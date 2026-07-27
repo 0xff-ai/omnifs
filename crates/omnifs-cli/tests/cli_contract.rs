@@ -244,10 +244,10 @@ fn fs_help_uses_named_instance_lifecycle_commands() {
         .expect("spawn omnifs fs shell --help");
     assert!(shell.status.success());
     let shell_help = String::from_utf8_lossy(&shell.stdout);
-    for flag in ["--name", "--shell", "--command"] {
+    for flag in ["--name", "--shell", "[COMMAND]"] {
         assert!(shell_help.contains(flag), "missing {flag}: {shell_help}");
     }
-    for retired in ["--protocol", "--runtime", "--mount"] {
+    for retired in ["--protocol", "--runtime", "--mount", "--command"] {
         assert!(
             !shell_help.contains(retired),
             "retired {retired} in {shell_help}"
@@ -468,7 +468,7 @@ fn malformed_inspector_replay_is_a_line_numbered_failure() {
 }
 
 #[test]
-fn plain_inspector_replay_preserves_canonical_jsonl() {
+fn inspector_replay_separates_human_plain_from_canonical_jsonl() {
     let fixture = Fixture::new();
     let replay = fixture.home_path().join("replay.jsonl");
     let contents = "{\"type\":\"dropped\",\"value\":{\"count\":1}}\n";
@@ -480,6 +480,19 @@ fn plain_inspector_replay_preserves_canonical_jsonl() {
         replay.to_string_lossy().into_owned(),
     ]);
 
+    assert_eq!(exit_code(&output), 0, "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "dropped 1 events\n"
+    );
+
+    let output = fixture.run_owned(&[
+        "--output".into(),
+        "jsonl".into(),
+        "inspect".into(),
+        "--replay".into(),
+        replay.to_string_lossy().into_owned(),
+    ]);
     assert_eq!(exit_code(&output), 0, "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), contents);
 }
@@ -689,7 +702,7 @@ fn mount_add_json_receipt_names_the_mount() {
         "mount",
         "add",
         "github",
-        "--as",
+        "--name",
         "dogfood-github",
         "--token",
         sentinel,
@@ -976,7 +989,7 @@ fn mount_add_same_artifact_collision_preserves_existing_spec() {
         "mount",
         "add",
         "web",
-        "--as",
+        "--name",
         "web",
         "--no-input",
         "--no-auth",
@@ -997,7 +1010,7 @@ fn mount_add_same_artifact_collision_preserves_existing_spec() {
         "mount",
         "add",
         "web",
-        "--as",
+        "--name",
         "web",
         "--no-input",
         "--no-auth",
@@ -1040,7 +1053,7 @@ fn mount_add_invalid_dynamic_domain_config_never_writes_spec() {
             "mount",
             "add",
             "web",
-            "--as",
+            "--name",
             "web",
             "--no-input",
             "--no-auth",
@@ -1059,7 +1072,7 @@ fn mount_add_invalid_dynamic_domain_config_never_writes_spec() {
         "mount",
         "add",
         "web",
-        "--as",
+        "--name",
         "web",
         "--no-input",
         "--no-auth",
