@@ -85,7 +85,9 @@ pub(crate) fn daemon_launch_failure(error: anyhow::Error) -> anyhow::Error {
 }
 
 fn includes_daemon_launch(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| cause.is::<DaemonLaunchFailure>())
+    error
+        .chain()
+        .any(<dyn std::error::Error + 'static>::is::<DaemonLaunchFailure>)
 }
 
 impl HintedError {

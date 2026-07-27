@@ -5,7 +5,7 @@ description: Navigate an omnifs filesystem as a read-only projected filesystem. 
 
 # Navigating omnifs mounts
 
-An omnifs filesystem is a read-only filesystem projection of external services. Treat its location like a normal directory tree, but discover it incrementally: list first, read the generated `README.md` route schema where available, then follow concrete paths. Docker and libkrun expose the tree at `/omnifs`; a host filesystem uses the absolute location chosen when it was enabled.
+An omnifs filesystem is a read-only filesystem projection of external services. Treat its location like a normal directory tree, but discover it incrementally: list first, read the generated `README.md` route schema where available, then follow concrete paths. Docker and libkrun expose the tree at `/omnifs`; a host filesystem uses the absolute location chosen when it was created.
 
 ## Ground rules
 

@@ -37,6 +37,7 @@ For a direct, scriptable path, create mounts one at a time with `omnifs mount ad
 ```bash
 omnifs mount add github
 omnifs mount add dns
+omnifs mount update github --config-json '{"owner":"0xff-ai"}'
 omnifs up
 omnifs fs create --name local --protocol fuse --runtime host --location "$HOME/omnifs"
 omnifs fs attach --name local
@@ -66,10 +67,13 @@ omnifs fs attach --name local
 omnifs fs attach --name guest
 omnifs fs restart --name guest
 omnifs fs shell --name guest
+omnifs fs shell --name guest -- ls -la /omnifs/github
 omnifs fs detach --name guest
 ```
 
 Every attached filesystem exposes every configured mount. `omnifs mount add` resolves and retains one exact content-addressed provider artifact, records that pin in desired state, and `omnifs up` applies the pin without installing or selecting another artifact.
+
+`omnifs mount update NAME` changes only named auth, config, or limits fields and rejects a stale concurrent edit. Use `--no-auth`, `--clear-config`, or `--clear-limits` for explicit removal.
 
 For automation, select one invocation-owned output contract. JSON prints one envelope and keeps resource collections plural; JSONL uses the same terminal result or error envelope with its stream-record discriminator. Live logs and Inspector records remain line streams.
 
@@ -77,6 +81,8 @@ For automation, select one invocation-owned output contract. JSON prints one env
 omnifs --output json status | jq '.result.filesystems[] | {id, protocol, runtime, location, state}'
 omnifs --output json mount ls | jq '.result.mounts[]'
 ```
+
+On an interactive terminal, `omnifs inspect` shows a timestamped operation stream, path activity, per-mount rates, and the selected provider/cache/callout stages. Press `?` for the current keys. `omnifs inspect --plain` emits human lines and `omnifs --output jsonl inspect` emits typed records without opening terminal mode.
 
 ## Things to try
 

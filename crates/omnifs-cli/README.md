@@ -40,6 +40,7 @@ omnifs fs create --name vm --runtime libkrun
 omnifs fs attach --name local
 omnifs fs attach --name docker
 omnifs fs restart --name docker
+omnifs fs shell --name docker -- ls -la /omnifs
 omnifs fs detach --name docker
 ```
 
@@ -48,6 +49,8 @@ Docker and libkrun deliver FUSE only. Every filesystem attaches to the host-nati
 ## Output
 
 Global `--output human|json|jsonl` selects the output contract. JSON emits one envelope with plural resource arrays such as `result.filesystems`, `result.mounts`, and `result.providers`; JSONL emits the same single terminal result or error with a stream-record discriminator. Finite structured commands never emit progress records. `--quiet`, `--no-input`, and `--yes` are also invocation-wide.
+
+Human resource reports use soft, borderless tables and print at most one Inventory-selected recovery action. `omnifs inspect` uses ratatui only on an interactive human terminal; `--plain` and JSONL are line streams. The TUI keeps a timestamped operation stream and selected stage detail, with help on `?`.
 
 ## Status
 
