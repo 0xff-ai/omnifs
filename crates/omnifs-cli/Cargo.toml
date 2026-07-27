@@ -55,6 +55,7 @@ getrandom = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+insta = "1"
 # Shares the cross-process NFS serialization lock (one port owner) with the
 # filesystem conformance matrix. No cycle: omnifs-itest does not depend on
 # omnifs-cli.

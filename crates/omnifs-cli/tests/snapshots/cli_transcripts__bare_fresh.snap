@@ -1,0 +1,11 @@
+---
+source: crates/omnifs-cli/tests/cli_transcripts.rs
+expression: "fixture.transcript(&fixture.run(&[]))"
+---
+exit: 0
+stdout:
+No mounts yet. omnifs projects external services as files.
+
+Get started:  omnifs setup        pick services, sign in, mount
+or piecewise: omnifs mount add    configure one mount
+stderr:

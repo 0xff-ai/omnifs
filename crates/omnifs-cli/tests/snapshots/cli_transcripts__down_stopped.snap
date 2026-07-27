@@ -1,0 +1,8 @@
+---
+source: crates/omnifs-cli/tests/cli_transcripts.rs
+expression: "fixture.transcript(&fixture.run(&[\"down\"]))"
+---
+exit: 0
+stdout:
+stderr:
+Nothing to stop. The daemon isn't running.

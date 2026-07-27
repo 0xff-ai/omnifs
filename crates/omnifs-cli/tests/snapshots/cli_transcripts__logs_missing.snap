@@ -1,0 +1,8 @@
+---
+source: crates/omnifs-cli/tests/cli_transcripts.rs
+expression: "fixture.transcript(&fixture.run(&[\"logs\"]))"
+---
+exit: 0
+stdout:
+stderr:
+No daemon log yet. It's written on first omnifs up.
