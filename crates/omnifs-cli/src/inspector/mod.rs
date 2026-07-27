@@ -12,5 +12,5 @@ mod tree;
 pub mod ui;
 
 pub use app::ConnectionMode;
-pub use run::{run_plain, run_tui};
+pub use run::{PlainFormat, run_plain, run_tui};
 pub use source::SourceKind;

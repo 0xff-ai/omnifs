@@ -245,7 +245,7 @@ pub(crate) fn spec_creation(
     let mount_name = provider_selection::mount_name(
         &mounts,
         &resolved.manifest.default_mount,
-        args.as_name.as_deref(),
+        args.name.as_deref(),
         interactive,
         prompt.yes,
         output,
@@ -640,7 +640,7 @@ mod tests {
         let called = mode(false, false, true).resolve(
             Some("explicit"),
             || "default",
-            "--as",
+            "--name",
             || panic!("explicit value must short-circuit before the prompt runs"),
         );
         assert_eq!(called.unwrap(), "explicit");
@@ -651,7 +651,7 @@ mod tests {
         let resolved = mode(true, true, false).resolve(
             None,
             || "default",
-            "--as",
+            "--name",
             || panic!("--yes must short-circuit before the prompt runs"),
         );
         assert_eq!(resolved.unwrap(), "default");
@@ -663,11 +663,11 @@ mod tests {
             .resolve(
                 None,
                 || "default",
-                "--as <name>",
+                "--name <name>",
                 || panic!("--no-input must bail before the prompt runs"),
             )
             .unwrap_err();
-        assert!(error.to_string().contains("--as <name>"));
+        assert!(error.to_string().contains("--name <name>"));
         assert!(error.to_string().contains("--yes"));
     }
 
@@ -679,17 +679,18 @@ mod tests {
             .resolve(
                 None,
                 || "default",
-                "--as <name>",
+                "--name <name>",
                 || panic!("a non-interactive run must bail before the prompt runs"),
             )
             .unwrap_err();
-        assert!(error.to_string().contains("--as <name>"));
+        assert!(error.to_string().contains("--name <name>"));
         assert!(error.to_string().contains("terminal"));
     }
 
     #[test]
     fn interactive_without_yes_or_no_input_calls_the_prompt() {
-        let resolved = mode(true, false, false).resolve(None, || "default", "--as", || Ok("typed"));
+        let resolved =
+            mode(true, false, false).resolve(None, || "default", "--name", || Ok("typed"));
         assert_eq!(resolved.unwrap(), "typed");
     }
 }

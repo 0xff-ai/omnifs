@@ -14,30 +14,42 @@ use omnifs_workspace::Workspace;
 #[command(
     name = "omnifs",
     version,
-    about = "omnifs: a virtual filesystem for everything",
+    about = "Project external services as files",
     after_help = "Exit codes:\n  0  success\n  1  generic failure\n  2  usage error\n  3  daemon unreachable\n  4  auth or consent required\n  5  degraded health"
 )]
 pub struct Cli {
     /// Increase tracing verbosity. -v = info, -vv = debug with span events.
     /// Overridden by `RUST_LOG`.
-    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+    #[arg(
+        short = 'v',
+        long = "verbose",
+        action = clap::ArgAction::Count,
+        global = true,
+        help_heading = "Global options"
+    )]
     pub verbose: u8,
 
     /// Output contract for this invocation.
-    #[arg(long, global = true, value_enum, default_value_t = OutputMode::Human)]
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = OutputMode::Human,
+        help_heading = "Global options"
+    )]
     pub output: OutputMode,
 
     /// Suppress conversational narration on stderr. Receipts, progress settle
     /// lines, and errors are preserved.
-    #[arg(short = 'q', long, global = true)]
+    #[arg(short = 'q', long, global = true, help_heading = "Global options")]
     pub quiet: bool,
 
     /// Reject prompts and browser handoffs.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub no_input: bool,
 
     /// Approve confirmation-only decisions.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub yes: bool,
 
     #[command(subcommand)]
@@ -681,7 +693,7 @@ mod tests {
         let command = Cli::command();
         let table = [
             ("mount add provider selection", "mount add", "provider"),
-            ("mount add mount name collision", "mount add", "as"),
+            ("mount add mount name collision", "mount add", "name"),
             ("mount add auth scheme", "mount add", "scheme"),
             ("mount add OAuth browser", "mount add", "no-browser"),
             ("mount add static token", "mount add", "token-env"),
@@ -709,6 +721,43 @@ mod tests {
         };
         assert_eq!(up.wait, apply.wait);
         assert_eq!(up.offline, apply.offline);
+    }
+
+    #[test]
+    fn wait_is_typed_at_the_parser_boundary() {
+        let parsed = Cli::try_parse_from(["omnifs", "up", "--wait", "30s"]).unwrap();
+        let Some(Commands::Up(args)) = parsed.command else {
+            panic!("expected up");
+        };
+        assert_eq!(args.wait, Some(std::time::Duration::from_secs(30)));
+
+        let Err(error) = Cli::try_parse_from(["omnifs", "up", "--wait", "30"]) else {
+            panic!("invalid duration must fail in clap");
+        };
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.to_string().contains("must use seconds"));
+    }
+
+    #[test]
+    fn help_groups_invocation_options_and_drops_the_old_mount_name_flag() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("Global options:"), "{help}");
+
+        let command = Cli::command();
+        let mount_add = command
+            .find_subcommand("mount")
+            .and_then(|mount| mount.find_subcommand("add"))
+            .expect("mount add");
+        assert!(
+            mount_add
+                .get_arguments()
+                .any(|arg| arg.get_long() == Some("name"))
+        );
+        assert!(
+            !mount_add
+                .get_arguments()
+                .any(|arg| arg.get_long() == Some("as"))
+        );
     }
 
     #[test]

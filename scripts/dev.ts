@@ -583,7 +583,7 @@ async function runInitMount(
     "mount",
     "add",
     mount.provider,
-    "--as",
+    "--name",
     mount.name,
     "--no-input",
     "--yes",

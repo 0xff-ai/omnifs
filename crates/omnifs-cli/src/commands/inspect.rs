@@ -1,12 +1,14 @@
 //! `omnifs inspect` — live JSONL inspector TUI.
 
+use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::Args;
 
-use crate::inspector::{ConnectionMode, SourceKind, run_plain, run_tui};
-use crate::ui::output::Output;
+use crate::error::{ExitCode, WithExitCode as _};
+use crate::inspector::{ConnectionMode, PlainFormat, SourceKind, run_plain, run_tui};
+use crate::ui::output::{Output, OutputMode};
 use omnifs_workspace::{Workspace, mounts};
 
 /// The inspector's connection label for a live daemon. The daemon always runs
@@ -21,27 +23,41 @@ const LIVE_LABEL: &str = "daemon";
 const STATIC_TEACHING_PATH: &str = "~/omnifs/dns/example.com/A";
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(
+    after_help = "Examples:\n  omnifs inspect\n  omnifs inspect --plain\n  omnifs inspect --output jsonl\n  omnifs inspect --replay trace.jsonl"
+)]
 pub struct InspectArgs {
     /// Replay a captured JSONL file instead of attaching live.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", conflicts_with = "record")]
     pub replay: Option<PathBuf>,
 
     /// While live-attaching, also append the stream to this host path.
     #[arg(long, value_name = "FILE")]
     pub record: Option<PathBuf>,
 
-    /// Print raw JSONL instead of the ratatui canvas.
+    /// Print the human line stream instead of the interactive Inspector.
     #[arg(long)]
     pub plain: bool,
 }
 
 impl InspectArgs {
     pub async fn run(self, output: Output) -> anyhow::Result<()> {
-        if output.is_structured() {
-            anyhow::bail!("inspect is a passthrough command and only supports human output")
-        }
-        if self.plain {
-            return self.run_plain(&output).await;
+        match output.mode() {
+            OutputMode::Json => {
+                return Err(anyhow::anyhow!(
+                    "inspect is an unbounded stream; use --output jsonl"
+                ))
+                .with_exit_code(ExitCode::Usage);
+            },
+            OutputMode::Jsonl => return self.run_plain(&output, PlainFormat::Jsonl).await,
+            OutputMode::Human
+                if self.plain
+                    || !std::io::stdin().is_terminal()
+                    || !std::io::stdout().is_terminal() =>
+            {
+                return self.run_plain(&output, PlainFormat::Human).await;
+            },
+            OutputMode::Human => {},
         }
 
         // Local-only and best-effort: a replay session or a workspace with
@@ -83,9 +99,9 @@ impl InspectArgs {
         Ok(())
     }
 
-    async fn run_plain(self, output: &Output) -> anyhow::Result<()> {
+    async fn run_plain(self, output: &Output, format: PlainFormat) -> anyhow::Result<()> {
         if let Some(path) = self.replay {
-            return run_plain(SourceKind::Replay(path), output);
+            return run_plain(SourceKind::Replay(path), output, format);
         }
         let workspace = Workspace::resolve()?;
         let client = crate::client::DaemonClient::for_workspace(&workspace);
@@ -95,7 +111,7 @@ impl InspectArgs {
         let record = self.record.clone();
         let output = output.clone();
         tokio::task::spawn_blocking(move || {
-            run_plain(SourceKind::Socket { endpoint, record }, &output)
+            run_plain(SourceKind::Socket { endpoint, record }, &output, format)
         })
         .await
         .context("inspector plain task")?

@@ -73,7 +73,7 @@ The CLI's libkrun runtime mirrors the filesystem image's channel split (`resolve
 
 ### Libkrun conformance lane (local-only, never CI)
 
-`crates/omnifs-itest/tests/filesystem_libkrun` runs the `fuse-libkrun` conformance column against a live guest: it creates and attaches `itest-libkrun`, runs the matrix through `omnifs fs shell --name itest-libkrun --command <cmd>`, and proves detach cleanliness. Run it with `just libkrun-conformance`; it remains a local-only, opt-in lane serialized with other live mount tests.
+`crates/omnifs-itest/tests/filesystem_libkrun` runs the `fuse-libkrun` conformance column against a live guest: it creates and attaches `itest-libkrun`, runs the matrix through `omnifs fs shell --name itest-libkrun -- <cmd>`, and proves detach cleanliness. Run it with `just libkrun-conformance`; it remains a local-only, opt-in lane serialized with other live mount tests.
 
 This lane can **never** run in GitHub-hosted CI: libkrun boots a libkrun microVM, and GitHub's hosted macOS runners do not support nested virtualization. It stays a declared local-only gate a contributor runs by hand before a libkrun-affecting change, not a lane that silently skips in CI and reads green.
 

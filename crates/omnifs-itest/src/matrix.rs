@@ -171,7 +171,7 @@ pub enum Exec {
         root: String,
         scratch: String,
     },
-    /// `omnifs fs shell --name itest-libkrun --command <cmd>` into a libkrun
+    /// `omnifs fs shell --name itest-libkrun -- <cmd>` into a libkrun
     /// guest through ssh over the vsock-to-unix bridge. `root` and `scratch`
     /// are guest paths, matching `DockerExec`'s shape. `omnifs_bin` and
     /// `home` select which workspace's libkrun guest to reach, so no
@@ -233,27 +233,11 @@ impl Exec {
             Exec::SshLibkrun {
                 omnifs_bin, home, ..
             } => {
-                // ssh has no argv-array remote exec: everything after the
-                // hostname is space-joined into one remote command string
-                // (`LibkrunRunner::shell_command`'s own doc comment), and
-                // that runner already wraps every trailing command in
-                // `cd $GUEST_MOUNT && exec <trailing>`. So `remote` must be
-                // exactly the one command `exec` replaces the login shell
-                // with, shipped as ONE already-shell-quoted argv element:
-                // passing `root`/`scratch`/`script` as separate trailing
-                // elements (the way `DockerExec` passes separate `-e` flags)
-                // would let ssh's naive space-join re-split the script body
-                // on whitespace. `env` (not a bare `ROOT=.. sh -c ..`
-                // prefix) because after `exec` an assignment-shaped word is
-                // exec's first operand, not a shell assignment: `exec ROOT=x
-                // sh` fails with "exec: ROOT=x: not found".
-                let remote = format!(
-                    "env ROOT={root} SCRATCH={scratch} sh -c {}",
-                    shell_single_quote(script)
-                );
                 let mut cmd = Command::new(omnifs_bin);
-                cmd.args(["fs", "shell", "--name", "itest-libkrun", "--command"])
-                    .arg(remote)
+                cmd.args(["fs", "shell", "--name", "itest-libkrun", "--", "env"])
+                    .arg(format!("ROOT={root}"))
+                    .arg(format!("SCRATCH={scratch}"))
+                    .args(["sh", "-c", script])
                     .env("OMNIFS_HOME", home);
                 cmd
             },
@@ -397,15 +381,6 @@ fn first_error_line(stderr: &[u8], code: Option<i32>) -> String {
         Some(code) => format!("exit status {code}"),
         None => "terminated by signal".to_string(),
     }
-}
-
-/// Wrap `s` in single quotes for a POSIX shell, escaping any embedded single
-/// quote as `'\''`. Used by [`Exec::SshLibkrun`] to ship a whole multi-line
-/// row script as one already-quoted remote command: ssh's own trailing-argv
-/// concatenation does no quoting of its own, so the string handed to it must
-/// already be safe to re-parse as shell syntax on the other end.
-fn shell_single_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 // ===========================================================================
@@ -940,7 +915,7 @@ pub const FUSE_DOCKER_FILESYSTEM: Column = Column {
 
 /// The libkrun guest FUSE filesystem (`omnifs fs attach --name itest-libkrun`),
 /// a libkrun microVM on Apple Silicon macOS, reached over ssh-over-vsock via
-/// the real `omnifs fs shell --name itest-libkrun --command <cmd>` CLI path
+/// the real `omnifs fs shell --name itest-libkrun -- <cmd>` CLI path
 /// (`crates/omnifs-itest/tests/filesystem_libkrun`). LOCAL-ONLY: GitHub-hosted
 /// macOS runners cannot nest virtualization, so this column never runs in CI
 /// (see `docs/contracts/60-build-validation.md`).

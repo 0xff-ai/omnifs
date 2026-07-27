@@ -17,7 +17,7 @@
 //! for the wrapped invocation.
 //!
 //! Every row's matrix execution goes over ssh-over-vsock via the real
-//! `omnifs fs shell --name itest-libkrun --command <cmd>` CLI path
+//! `omnifs fs shell --name itest-libkrun -- <cmd>` CLI path
 //! (`matrix::Exec::SshLibkrun`), the same command construction
 //! `LibkrunRunner::shell_command` builds for interactive `filesystem shell`. One
 //! ssh connection per row (mirroring `filesystem_docker`,
@@ -486,7 +486,7 @@ fn force_unmount(mount_point: &Path) {
     }
 }
 
-/// `omnifs fs shell --name itest-libkrun --command cat
+/// `omnifs fs shell --name itest-libkrun -- cat
 /// /omnifs/<mount>/hello/message` returns exact fixture bytes for every
 /// configured mount.
 fn assert_serves(fixture: &Fixture) {
@@ -497,13 +497,13 @@ fn assert_serves(fixture: &Fixture) {
             "shell",
             "--name",
             "itest-libkrun",
-            "--command",
+            "--",
             "cat",
             &guest_path,
         ]);
         assert!(
             out.status.success(),
-            "omnifs fs shell --name itest-libkrun --command cat {guest_path} failed: {}",
+            "omnifs fs shell --name itest-libkrun -- cat {guest_path} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello, world!");
@@ -516,7 +516,7 @@ fn assert_guest_lockdown(fixture: &Fixture) {
         "shell",
         "--name",
         "itest-libkrun",
-        "--command",
+        "--",
         "ls",
         "-1",
         "/sys/class/net",
@@ -537,7 +537,7 @@ fn assert_guest_lockdown(fixture: &Fixture) {
         "shell",
         "--name",
         "itest-libkrun",
-        "--command",
+        "--",
         "cat",
         "/proc/cmdline",
     ]);
@@ -756,20 +756,20 @@ fn libkrun_lifecycle_and_matrix() {
         "shell",
         "--name",
         "itest-libkrun",
-        "--command",
+        "--",
         "mkdir",
         "-p",
         GUEST_SCRATCH,
     ]);
     assert!(
         mkdir_out.status.success(),
-        "omnifs fs shell --name itest-libkrun --command mkdir -p {GUEST_SCRATCH} failed: {}",
+        "omnifs fs shell --name itest-libkrun -- mkdir -p {GUEST_SCRATCH} failed: {}",
         String::from_utf8_lossy(&mkdir_out.stderr)
     );
 
     // The fuse-libkrun matrix column, through the shared row/executor
     // machinery, over ssh-over-vsock via the real
-    // `omnifs fs shell --name itest-libkrun --command <cmd>` path.
+    // `omnifs fs shell --name itest-libkrun -- <cmd>` path.
     let exec = Exec::SshLibkrun {
         omnifs_bin: live::omnifs_bin(),
         home: fixture.home_path().to_path_buf(),

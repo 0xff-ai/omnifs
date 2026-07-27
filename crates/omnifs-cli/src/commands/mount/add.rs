@@ -18,12 +18,13 @@ use super::token_validation::validate_static_token;
 use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
+#[command(after_help = "Examples:\n  omnifs mount add\n  omnifs mount add github --name work")]
 pub struct AddArgs {
     /// Provider to use (positional; picker if omitted).
     pub provider: Option<String>,
     /// Mount name override. Auto-generated from the provider if absent.
-    #[arg(long = "as")]
-    pub as_name: Option<String>,
+    #[arg(long)]
+    pub name: Option<String>,
     /// Print the OAuth URL instead of opening a browser.
     #[arg(long)]
     pub no_browser: bool,
@@ -312,7 +313,7 @@ mod tests {
         let workspace = Workspace::under_root(dir.path());
         let args = AddArgs {
             provider: Some("dns".to_string()),
-            as_name: None,
+            name: None,
             no_browser: true,
             token: None,
             token_env: None,
