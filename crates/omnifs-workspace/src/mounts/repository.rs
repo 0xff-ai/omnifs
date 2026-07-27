@@ -142,20 +142,33 @@ impl Repository {
     /// Open (and, on first use, initialize) the repository at `mounts_dir`.
     /// The registry lock is retained until this value is dropped.
     pub fn open(mounts_dir: impl AsRef<Path>) -> Result<Self, RepositoryError> {
+        let mut repository = Self::open_locked(mounts_dir)?;
+        repository.ensure_git_repository()?;
+        repository.validate_tracked_files(None)?;
+        repository.commit()?;
+        Ok(repository)
+    }
+
+    /// Lock and validate an existing repository without staging or committing
+    /// working-tree changes.
+    pub(crate) fn open_existing(mounts_dir: impl AsRef<Path>) -> Result<Self, RepositoryError> {
+        let repository = Self::open_locked(mounts_dir)?;
+        repository.validate_tracked_files(None)?;
+        Ok(repository)
+    }
+
+    fn open_locked(mounts_dir: impl AsRef<Path>) -> Result<Self, RepositoryError> {
         let mounts_dir = mounts_dir.as_ref().to_path_buf();
         fs::create_dir_all(&mounts_dir).map_err(|source| RepositoryError::Io {
             path: mounts_dir.clone(),
             source,
         })?;
         let registry = Registry::load_locked(&mounts_dir)?;
-        let mut repository = Self {
+        let repository = Self {
             mounts_dir,
             registry,
         };
-        repository.ensure_git_repository()?;
         repository.validate_registry()?;
-        repository.validate_tracked_files(None)?;
-        repository.commit()?;
         Ok(repository)
     }
 
@@ -213,6 +226,9 @@ impl Repository {
         expected_source: &[u8],
         candidate: &super::Spec,
     ) -> Result<Revision, RepositoryError> {
+        self.registry.reload()?;
+        self.validate_registry()?;
+        self.validate_tracked_files(None)?;
         let actual_revision = self.head_revision()?;
         let loaded = self
             .registry
@@ -850,6 +866,37 @@ mod tests {
             repository.registry().get(&name).unwrap().config_raw,
             updated.config_raw
         );
+    }
+
+    #[test]
+    fn replace_if_unchanged_does_not_commit_a_manual_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mounts = dir.path().join("mounts");
+        let name = MountName::new("demo").unwrap();
+        let mut repository = Repository::open(&mounts).unwrap();
+        repository.put(&spec("demo")).unwrap();
+        let revision = repository.commit().unwrap();
+        let original = repository
+            .registry()
+            .loaded_iter()
+            .find_map(|(candidate, loaded)| (candidate == &name).then(|| loaded.source().to_vec()))
+            .unwrap();
+        drop(repository);
+
+        let mut manual = spec("demo");
+        manual.config_raw = Some(serde_json::json!({"manual": true}));
+        let manual_source = serde_json::to_vec_pretty(&manual).unwrap();
+        fs::write(mounts.join("demo.json"), &manual_source).unwrap();
+
+        let mut candidate = spec("demo");
+        candidate.config_raw = Some(serde_json::json!({"candidate": true}));
+        let mut repository = Repository::open_existing(&mounts).unwrap();
+        assert!(matches!(
+            repository.replace_if_unchanged(&name, &revision, &original, &candidate),
+            Err(RepositoryError::ConcurrentUpdate { .. })
+        ));
+        assert_eq!(repository.head_revision().unwrap(), Some(revision));
+        assert_eq!(fs::read(mounts.join("demo.json")).unwrap(), manual_source);
     }
 
     #[test]

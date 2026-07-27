@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Lines, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -253,17 +253,23 @@ pub struct EventSource {
     rx: Receiver<SourceMessage>,
     handle: Option<JoinHandle<()>>,
     replay_speed: Option<Arc<AtomicU8>>,
+    replay_cancelled: Option<Arc<AtomicBool>>,
 }
 
 impl EventSource {
     pub fn spawn(kind: SourceKind) -> Self {
         let (tx, rx) = mpsc::sync_channel(SOURCE_QUEUE_CAPACITY);
         let mut replay_speed = None;
+        let mut replay_cancelled = None;
         let handle = match kind {
             SourceKind::Replay(path) => {
                 let speed = Arc::new(AtomicU8::new(ReplaySpeed::Normal.encoded()));
+                let cancelled = Arc::new(AtomicBool::new(false));
                 replay_speed = Some(Arc::clone(&speed));
-                Some(thread::spawn(move || replay_path(&path, &tx, &speed)))
+                replay_cancelled = Some(Arc::clone(&cancelled));
+                Some(thread::spawn(move || {
+                    replay_path(&path, &tx, &speed, &cancelled);
+                }))
             },
             SourceKind::Socket { endpoint, record } => {
                 // The live socket source reconnects forever; detach it
@@ -279,6 +285,7 @@ impl EventSource {
             rx,
             handle,
             replay_speed,
+            replay_cancelled,
         }
     }
 
@@ -312,6 +319,10 @@ impl Drop for EventSource {
         let (_tx, rx) = mpsc::sync_channel(1);
         drop(std::mem::replace(&mut self.rx, rx));
         if let Some(handle) = self.handle.take() {
+            if let Some(cancelled) = &self.replay_cancelled {
+                cancelled.store(true, Ordering::Relaxed);
+                handle.thread().unpark();
+            }
             let _ = handle.join();
         }
     }
@@ -351,7 +362,12 @@ impl ReplayReader {
     }
 }
 
-fn replay_path(path: &Path, tx: &SyncSender<SourceMessage>, speed: &AtomicU8) {
+fn replay_path(
+    path: &Path,
+    tx: &SyncSender<SourceMessage>,
+    speed: &AtomicU8,
+    cancelled: &AtomicBool,
+) {
     let result: Result<bool> = (|| -> Result<bool> {
         let mut reader = ReplayReader::open(path)?;
         let mut previous_timestamp = None;
@@ -364,7 +380,10 @@ fn replay_path(path: &Path, tx: &SyncSender<SourceMessage>, speed: &AtomicU8) {
                         ReplaySpeed::decode(speed.load(Ordering::Relaxed)),
                     )
                 {
-                    thread::sleep(delay);
+                    thread::park_timeout(delay);
+                    if cancelled.load(Ordering::Relaxed) {
+                        return Ok(false);
+                    }
                 }
                 previous_timestamp = Some(timestamp);
             }
@@ -575,5 +594,43 @@ mod tests {
             Some(Duration::from_millis(500))
         );
         assert_eq!(replay_delay(end, start, ReplaySpeed::Normal), None);
+    }
+
+    #[test]
+    fn dropping_replay_interrupts_a_recorded_delay() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("replay.jsonl");
+        let line = |ts, seq| {
+            InspectorLine::Record(
+                InspectorRecord::new(
+                    ts,
+                    seq,
+                    seq,
+                    InspectorEvent::FuseStart {
+                        op: "lookup".into(),
+                        mount: "github".into(),
+                        path: format!("/{seq}"),
+                    },
+                )
+                .with_seq(seq),
+            )
+            .to_json_line()
+            .expect("serialize")
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}",
+                line("2026-05-23T00:00:00Z", 1),
+                line("2026-05-24T00:00:00Z", 2)
+            ),
+        )
+        .expect("write replay");
+
+        let source = EventSource::spawn(SourceKind::Replay(path));
+        assert!(matches!(source.recv(), Some(SourceMessage::Line(_))));
+        let started = std::time::Instant::now();
+        drop(source);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

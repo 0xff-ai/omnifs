@@ -330,7 +330,7 @@ impl DesiredState {
                 candidate,
             );
         }
-        Repository::open(&self.mounts_dir)?.replace_if_unchanged(
+        Repository::open_existing(&self.mounts_dir)?.replace_if_unchanged(
             &observation.name,
             &observation.revision,
             &observation.source,
