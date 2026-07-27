@@ -179,6 +179,7 @@ impl SessionStats {
 #[derive(Debug, Clone)]
 pub struct Operation {
     pub trace_id: TraceId,
+    pub started_ts: String,
     pub fuse_op: String,
     pub mount: String,
     pub path: String,
@@ -194,9 +195,17 @@ pub struct Operation {
 }
 
 impl Operation {
-    fn new(trace_id: TraceId, mount: String, path: String, fuse_op: &str, mono_us: u64) -> Self {
+    fn new(
+        trace_id: TraceId,
+        started_ts: String,
+        mount: String,
+        path: String,
+        fuse_op: &str,
+        mono_us: u64,
+    ) -> Self {
         Self {
             trace_id,
+            started_ts,
             fuse_op: fuse_op.to_string(),
             mount,
             path,
@@ -313,7 +322,7 @@ impl TraceReducer {
         let trace_id = record.trace_id;
         match &record.event {
             InspectorEvent::FuseStart { op, mount, path } => {
-                self.on_fuse_start(trace_id, op, mount, path, record.mono_us);
+                self.on_fuse_start(trace_id, &record.ts, op, mount, path, record.mono_us);
             },
             InspectorEvent::FuseEnd { op, end } => self.on_fuse_end(
                 trace_id,
@@ -403,6 +412,7 @@ impl TraceReducer {
     fn on_fuse_start(
         &mut self,
         trace_id: TraceId,
+        started_ts: &str,
         op: &str,
         mount: &str,
         path: &str,
@@ -411,6 +421,7 @@ impl TraceReducer {
         let normalized_path = self.forest.mount_tree_mut(mount).normalize_path(path);
         let operation = Operation::new(
             trace_id,
+            started_ts.to_string(),
             mount.to_string(),
             normalized_path.clone(),
             op,
