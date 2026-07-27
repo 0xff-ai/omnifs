@@ -1,0 +1,9 @@
+---
+source: crates/omnifs-cli/tests/cli_transcripts.rs
+expression: fixture.transcript(&list)
+---
+exit: 0
+stdout:
+Name	Protocol	Runtime	State	Location
+dev	nfs	host	detached	$OMNIFS_HOME/mnt
+stderr:

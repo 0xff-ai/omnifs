@@ -1,0 +1,17 @@
+---
+source: crates/omnifs-cli/tests/cli_transcripts.rs
+expression: "fixture.transcript(&fixture.run(&[\"status\"]))"
+---
+exit: 0
+stdout:
+omnifs  $OMNIFS_HOME                                            ○ stopped
+0 mounts configured
+  fix:  omnifs up
+
+Filesystems  0
+  (none)
+
+Mounts  0
+  (none)
+
+stderr:
