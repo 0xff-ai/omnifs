@@ -31,19 +31,13 @@ impl LogsArgs {
         let workspace = Workspace::resolve()?;
         let log_path = workspace.daemon().log_file();
         if !log_path.exists() {
-            crate::ui::eprint_raw(&format!(
-                "{}\n",
-                style::accentuate(
-                    "No daemon log yet. It's written on first `omnifs up`.",
-                    Stream::Stderr,
-                )
-            ));
+            output.narrate("No daemon log yet. It's written on first `omnifs up`.");
             return Ok(());
         }
         let running = daemon_is_running(&workspace);
-        crate::ui::eprint_raw(&format!(
-            "{}\n",
-            style::dim(header_line(&log_path, self.follow, running), Stream::Stderr)
+        output.narrate(style::dim(
+            header_line(&log_path, self.follow, running),
+            Stream::Stderr,
         ));
         let color = style::color_enabled(Stream::Stdout);
         if self.follow && running {
@@ -88,17 +82,44 @@ fn header_line(log_path: &Path, follow: bool, running: bool) -> String {
 /// the plain (non-`-f`) case and as `-f`'s degrade when the daemon is down
 /// (nothing new is coming, so following would just hang).
 fn print_static_tail(log_path: &Path, color: bool) -> anyhow::Result<()> {
-    let contents = std::fs::read_to_string(log_path)
+    let contents = std::fs::read(log_path)
         .with_context(|| format!("read daemon log {}", log_path.display()))?;
-    let lines: Vec<&str> = contents.lines().collect();
-    let start = lines.len().saturating_sub(DEFAULT_TAIL_LINES);
-    let mut out = String::new();
-    for line in &lines[start..] {
-        out.push_str(&colorize_log_line(line, color));
-        out.push('\n');
+    let tail = &contents[tail_start(&contents, DEFAULT_TAIL_LINES)..];
+    if !color {
+        std::io::stdout()
+            .lock()
+            .write_all(tail)
+            .context("write daemon log")?;
+        return Ok(());
     }
-    crate::ui::print_raw(&out);
+    let text = String::from_utf8_lossy(tail);
+    let mut stdout = std::io::stdout().lock();
+    for line in text.split_inclusive('\n') {
+        let (body, ending) = line.strip_suffix('\n').map_or((line, ""), |body| {
+            body.strip_suffix('\r')
+                .map_or((body, "\n"), |body| (body, "\r\n"))
+        });
+        stdout.write_all(colorize_log_line(body, true).as_bytes())?;
+        stdout.write_all(ending.as_bytes())?;
+    }
     Ok(())
+}
+
+fn tail_start(contents: &[u8], line_count: usize) -> usize {
+    if contents.is_empty() || line_count == 0 {
+        return contents.len();
+    }
+    let mut breaks = 0;
+    for index in (0..contents.len()).rev() {
+        if contents[index] != b'\n' || index + 1 == contents.len() {
+            continue;
+        }
+        breaks += 1;
+        if breaks == line_count {
+            return index + 1;
+        }
+    }
+    0
 }
 
 /// Stream new lines as they're written, surviving log rotation via `tail
@@ -106,6 +127,17 @@ fn print_static_tail(log_path: &Path, color: bool) -> anyhow::Result<()> {
 /// inherit it directly) so each line gets the same TTY-only level coloring
 /// as the static tail.
 fn follow_native_log(log_path: &Path, color: bool) -> anyhow::Result<()> {
+    if !color {
+        let status = Command::new("tail")
+            .arg("-F")
+            .arg("-n")
+            .arg(DEFAULT_TAIL_LINES.to_string())
+            .arg(log_path)
+            .status()
+            .with_context(|| format!("tail -F {}", log_path.display()))?;
+        anyhow::ensure!(status.success(), "tail -F exited with {status}");
+        return Ok(());
+    }
     let mut child = Command::new("tail")
         .arg("-F")
         .arg("-n")
@@ -124,7 +156,12 @@ fn follow_native_log(log_path: &Path, color: bool) -> anyhow::Result<()> {
         // and a real I/O error must not leave us blocked in `wait()` on a
         // `tail -F` that never exits on its own.
         match reader.read_until(b'\n', &mut buf) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).context("read tail output");
+            },
             Ok(_) => {
                 let line = String::from_utf8_lossy(&buf);
                 let line = line.trim_end_matches(['\n', '\r']);
@@ -133,8 +170,8 @@ fn follow_native_log(log_path: &Path, color: bool) -> anyhow::Result<()> {
             },
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    let status = child.wait().context("wait for tail")?;
+    anyhow::ensure!(status.success(), "tail -F exited with {status}");
     Ok(())
 }
 
@@ -247,5 +284,14 @@ mod tests {
         assert!(looks_like_timestamp("2026-07-18T10:00:00.123456Z"));
         assert!(!looks_like_timestamp("ERROR"));
         assert!(!looks_like_timestamp("short"));
+    }
+
+    #[test]
+    fn tail_start_preserves_raw_line_endings_and_final_newline_state() {
+        let bytes = b"a\r\nb\xff\nc";
+        assert_eq!(&bytes[tail_start(bytes, 2)..], b"b\xff\nc");
+        let terminated = b"a\r\nb\r\nc\r\n";
+        assert_eq!(&terminated[tail_start(terminated, 2)..], b"b\r\nc\r\n");
+        assert_eq!(tail_start(bytes, 0), bytes.len());
     }
 }

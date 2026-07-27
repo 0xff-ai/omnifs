@@ -73,6 +73,21 @@ struct HintedError {
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+struct DaemonLaunchFailure {
+    #[source]
+    source: anyhow::Error,
+}
+
+pub(crate) fn daemon_launch_failure(error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(DaemonLaunchFailure { source: error })
+}
+
+fn includes_daemon_launch(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<DaemonLaunchFailure>())
+}
+
 impl HintedError {
     /// Find the wrapper anywhere in the cause chain so hints and exit codes
     /// survive callers adding context above it.
@@ -285,15 +300,10 @@ fn build_error_block(
     };
 
     let mut actions = Vec::new();
-    let mut hints_iter = hints.into_iter();
-    if let Some(fix) = hints_iter.next() {
+    if let Some(fix) = hints.into_iter().next() {
         actions.push(render::ErrorAction::fix(fix));
-    }
-    if let Some(tail) = daemon_log {
+    } else if let Some(tail) = daemon_log {
         actions.push(render::ErrorAction::log(tail.display_path.clone()));
-    }
-    for hint in hints_iter {
-        actions.push(render::ErrorAction::try_(hint));
     }
 
     render::ErrorBlock {
@@ -305,11 +315,11 @@ fn build_error_block(
 }
 
 /// Renders the top-level human error block. A daemon-shaped
-/// failure (`ExitCode::DaemonUnavailable`) quotes the daemon log tail inline
+/// daemon launch failure quotes the daemon log tail inline
 /// instead of only pointing at `omnifs logs`; every other failure falls back
 /// to the plain cause chain.
 pub fn render(error: &anyhow::Error) -> String {
-    let daemon_log = (exit_code(error) == ExitCode::DaemonUnavailable)
+    let daemon_log = includes_daemon_launch(error)
         .then(read_daemon_log_tail)
         .flatten();
     let block = build_error_block(error, daemon_log.as_ref());
@@ -395,7 +405,7 @@ mod tests {
     fn human_error_block_matches_the_documented_shape_with_a_daemon_log_tail() {
         // the worked example, exercised through error.rs's own
         // construction (not just render.rs's primitive test) to prove the
-        // wiring: headline, `Last daemon log lines:` detail, `Fix:`/`Log:`.
+        // wiring: headline, bounded detail, and one best action.
         let error = daemon_unreachable_error(
             "The daemon exited before your mounts came ready.",
             "omnifs mount add github",
@@ -420,10 +430,17 @@ mod tests {
              \x20\x20\x20\x20ERROR provider github: pinned artifact missing from store\n\
              \n\
              Fix:  omnifs mount add github\n\
-             Log:  ~/.omnifs/cache/daemon.log\n\
              \n\
              (id: daemon-unavailable)\n"
         );
+    }
+
+    #[test]
+    fn only_explicit_launch_failures_request_a_daemon_tail() {
+        let ordinary = daemon_unreachable_error("status failed", "omnifs doctor");
+        assert!(!includes_daemon_launch(&ordinary));
+        let launch = daemon_launch_failure(ordinary);
+        assert!(includes_daemon_launch(&launch));
     }
 
     #[test]
