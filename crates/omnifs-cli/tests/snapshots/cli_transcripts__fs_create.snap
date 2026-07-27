@@ -4,5 +4,10 @@ expression: fixture.transcript(&create)
 ---
 exit: 0
 stdout:
-configured filesystem `dev` (nfs/host)
 stderr:
+✓ filesystem   dev
+✓ protocol     nfs
+✓ runtime      host
+✓ location     $OMNIFS_HOME/mnt
+✓ state        configured
+Filesystem dev is configured but detached. Attach it: omnifs fs attach --name dev

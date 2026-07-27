@@ -4,6 +4,7 @@ expression: fixture.transcript(&list)
 ---
 exit: 0
 stdout:
-Name	Protocol	Runtime	State	Location
-dev	nfs	host	detached	$OMNIFS_HOME/mnt
+Filesystems  1 detached
+  Name  Protocol  Runtime  Location                                                         Coverage      State
+  dev   nfs       host     $OMNIFS_HOME/mnt  all 0 mounts  ○ detached
 stderr:
