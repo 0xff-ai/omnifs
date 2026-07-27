@@ -781,14 +781,11 @@ fn mount_add_json_receipt_names_the_mount() {
         ),
         "unexpected status: {json}"
     );
+    assert!(json["result"]["revision"].as_str().is_some());
 }
 
-/// A failed static-token validation must abort before `persist_mount_spec`
-/// runs (`stages.rs::MountInitPlan::authenticate`'s `?` propagates the error
-/// straight out of `configure_mount`), so nothing is ever written and the
-/// `✓ mount ... created` row never prints for a mount that does not exist.
 #[test]
-fn mount_add_auth_failure_writes_no_spec_and_prints_no_created_row() {
+fn mount_add_auth_failure_keeps_the_committed_spec_for_reauth() {
     let fixture = Fixture::new();
     let providers_dir = fixture.home_path().join("providers");
 
@@ -825,17 +822,86 @@ fn mount_add_auth_failure_writes_no_spec_and_prints_no_created_row() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stderr.contains("created"),
-        "the mount row must never claim creation when nothing was persisted: {stderr}"
+        stderr.contains("created"),
+        "the durable mount must be reported before sign-in: {stderr}"
     );
     assert!(
         stderr.contains("validat"),
         "the real validation failure should still surface: {stderr}"
     );
     assert!(
-        !fixture.home_path().join("mounts/authfail.json").exists(),
-        "a failed auth flow must not write a mount spec"
+        fixture.home_path().join("mounts/authfail.json").exists(),
+        "a failed sign-in must retain the complete mount spec"
     );
+    assert!(
+        stderr.contains("mount reauth") && stderr.contains("authfail"),
+        "{stderr}"
+    );
+    assert!(
+        !fixture.home_path().join("credentials.json").exists(),
+        "failed validation must not store a credential"
+    );
+}
+
+#[test]
+fn mount_update_replaces_selected_fields_and_reports_revisions() {
+    let fixture = Fixture::new();
+    install_web_provider(&fixture);
+    let added = fixture.run(&[
+        "mount",
+        "add",
+        "web",
+        "--name",
+        "web",
+        "--no-input",
+        "--no-auth",
+        "--config-json",
+        r#"{"domains":["example.com"]}"#,
+        "--output",
+        "json",
+    ]);
+    assert_eq!(exit_code(&added), 0);
+    let first = stdout_json(&added)["result"]["revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let updated = fixture.run(&[
+        "mount",
+        "update",
+        "web",
+        "--config-json",
+        r#"{"domains":["example.org"]}"#,
+        "--output",
+        "json",
+    ]);
+    assert_eq!(
+        exit_code(&updated),
+        0,
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    let updated_json = stdout_json(&updated);
+    let result = &updated_json["result"];
+    assert_eq!(result["previous_revision"], first);
+    assert_ne!(result["revision"], first);
+    assert_eq!(result["changed"], serde_json::json!(["config"]));
+    let spec = std::fs::read_to_string(fixture.home_path().join("mounts/web.json")).unwrap();
+    assert!(spec.contains("example.org"));
+
+    let unchanged = fixture.run(&[
+        "mount",
+        "update",
+        "web",
+        "--config-json",
+        r#"{"domains":["example.org"]}"#,
+        "--output",
+        "json",
+    ]);
+    assert_eq!(exit_code(&unchanged), 0);
+    let unchanged = stdout_json(&unchanged);
+    assert_eq!(unchanged["result"]["revision"], result["revision"]);
+    assert_eq!(unchanged["result"]["changed"], serde_json::json!([]));
 }
 
 /// A structured command that fails before its final document emits exactly one JSON

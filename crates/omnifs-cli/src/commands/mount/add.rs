@@ -109,6 +109,7 @@ impl AddArgs {
                     verdict: crate::commands::receipt::Verdict::Ok,
                     mount: outcome.mount_name,
                     status: outcome.status,
+                    revision: outcome.revision.to_string(),
                 },
             )?;
         }

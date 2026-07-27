@@ -87,6 +87,8 @@ pub(crate) struct MountRemoveReceipt {
     pub(crate) rows: Vec<Outcome>,
     pub(crate) dry_run: bool,
     pub(crate) plan: Plan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) revision: Option<String>,
 }
 
 impl MountRemoveReceipt {
@@ -97,16 +99,23 @@ impl MountRemoveReceipt {
             rows: Vec::new(),
             dry_run: true,
             plan,
+            revision: None,
         }
     }
 
-    pub(crate) fn applied(mount: String, plan: Plan, rows: Vec<Outcome>) -> Self {
+    pub(crate) fn applied(
+        mount: String,
+        plan: Plan,
+        rows: Vec<Outcome>,
+        revision: Option<String>,
+    ) -> Self {
         Self {
             verdict: Verdict::from_rows(&rows),
             mount,
             rows,
             dry_run: false,
             plan,
+            revision,
         }
     }
 
@@ -145,6 +154,7 @@ pub(crate) struct MountAddReceipt {
     pub(crate) verdict: Verdict,
     pub(crate) mount: String,
     pub(crate) status: MountInitStatus,
+    pub(crate) revision: String,
 }
 
 /// `omnifs mount reauth`: the mount whose credential was refreshed.

@@ -7,6 +7,7 @@ pub(crate) mod provider_selection;
 pub(crate) mod revoke;
 pub(crate) mod spec_creation;
 mod token_validation;
+mod update;
 
 pub(crate) use add::AddArgs;
 pub(crate) use add::{render_consent_block, run_static_token_init};
@@ -40,6 +41,8 @@ pub enum MountCommand {
     Ls,
     /// Show one configured mount and every derived filesystem access path.
     Show(ShowArgs),
+    /// Update selected fields in an existing mount.
+    Update(update::UpdateArgs),
     /// Re-authenticate an existing mount.
     Reauth(ReauthArgs),
     /// Revoke the configured credential for an existing mount.
@@ -88,6 +91,7 @@ impl MountArgs {
             MountCommand::Add(args) => args.run(output).await,
             MountCommand::Ls => ls(output).await,
             MountCommand::Show(args) => show(&args, output).await,
+            MountCommand::Update(args) => args.run(output).await,
             MountCommand::Reauth(args) => {
                 let receipt = args.run(output.clone()).await?;
                 if output.is_structured() {
@@ -525,6 +529,7 @@ fn rm_with_options(
             name.to_string(),
             plan,
             receipt.rows,
+            None,
         ));
     }
     let config_path = mounts.spec_path(&name);
@@ -555,13 +560,17 @@ fn rm_with_options(
         Err(error) => Outcome::fail("spec", format!("spec kept; local delete failed: {error:#}")),
     };
     let mut outcomes = vec![spec_outcome];
-    if outcomes[0].state != crate::ui::consent::OutcomeState::Fail
-        && let Err(error) = workspace.desired_state().commit()
-    {
-        outcomes[0] = Outcome::fail(
-            "spec",
-            format!("deleted locally; desired-state commit failed: {error:#}"),
-        );
+    let mut revision = None;
+    if outcomes[0].state != crate::ui::consent::OutcomeState::Fail {
+        match workspace.desired_state().commit() {
+            Ok(committed) => revision = Some(committed.to_string()),
+            Err(error) => {
+                outcomes[0] = Outcome::fail(
+                    "spec",
+                    format!("deleted locally; desired-state commit failed: {error:#}"),
+                );
+            },
+        }
     }
     let receipt = plan.receipt(outcomes);
     output.receipt(&receipt);
@@ -586,6 +595,7 @@ fn rm_with_options(
         name.to_string(),
         plan,
         receipt.rows,
+        revision,
     ))
 }
 

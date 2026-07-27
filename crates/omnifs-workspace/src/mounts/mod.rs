@@ -58,7 +58,7 @@ impl Limits {
 /// Raw user-authored mount JSON.
 ///
 /// Loaded from JSON files in the mount spec directory.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
     /// The pinned provider reference: the content [`ProviderId`] plus the
@@ -538,6 +538,21 @@ impl Registry {
         })
     }
 
+    /// Restore the exact validated bytes for one live spec while this registry
+    /// holds the repository lock.
+    pub(crate) fn restore_source(
+        &mut self,
+        name: &MountName,
+        bytes: &[u8],
+    ) -> Result<(), SpecError> {
+        let path = self.spec_path(name);
+        let spec = Self::validate_source(&path, name.as_str(), bytes)?;
+        self.write_spec_atomic(&path, bytes)?;
+        self.specs
+            .insert(name.clone(), LoadedSpec::new(spec, Arc::from(bytes)));
+        Ok(())
+    }
+
     /// Restore one validated revision file through the same parser, naming
     /// checks, and atomic writer used for live specs. Repository uses this when
     /// snapshotting Git revisions; callers cannot bypass Spec validation.
@@ -562,31 +577,9 @@ impl Registry {
                 mount: stem.to_string(),
             });
         }
-        let spec =
-            Spec::parse(
-                std::str::from_utf8(bytes).map_err(|error| SpecError::ParseSpec {
-                    path: root.join(relative),
-                    source: serde_json::Error::io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        error,
-                    )),
-                })?,
-            )
-            .map_err(|source| SpecError::ParseSpec {
-                path: root.join(relative),
-                source,
-            })?;
-        let name = MountName::new(spec.mount.clone()).map_err(|source| SpecError::MountName {
-            path: root.join(relative),
-            mount: spec.mount.clone(),
-            source,
-        })?;
-        if name.as_str() != stem {
-            return Err(SpecError::FilenameMismatch {
-                path: root.join(relative),
-                mount: spec.mount,
-            });
-        }
+        let path = root.join(relative);
+        let spec = Self::validate_source(&path, stem, bytes)?;
+        let name = MountName::new(spec.mount.clone()).expect("validated mount name");
         fs::create_dir_all(root).map_err(|source| SpecError::WriteSpec {
             path: root.to_path_buf(),
             source,
@@ -597,6 +590,35 @@ impl Registry {
                 source,
             },
         )
+    }
+
+    fn validate_source(path: &Path, expected_name: &str, bytes: &[u8]) -> Result<Spec, SpecError> {
+        let spec =
+            Spec::parse(
+                std::str::from_utf8(bytes).map_err(|error| SpecError::ParseSpec {
+                    path: path.to_path_buf(),
+                    source: serde_json::Error::io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        error,
+                    )),
+                })?,
+            )
+            .map_err(|source| SpecError::ParseSpec {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let name = MountName::new(spec.mount.clone()).map_err(|source| SpecError::MountName {
+            path: path.to_path_buf(),
+            mount: spec.mount.clone(),
+            source,
+        })?;
+        if name.as_str() != expected_name {
+            return Err(SpecError::FilenameMismatch {
+                path: path.to_path_buf(),
+                mount: spec.mount,
+            });
+        }
+        Ok(spec)
     }
 
     fn spec_paths(&self) -> io::Result<Vec<PathBuf>> {
