@@ -9,7 +9,7 @@ use std::io::IsTerminal as _;
 
 use crossterm::terminal;
 use tabled::builder::Builder;
-use tabled::settings::{Alignment, Padding, Span, Style};
+use tabled::settings::{Alignment, Padding, Span, Style, Width};
 
 use super::render::display_width;
 
@@ -55,17 +55,16 @@ impl Report {
     /// the process terminal.
     pub(crate) fn render_with(&self, options: RenderOptions) -> String {
         let mut out = String::new();
-        let mut action_rendered = false;
         for (index, block) in self.blocks.iter().enumerate() {
             if index > 0 {
                 out.push('\n');
             }
             match block {
                 Block::Context(context) => {
-                    context.render_into(&mut out, options, &mut action_rendered);
+                    context.render_into(&mut out, options);
                 },
                 Block::Resources(table) => {
-                    table.render_into(&mut out, options, &mut action_rendered);
+                    table.render_into(&mut out, options);
                 },
             }
         }
@@ -113,7 +112,7 @@ impl ContextStrip {
         self
     }
 
-    fn render_into(&self, out: &mut String, options: RenderOptions, action_rendered: &mut bool) {
+    fn render_into(&self, out: &mut String, options: RenderOptions) {
         let left = format!("{}  {}", self.title, self.location);
         let state = self.state.render(options.color);
         let gap = options
@@ -132,11 +131,8 @@ impl ContextStrip {
                     .join(", ")
             );
         }
-        if let Some(action) = self.action.as_ref()
-            && !*action_rendered
-        {
+        if let Some(action) = self.action.as_ref() {
             let _ = writeln!(out, "  fix:  {}", action.command);
-            *action_rendered = true;
         }
     }
 }
@@ -194,7 +190,7 @@ impl ResourceTable {
         format!("{}  {}", self.title, self.summary.0)
     }
 
-    fn render_into(&self, out: &mut String, options: RenderOptions, action_rendered: &mut bool) {
+    fn render_into(&self, out: &mut String, options: RenderOptions) {
         let _ = writeln!(out, "{}", self.heading());
         if self.rows.is_empty() {
             let _ = writeln!(out, "  (none)");
@@ -202,13 +198,13 @@ impl ResourceTable {
         }
 
         if options.width <= 71 {
-            self.render_stacked(out, options, action_rendered);
+            self.render_stacked(out, options);
         } else {
-            self.render_wide(out, options, action_rendered);
+            self.render_wide(out, options);
         }
     }
 
-    fn render_wide(&self, out: &mut String, options: RenderOptions, action_rendered: &mut bool) {
+    fn render_wide(&self, out: &mut String, options: RenderOptions) {
         let active = self.active_columns(options.width);
         let mut builder = Builder::default();
         builder.push_record(
@@ -226,15 +222,12 @@ impl ResourceTable {
                     .map_or_else(String::new, |cell| cell.render(options.color))
             }));
             record_index += 1;
-            if let Some(action) = row.action.as_ref()
-                && !*action_rendered
-            {
+            if let Some(action) = row.action.as_ref() {
                 let mut action_row = vec![format!("fix:  {}", action.command)];
                 action_row.resize(active.len(), String::new());
                 builder.push_record(action_row);
                 spanned_rows.push(record_index);
                 record_index += 1;
-                *action_rendered = true;
             }
         }
 
@@ -243,6 +236,9 @@ impl ResourceTable {
             .with(Style::empty())
             .with(Padding::new(0, 2, 0, 0))
             .with(Alignment::left());
+        if self.layout_width(&active) > options.width {
+            table.with(Width::truncate(options.width.saturating_sub(2)));
+        }
         let span = isize::try_from(active.len()).unwrap_or(isize::MAX);
         for row in spanned_rows {
             table.modify((row, 0), Span::column(span));
@@ -252,7 +248,7 @@ impl ResourceTable {
         }
     }
 
-    fn render_stacked(&self, out: &mut String, options: RenderOptions, action_rendered: &mut bool) {
+    fn render_stacked(&self, out: &mut String, options: RenderOptions) {
         for row in &self.rows {
             let identity = self
                 .columns
@@ -284,11 +280,8 @@ impl ResourceTable {
             if !metadata.is_empty() {
                 let _ = writeln!(out, "    {}", metadata.join(", "));
             }
-            if let Some(action) = row.action.as_ref()
-                && !*action_rendered
-            {
+            if let Some(action) = row.action.as_ref() {
                 let _ = writeln!(out, "    fix:  {}", action.command);
-                *action_rendered = true;
             }
         }
     }
@@ -660,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_layout_stacks_identity_metadata_and_one_shared_action() {
+    fn narrow_layout_renders_each_action_it_is_given() {
         let mut report = Report::new();
         report.push(Block::Resources(sample()));
         let output = report.render_with(RenderOptions {
@@ -678,9 +671,26 @@ mod tests {
         assert!(display_width(&first_row) <= 71);
         assert_eq!(
             output.matches("fix:  omnifs mount reauth github").count(),
-            1
+            2
         );
         assert!(output.contains("Location  /very/long/location"));
+    }
+
+    #[test]
+    fn wide_layout_truncates_to_the_terminal_width() {
+        let mut table = sample();
+        table.rows[0].cells[1] = Cell::new(format!("/{}", "x".repeat(200)));
+        let mut report = Report::new();
+        report.push(Block::Resources(table));
+        let output = report.render_with(RenderOptions {
+            width: 80,
+            color: false,
+        });
+
+        assert!(
+            output.lines().all(|line| display_width(line) <= 80),
+            "{output}"
+        );
     }
 
     #[test]

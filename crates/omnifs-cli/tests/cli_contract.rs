@@ -325,6 +325,32 @@ fn fs_create_persists_one_resolved_spec_without_starting_a_runtime() {
 }
 
 #[test]
+fn fs_list_ignores_unrelated_mount_health() {
+    let fixture = Fixture::new();
+    fixture.write_static_token_mount_without_credential();
+    let location = fixture.home_path().join("filesystem");
+    let created = fixture.run_owned(&[
+        "fs".to_owned(),
+        "create".to_owned(),
+        "--name".to_owned(),
+        "main".to_owned(),
+        "--protocol".to_owned(),
+        "nfs".to_owned(),
+        "--runtime".to_owned(),
+        "host".to_owned(),
+        "--location".to_owned(),
+        location.display().to_string(),
+    ]);
+    assert_eq!(exit_code(&created), 0, "{created:?}");
+
+    let listed = fixture.run(&["fs", "ls", "--output", "json"]);
+    assert_eq!(exit_code(&listed), 0, "{listed:?}");
+    let listed = stdout_json(&listed);
+    assert_eq!(listed["verdict"], "ok");
+    assert_eq!(listed["result"]["filesystems"][0]["state"], "detached");
+}
+
+#[test]
 fn fs_create_freezes_host_defaults_and_rejects_guest_locations() {
     let fixture = Fixture::new();
     let host = fixture.run(&[
@@ -465,6 +491,19 @@ fn malformed_inspector_replay_is_a_line_numbered_failure() {
     assert!(stderr.contains("line 2"), "{stderr}");
     assert!(stderr.contains("invalid json"), "{stderr}");
     assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn logs_preserve_raw_bytes_and_the_missing_final_newline() {
+    let fixture = Fixture::new();
+    let cache = fixture.home_path().join("cache");
+    std::fs::create_dir_all(&cache).expect("cache dir");
+    let bytes = b"first\r\nsecond\xff\nunterminated";
+    std::fs::write(cache.join("daemon.log"), bytes).expect("daemon log");
+
+    let output = fixture.run(&["logs"]);
+    assert_eq!(exit_code(&output), 0, "{output:?}");
+    assert_eq!(output.stdout, bytes);
 }
 
 #[test]

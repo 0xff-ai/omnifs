@@ -502,12 +502,13 @@ fn verdict_line(rows: &[&Row], verdict: DoctorVerdict, caps: Capabilities) -> St
     } else {
         parts.join(", ")
     };
-    let fixable = rows
+    let mut problems = rows
         .iter()
-        .filter(|row| row.severity >= Severity::Attention)
-        .filter_map(|row| row.fix.as_deref())
-        .collect::<std::collections::BTreeSet<_>>();
-    match fixable.into_iter().next() {
+        .filter(|row| row.severity >= Severity::Attention);
+    let shared_fix = problems.next().and_then(|row| row.fix.as_deref());
+    let shared_fix =
+        shared_fix.filter(|action| problems.all(|row| row.fix.as_deref() == Some(*action)));
+    match shared_fix {
         Some(action) => format!("{summary}. Fix it:  {}", style::accent(action, caps.color)),
         None => format!("{summary}."),
     }
@@ -1288,6 +1289,28 @@ mod golden {
 
         let verdict = lines.last().copied().unwrap_or_default();
         assert_eq!(verdict, "1 warning. Fix it:  omnifs mount reauth github");
+    }
+
+    #[test]
+    fn verdict_omits_a_fix_unless_every_problem_shares_it() {
+        let warning = |fix: Option<&str>| Row {
+            severity: Severity::Attention,
+            key: "check".to_owned(),
+            value: "needs attention".to_owned(),
+            fix: fix.map(str::to_owned),
+        };
+        let first = warning(Some("omnifs up"));
+        let different = warning(Some("omnifs doctor"));
+        assert_eq!(
+            verdict_line(&[&first, &different], DoctorVerdict::Warnings, caps(false)),
+            "2 warnings."
+        );
+
+        let missing = warning(None);
+        assert_eq!(
+            verdict_line(&[&first, &missing], DoctorVerdict::Warnings, caps(false)),
+            "2 warnings."
+        );
     }
 
     #[test]

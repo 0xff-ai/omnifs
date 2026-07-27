@@ -676,10 +676,38 @@ fn propagate(mut command: Command, context: String) -> Result<ExitCode> {
 
 async fn list(output: Output) -> Result<ExitCode> {
     let workspace = Workspace::resolve()?;
-    let inventory = crate::inventory::Inventory::collect(&workspace).await?;
-    let verdict = inventory.verdict();
-    let rows = inventory
-        .filesystems
+    let configured = workspace.filesystems().list()?;
+    let mount_count = workspace
+        .desired_state()
+        .observe_repository()?
+        .registry()
+        .iter()
+        .count();
+    let daemon_probe = crate::client::DaemonClient::for_workspace(&workspace)
+        .status_optional_checked()
+        .await;
+    let daemon = daemon_probe.as_ref().ok().and_then(Option::as_ref);
+    let filesystems = crate::inventory::filesystem_statuses(
+        &configured,
+        daemon,
+        daemon_probe.is_ok(),
+        mount_count,
+    );
+    let verdict = if filesystems
+        .iter()
+        .any(|filesystem| filesystem.state.severity() >= crate::inventory::Severity::Attention)
+    {
+        crate::inventory::Verdict::Degraded
+    } else {
+        crate::inventory::Verdict::Ok
+    };
+    let next_action = filesystems
+        .iter()
+        .find(|filesystem| filesystem.state.severity() >= crate::inventory::Severity::Attention)
+        .map(|filesystem| crate::inventory::NextAction::Doctor {
+            target: crate::inventory::ActionTarget::Filesystem(filesystem.spec.id().clone()),
+        });
+    let rows = filesystems
         .iter()
         .map(|filesystem| ListRow {
             spec: filesystem.spec.clone(),
@@ -694,10 +722,7 @@ async fn list(output: Output) -> Result<ExitCode> {
     } else {
         let mut report = crate::ui::table::Report::new();
         report.push(crate::ui::table::Block::Resources(
-            crate::status::filesystem_table(
-                &inventory.filesystems,
-                inventory.next_action().as_ref(),
-            ),
+            crate::status::filesystem_table(&filesystems, next_action.as_ref()),
         ));
         crate::ui::print_raw(&report.render());
     }

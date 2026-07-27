@@ -476,11 +476,7 @@ impl App {
                 .is_some_and(|op| self.filter.matches(op))
         });
         if !selected_is_visible {
-            self.selected = self
-                .view_reducer()
-                .visible_trace_ids(&self.filter)
-                .first()
-                .copied();
+            self.selected = self.visible_trace_ids().first().copied();
         }
     }
 
@@ -765,7 +761,7 @@ impl App {
     }
 
     fn select_next(&mut self) {
-        let visible = self.view_reducer().visible_trace_ids(&self.filter);
+        let visible = self.visible_trace_ids();
         if visible.is_empty() {
             return;
         }
@@ -778,7 +774,7 @@ impl App {
     }
 
     fn select_prev(&mut self) {
-        let visible = self.view_reducer().visible_trace_ids(&self.filter);
+        let visible = self.visible_trace_ids();
         if visible.is_empty() {
             return;
         }
@@ -1462,6 +1458,10 @@ mod tests {
         app.handle_key(key(KeyCode::Char('l')));
         assert_eq!(app.operation_order, OperationOrder::Latency);
         assert_eq!(app.visible_trace_ids()[0], 2);
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(app.selected_trace(), Some(3));
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(app.selected_trace(), Some(2));
 
         app.handle_key(key(KeyCode::Char('E')));
         assert_eq!(app.selected_trace(), Some(3));
