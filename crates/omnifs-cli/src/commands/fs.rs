@@ -304,11 +304,14 @@ async fn attach(args: NameArgs, output: Output) -> Result<ExitCode> {
         .status_optional()
         .await?
         .context("the daemon is stopped; run `omnifs up` before attaching a filesystem")?;
-    ensure!(
-        !status.filesystems.iter().any(|row| row.id() == spec.id()),
-        "filesystem `{}` is already attached",
-        spec.id()
-    );
+    if let Some(attached) = status.filesystems.iter().find(|row| row.id() == spec.id()) {
+        ensure!(
+            attached == &spec,
+            "filesystem `{}` is attached with different settings; run `omnifs doctor`",
+            spec.id()
+        );
+        return finish_action(&output, spec, "already_attached");
+    }
     ensure!(
         !runtime_running(&workspace, &spec, output.clone()).await?,
         "filesystem `{}` already has a running {} instance",
@@ -604,12 +607,27 @@ async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
                 "filesystem `{}` is not mounted; runner phase is {phase:?}",
                 spec.id()
             );
-            crate::ui::print_raw(&format!(
-                "Filesystem `{}` is already available in your normal shell at {}.\n",
-                spec.id(),
-                spec.location().display()
-            ));
-            Ok(ExitCode::Success)
+            if let Some(program) = args.command.first() {
+                let mut command = Command::new(program);
+                command
+                    .args(&args.command[1..])
+                    .current_dir(spec.location());
+                propagate(
+                    command,
+                    format!("run command in filesystem `{}`", spec.id()),
+                )
+            } else if let Some(shell) = args.shell.as_deref() {
+                let mut command = Command::new(shell);
+                command.current_dir(spec.location());
+                propagate(command, format!("open shell in filesystem `{}`", spec.id()))
+            } else {
+                crate::ui::print_raw(&format!(
+                    "Filesystem `{}` is available at {}.\n",
+                    spec.id(),
+                    spec.location().display()
+                ));
+                Ok(ExitCode::Success)
+            }
         },
         fs::Runtime::Docker => {
             let name =
@@ -697,13 +715,65 @@ fn finish_action(output: &Output, spec: fs::Spec, state: &'static str) -> Result
     if output.is_structured() {
         output.emit_result(ResultVerdict::Ok, &result)?;
     } else {
-        crate::ui::print_raw(&format!(
-            "{} filesystem `{}` ({}/{})\n",
-            state,
-            result.filesystem.id(),
-            result.filesystem.protocol(),
-            result.filesystem.runtime()
-        ));
+        let rows = [
+            crate::ui::render::LedgerRow::new(
+                crate::ui::style::Glyph::Done,
+                "filesystem",
+                result.filesystem.id().to_string(),
+            ),
+            crate::ui::render::LedgerRow::new(
+                crate::ui::style::Glyph::Done,
+                "protocol",
+                result.filesystem.protocol().to_string(),
+            ),
+            crate::ui::render::LedgerRow::new(
+                crate::ui::style::Glyph::Done,
+                "runtime",
+                result.filesystem.runtime().to_string(),
+            ),
+            crate::ui::render::LedgerRow::new(
+                crate::ui::style::Glyph::Done,
+                "location",
+                omnifs_workspace::display(result.filesystem.location()),
+            ),
+            crate::ui::render::LedgerRow::new(
+                crate::ui::style::Glyph::Done,
+                "state",
+                state.replace('_', " "),
+            ),
+        ];
+        let width = crate::ui::render::ledger_key_width(&rows);
+        for row in &rows {
+            output.ledger_row(row, width);
+        }
+        match state {
+            "configured" => output.outro(format!(
+                "Filesystem `{}` is configured but detached. Attach it: `omnifs fs attach --name {}`",
+                result.filesystem.id(),
+                result.filesystem.id()
+            )),
+            "attached" | "already_attached"
+                if result.filesystem.runtime() == fs::Runtime::Host =>
+            {
+                output.outro(format!(
+                    "Files are at {}.",
+                    omnifs_workspace::display(result.filesystem.location())
+                ));
+            },
+            "attached" | "already_attached" => output.outro(format!(
+                "Enter it: `omnifs fs shell --name {}`",
+                result.filesystem.id()
+            )),
+            "detached" => output.outro(format!(
+                "Filesystem `{}` is detached; its configuration remains.",
+                result.filesystem.id()
+            )),
+            "removed" => output.outro(format!(
+                "Filesystem `{}` configuration removed.",
+                result.filesystem.id()
+            )),
+            _ => {},
+        }
     }
     Ok(ExitCode::Success)
 }
