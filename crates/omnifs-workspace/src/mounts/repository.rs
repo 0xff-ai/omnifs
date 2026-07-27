@@ -101,6 +101,20 @@ pub enum RepositoryError {
         path: PathBuf,
         details: String,
     },
+    #[error(
+        "mount `{mount}` changed while it was being updated (expected revision {expected}, found {actual})"
+    )]
+    ConcurrentUpdate {
+        mount: MountName,
+        expected: Revision,
+        actual: String,
+    },
+    #[error("failed to commit mount `{mount}`: {commit}; rollback also failed: {rollback}")]
+    CommitRollback {
+        mount: MountName,
+        commit: Box<RepositoryError>,
+        rollback: String,
+    },
 }
 
 /// The local Git repository containing mount desired state.
@@ -184,6 +198,61 @@ impl Repository {
     /// Remove a spec through Registry's canonical naming and file-removal path.
     pub fn remove(&mut self, name: &MountName) -> Result<bool, RepositoryError> {
         Ok(self.registry.remove(name)?)
+    }
+
+    /// Replace an existing mount only if both its committed revision and exact
+    /// source bytes still match an earlier observation.
+    ///
+    /// The caller can perform prompts and network work between observation and
+    /// this operation without holding the repository lock. A failed commit
+    /// restores both the exact file bytes and the Git index before returning.
+    pub fn replace_if_unchanged(
+        &mut self,
+        name: &MountName,
+        expected_revision: &Revision,
+        expected_source: &[u8],
+        candidate: &super::Spec,
+    ) -> Result<Revision, RepositoryError> {
+        let actual_revision = self.head_revision()?;
+        let loaded = self
+            .registry
+            .loaded_iter()
+            .find_map(|(loaded_name, loaded)| (loaded_name == name).then_some(loaded));
+        let matches = actual_revision.as_ref() == Some(expected_revision)
+            && loaded.is_some_and(|loaded| loaded.source() == expected_source);
+        if !matches {
+            return Err(RepositoryError::ConcurrentUpdate {
+                mount: name.clone(),
+                expected: expected_revision.clone(),
+                actual: actual_revision.map_or_else(
+                    || "no committed revision".to_string(),
+                    |revision| revision.0,
+                ),
+            });
+        }
+        if loaded.is_some_and(|loaded| loaded.spec() == candidate) {
+            return Ok(expected_revision.clone());
+        }
+
+        self.put(candidate)?;
+        match self.commit() {
+            Ok(revision) => Ok(revision),
+            Err(commit) => {
+                let rollback = self
+                    .registry
+                    .restore_source(name, expected_source)
+                    .map_err(RepositoryError::from)
+                    .and_then(|()| self.stage_specs());
+                match rollback {
+                    Ok(()) => Err(commit),
+                    Err(rollback) => Err(RepositoryError::CommitRollback {
+                        mount: name.clone(),
+                        commit: Box::new(commit),
+                        rollback: rollback.to_string(),
+                    }),
+                }
+            },
+        }
     }
 
     /// Commit valid current `*.json` edits and return the resulting revision.
@@ -743,6 +812,99 @@ mod tests {
         let third = repository.commit().unwrap();
         assert_ne!(second, third);
         assert!(repository.registry().iter().next().is_none());
+    }
+
+    #[test]
+    fn replace_if_unchanged_commits_once_and_rejects_stale_observations() {
+        let dir = tempfile::tempdir().unwrap();
+        let mounts = dir.path().join("mounts");
+        let name = MountName::new("demo").unwrap();
+        let mut repository = Repository::open(&mounts).unwrap();
+        repository.put(&spec("demo")).unwrap();
+        let first = repository.commit().unwrap();
+        let original = repository
+            .registry()
+            .loaded_iter()
+            .find_map(|(candidate, loaded)| (candidate == &name).then(|| loaded.source().to_vec()))
+            .unwrap();
+
+        let mut updated = spec("demo");
+        updated.config_raw = Some(serde_json::json!({"updated": true}));
+        let second = repository
+            .replace_if_unchanged(&name, &first, &original, &updated)
+            .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            repository.registry().get(&name).unwrap().config_raw,
+            updated.config_raw
+        );
+
+        let mut stale = updated.clone();
+        stale.config_raw = Some(serde_json::json!({"stale": true}));
+        assert!(matches!(
+            repository.replace_if_unchanged(&name, &first, &original, &stale),
+            Err(RepositoryError::ConcurrentUpdate { .. })
+        ));
+        assert_eq!(repository.head_revision().unwrap(), Some(second));
+        assert_eq!(
+            repository.registry().get(&name).unwrap().config_raw,
+            updated.config_raw
+        );
+    }
+
+    #[test]
+    fn replace_if_unchanged_noop_keeps_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let mounts = dir.path().join("mounts");
+        let name = MountName::new("demo").unwrap();
+        let mut repository = Repository::open(&mounts).unwrap();
+        let original_spec = spec("demo");
+        repository.put(&original_spec).unwrap();
+        let revision = repository.commit().unwrap();
+        let source = repository
+            .registry()
+            .loaded_iter()
+            .find_map(|(candidate, loaded)| (candidate == &name).then(|| loaded.source().to_vec()))
+            .unwrap();
+
+        let result = repository
+            .replace_if_unchanged(&name, &revision, &source, &original_spec)
+            .unwrap();
+        assert_eq!(result, revision);
+        assert_eq!(repository.head_revision().unwrap(), Some(revision));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_if_unchanged_restores_file_and_index_when_commit_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mounts = dir.path().join("mounts");
+        let name = MountName::new("demo").unwrap();
+        let mut repository = Repository::open(&mounts).unwrap();
+        repository.put(&spec("demo")).unwrap();
+        let revision = repository.commit().unwrap();
+        let original = repository
+            .registry()
+            .loaded_iter()
+            .find_map(|(candidate, loaded)| (candidate == &name).then(|| loaded.source().to_vec()))
+            .unwrap();
+        let hook = mounts.join(".git/hooks/pre-commit");
+        fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut updated = spec("demo");
+        updated.config_raw = Some(serde_json::json!({"must_not_leak": true}));
+        assert!(matches!(
+            repository.replace_if_unchanged(&name, &revision, &original, &updated),
+            Err(RepositoryError::Git { .. })
+        ));
+        assert_eq!(fs::read(mounts.join("demo.json")).unwrap(), original);
+        assert_eq!(repository.head_revision().unwrap(), Some(revision));
+        let status = git(&mounts, &["status", "--porcelain", "--untracked-files=all"]);
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty());
     }
 
     #[test]

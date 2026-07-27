@@ -237,6 +237,30 @@ pub struct DesiredState {
     repository: OnceCell<RefCell<Repository>>,
 }
 
+/// One optimistic read of a committed mount spec.
+///
+/// Callers may do slow work after observing it. Publishing the replacement
+/// checks the revision and exact source again under the repository lock.
+#[derive(Debug, Clone)]
+pub struct MountObservation {
+    name: MountName,
+    revision: Revision,
+    source: Vec<u8>,
+    spec: Spec,
+}
+
+impl MountObservation {
+    #[must_use]
+    pub fn revision(&self) -> &Revision {
+        &self.revision
+    }
+
+    #[must_use]
+    pub fn spec(&self) -> &Spec {
+        &self.spec
+    }
+}
+
 impl DesiredState {
     fn new(mounts_dir: PathBuf, cache_dir: PathBuf) -> Self {
         Self {
@@ -267,6 +291,51 @@ impl DesiredState {
 
     pub fn observe_repository(&self) -> Result<Repository, crate::mounts::RepositoryError> {
         Repository::observe(&self.mounts_dir)
+    }
+
+    /// Observe one committed mount without retaining the repository lock.
+    pub fn observe_mount(
+        &self,
+        name: &MountName,
+    ) -> Result<Option<MountObservation>, crate::mounts::RepositoryError> {
+        let repository = self.observe_repository()?;
+        let Some(revision) = repository.head_revision()? else {
+            return Ok(None);
+        };
+        Ok(repository
+            .registry()
+            .loaded_iter()
+            .find_map(|(candidate, loaded)| {
+                (candidate == name).then(|| MountObservation {
+                    name: name.clone(),
+                    revision: revision.clone(),
+                    source: loaded.source().to_vec(),
+                    spec: loaded.spec().clone(),
+                })
+            }))
+    }
+
+    /// Publish a candidate only if its observation still names the current
+    /// exact committed mount.
+    pub fn replace_mount(
+        &self,
+        observation: &MountObservation,
+        candidate: &Spec,
+    ) -> Result<Revision, crate::mounts::RepositoryError> {
+        if let Some(repository) = self.repository.get() {
+            return repository.borrow_mut().replace_if_unchanged(
+                &observation.name,
+                &observation.revision,
+                &observation.source,
+                candidate,
+            );
+        }
+        Repository::open(&self.mounts_dir)?.replace_if_unchanged(
+            &observation.name,
+            &observation.revision,
+            &observation.source,
+            candidate,
+        )
     }
 
     pub fn put_uncommitted(&self, spec: &Spec) -> Result<(), crate::mounts::RepositoryError> {

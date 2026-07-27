@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::authn::AuthKind;
 
 /// Authentication configuration for HTTP requests.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Auth {
     StaticToken(StaticToken),
@@ -16,7 +16,7 @@ pub enum Auth {
     OAuth(OAuth),
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StaticToken {
     /// Provider-declared auth scheme key for manifest-backed credentials.
@@ -27,7 +27,7 @@ pub struct StaticToken {
     pub account: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct OAuth {
     /// Provider-declared auth scheme key for manifest-backed credentials.

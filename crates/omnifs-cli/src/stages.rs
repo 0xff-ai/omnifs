@@ -24,6 +24,7 @@ use omnifs_workspace::Workspace;
 pub(crate) struct MountInitOutcome {
     pub(crate) mount_name: String,
     pub(crate) status: MountInitStatus,
+    pub(crate) revision: omnifs_workspace::mounts::Revision,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -132,17 +133,11 @@ pub(crate) async fn configure_mount(
     receipt_style: ReceiptStyle,
 ) -> anyhow::Result<MountInitOutcome> {
     let mut plan = spec_creation(&args, workspace, output, prompt, receipt_style)?;
-    let status = plan
-        .authenticate(&args, workspace, output, prompt, receipt_style)
-        .await?;
-    persist_mount_spec(workspace, &plan, output)?;
+    plan.preflight_auth_inputs(&args, prompt)?;
+    let revision = persist_mount_spec(workspace, &plan, output)?;
 
-    // The `mount ... created` row prints only once the spec is actually on
-    // disk: an auth failure above returns before this line
-    // runs (`?` on `authenticate`), so the transcript never claims a mount
-    // exists when persist never happened. A declined sign-in still reaches
-    // here (it resolves to `Ok(SignInDeclined)`, not an error), so this row
-    // and the skip row below both print, in that order, and both are true.
+    // Desired state settles before the optional sign-in follow-on. A failed
+    // sign-in leaves this complete committed spec in place for `reauth`.
     output.ledger_row(
         &crate::ui::render::LedgerRow::new(
             crate::ui::style::Glyph::Done,
@@ -151,6 +146,16 @@ pub(crate) async fn configure_mount(
         ),
         mount_add_key_width(),
     );
+
+    let status = plan
+        .authenticate(&args, workspace, output, prompt, receipt_style)
+        .await
+        .with_context(|| {
+            format!(
+                "mount `{}` remains configured at revision {}; run `omnifs mount reauth {}` to complete sign-in",
+                plan.mount_name, revision, plan.mount_name
+            )
+        })?;
 
     if status == MountInitStatus::SignInDeclined {
         output.ledger_row(
@@ -172,6 +177,7 @@ pub(crate) async fn configure_mount(
     Ok(MountInitOutcome {
         mount_name: plan.mount_name.to_string(),
         status,
+        revision,
     })
 }
 
@@ -358,6 +364,20 @@ pub(crate) fn spec_creation(
 }
 
 impl MountInitPlan {
+    fn preflight_auth_inputs(&self, args: &AddArgs, prompt: PromptMode) -> anyhow::Result<()> {
+        if self.imported_token.is_none()
+            && self.spec.auth.as_ref().is_some_and(|auth| !auth.is_oauth())
+            && (args.token.is_some() || args.token_env.is_some())
+        {
+            TokenSource::resolve(
+                args.token.as_deref(),
+                args.token_env.as_deref(),
+                init_interactive(prompt),
+            )?;
+        }
+        Ok(())
+    }
+
     async fn authenticate(
         &mut self,
         args: &AddArgs,
@@ -420,12 +440,7 @@ impl MountInitPlan {
             )
             .await
             .inspect_err(|_| {
-                // `persist_mount_spec` runs only after this call returns
-                // `Ok`, so a login failure here means nothing was
-                // ever written: the recovery is re-running the whole add,
-                // not `reauth` against a mount name that does not exist on
-                // disk.
-                output.narrate(sign_in_failed_value(&plan.manifest.id));
+                output.narrate(sign_in_failed_value(&plan.mount_name));
             })?;
         } else {
             if interactive
@@ -503,8 +518,8 @@ fn sign_in_declined_value(mount_name: &MountName) -> String {
 /// `persist_mount_spec` never runs and nothing exists on disk. The recovery
 /// is re-running the whole add, not `reauth` against a mount name nothing
 /// created. Pure so the exact wording is testable without a workspace.
-fn sign_in_failed_value(provider_id: &str) -> String {
-    format!("sign-in did not complete; re-run `omnifs mount add {provider_id}` to retry")
+fn sign_in_failed_value(mount_name: &MountName) -> String {
+    format!("sign-in did not complete; run `omnifs mount reauth {mount_name}` to retry")
 }
 
 pub(crate) fn parse_wait_duration(raw: &str) -> anyhow::Result<Duration> {
@@ -543,10 +558,9 @@ fn persist_mount_spec(
     workspace: &Workspace,
     plan: &MountInitPlan,
     _output: &crate::ui::output::Output,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<omnifs_workspace::mounts::Revision> {
     workspace.desired_state().put_uncommitted(&plan.spec)?;
-    workspace.desired_state().commit()?;
-    Ok(())
+    workspace.desired_state().commit().map_err(Into::into)
 }
 
 fn apply_mount_overrides(
@@ -615,16 +629,12 @@ mod tests {
     }
 
     #[test]
-    fn sign_in_failed_value_points_at_retrying_add_not_reauth() {
-        // Unlike a decline, a real login failure means nothing was ever
-        // persisted (the whole point of Bug 2): `reauth` would target a
-        // mount name that does not exist on disk, so the recovery must be
-        // re-running the add instead.
+    fn sign_in_failed_value_points_at_the_committed_mount() {
+        let name = MountName::try_from("github").unwrap();
         assert_eq!(
-            sign_in_failed_value("github"),
-            "sign-in did not complete; re-run `omnifs mount add github` to retry"
+            sign_in_failed_value(&name),
+            "sign-in did not complete; run `omnifs mount reauth github` to retry"
         );
-        assert!(!sign_in_failed_value("github").contains("reauth"));
     }
 
     fn mode(interactive: bool, yes: bool, no_input: bool) -> PromptMode {
