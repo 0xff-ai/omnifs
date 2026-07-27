@@ -8,9 +8,11 @@ use omnifs_api::events::{InspectorEvent, InspectorLine, InspectorRecord, TraceId
 use super::filter::{FilterMode, ViewFilter};
 use super::metrics::MountWindow;
 use super::sandbox::{MountSandboxView, PortId};
-use super::source::SourceMessage;
+use super::source::{ReplaySpeed, SourceMessage};
 use super::timeline::Timeline;
-use super::trace_state::{MAX_RECENT_TRACES, MountPalette, Operation, SessionStats, TraceReducer};
+use super::trace_state::{
+    MAX_RECENT_TRACES, MountPalette, Operation, OperationStatus, SessionStats, TraceReducer,
+};
 use super::tree::{ACTIVE_FOCUS_WINDOW_US, MountForest, RenderRow};
 
 const EVENT_WINDOW: usize = 128;
@@ -19,6 +21,13 @@ const EVENT_WINDOW: usize = 128;
 pub enum ConnectionMode {
     Inspector,
     Replay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OperationOrder {
+    #[default]
+    Recent,
+    Latency,
 }
 
 /// Which full-screen view the TUI is showing. `v` toggles between them
@@ -63,6 +72,10 @@ pub struct App {
     pub addr: Option<String>,
     /// Hides mounts with no samples in the current metrics window.
     pub hide_idle: bool,
+    pub operation_order: OperationOrder,
+    pub help_open: bool,
+    pub replay_speed: ReplaySpeed,
+    pub notice: Option<String>,
     pub filter: ViewFilter,
     pub focus: PaneFocus,
     pub tree_cursor: Option<TreeCursor>,
@@ -91,6 +104,7 @@ pub struct App {
     /// in the timeline, read by every render/selection accessor instead
     /// of `traces`. `None` means live.
     scrub: Option<Scrub>,
+    yank_request: Option<String>,
 }
 
 /// A paused view: a `TraceReducer` folded up to `cursor`, an absolute
@@ -250,6 +264,10 @@ impl App {
             daemon_epoch: None,
             addr,
             hide_idle: false,
+            operation_order: OperationOrder::Recent,
+            help_open: false,
+            replay_speed: ReplaySpeed::Normal,
+            notice: None,
             filter: ViewFilter::default(),
             focus: PaneFocus::default(),
             tree_cursor: None,
@@ -266,6 +284,7 @@ impl App {
             event_times: VecDeque::new(),
             timeline: Timeline::new(),
             scrub: None,
+            yank_request: None,
         }
     }
 
@@ -383,7 +402,17 @@ impl App {
     }
 
     pub fn visible_trace_ids(&self) -> Vec<TraceId> {
-        self.view_reducer().visible_trace_ids(&self.filter)
+        let mut traces = self.view_reducer().visible_trace_ids(&self.filter);
+        if self.operation_order == OperationOrder::Latency {
+            traces.sort_by_key(|trace_id| {
+                std::cmp::Reverse(
+                    self.operation(*trace_id)
+                        .and_then(|operation| operation.fuse_elapsed_us)
+                        .unwrap_or(0),
+                )
+            });
+        }
+        traces
     }
 
     /// Number of operations currently retained in memory. Pairs with
@@ -504,9 +533,21 @@ impl App {
             self.handle_filter_key(key.code);
             return;
         }
+        if self.help_open {
+            if matches!(key.code, KeyCode::Char('?') | KeyCode::Esc) {
+                self.help_open = false;
+            } else if Command::Quit.matches(&key) {
+                self.quit = true;
+            }
+            return;
+        }
         if let Some(binding) = KEYMAP.iter().find(|binding| binding.handles(self, &key)) {
             binding.command.run(self, &key);
         }
+    }
+
+    pub fn take_yank_request(&mut self) -> Option<String> {
+        self.yank_request.take()
     }
 
     /// Space: pause freezes the view at the current timeline position;
@@ -733,6 +774,7 @@ impl App {
             .and_then(|sel| visible.iter().position(|id| *id == sel))
             .map_or(0, |i| (i + 1).min(visible.len() - 1));
         self.selected = Some(visible[idx]);
+        self.sync_tree_cursor_to_selection();
     }
 
     fn select_prev(&mut self) {
@@ -745,6 +787,39 @@ impl App {
             .and_then(|sel| visible.iter().position(|id| *id == sel))
             .map_or(0, |i| i.saturating_sub(1));
         self.selected = Some(visible[idx]);
+        self.sync_tree_cursor_to_selection();
+    }
+
+    fn select_next_error(&mut self) {
+        let visible = self.visible_trace_ids();
+        let errors: Vec<_> = visible
+            .into_iter()
+            .filter(|trace_id| {
+                self.operation(*trace_id)
+                    .is_some_and(|operation| operation.status == OperationStatus::Error)
+            })
+            .collect();
+        if errors.is_empty() {
+            self.notice = Some("No failed operations in this view.".into());
+            return;
+        }
+        let next = self
+            .selected
+            .and_then(|selected| errors.iter().position(|trace_id| *trace_id == selected))
+            .map_or(errors[0], |index| errors[(index + 1) % errors.len()]);
+        self.selected = Some(next);
+        self.sync_tree_cursor_to_selection();
+    }
+
+    fn sync_tree_cursor_to_selection(&mut self) {
+        let Some((mount, path)) = self
+            .selected
+            .and_then(|trace_id| self.operation(trace_id))
+            .map(|operation| (operation.mount.clone(), operation.path.clone()))
+        else {
+            return;
+        };
+        self.tree_cursor = Some(TreeCursor { mount, path });
     }
 
     fn toggle_errors_only(&mut self) {
@@ -757,6 +832,26 @@ impl App {
 
     fn toggle_idle(&mut self) {
         self.hide_idle = !self.hide_idle;
+    }
+
+    fn toggle_operation_order(&mut self) {
+        self.operation_order = match self.operation_order {
+            OperationOrder::Recent => OperationOrder::Latency,
+            OperationOrder::Latency => OperationOrder::Recent,
+        };
+        self.ensure_selected_visible();
+    }
+
+    fn request_yank(&mut self) {
+        let Some(path) = self
+            .selected
+            .and_then(|trace_id| self.operation(trace_id))
+            .map(|operation| operation.path.clone())
+        else {
+            self.notice = Some("No operation path is selected.".into());
+            return;
+        };
+        self.yank_request = Some(path);
     }
 
     fn start_filter_edit(&mut self) {
@@ -783,6 +878,7 @@ enum BindingScope {
     Activity,
     Sandbox,
     Paused,
+    Replay,
 }
 
 impl BindingScope {
@@ -792,6 +888,7 @@ impl BindingScope {
             Self::Activity => app.view == AppView::Activity,
             Self::Sandbox => app.view == AppView::Sandbox,
             Self::Paused => app.paused(),
+            Self::Replay => app.mode == ConnectionMode::Replay,
         }
     }
 }
@@ -813,6 +910,12 @@ enum Command {
     CycleMount,
     GoLive,
     StepScrub,
+    NextError,
+    ToggleOrder,
+    Yank,
+    Help,
+    ReplaySlower,
+    ReplayFaster,
 }
 
 impl Command {
@@ -837,6 +940,12 @@ impl Command {
             Self::CycleMount => key.code == KeyCode::Char('m'),
             Self::GoLive => key.code == KeyCode::Char('g'),
             Self::StepScrub => matches!(key.code, KeyCode::Left | KeyCode::Right),
+            Self::NextError => key.code == KeyCode::Char('E'),
+            Self::ToggleOrder => key.code == KeyCode::Char('l'),
+            Self::Yank => key.code == KeyCode::Char('y'),
+            Self::Help => key.code == KeyCode::Char('?'),
+            Self::ReplaySlower => key.code == KeyCode::Char('['),
+            Self::ReplayFaster => key.code == KeyCode::Char(']'),
         }
     }
 
@@ -875,6 +984,12 @@ impl Command {
                     app.step_scrub_forward();
                 }
             },
+            Self::NextError => app.select_next_error(),
+            Self::ToggleOrder => app.toggle_operation_order(),
+            Self::Yank => app.request_yank(),
+            Self::Help => app.help_open = true,
+            Self::ReplaySlower => app.replay_speed = app.replay_speed.slower(),
+            Self::ReplayFaster => app.replay_speed = app.replay_speed.faster(),
         }
     }
 }
@@ -925,6 +1040,7 @@ impl KeyBinding {
 
 const KEYMAP: &[KeyBinding] = &[
     KeyBinding::visible(BindingScope::Global, Command::Quit, "q", "quit"),
+    KeyBinding::visible(BindingScope::Global, Command::Help, "?", "help"),
     KeyBinding::visible(BindingScope::Global, Command::ToggleView, "v", "view"),
     KeyBinding::visible(BindingScope::Activity, Command::CycleFocus, "tab", "focus"),
     KeyBinding::visible(BindingScope::Activity, Command::Navigate, "↑/↓", "navigate"),
@@ -945,11 +1061,21 @@ const KEYMAP: &[KeyBinding] = &[
     KeyBinding::visible(BindingScope::Sandbox, Command::CycleMount, "m", "mount"),
     KeyBinding::visible(BindingScope::Global, Command::TogglePause, "space", "pause"),
     KeyBinding::visible(BindingScope::Global, Command::ToggleErrors, "e", "errors"),
+    KeyBinding::hidden(
+        BindingScope::Activity,
+        Command::NextError,
+        "E",
+        "next error",
+    ),
+    KeyBinding::visible(BindingScope::Activity, Command::ToggleOrder, "l", "latency"),
+    KeyBinding::visible(BindingScope::Activity, Command::Yank, "y", "copy path"),
     KeyBinding::visible(BindingScope::Global, Command::ToggleIdle, "i", "idle"),
     KeyBinding::visible(BindingScope::Global, Command::EditFilter, "/", "filter"),
     KeyBinding::visible(BindingScope::Global, Command::Reset, "r", "reset"),
     KeyBinding::visible(BindingScope::Paused, Command::StepScrub, "←/→", "step"),
     KeyBinding::visible(BindingScope::Paused, Command::GoLive, "g", "live"),
+    KeyBinding::visible(BindingScope::Replay, Command::ReplaySlower, "[", "slower"),
+    KeyBinding::visible(BindingScope::Replay, Command::ReplayFaster, "]", "faster"),
 ];
 
 /// Context-sensitive footer text generated from the same bindings that
@@ -961,6 +1087,14 @@ pub fn footer_text(app: &App) -> String {
         .map(|binding| format!("{} {}", binding.label, binding.description))
         .collect();
     format!(" {} ", parts.join("  "))
+}
+
+pub fn help_lines(app: &App) -> Vec<String> {
+    KEYMAP
+        .iter()
+        .filter(|binding| binding.scope.active(app))
+        .map(|binding| format!("{:<8} {}", binding.label, binding.description))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1301,5 +1435,54 @@ mod tests {
         app.handle_key(key(crossterm::event::KeyCode::Char('i')));
         assert_eq!(app.ordered_mounts_for_strip(8), vec!["github"]);
         assert!(!app.visible_tree_rows().is_empty());
+    }
+
+    #[test]
+    fn operation_controls_share_the_keymap_and_keep_selection_in_sync() {
+        let mut app = App::new(ConnectionMode::Replay, "test", None, Some("/omnifs".into()));
+        app.apply_record(fuse_start(1, 10, "github", "/fast"));
+        app.apply_record(fuse_end(1, 20, 10));
+        app.apply_record(fuse_start(2, 30, "github", "/slow"));
+        app.apply_record(fuse_end(2, 40, 200_000));
+        app.apply_record(fuse_start(3, 50, "github", "/failed"));
+        app.apply_record(record(
+            3,
+            60,
+            InspectorEvent::FuseEnd {
+                op: "lookup".into(),
+                end: OpEnd {
+                    elapsed_us: 30,
+                    result: OutcomeFields::with_outcome(
+                        omnifs_api::events::InspectorOutcome::Network,
+                    ),
+                },
+            },
+        ));
+
+        app.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(app.operation_order, OperationOrder::Latency);
+        assert_eq!(app.visible_trace_ids()[0], 2);
+
+        app.handle_key(key(KeyCode::Char('E')));
+        assert_eq!(app.selected_trace(), Some(3));
+        assert_eq!(
+            app.tree_cursor.as_ref().map(|cursor| cursor.path.as_str()),
+            Some("/failed")
+        );
+
+        app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(app.take_yank_request().as_deref(), Some("/failed"));
+
+        app.handle_key(key(KeyCode::Char(']')));
+        assert_eq!(app.replay_speed, ReplaySpeed::Double);
+
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help_open);
+        let help = help_lines(&app).join("\n");
+        assert!(help.contains("E        next error"));
+        assert!(help.contains("]        faster"));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.help_open);
+        assert!(!app.quit);
     }
 }

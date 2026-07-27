@@ -5,12 +5,15 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 
 use omnifs_api::events::InspectorOutcome;
+use unicode_width::UnicodeWidthStr as _;
 
-use super::app::{App, AppView, ConnectionMode, PaneFocus, footer_text};
+use super::app::{
+    App, AppView, ConnectionMode, OperationOrder, PaneFocus, footer_text, help_lines,
+};
 use super::filter::FilterMode;
 use super::format;
 use super::metrics::{MountWindow, render_sparkline};
@@ -79,10 +82,12 @@ pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
     if app.view == AppView::Sandbox {
         super::sandbox_ui::render(frame, app, area);
+        render_help(frame, app, area);
         return;
     }
     if format::compact_mode(area.width, area.height) {
         render_compact(frame, app, area);
+        render_help(frame, app, area);
         return;
     }
 
@@ -101,6 +106,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_header(frame, app, chunks[0]);
     render_sparkline_strip(frame, app, chunks[1]);
     render_main(frame, app, chunks[2]);
+    render_help(frame, app, area);
 }
 
 fn render_compact(frame: &mut Frame, app: &App, area: Rect) {
@@ -126,23 +132,29 @@ pub(super) fn render_header(frame: &mut Frame, app: &App, area: Rect) {
                     None => "disconnected".to_string(),
                 }
             };
-            format!("live · {} · {state}", app.container)
+            format!("live {} · {state}", app.container)
         },
-        ConnectionMode::Replay => format!("replay · {}", app.container),
+        ConnectionMode::Replay => format!("replay {}", app.container),
     };
     let pause = if app.paused() {
-        format!(
-            " paused  +{} buffered  (space to resume)",
-            app.buffered_since_pause()
-        )
+        format!(" · paused +{}", app.buffered_since_pause())
     } else {
         String::new()
     };
     let filter = match app.filter.mode {
         FilterMode::All => "",
-        FilterMode::ErrorsOnly => " errors-only",
+        FilterMode::ErrorsOnly => " · errors-only",
     };
-    let idle = if app.hide_idle { " idle-hidden" } else { "" };
+    let idle = if app.hide_idle { " · idle-hidden" } else { "" };
+    let order = match app.operation_order {
+        OperationOrder::Recent => "",
+        OperationOrder::Latency => " · latency-order",
+    };
+    let speed = if app.mode == ConnectionMode::Replay {
+        format!(" {}", app.replay_speed.label())
+    } else {
+        String::new()
+    };
     let edit = if app.filter.editing {
         format!(" filter:{}", app.filter.query)
     } else if !app.filter.query.is_empty() {
@@ -151,20 +163,51 @@ pub(super) fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         String::new()
     };
     let view_name = match app.view {
-        AppView::Activity => "recent activity",
+        AppView::Activity => "activity",
         AppView::Sandbox => "sandbox map",
     };
     let title = format!(
-        " omnifs inspect · {view_name} │ {source}{pause} │ {:.1} evt/s │ dropped {} ",
+        " inspect · {view_name} · {source}{speed}{pause}{filter}{idle}{order} · {:.1}/s · drop {} ",
         app.events_per_sec, app.dropped_events
     );
+    let notice = app
+        .notice
+        .as_deref()
+        .map_or(String::new(), |notice| format!(" │ {notice}"));
     let keys = footer_text(app);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
-        .title(title + filter + idle + &edit)
+        .title(title + &edit + &notice)
         .title_bottom(keys);
     frame.render_widget(block, area);
+}
+
+fn render_help(frame: &mut Frame, app: &App, area: Rect) {
+    if !app.help_open {
+        return;
+    }
+    let lines = help_lines(app);
+    let width = area.width.saturating_sub(4).min(52);
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .min(area.height.saturating_sub(2));
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines.join("\n")).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" keys · ?/esc close "),
+        ),
+        popup,
+    );
 }
 
 fn render_sparkline_strip(frame: &mut Frame, app: &App, area: Rect) {
@@ -199,9 +242,9 @@ fn sparkline_line(mount: &str, window: &MountWindow, color: Color, now_mono: u64
     let cache = window
         .cache_hit_ratio()
         .map_or_else(|| "  —".to_string(), |r| format!("{:>3.0}%", r * 100.0));
-    let p95 = window
-        .p95_latency_us()
-        .map_or_else(|| "—".to_string(), format::format_latency_us);
+    let p95_us = window.p95_latency_us();
+    let p95 = p95_us.map_or_else(|| "—".to_string(), format::format_latency_us);
+    let p95_color = p95_us.map_or(Color::DarkGray, format::latency_color);
     let idle_label = window.is_empty();
     let mount_styled = Span::styled(
         format!("  {mount:<10}"),
@@ -223,17 +266,19 @@ fn sparkline_line(mount: &str, window: &MountWindow, color: Color, now_mono: u64
             Span::raw(format!("   evt/s {rate:>4.1}")),
             Span::raw(format!("   err {:>3.0}%", err * 100.0)),
             Span::raw(format!("   cache {cache}")),
-            Span::raw(format!("   p95 {p95}")),
+            Span::styled(format!("   p95 {p95}"), Style::default().fg(p95_color)),
         ]
     };
     Line::from(spans)
 }
 
 fn render_main(frame: &mut Frame, app: &App, area: Rect) {
+    let rows = Layout::vertical([Constraint::Min(5), Constraint::Length(8)]).split(area);
     let columns =
-        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[0]);
     render_tree(frame, app, columns[0]);
     render_operations_log(frame, app, columns[1]);
+    render_operation_detail(frame, app, rows[1]);
 }
 
 fn empty_state_lines(app: &App) -> Vec<Line<'static>> {
@@ -344,7 +389,7 @@ impl TreeRowView<'_> {
         if let Some(us) = row.last_latency_us {
             spans.push(Span::styled(
                 format!("  {}", format::format_latency_us(us)),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(format::latency_color(us)),
             ));
         }
         let mut line = Line::from(spans);
@@ -357,7 +402,11 @@ impl TreeRowView<'_> {
 
 fn render_operations_log(frame: &mut Frame, app: &App, area: Rect) {
     let title = format!(
-        " operations ({} retained / {} cap) ",
+        " operations · {} ({} / {}) ",
+        match app.operation_order {
+            OperationOrder::Recent => "recent",
+            OperationOrder::Latency => "latency",
+        },
         app.retained_trace_count(),
         App::max_retained_traces()
     );
@@ -368,112 +417,78 @@ fn render_operations_log(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let capacity = inner.height as usize;
     let width = inner.width as usize;
-    if capacity == 0 || width == 0 {
+    if inner.height == 0 || width == 0 {
         return;
     }
 
     let trace_ids = app.visible_trace_ids();
-    let blocks: Vec<(omnifs_api::events::TraceId, Vec<Line<'static>>)> = trace_ids
+    let rows: Vec<(omnifs_api::events::TraceId, Line<'static>)> = trace_ids
         .iter()
         .filter_map(|&tid| {
             let op = app.operation(tid)?;
-            Some((tid, OperationBlockView { op, app, width }.into_lines()))
+            Some((tid, OperationRowView { op, app, width }.into_line()))
         })
         .collect();
 
-    if blocks.is_empty() {
+    if rows.is_empty() {
         let msg = Paragraph::new(empty_state_lines(app));
         frame.render_widget(msg, inner);
         return;
     }
 
-    // Newest-first rendering; advance `start` until the selected trace's
-    // full block fits within `capacity`. Each block carries a trailing
-    // separator row so blocks visually break apart.
     let selected = app.selected_trace();
-    let start = scroll_start_for_selected(&blocks, selected, capacity);
-
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(capacity);
-    for (tid, block) in blocks.iter().skip(start) {
-        let is_selected = selected == Some(*tid);
-        if lines.len() + block.len() > capacity {
-            break;
-        }
-        for (index, raw) in block.iter().enumerate() {
-            let mut line = if is_selected && index == 0 {
-                let mut spans = vec![Span::raw(CURSOR_MARKER)];
-                spans.extend(raw.spans.clone());
-                Line::from(spans)
-            } else {
-                raw.clone()
-            };
+    let capacity = usize::from(inner.height);
+    let selected_index =
+        selected.and_then(|selected| rows.iter().position(|(trace_id, _)| *trace_id == selected));
+    let start = selected_index.map_or(0, |index| index.saturating_sub(capacity.saturating_sub(1)));
+    let lines = rows
+        .iter()
+        .skip(start)
+        .take(capacity)
+        .map(|(trace_id, raw)| {
+            let is_selected = selected == Some(*trace_id);
+            let mut spans = vec![Span::raw(if is_selected { CURSOR_MARKER } else { "  " })];
+            spans.extend(raw.spans.clone());
+            let mut line = Line::from(spans);
             if is_selected {
                 line = line.patch_style(CURSOR_STYLE);
             }
-            lines.push(line);
-        }
-        if lines.len() < capacity {
-            lines.push(Line::raw(""));
-        }
-        if lines.len() >= capacity {
-            break;
-        }
-    }
-
+            line
+        })
+        .collect::<Vec<_>>();
     let paragraph = Paragraph::new(lines);
     frame.render_widget(paragraph, inner);
 }
 
-/// Pick the starting block index so the selected trace's block fits in
-/// `capacity` rows. Returns 0 when nothing is selected or already in view.
-fn scroll_start_for_selected(
-    blocks: &[(omnifs_api::events::TraceId, Vec<Line<'static>>)],
-    selected: Option<omnifs_api::events::TraceId>,
-    capacity: usize,
-) -> usize {
-    let Some(sel) = selected else { return 0 };
-    let Some(sel_idx) = blocks.iter().position(|(tid, _)| *tid == sel) else {
-        return 0;
-    };
-    let mut start = 0;
-    loop {
-        let total: usize = blocks[start..=sel_idx]
-            .iter()
-            .map(|(_, b)| b.len() + 1)
-            .sum();
-        if total <= capacity || start >= sel_idx {
-            return start;
-        }
-        start += 1;
-    }
-}
-
-/// All the lines that make up one trace block in the operations log:
-/// a header row identifying the FUSE request, indented stage rows
-/// (provider work, callouts, cache events, subtree handoffs, clones),
-/// and a result row showing total elapsed + outcome.
-struct OperationBlockView<'a> {
+struct OperationRowView<'a> {
     op: &'a Operation,
     app: &'a App,
     width: usize,
 }
 
-impl OperationBlockView<'_> {
-    fn into_lines(self) -> Vec<Line<'static>> {
+impl OperationRowView<'_> {
+    fn into_line(self) -> Line<'static> {
         let Self { op, app, width } = self;
         let mount_color = app.palette().peek(&op.mount).unwrap_or(Color::White);
-        let path = format::shorten_path(&op.path, width.saturating_sub(16).max(8));
-        let marker = if op.status == OperationStatus::Running {
-            "▦"
-        } else {
-            "●"
+        let elapsed = op
+            .fuse_elapsed_us
+            .map_or_else(|| "running".into(), format::format_latency_us);
+        let elapsed_color = op
+            .fuse_elapsed_us
+            .map_or(Color::LightYellow, format::latency_color);
+        let timestamp = format::format_timestamp(&op.started_ts);
+        let reserved = timestamp.len() + op.mount.len() + op.fuse_op.len() + elapsed.len() + 7;
+        let path = format::shorten_path(&op.path, width.saturating_sub(reserved).max(8));
+        let outcome_color = match op.status {
+            OperationStatus::Running => Color::LightYellow,
+            OperationStatus::Ok => Color::LightGreen,
+            OperationStatus::Error => Color::LightRed,
         };
-        let mut lines = vec![Line::from(vec![
+        Line::from(vec![
             Span::styled(
-                format!("{marker} #{} ", op.trace_id),
-                Style::default().fg(mount_color),
+                format!("{timestamp} "),
+                Style::default().fg(Color::DarkGray),
             ),
             Span::styled(
                 format!("{} ", op.mount),
@@ -481,40 +496,59 @@ impl OperationBlockView<'_> {
                     .fg(mount_color)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("{} ", op.fuse_op)),
-            Span::styled(path, Style::default().fg(Color::White)),
-        ])];
-
-        for stage in op.stages.iter().skip(1) {
-            lines.push((StageView { stage, width }).into_line());
-        }
-
-        if let Some(elapsed) = op.fuse_elapsed_us {
-            let outcome = op.outcome.unwrap_or(InspectorOutcome::Ok);
-            let outcome_color = if outcome == InspectorOutcome::Ok {
-                Color::LightGreen
-            } else {
-                Color::LightRed
-            };
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled("◀ ", Style::default().fg(outcome_color)),
-                Span::styled(
-                    outcome.to_string(),
-                    Style::default()
-                        .fg(outcome_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(format!("  {}", format::format_latency_us(elapsed))),
-            ]));
-        } else if op.status == OperationStatus::Running {
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled("◀ …", Style::default().fg(Color::DarkGray)),
-            ]));
-        }
-        lines
+            Span::styled(
+                format!("{} ", op.fuse_op),
+                Style::default().fg(outcome_color),
+            ),
+            Span::raw(path),
+            Span::styled(format!("  {elapsed}"), Style::default().fg(elapsed_color)),
+        ])
     }
+}
+
+fn render_operation_detail(frame: &mut Frame, app: &App, area: Rect) {
+    let selected = app
+        .selected_trace()
+        .and_then(|trace_id| app.operation(trace_id));
+    let title = selected.map_or_else(
+        || " selected operation ".to_string(),
+        |operation| {
+            format!(
+                " {} · {} {} · trace {} ",
+                operation.mount, operation.fuse_op, operation.path, operation.trace_id
+            )
+        },
+    );
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let Some(operation) = selected else {
+        return;
+    };
+    let width = usize::from(inner.width);
+    let mut lines = operation
+        .stages
+        .iter()
+        .map(|stage| StageView { stage, width }.into_line())
+        .collect::<Vec<_>>();
+    if let Some(elapsed) = operation.fuse_elapsed_us {
+        let outcome = operation.outcome.unwrap_or(InspectorOutcome::Ok);
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {outcome}"),
+                Style::default().fg(if outcome == InspectorOutcome::Ok {
+                    Color::LightGreen
+                } else {
+                    Color::LightRed
+                }),
+            ),
+            Span::styled(
+                format!("  {}", format::format_latency_us(elapsed)),
+                Style::default().fg(format::latency_color(elapsed)),
+            ),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// One stage rendered as a three-column row: `{indent}{glyph} {display}`
@@ -545,22 +579,16 @@ impl StageView<'_> {
                 (None, _, false) => (String::new(), None, Color::DarkGray),
             };
 
-        // Build the trailing chunk first so we know its width, then pad
-        // between the left half and it. Stage content is overwhelmingly
-        // ASCII so char count is a fair stand-in for cell width.
         let trailing = match (elapsed_text.as_str(), outcome_text.as_deref()) {
             ("", None) => String::new(),
             (elapsed, None) => elapsed.to_string(),
             ("", Some(out)) => out.to_string(),
             (elapsed, Some(out)) => format!("{elapsed} {out}"),
         };
-        let leading_cols = cell.indent.chars().count()
-            + cell.glyph.chars().count()
-            + 1
-            + cell.display.chars().count();
+        let leading_cols = cell.indent.width() + cell.glyph.width() + 1 + cell.display.width();
         let pad = width
             .saturating_sub(leading_cols)
-            .saturating_sub(trailing.chars().count())
+            .saturating_sub(trailing.width())
             .max(2);
 
         let mut spans = vec![
@@ -573,9 +601,12 @@ impl StageView<'_> {
             Span::raw(" ".repeat(pad)),
         ];
         if !elapsed_text.is_empty() {
+            let elapsed_color = stage
+                .elapsed_us
+                .map_or(Color::DarkGray, format::latency_color);
             spans.push(Span::styled(
                 elapsed_text,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(elapsed_color),
             ));
         }
         if let Some(outcome) = outcome_text {
@@ -598,8 +629,44 @@ impl StageView<'_> {
 
 #[cfg(test)]
 mod tests {
+    use omnifs_api::events::InspectorLine;
+    use ratatui::{Terminal, backend::TestBackend};
+
     use super::*;
     use crate::inspector::app::{App, ConnectionMode};
+    use crate::inspector::source::SourceMessage;
+
+    fn fixture_app() -> App {
+        let mut app = App::new(
+            ConnectionMode::Replay,
+            "fixture",
+            None,
+            Some("/omnifs/github".into()),
+        );
+        for line in include_str!("../../tests/fixtures/inspector_journey.jsonl").lines() {
+            app.apply_line(InspectorLine::parse_line(line).expect("parse fixture"));
+        }
+        app
+    }
+
+    fn screen(app: &App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, app))
+            .expect("render frame");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line.trim_end().to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn tree_rollup_badge_explains_failure_count() {
@@ -621,5 +688,61 @@ mod tests {
         }
         .into_line();
         assert!(line.to_string().contains("12 failed paths"));
+    }
+
+    #[test]
+    fn recorded_journeys_have_stable_frames_and_semantic_cues() {
+        let empty = App::new(
+            ConnectionMode::Replay,
+            "empty",
+            None,
+            Some("/omnifs/github".into()),
+        );
+        let empty_screen = screen(&empty, 100, 28);
+        assert!(empty_screen.contains("Nothing yet."));
+        assert!(empty_screen.contains("ls /omnifs/github"));
+        insta::assert_snapshot!("inspector_empty", empty_screen);
+
+        let mut streaming = fixture_app();
+        let streaming_screen = screen(&streaming, 100, 28);
+        assert!(streaming_screen.contains("12:00:00.000"));
+        assert!(streaming_screen.contains("trace 1"));
+        assert!(streaming_screen.contains("220.0ms"));
+        insta::assert_snapshot!("inspector_streaming", streaming_screen);
+
+        streaming.filter.mode = FilterMode::ErrorsOnly;
+        streaming.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        streaming.help_open = true;
+        let filtered_screen = screen(&streaming, 100, 28);
+        assert!(filtered_screen.contains("errors-only"));
+        assert!(filtered_screen.contains("keys · ?/esc close"));
+        assert!(filtered_screen.contains("paused"));
+        insta::assert_snapshot!("inspector_filter_pause_help", filtered_screen);
+
+        let mut disconnected = App::new(
+            ConnectionMode::Inspector,
+            "daemon",
+            Some("unix:/tmp/omnifs.sock".into()),
+            Some("/omnifs/github".into()),
+        );
+        disconnected.apply_source_message(SourceMessage::Connected {
+            epoch: "one".into(),
+        });
+        for line in include_str!("../../tests/fixtures/inspector_journey.jsonl").lines() {
+            disconnected.apply_line(InspectorLine::parse_line(line).expect("parse fixture"));
+        }
+        disconnected.apply_source_message(SourceMessage::Disconnected);
+        let disconnected_screen = screen(&disconnected, 100, 28);
+        assert!(disconnected_screen.contains("waiting on unix:/tmp/omnifs.sock"));
+        assert!(disconnected_screen.contains("ENG-42"));
+        insta::assert_snapshot!("inspector_disconnected", disconnected_screen);
+
+        let compact_screen = screen(&fixture_app(), 72, 18);
+        assert!(compact_screen.contains("operations"));
+        assert!(!compact_screen.contains("recent paths"));
+        insta::assert_snapshot!("inspector_compact", compact_screen);
     }
 }

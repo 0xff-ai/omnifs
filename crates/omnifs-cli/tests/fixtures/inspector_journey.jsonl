@@ -1,0 +1,9 @@
+{"type":"record","value":{"v":1,"ts":"2026-05-23T12:00:00.000Z","mono_us":1000000,"seq":1,"trace_id":1,"event":{"type":"fuse.start","op":"lookup","mount":"github","path":"/repos/omnifs"}}}
+{"type":"record","value":{"v":1,"ts":"2026-05-23T12:00:00.010Z","mono_us":1010000,"seq":2,"trace_id":1,"event":{"type":"provider.start","operation_id":1,"mount":"github","provider":"github","method":"lookup_child","path":"/repos/omnifs"}}}
+{"type":"record","value":{"v":1,"ts":"2026-05-23T12:00:00.020Z","mono_us":1020000,"seq":3,"trace_id":1,"event":{"type":"cache.event","operation_id":1,"mount":"github","path":"/repos/omnifs","kind":"browse_hit","elapsed_us":150}}}
+{"type":"record","value":{"v":1,"ts":"2026-05-23T12:00:00.030Z","mono_us":1030000,"seq":4,"trace_id":1,"event":{"type":"provider.end","operation_id":1,"elapsed_us":20000,"outcome":"ok"}}}
+{"type":"record","value":{"v":1,"ts":"2026-05-23T12:00:00.040Z","mono_us":1040000,"seq":5,"trace_id":1,"event":{"type":"fuse.end","op":"lookup","elapsed_us":40000,"outcome":"ok"}}}
+{"type":"record","value":{"v":1,"ts":"2026-05-23T12:00:00.100Z","mono_us":1100000,"seq":6,"trace_id":2,"event":{"type":"fuse.start","op":"read","mount":"linear","path":"/issues/ENG-42"}}}
+{"type":"record","value":{"v":1,"ts":"2026-05-23T12:00:00.150Z","mono_us":1150000,"seq":7,"trace_id":2,"event":{"type":"provider.start","operation_id":2,"mount":"linear","provider":"linear","method":"read_file","path":"/issues/ENG-42"}}}
+{"type":"record","value":{"v":1,"ts":"2026-05-23T12:00:00.300Z","mono_us":1300000,"seq":8,"trace_id":2,"event":{"type":"provider.end","operation_id":2,"elapsed_us":150000,"outcome":"network","message":"redacted"}}}
+{"type":"record","value":{"v":1,"ts":"2026-05-23T12:00:00.320Z","mono_us":1320000,"seq":9,"trace_id":2,"event":{"type":"fuse.end","op":"read","elapsed_us":220000,"outcome":"network","message":"redacted"}}}

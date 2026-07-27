@@ -4,6 +4,8 @@ use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Lines, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -20,6 +22,79 @@ use crate::client::read_control_line;
 
 const SOURCE_QUEUE_CAPACITY: usize = 1024;
 const MESSAGES_PER_FRAME: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReplaySpeed {
+    Quarter,
+    Half,
+    #[default]
+    Normal,
+    Double,
+    Quadruple,
+}
+
+impl ReplaySpeed {
+    const ALL: [Self; 5] = [
+        Self::Quarter,
+        Self::Half,
+        Self::Normal,
+        Self::Double,
+        Self::Quadruple,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Quarter => "0.25×",
+            Self::Half => "0.5×",
+            Self::Normal => "1×",
+            Self::Double => "2×",
+            Self::Quadruple => "4×",
+        }
+    }
+
+    pub fn faster(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|speed| *speed == self)
+            .unwrap_or(2);
+        Self::ALL[(index + 1).min(Self::ALL.len() - 1)]
+    }
+
+    pub fn slower(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|speed| *speed == self)
+            .unwrap_or(2);
+        Self::ALL[index.saturating_sub(1)]
+    }
+
+    const fn encoded(self) -> u8 {
+        match self {
+            Self::Quarter => 0,
+            Self::Half => 1,
+            Self::Normal => 2,
+            Self::Double => 3,
+            Self::Quadruple => 4,
+        }
+    }
+
+    fn decode(value: u8) -> Self {
+        Self::ALL
+            .get(usize::from(value))
+            .copied()
+            .unwrap_or(Self::Normal)
+    }
+
+    const fn ratio(self) -> (u128, u128) {
+        match self {
+            Self::Quarter => (1, 4),
+            Self::Half => (1, 2),
+            Self::Normal => (1, 1),
+            Self::Double => (2, 1),
+            Self::Quadruple => (4, 1),
+        }
+    }
+}
 
 /// Outcome of one [`EventsClient::attach`] call.
 pub enum AttachOutcome {
@@ -177,13 +252,19 @@ impl InspectorSession {
 pub struct EventSource {
     rx: Receiver<SourceMessage>,
     handle: Option<JoinHandle<()>>,
+    replay_speed: Option<Arc<AtomicU8>>,
 }
 
 impl EventSource {
     pub fn spawn(kind: SourceKind) -> Self {
         let (tx, rx) = mpsc::sync_channel(SOURCE_QUEUE_CAPACITY);
+        let mut replay_speed = None;
         let handle = match kind {
-            SourceKind::Replay(path) => Some(thread::spawn(move || replay_path(&path, &tx))),
+            SourceKind::Replay(path) => {
+                let speed = Arc::new(AtomicU8::new(ReplaySpeed::Normal.encoded()));
+                replay_speed = Some(Arc::clone(&speed));
+                Some(thread::spawn(move || replay_path(&path, &tx, &speed)))
+            },
             SourceKind::Socket { endpoint, record } => {
                 // The live socket source reconnects forever; detach it
                 // so quitting the TUI never waits on the reconnect loop.
@@ -194,7 +275,11 @@ impl EventSource {
                 None
             },
         };
-        Self { rx, handle }
+        Self {
+            rx,
+            handle,
+            replay_speed,
+        }
     }
 
     /// Drain bounded work for one draw tick. A hot stream can neither grow
@@ -211,6 +296,12 @@ impl EventSource {
 
     pub fn recv(&self) -> Option<SourceMessage> {
         self.rx.recv().ok()
+    }
+
+    pub fn set_replay_speed(&self, speed: ReplaySpeed) {
+        if let Some(control) = &self.replay_speed {
+            control.store(speed.encoded(), Ordering::Relaxed);
+        }
     }
 }
 
@@ -260,14 +351,26 @@ impl ReplayReader {
     }
 }
 
-fn replay_path(path: &Path, tx: &SyncSender<SourceMessage>) {
+fn replay_path(path: &Path, tx: &SyncSender<SourceMessage>, speed: &AtomicU8) {
     let result: Result<bool> = (|| -> Result<bool> {
         let mut reader = ReplayReader::open(path)?;
+        let mut previous_timestamp = None;
         while let Some(line) = reader.next_line()? {
+            if let Some(timestamp) = line_timestamp(&line) {
+                if let Some(previous) = previous_timestamp
+                    && let Some(delay) = replay_delay(
+                        previous,
+                        timestamp,
+                        ReplaySpeed::decode(speed.load(Ordering::Relaxed)),
+                    )
+                {
+                    thread::sleep(delay);
+                }
+                previous_timestamp = Some(timestamp);
+            }
             if tx.send(SourceMessage::Line(line)).is_err() {
                 return Ok(false);
             }
-            thread::sleep(Duration::from_millis(120));
         }
         Ok(true)
     })();
@@ -280,6 +383,27 @@ fn replay_path(path: &Path, tx: &SyncSender<SourceMessage>) {
             let _ = tx.send(SourceMessage::Failed(format!("{error:#}")));
         },
     }
+}
+
+fn line_timestamp(line: &InspectorLine) -> Option<time::OffsetDateTime> {
+    let InspectorLine::Record(record) = line else {
+        return None;
+    };
+    time::OffsetDateTime::parse(&record.ts, &time::format_description::well_known::Rfc3339).ok()
+}
+
+fn replay_delay(
+    previous: time::OffsetDateTime,
+    current: time::OffsetDateTime,
+    speed: ReplaySpeed,
+) -> Option<Duration> {
+    let micros = (current - previous).whole_microseconds();
+    let micros = u128::try_from(micros).ok()?;
+    let (numerator, denominator) = speed.ratio();
+    let scaled = micros.saturating_mul(denominator) / numerator;
+    Some(Duration::from_micros(
+        u64::try_from(scaled).unwrap_or(u64::MAX),
+    ))
 }
 
 /// Subscribe to the daemon's event stream and forward every received typed
@@ -373,6 +497,7 @@ pub fn replay_file_blocking(path: &Path) -> Result<Vec<InspectorLine>> {
 mod tests {
     use super::*;
     use omnifs_api::events::{InspectorEvent, InspectorRecord};
+    use time::format_description::well_known::Rfc3339;
 
     #[test]
     fn replay_reports_malformed_line_as_failed_terminal_message() {
@@ -430,5 +555,25 @@ mod tests {
         session.begin("two".into());
         assert_eq!(session.high_water_seq, 0);
         assert!(session.accept(&record(1)));
+    }
+
+    #[test]
+    fn replay_delay_uses_recorded_wall_time_at_each_speed() {
+        let start =
+            time::OffsetDateTime::parse("2026-05-23T12:00:00Z", &Rfc3339).expect("parse start");
+        let end = time::OffsetDateTime::parse("2026-05-23T12:00:02Z", &Rfc3339).expect("parse end");
+        assert_eq!(
+            replay_delay(start, end, ReplaySpeed::Quarter),
+            Some(Duration::from_secs(8))
+        );
+        assert_eq!(
+            replay_delay(start, end, ReplaySpeed::Normal),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            replay_delay(start, end, ReplaySpeed::Quadruple),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(replay_delay(end, start, ReplaySpeed::Normal), None);
     }
 }

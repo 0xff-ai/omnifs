@@ -130,6 +130,15 @@ fn run_loop(
             && key.kind == KeyEventKind::Press
         {
             app.handle_key(key);
+            event_source.set_replay_speed(app.replay_speed);
+            if let Some(path) = app.take_yank_request() {
+                app.notice = match arboard::Clipboard::new()
+                    .and_then(|mut clipboard| clipboard.set_text(path.clone()))
+                {
+                    Ok(()) => Some(format!("Copied {path}")),
+                    Err(_) => Some(format!("Copy failed. Path: {path}")),
+                };
+            }
         }
 
         if last_tick.elapsed() >= tick_rate {
