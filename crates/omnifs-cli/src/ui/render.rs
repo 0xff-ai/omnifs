@@ -201,6 +201,7 @@ pub(crate) fn ledger_row_line(row: &LedgerRow, key_width: usize, caps: Capabilit
 /// that must align a continuation line under a row's value without
 /// duplicating the gap math: doctor's per-row `fix:` line is one
 /// such caller.
+#[cfg(test)]
 pub(crate) fn ledger_value_column(key_width: usize) -> usize {
     // Glyph (1) + one space (1) precede the key, then the key's own field.
     key_width + LEDGER_GAP + 2
@@ -264,7 +265,7 @@ pub(crate) struct ErrorDetail {
     pub(crate) lines: Vec<String>,
 }
 
-/// One `Fix:`/`Log:`/`Try:` recovery line.
+/// One recovery line.
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorAction {
     pub(crate) label: &'static str,
@@ -283,13 +284,6 @@ impl ErrorAction {
         Self {
             label: "Log",
             value: path.into(),
-        }
-    }
-
-    pub(crate) fn try_(value: impl Into<String>) -> Self {
-        Self {
-            label: "Try",
-            value: value.into(),
         }
     }
 }

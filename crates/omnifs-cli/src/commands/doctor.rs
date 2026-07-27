@@ -90,6 +90,8 @@ struct Doctor<'a> {
 enum Section {
     Environment,
     Workspace,
+    Mounts,
+    Filesystems,
 }
 
 /// A remediation doctor knows how to execute itself.
@@ -114,12 +116,6 @@ enum Remediation {
         state_dir: PathBuf,
         record: omnifs_libkrun::HelperRecord,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConsentPolicy {
-    AutoAllowed,
-    InteractiveOnly,
 }
 
 struct DockerCandidate {
@@ -147,15 +143,6 @@ impl Remediation {
             Self::StopLibkrunFilesystem { record, .. } => {
                 format!("omnifs fs detach --name {}", record.spec.id())
             },
-        }
-    }
-
-    const fn consent_policy(&self) -> ConsentPolicy {
-        match self {
-            Self::MountReauth(_) | Self::CleanStaleHostRecord { .. } => ConsentPolicy::AutoAllowed,
-            Self::StopHostFilesystem { .. }
-            | Self::StopDockerFilesystem { .. }
-            | Self::StopLibkrunFilesystem { .. } => ConsentPolicy::InteractiveOnly,
         }
     }
 
@@ -302,7 +289,7 @@ impl Finding {
             AuthState::NotNeeded | AuthState::Ready => return None,
         };
         Some(Self {
-            section: Section::Workspace,
+            section: Section::Mounts,
             check: "credentials".to_owned(),
             target: Some(mount.name.clone()),
             severity: mount.auth.severity(),
@@ -315,7 +302,7 @@ impl Finding {
 
 fn docker_ownership_finding(target: impl Into<Option<String>>, result: ProbeResult) -> Finding {
     Finding::from_probe(
-        Section::Workspace,
+        Section::Filesystems,
         "docker filesystem ownership",
         target.into(),
         result,
@@ -381,16 +368,20 @@ impl From<&Finding> for Row {
 
 /// Split findings into the Environment/Workspace groups; the
 /// Daemon group's single row comes from `daemon_row`, not from `findings`.
-fn build_rows(findings: &[Finding]) -> (Vec<Row>, Vec<Row>) {
+fn build_rows(findings: &[Finding]) -> (Vec<Row>, Vec<Row>, Vec<Row>, Vec<Row>) {
     let mut environment = Vec::new();
     let mut workspace = Vec::new();
+    let mut mounts = Vec::new();
+    let mut filesystems = Vec::new();
     for finding in findings {
         match finding.section {
             Section::Environment => environment.push(Row::from(finding)),
             Section::Workspace => workspace.push(Row::from(finding)),
+            Section::Mounts => mounts.push(Row::from(finding)),
+            Section::Filesystems => filesystems.push(Row::from(finding)),
         }
     }
-    (environment, workspace)
+    (environment, workspace, mounts, filesystems)
 }
 
 fn daemon_row(inventory: &Inventory) -> Row {
@@ -465,7 +456,6 @@ fn daemon_uptime(inventory: &Inventory) -> Option<String> {
 }
 
 /// Render one group: a bold heading, then each row indented two spaces
-/// under it with its own `fix:` continuation line when it carries one
 /// Key sizing is per group, matching the register's per-block
 /// rule (2.1).
 fn render_group(heading: &str, rows: &[Row], caps: Capabilities) -> String {
@@ -474,17 +464,10 @@ fn render_group(heading: &str, rows: &[Row], caps: Capabilities) -> String {
     out.push('\n');
     let ledger_rows: Vec<LedgerRow> = rows.iter().map(Row::ledger_row).collect();
     let key_width = render::ledger_key_width(&ledger_rows);
-    for (row, ledger_row) in rows.iter().zip(ledger_rows.iter()) {
+    for ledger_row in &ledger_rows {
         out.push_str("  ");
         out.push_str(&render::ledger_row_line(ledger_row, key_width, caps));
         out.push('\n');
-        if let Some(fix) = &row.fix {
-            let pad = 2 + render::ledger_value_column(key_width);
-            out.push_str(&" ".repeat(pad));
-            out.push_str("fix:  ");
-            out.push_str(&style::accent(fix, caps.color));
-            out.push('\n');
-        }
     }
     out
 }
@@ -519,14 +502,14 @@ fn verdict_line(rows: &[&Row], verdict: DoctorVerdict, caps: Capabilities) -> St
     } else {
         parts.join(", ")
     };
-    let fixable: Vec<&str> = rows
+    let fixable = rows
         .iter()
         .filter(|row| row.severity >= Severity::Attention)
         .filter_map(|row| row.fix.as_deref())
-        .collect();
-    match fixable[..] {
-        [only] => format!("{summary}. Fix it:  {}", style::accent(only, caps.color)),
-        _ => format!("{summary}."),
+        .collect::<std::collections::BTreeSet<_>>();
+    match fixable.into_iter().next() {
+        Some(action) => format!("{summary}. Fix it:  {}", style::accent(action, caps.color)),
+        None => format!("{summary}."),
     }
 }
 
@@ -539,18 +522,24 @@ fn render_report(
     verdict: DoctorVerdict,
     caps: Capabilities,
 ) -> String {
-    let (environment, workspace) = build_rows(findings);
+    let (environment, workspace, mounts, filesystems) = build_rows(findings);
     let daemon = vec![daemon_row(inventory)];
     let mut out = String::new();
     out.push_str(&render_group("Environment", &environment, caps));
     out.push('\n');
     out.push_str(&render_group("Workspace", &workspace, caps));
     out.push('\n');
+    out.push_str(&render_group("Mounts", &mounts, caps));
+    out.push('\n');
+    out.push_str(&render_group("Filesystems", &filesystems, caps));
+    out.push('\n');
     out.push_str(&render_group("Daemon", &daemon, caps));
     out.push('\n');
     let all_rows: Vec<&Row> = environment
         .iter()
         .chain(workspace.iter())
+        .chain(mounts.iter())
+        .chain(filesystems.iter())
         .chain(daemon.iter())
         .collect();
     out.push_str(&verdict_line(&all_rows, verdict, caps));
@@ -561,62 +550,117 @@ fn render_report(
 /// The remediations doctor is willing to offer to run, or `None` when the
 /// warnings/failures on this run are not all fixable through a known,
 /// doctor-owned remediation.
-fn remediable_fixes(findings: &[Finding]) -> Option<Vec<&Remediation>> {
-    let remediations: Vec<&Remediation> = findings
+fn remediable_fixes(findings: &[Finding]) -> Vec<Remediation> {
+    let mut seen = std::collections::BTreeSet::new();
+    findings
         .iter()
         .filter_map(|finding| finding.remediation.as_ref())
-        .collect();
-    (!remediations.is_empty()).then_some(remediations)
+        .filter(|remediation| seen.insert(remediation.command_line()))
+        .cloned()
+        .collect()
 }
 
-/// Offer to apply every remediable fix. `--no-input`, structured
-/// modes, and a non-interactive session all degrade to report-only, matching
-/// the rest of the CLI's prompt policy rather than inventing a doctor-local
-/// rule.
+#[derive(Debug, Default)]
+struct RepairSummary {
+    attempted: usize,
+    failed: usize,
+}
+
+/// Show the complete repair set, ask once, then continue through independent
+/// failures. Fresh ownership checks still run inside each remediation.
 async fn offer_fix(
     workspace: &Workspace,
     output: &Output,
     findings: &[Finding],
-) -> anyhow::Result<()> {
-    let Some(remediations) = remediable_fixes(findings) else {
-        return Ok(());
-    };
+) -> anyhow::Result<RepairSummary> {
+    let remediations = remediable_fixes(findings);
+    if remediations.is_empty()
+        || output.no_input()
+        || output.is_structured()
+        || (!output.yes() && !crate::ui::prompt::is_terminal())
+    {
+        return Ok(RepairSummary::default());
+    }
+    output.narrate("");
+    output.narrate("Repairs:");
+    for remediation in &remediations {
+        output.narrate(format!("  - {}", remediation.command_line()));
+    }
+    if !output.yes()
+        && !Confirm::new(format!("Apply all {} repairs now?", remediations.len()))
+            .ask_with_output(output)?
+    {
+        return Ok(RepairSummary::default());
+    }
+
     let caps = render::stdout_capabilities();
     let ledger_rows: Vec<LedgerRow> = remediations
         .iter()
         .map(|remediation| LedgerRow::new(Glyph::Done, "fix", remediation.command_line()))
         .collect();
     let key_width = render::ledger_key_width(&ledger_rows);
+    let mut summary = RepairSummary::default();
     for (remediation, mut ledger_row) in remediations.into_iter().zip(ledger_rows) {
-        let apply = match remediation.consent_policy() {
-            ConsentPolicy::AutoAllowed if output.yes() => true,
-            _ if output.ensure_prompt_allowed().is_err() || !crate::ui::prompt::is_terminal() => {
-                false
-            },
-            ConsentPolicy::AutoAllowed | ConsentPolicy::InteractiveOnly => {
-                Confirm::new(format!("Apply `{}` now?", remediation.command_line()))
-                    .ask_with_output(output)?
-            },
-        };
-        if !apply {
-            continue;
-        }
+        summary.attempted += 1;
         let outcome = remediation.apply(workspace).await;
-        ledger_row.glyph = if outcome.is_ok() {
-            Glyph::Done
-        } else {
-            Glyph::Fail
-        };
+        if let Err(error) = outcome {
+            summary.failed += 1;
+            ledger_row.glyph = Glyph::Fail;
+            ledger_row.value = format!("{}: {error:#}", ledger_row.value);
+        }
         crate::ui::print_raw(&format!(
             "{}\n",
             render::ledger_row_line(&ledger_row, key_width, caps)
         ));
     }
-    Ok(())
+    Ok(summary)
 }
 
 impl Doctor<'_> {
     async fn run(self) -> anyhow::Result<DoctorVerdict> {
+        let mut result = self.diagnose().await?;
+        let mut verdict = result.verdict();
+        if self.output.is_structured() {
+            self.output.emit_result(
+                match verdict {
+                    DoctorVerdict::Clean => ResultVerdict::Ok,
+                    DoctorVerdict::Warnings | DoctorVerdict::Failures => ResultVerdict::Degraded,
+                },
+                result,
+            )?;
+            return Ok(verdict);
+        }
+
+        let caps = render::stdout_capabilities();
+        crate::ui::print_raw(&render_report(
+            &result.findings,
+            &result.inventory,
+            verdict,
+            caps,
+        ));
+        let repairs = offer_fix(self.workspace, &self.output, &result.findings).await?;
+        if repairs.attempted > 0 {
+            let fresh = Doctor {
+                workspace: self.workspace,
+                inventory: Inventory::collect(self.workspace).await?,
+                docker_target: resolve_filesystem_target(self.workspace)
+                    .map_err(|error: anyhow::Error| format!("resolve target: {error:#}")),
+                output: self.output.clone(),
+            };
+            result = fresh.diagnose().await?;
+            verdict = result.verdict();
+            self.output.narrate("");
+            self.output.narrate(format!(
+                "Repairs complete: {} attempted, {} failed. Final state: {}.",
+                repairs.attempted,
+                repairs.failed,
+                doctor_verdict_label(verdict)
+            ));
+        }
+        Ok(verdict)
+    }
+
+    async fn diagnose(&self) -> anyhow::Result<DoctorResult> {
         let (runtime, mut findings) = self.base_findings().await;
         findings.extend(self.inventory.mounts.iter().filter_map(Finding::mount_auth));
         let daemon_health = self.inventory.daemon.health();
@@ -627,30 +671,10 @@ impl Doctor<'_> {
         );
         findings.extend(self.libkrun_filesystem_findings(daemon_health));
 
-        let result = DoctorResult {
-            inventory: self.inventory,
+        Ok(DoctorResult {
+            inventory: self.inventory.clone(),
             findings,
-        };
-        let verdict = result.verdict();
-        if self.output.is_structured() {
-            self.output.emit_result(
-                match verdict {
-                    DoctorVerdict::Clean => ResultVerdict::Ok,
-                    DoctorVerdict::Warnings | DoctorVerdict::Failures => ResultVerdict::Degraded,
-                },
-                result,
-            )?;
-        } else {
-            let caps = render::stdout_capabilities();
-            crate::ui::print_raw(&render_report(
-                &result.findings,
-                &result.inventory,
-                verdict,
-                caps,
-            ));
-            offer_fix(self.workspace, &self.output, &result.findings).await?;
-        }
-        Ok(verdict)
+        })
     }
 
     async fn base_findings(&self) -> (Option<DockerClient>, Vec<Finding>) {
@@ -717,7 +741,7 @@ impl Doctor<'_> {
             Ok(probes) => probes,
             Err(error) => {
                 findings.push(Finding::from_probe(
-                    Section::Workspace,
+                    Section::Filesystems,
                     "filesystem state",
                     None,
                     ProbeResult::Err(format!("{error:#}")),
@@ -734,7 +758,7 @@ impl Doctor<'_> {
                 } => (state_dir, record, confirmed),
                 crate::host_fs::RunnerProbe::Invalid { state_dir, error } => {
                     findings.push(Finding::from_probe(
-                        Section::Workspace,
+                        Section::Filesystems,
                         "filesystem state",
                         Some(state_dir.display().to_string()),
                         ProbeResult::Err(error),
@@ -757,7 +781,7 @@ impl Doctor<'_> {
                     let remediation = (daemon_health == DaemonHealth::Stopped)
                         .then_some(Remediation::StopHostFilesystem { state_dir, record });
                     findings.push(Finding {
-                        section: Section::Workspace,
+                        section: Section::Filesystems,
                         check: "stray filesystem".to_owned(),
                         target,
                         severity: Severity::Attention,
@@ -773,7 +797,7 @@ impl Doctor<'_> {
                     let remediation = (!mount_active && !is_attached)
                         .then_some(Remediation::CleanStaleHostRecord { state_dir, record });
                     findings.push(Finding {
-                        section: Section::Workspace,
+                        section: Section::Filesystems,
                         check: "stale filesystem state".to_owned(),
                         target,
                         severity: if mount_active || is_attached {
@@ -889,7 +913,7 @@ impl Doctor<'_> {
                 );
                 let state = if running { "running" } else { "stopped" };
                 findings.push(Finding {
-                    section: Section::Workspace,
+                    section: Section::Filesystems,
                     check: "stray filesystem".to_owned(),
                     target: Some(candidate.spec.id().to_string()),
                     severity: Severity::Attention,
@@ -943,7 +967,7 @@ impl Doctor<'_> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return findings,
             Err(error) => {
                 findings.push(Finding::from_probe(
-                    Section::Workspace,
+                    Section::Filesystems,
                     "libkrun filesystem ownership",
                     Some(runtime_root.display().to_string()),
                     ProbeResult::Err(error.to_string()),
@@ -956,7 +980,7 @@ impl Doctor<'_> {
                 Ok(entry) => entry,
                 Err(error) => {
                     findings.push(Finding::from_probe(
-                        Section::Workspace,
+                        Section::Filesystems,
                         "libkrun filesystem ownership",
                         None,
                         ProbeResult::Err(error.to_string()),
@@ -973,7 +997,7 @@ impl Doctor<'_> {
                 Ok(id) => id,
                 Err(error) => {
                     findings.push(Finding::from_probe(
-                        Section::Workspace,
+                        Section::Filesystems,
                         "libkrun filesystem ownership",
                         Some(raw_id),
                         ProbeResult::Err(error.to_string()),
@@ -985,7 +1009,7 @@ impl Doctor<'_> {
             match runner.confirmed_record() {
                 Ok(Some(record)) if record.spec.id() != &id => {
                     findings.push(Finding::from_probe(
-                        Section::Workspace,
+                        Section::Filesystems,
                         "libkrun filesystem ownership",
                         Some(id.to_string()),
                         ProbeResult::Err(format!(
@@ -1001,7 +1025,7 @@ impl Doctor<'_> {
                     let remediation = (daemon_health == DaemonHealth::Stopped)
                         .then_some(Remediation::StopLibkrunFilesystem { state_dir, record });
                     findings.push(Finding {
-                        section: Section::Workspace,
+                        section: Section::Filesystems,
                         check: "stray filesystem".to_owned(),
                         target: Some(id.to_string()),
                         severity: Severity::Attention,
@@ -1014,7 +1038,7 @@ impl Doctor<'_> {
                 },
                 Ok(None) => {},
                 Err(error) => findings.push(Finding::from_probe(
-                    Section::Workspace,
+                    Section::Filesystems,
                     "libkrun filesystem ownership",
                     Some(id.to_string()),
                     ProbeResult::Err(format!("{error:#}")),
@@ -1149,6 +1173,14 @@ impl Doctor<'_> {
     }
 }
 
+const fn doctor_verdict_label(verdict: DoctorVerdict) -> &'static str {
+    match verdict {
+        DoctorVerdict::Clean => "clean",
+        DoctorVerdict::Warnings => "warnings remain",
+        DoctorVerdict::Failures => "failures remain",
+    }
+}
+
 #[cfg(test)]
 mod golden {
     use super::*;
@@ -1186,7 +1218,7 @@ mod golden {
 
     fn targeted_finding() -> Finding {
         Finding {
-            section: Section::Workspace,
+            section: Section::Mounts,
             check: "credentials".to_string(),
             target: Some("github".to_string()),
             severity: Severity::Attention,
@@ -1216,6 +1248,8 @@ mod golden {
         let rendered = render_report(&findings, &inventory, DoctorVerdict::Clean, caps(false));
         assert!(rendered.contains("Environment"), "{rendered}");
         assert!(rendered.contains("Workspace"), "{rendered}");
+        assert!(rendered.contains("Mounts"), "{rendered}");
+        assert!(rendered.contains("Filesystems"), "{rendered}");
         assert!(rendered.contains("Daemon"), "{rendered}");
         assert!(
             rendered.trim_end().ends_with("Everything checks out."),
@@ -1243,9 +1277,8 @@ mod golden {
             lines[credentials_index].contains("github token expired"),
             "{rendered}"
         );
-        assert_eq!(
-            lines[credentials_index + 1].trim(),
-            "fix:  omnifs mount reauth github",
+        assert!(
+            !lines[credentials_index + 1].trim().starts_with("fix:"),
             "{rendered}"
         );
 
@@ -1255,6 +1288,14 @@ mod golden {
 
         let verdict = lines.last().copied().unwrap_or_default();
         assert_eq!(verdict, "1 warning. Fix it:  omnifs mount reauth github");
+    }
+
+    #[test]
+    fn duplicate_repairs_are_offered_once() {
+        let finding = targeted_finding();
+        let fixes = remediable_fixes(&[finding.clone(), finding]);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].command_line(), "omnifs mount reauth github");
     }
 
     #[test]
@@ -1322,7 +1363,7 @@ mod golden {
     #[test]
     fn remediable_fixes_returns_the_actionable_subset() {
         let all_remediable = vec![targeted_finding()];
-        assert!(remediable_fixes(&all_remediable).is_some());
+        assert_eq!(remediable_fixes(&all_remediable).len(), 1);
 
         let mixed = vec![
             targeted_finding(),
@@ -1336,9 +1377,9 @@ mod golden {
                 remediation: None,
             },
         ];
-        assert_eq!(remediable_fixes(&mixed).unwrap().len(), 1);
+        assert_eq!(remediable_fixes(&mixed).len(), 1);
 
-        assert!(remediable_fixes(&probes()).is_none());
+        assert!(remediable_fixes(&probes()).is_empty());
     }
 
     fn probe_credential_result(root: &std::path::Path) -> ProbeResult {

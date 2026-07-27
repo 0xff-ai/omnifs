@@ -244,7 +244,8 @@ impl<'a> Launcher<'a> {
             offline,
             self.readiness_timeout,
         )
-        .await?;
+        .await
+        .map_err(crate::error::daemon_launch_failure)?;
 
         let status = client.status().await?;
         let key_width = up_key_width();
