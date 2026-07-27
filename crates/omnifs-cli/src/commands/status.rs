@@ -13,17 +13,9 @@ pub async fn run(output: Output) -> anyhow::Result<ExitCode> {
         output.emit_result(report.inventory.verdict(), report.inventory)?;
     } else {
         crate::ui::print_raw(&format!("{}\n", report.render().render()));
-        // The context strip already names the next step (`fix:  omnifs
-        // up`/`fix:  omnifs logs`) whenever the daemon is not running;
-        // repeating a `Browse:` line derived from a daemon that cannot
-        // currently serve anything would state two competing "what to
-        // do next" facts.
-        if crate::ui::access::show_browse_line(report.inventory.daemon_health()) {
+        if let Some(action) = report.closing_action() {
             output.narrate("");
-            output.narrate(format!(
-                "Browse:  `{}`",
-                crate::ui::access::browse_command(&report.inventory)
-            ));
+            output.narrate(crate::ui::access::action_line(&action).render());
         }
     }
     Ok(exit_code)

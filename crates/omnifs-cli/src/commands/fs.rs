@@ -658,40 +658,35 @@ fn propagate(mut command: Command, context: String) -> Result<ExitCode> {
 
 async fn list(output: Output) -> Result<ExitCode> {
     let workspace = Workspace::resolve()?;
-    let specs = workspace.filesystems().list()?;
-    let daemon = crate::client::DaemonClient::for_workspace(&workspace)
-        .status_optional_checked()
-        .await;
-    let rows = specs
-        .into_iter()
-        .map(|spec| {
-            let state = match &daemon {
-                Ok(Some(status)) if status.filesystems.contains(&spec) => "attached",
-                Ok(_) => "detached",
-                Err(_) => "unknown",
-            };
-            ListRow { spec, state }
+    let inventory = crate::inventory::Inventory::collect(&workspace).await?;
+    let verdict = inventory.verdict();
+    let rows = inventory
+        .filesystems
+        .iter()
+        .map(|filesystem| ListRow {
+            spec: filesystem.spec.clone(),
+            state: filesystem.state.label(),
         })
         .collect::<Vec<_>>();
     let result = ListResult { filesystems: rows };
     if output.is_structured() {
-        output.emit_result(ResultVerdict::Ok, &result)?;
+        output.emit_result(verdict, &result)?;
     } else if result.filesystems.is_empty() {
         crate::ui::print_raw("No filesystems configured.\n");
     } else {
-        crate::ui::print_raw("Name\tProtocol\tRuntime\tState\tLocation\n");
-        for row in &result.filesystems {
-            crate::ui::print_raw(&format!(
-                "{}\t{}\t{}\t{}\t{}\n",
-                row.spec.id(),
-                row.spec.protocol(),
-                row.spec.runtime(),
-                row.state,
-                row.spec.location().display()
-            ));
-        }
+        let mut report = crate::ui::table::Report::new();
+        report.push(crate::ui::table::Block::Resources(
+            crate::status::filesystem_table(
+                &inventory.filesystems,
+                inventory.next_action().as_ref(),
+            ),
+        ));
+        crate::ui::print_raw(&report.render());
     }
-    Ok(ExitCode::Success)
+    Ok(match verdict {
+        crate::inventory::Verdict::Ok => ExitCode::Success,
+        crate::inventory::Verdict::Degraded => ExitCode::Degraded,
+    })
 }
 
 fn finish_action(output: &Output, spec: fs::Spec, state: &'static str) -> Result<ExitCode> {

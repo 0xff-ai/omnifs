@@ -1,7 +1,10 @@
 //! Status report: data types, collection, and rendering.
 
 use crate::error::ExitCode;
-use crate::inventory::{DaemonHealth, FilesystemStatus, Inventory, MountStatus, Severity};
+use crate::inventory::{
+    ActionTarget, DaemonHealth, FilesystemState, FilesystemStatus, Inventory, MountStatus,
+    NextAction, ServingState, Severity,
+};
 use crate::ui::render::count;
 use crate::ui::table::{
     Action as TableAction, Block as TableBlock, Cell as TableCell, Column as TableColumn,
@@ -39,6 +42,7 @@ impl InventoryReport {
     pub(crate) fn render(&self) -> TableReport {
         let mut report = TableReport::new();
         let daemon_health = self.inventory.daemon_health();
+        let next_action = self.inventory.next_action();
         let context_state = match daemon_health {
             DaemonHealth::Running => match self.inventory.verdict() {
                 crate::inventory::Verdict::Ok => TableState::positive("healthy"),
@@ -75,18 +79,50 @@ impl InventoryReport {
             context_state,
         )
         .with_metadata(metadata);
-        if let Some(fix) = daemon_health.context_fix() {
-            context = context.with_action(TableAction::fix(fix));
+        if matches!(
+            next_action,
+            Some(NextAction::Doctor {
+                target: ActionTarget::Workspace
+            })
+        ) {
+            context = context.with_action(TableAction::fix("omnifs doctor"));
+        } else if matches!(next_action, Some(NextAction::StartDaemon)) {
+            context = context.with_action(TableAction::fix("omnifs up"));
         }
         report.push(TableBlock::Context(context));
 
-        report.push(TableBlock::Resources(filesystem_table(
-            &self.inventory.filesystems,
+        report.push(TableBlock::Resources(mount_table(
+            &self.inventory.mounts,
+            crate::ui::access::primary_host_location(&self.inventory),
+            next_action.as_ref(),
         )));
 
-        report.push(TableBlock::Resources(mount_table(&self.inventory.mounts)));
+        let clean_stopped_filesystems = daemon_health == DaemonHealth::Stopped
+            && self
+                .inventory
+                .filesystems
+                .iter()
+                .all(|filesystem| filesystem.state == FilesystemState::Detached);
+        if !clean_stopped_filesystems {
+            report.push(TableBlock::Resources(filesystem_table(
+                &self.inventory.filesystems,
+                next_action.as_ref(),
+            )));
+        }
 
         report
+    }
+
+    pub(crate) fn closing_action(&self) -> Option<NextAction> {
+        self.inventory.next_action().filter(|action| {
+            matches!(
+                action,
+                NextAction::AttachFilesystem { .. }
+                    | NextAction::CreateFilesystem
+                    | NextAction::Browse { .. }
+                    | NextAction::EnterFilesystem { .. }
+            )
+        })
     }
 }
 
@@ -103,15 +139,22 @@ fn provider_label(mount: &MountStatus) -> String {
         || mount.provider.name.clone(),
         |version| format!("{}@{}", mount.provider.name, version),
     );
-    format!("{identity} ({})", mount.provider.state.label())
+    if mount.provider.state.severity() >= Severity::Attention {
+        format!("{identity} ({})", mount.provider.state.label())
+    } else {
+        identity
+    }
 }
 
 /// Shared table builders for list/show consumers. The report delegates to
 /// these concrete schema owners, so callers cannot drift from status output.
-pub(crate) fn filesystem_table(filesystems: &[FilesystemStatus]) -> TableResources {
+pub(crate) fn filesystem_table(
+    filesystems: &[FilesystemStatus],
+    next_action: Option<&NextAction>,
+) -> TableResources {
     let mut table = TableResources::new(
         "Filesystems",
-        filesystems.len(),
+        filesystem_summary(filesystems),
         vec![
             TableColumn::new("Name", TablePriority::Identity, TableWidth::Auto),
             TableColumn::new("Protocol", TablePriority::Identity, TableWidth::Auto),
@@ -136,24 +179,33 @@ pub(crate) fn filesystem_table(filesystems: &[FilesystemStatus]) -> TableResourc
             ],
             table_state(filesystem.state.severity(), filesystem.state.label()),
         );
-        if let Some(fix) = &filesystem.fix {
-            row = row.with_action(TableAction::fix(fix.clone()));
+        if matches!(
+            next_action,
+            Some(NextAction::Doctor {
+                target: ActionTarget::Filesystem(id)
+            }) if id == filesystem.spec.id()
+        ) {
+            row = row.with_action(TableAction::fix("omnifs doctor"));
         }
         table.push(row);
     }
     table
 }
 
-pub(crate) fn mount_table(mounts: &[MountStatus]) -> TableResources {
+pub(crate) fn mount_table(
+    mounts: &[MountStatus],
+    host_location: Option<&std::path::Path>,
+    next_action: Option<&NextAction>,
+) -> TableResources {
     let mut table = TableResources::new(
         "Mounts",
-        mounts.len(),
+        mount_summary(mounts),
         vec![
             TableColumn::new("Mount", TablePriority::Identity, TableWidth::Auto),
             TableColumn::new("Provider", TablePriority::Secondary, TableWidth::Auto),
             TableColumn::new("Auth", TablePriority::Essential, TableWidth::Auto),
             TableColumn::new("Serving", TablePriority::Essential, TableWidth::Auto),
-            TableColumn::new("Access", TablePriority::Secondary, TableWidth::Auto),
+            TableColumn::new("Files at", TablePriority::Secondary, TableWidth::Path),
         ],
     );
     for mount in mounts {
@@ -163,20 +215,109 @@ pub(crate) fn mount_table(mounts: &[MountStatus]) -> TableResources {
                 TableCell::new(provider_label(mount)),
                 TableCell::state(table_state(mount.auth.severity(), mount.auth.label())),
                 TableCell::state(table_state(mount.serving.severity(), mount.serving.label())),
-                TableCell::new(if mount.access_count == 0 {
-                    "none".into()
-                } else {
-                    count(mount.access_count, "filesystem")
-                }),
+                TableCell::new(host_access_path(host_location, mount)),
             ],
             mount_row_state(mount),
         );
-        if let Some(fix) = &mount.fix {
-            row = row.with_action(TableAction::fix(fix.clone()));
+        let action = match next_action {
+            Some(NextAction::Doctor {
+                target: ActionTarget::Mount(name),
+            }) if name == &mount.name => Some("omnifs doctor".to_owned()),
+            Some(NextAction::Reauthenticate { mount: name }) if name == &mount.name => {
+                Some(format!("omnifs mount reauth {}", mount.name))
+            },
+            _ => None,
+        };
+        if let Some(action) = action {
+            row = row.with_action(TableAction::fix(action));
         }
         table.push(row);
     }
     table
+}
+
+fn host_access_path(host_location: Option<&std::path::Path>, mount: &MountStatus) -> String {
+    if !matches!(mount.serving, ServingState::Live | ServingState::Offline) {
+        return String::new();
+    }
+    host_location.map_or_else(String::new, |location| {
+        omnifs_workspace::display(
+            &location.join(mount.root.strip_prefix("/").unwrap_or(mount.root.as_path())),
+        )
+    })
+}
+
+fn filesystem_summary(filesystems: &[FilesystemStatus]) -> String {
+    if filesystems.is_empty() {
+        return "none configured".to_owned();
+    }
+    let count_state = |state| {
+        filesystems
+            .iter()
+            .filter(|filesystem| filesystem.state == state)
+            .count()
+    };
+    let parts = [
+        (count_state(FilesystemState::Attached), "attached"),
+        (count_state(FilesystemState::Detached), "detached"),
+        (count_state(FilesystemState::Unknown), "unknown"),
+        (count_state(FilesystemState::Failed), "failed"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, label)| format!("{count} {label}"))
+    .collect::<Vec<_>>();
+    if parts.len() == 1 {
+        parts[0].clone()
+    } else {
+        format!("{} configured, {}", filesystems.len(), parts.join(", "))
+    }
+}
+
+fn mount_summary(mounts: &[MountStatus]) -> String {
+    if mounts.is_empty() {
+        return "none configured".to_owned();
+    }
+    let live = mounts
+        .iter()
+        .filter(|mount| mount.serving == ServingState::Live)
+        .count();
+    let offline = mounts
+        .iter()
+        .filter(|mount| mount.serving == ServingState::Offline)
+        .count();
+    let needs_attention = mounts
+        .iter()
+        .filter(|mount| {
+            mount.provider.state.severity() >= Severity::Attention
+                || mount.auth.severity() >= Severity::Attention
+                || mount.serving.severity() >= Severity::Attention
+        })
+        .count();
+    if needs_attention > 0 {
+        let mut parts = Vec::new();
+        if live > 0 {
+            parts.push(format!("{live} live"));
+        }
+        if offline > 0 {
+            parts.push(format!("{offline} offline"));
+        }
+        parts.push(format!("{needs_attention} needs attention"));
+        return format!("{} configured, {}", mounts.len(), parts.join(", "));
+    }
+    if live == mounts.len() {
+        return format!("{live} live");
+    }
+    if offline == mounts.len() {
+        return format!("{offline} offline");
+    }
+    if mounts
+        .iter()
+        .all(|mount| mount.serving == ServingState::Stopped)
+    {
+        return format!("{} configured, stopped", mounts.len());
+    }
+    format!("{} configured", mounts.len())
 }
 
 /// One honest headline label per explicit precedence: a provider pin
@@ -227,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn stopped_context_metadata_names_configured_mounts_not_a_stale_pid() {
+    fn empty_stopped_context_names_configured_mounts_without_a_false_start_action() {
         let rendered =
             report(DaemonHealth::Stopped)
                 .render()
@@ -236,7 +377,7 @@ mod tests {
                     color: false,
                 });
         assert!(rendered.contains("0 mounts configured"), "{rendered}");
-        assert!(rendered.contains("fix:  omnifs up"));
+        assert!(!rendered.contains("fix:"), "{rendered}");
     }
 
     #[test]
@@ -270,7 +411,7 @@ mod tests {
         );
     }
 
-    /// the full shape: context line, `Filesystems` and `Mounts`
+    /// The full shape: context line, `Mounts` and `Filesystems`
     /// sections, and a degraded mount row carrying its `fix:` line on the
     /// following line, full width, never truncated. (`Inventory::test`
     /// fixes the daemon pid at 1 rather than the illustrative
@@ -345,6 +486,10 @@ mod tests {
         );
         assert!(rendered.contains("Filesystems"), "{rendered}");
         assert!(rendered.contains("Mounts"), "{rendered}");
+        assert!(
+            rendered.find("Mounts").unwrap() < rendered.find("Filesystems").unwrap(),
+            "{rendered}"
+        );
         assert!(rendered.contains("github"), "{rendered}");
         assert!(rendered.contains("● live"), "{rendered}");
 
@@ -380,7 +525,35 @@ mod tests {
             },
         );
         assert!(unreachable.contains("× unreachable"));
-        assert!(unreachable.contains("fix:  omnifs logs"));
+        assert!(unreachable.contains("fix:  omnifs doctor"));
+    }
+
+    #[test]
+    fn clean_stopped_status_hides_detached_filesystem_rows() {
+        let inventory = Inventory::test(
+            DaemonHealth::Stopped,
+            vec![crate::inventory::FilesystemStatus {
+                spec: omnifs_core::fs::Spec::new(
+                    "host".parse().unwrap(),
+                    omnifs_core::fs::Protocol::Nfs,
+                    omnifs_core::fs::Runtime::Host,
+                    "/Users/raul/omnifs".into(),
+                )
+                .unwrap(),
+                state: crate::inventory::FilesystemState::Detached,
+                mount_count: 0,
+                fix: None,
+            }],
+            Vec::new(),
+        );
+        let rendered =
+            InventoryReport { inventory }
+                .render()
+                .render_with(crate::ui::table::RenderOptions {
+                    width: 120,
+                    color: false,
+                });
+        assert!(!rendered.contains("Filesystems"), "{rendered}");
     }
 
     /// Regression for the footgun this slice fixes: a live mount whose auth

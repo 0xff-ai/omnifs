@@ -12,7 +12,19 @@
 use omnifs_core::fs::Runtime;
 use std::path::Path;
 
-use crate::inventory::{FilesystemStatus, Inventory};
+use crate::inventory::{FilesystemStatus, Inventory, NextAction};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActionLine {
+    pub(crate) label: &'static str,
+    pub(crate) command: String,
+}
+
+impl ActionLine {
+    pub(crate) fn render(&self) -> String {
+        format!("{}:  `{}`", self.label, self.command)
+    }
+}
 
 fn attached_filesystems(inventory: &Inventory) -> Vec<&FilesystemStatus> {
     inventory
@@ -49,10 +61,19 @@ pub(crate) fn guest_shell_line(filesystem: &FilesystemStatus) -> String {
     format!("In the microVM:  `{}`", guest_shell_command(filesystem))
 }
 
-fn no_filesystem_line(mount_count: usize) -> String {
+fn no_filesystem_line(inventory: &Inventory) -> String {
+    let action = inventory
+        .next_action()
+        .map(|action| action_line(&action))
+        .unwrap_or(ActionLine {
+            label: "Create",
+            command: "omnifs fs create --name main".to_owned(),
+        });
+    let mount_count = inventory.mounts.len();
     let noun = if mount_count == 1 { "mount" } else { "mounts" };
     format!(
-        "Serving {mount_count} {noun}. No filesystem attached yet:  `omnifs fs create --name main`"
+        "Serving {mount_count} {noun}. No filesystem attached yet. {}",
+        action.render()
     )
 }
 
@@ -66,7 +87,7 @@ fn no_filesystem_line(mount_count: usize) -> String {
 pub(crate) fn lines(inventory: &Inventory) -> Vec<String> {
     let attached = attached_filesystems(inventory);
     if attached.is_empty() {
-        return vec![no_filesystem_line(inventory.mounts.len())];
+        return vec![no_filesystem_line(inventory)];
     }
     attached
         .into_iter()
@@ -84,26 +105,6 @@ fn browse_from_location(location: &Path, mount: Option<&str>) -> String {
 
 /// The guest-shell-or-create-nudge tail shared by every browse action that
 /// found no attached host filesystem to name a path against.
-fn browse_or_guest_fallback(inventory: &Inventory) -> String {
-    if let Some(guest) = attached_filesystems(inventory)
-        .into_iter()
-        .find(|filesystem| filesystem.spec.runtime() != Runtime::Host)
-    {
-        return guest_shell_command(guest);
-    }
-    "omnifs fs create --name main".to_owned()
-}
-
-/// Whether `omnifs status`'s closing `Browse:` line should print at all
-/// suppressed whenever the context strip already carries a
-/// `fix:` action naming the next step ([`DaemonHealth::context_fix`]), so the
-/// human register never states two competing "what to do next" facts in the
-/// same report. Bare `omnifs` (`cli.rs::run_bare`) already branches on
-/// `DaemonHealth::Running` itself and does not use this.
-pub(crate) fn show_browse_line(daemon_health: crate::inventory::DaemonHealth) -> bool {
-    daemon_health.context_fix().is_none()
-}
-
 /// The single derived browse action for `omnifs status`'s closing
 /// `Browse:` line: a host `ls` example when a host filesystem is attached,
 /// else the guest shell command, else the enable nudge. Never a bare path
@@ -111,11 +112,55 @@ pub(crate) fn show_browse_line(daemon_health: crate::inventory::DaemonHealth) ->
 /// no single mount is more relevant than another to a whole-workspace
 /// summary.
 pub(crate) fn browse_command(inventory: &Inventory) -> String {
-    match primary_host_location(inventory) {
-        Some(location) => {
-            browse_from_location(location, inventory.mounts.first().map(|m| m.name.as_str()))
+    inventory
+        .next_action()
+        .map(|action| action_line(&action))
+        .map_or_else(
+            || {
+                primary_host_location(inventory).map_or_else(
+                    || "omnifs fs create --name main".to_owned(),
+                    |location| {
+                        browse_from_location(
+                            location,
+                            inventory.mounts.first().map(|mount| mount.name.as_str()),
+                        )
+                    },
+                )
+            },
+            |line| line.command,
+        )
+}
+
+pub(crate) fn action_line(action: &NextAction) -> ActionLine {
+    match action {
+        NextAction::Doctor { .. } => ActionLine {
+            label: "Fix",
+            command: "omnifs doctor".to_owned(),
         },
-        None => browse_or_guest_fallback(inventory),
+        NextAction::Reauthenticate { mount } => ActionLine {
+            label: "Sign in",
+            command: format!("omnifs mount reauth {mount}"),
+        },
+        NextAction::StartDaemon => ActionLine {
+            label: "Start serving",
+            command: "omnifs up".to_owned(),
+        },
+        NextAction::AttachFilesystem { id } => ActionLine {
+            label: "Mount files",
+            command: format!("omnifs fs attach --name {id}"),
+        },
+        NextAction::CreateFilesystem => ActionLine {
+            label: "Create a filesystem",
+            command: "omnifs fs create --name main".to_owned(),
+        },
+        NextAction::Browse { path } => ActionLine {
+            label: "Browse",
+            command: format!("ls {}", omnifs_workspace::display(path)),
+        },
+        NextAction::EnterFilesystem { id } => ActionLine {
+            label: "Enter",
+            command: format!("omnifs fs shell --name {id}"),
+        },
     }
 }
 
@@ -175,36 +220,34 @@ mod tests {
     }
 
     #[test]
-    fn browse_line_is_suppressed_exactly_when_the_context_strip_already_has_a_fix_action() {
-        use crate::inventory::DaemonHealth;
-
-        // Stopped/Failed/Unreachable all print a `fix:` action in
-        // `status.rs::render`'s context strip, so the closing `Browse:` line
-        // would restate a competing "what to do next" fact.
-        for suppressed in [
-            DaemonHealth::Stopped,
-            DaemonHealth::Failed,
-            DaemonHealth::Unreachable,
-        ] {
-            assert!(!show_browse_line(suppressed), "{suppressed:?}");
-        }
-        for shown in [
-            DaemonHealth::Running,
-            DaemonHealth::Starting,
-            DaemonHealth::Degraded,
-        ] {
-            assert!(show_browse_line(shown), "{shown:?}");
-        }
-    }
-
-    #[test]
     fn no_observed_filesystem_names_the_create_command_not_a_path() {
         let inventory = Inventory::test(DaemonHealth::Running, Vec::new(), vec![mount("github")]);
         let rendered = lines(&inventory);
         assert_eq!(rendered.len(), 1);
-        assert!(rendered[0].starts_with("Serving 1 mount. No filesystem attached yet:"));
+        assert!(
+            rendered[0]
+                .starts_with("Serving 1 mount. No filesystem attached yet. Create a filesystem:")
+        );
         assert!(rendered[0].contains("omnifs fs create --name main"));
         assert_eq!(browse_command(&inventory), "omnifs fs create --name main");
+    }
+
+    #[test]
+    fn detached_filesystem_names_attach_as_the_next_action() {
+        let inventory = Inventory::test(
+            DaemonHealth::Running,
+            vec![filesystem(
+                Runtime::Host,
+                "/mnt/omnifs",
+                FilesystemState::Detached,
+            )],
+            vec![mount("github")],
+        );
+        assert_eq!(
+            browse_command(&inventory),
+            "omnifs fs attach --name fuse-host"
+        );
+        assert!(lines(&inventory)[0].contains("Mount files:"));
     }
 
     #[test]
@@ -319,6 +362,6 @@ mod tests {
             vec![mount("github")],
         );
         assert!(primary_host_location(&inventory).is_none());
-        assert_eq!(browse_command(&inventory), "omnifs fs create --name main");
+        assert_eq!(browse_command(&inventory), "omnifs doctor");
     }
 }
