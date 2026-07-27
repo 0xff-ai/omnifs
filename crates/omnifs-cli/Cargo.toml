@@ -52,6 +52,7 @@ tar = { workspace = true }
 zstd = { workspace = true }
 unicode-width = { workspace = true }
 getrandom = "0.3"
+tabled = { version = "0.20", features = ["ansi"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

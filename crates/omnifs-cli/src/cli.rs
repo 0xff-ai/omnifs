@@ -444,48 +444,43 @@ fn fresh_workspace_screen(
 /// that can still fire when `mounts` is empty (a daemon that failed or went
 /// unreachable, or a filesystem severe enough to flip the verdict while the
 /// daemon is otherwise up), and the mount-related disjuncts are moot on an
-/// empty mount list. Returns the label to show and the fix command to run;
-/// the fix command is always `DaemonHealth::context_fix` or the filesystem's
-/// own `fix` field, never re-derived here.
+/// empty mount list. Returns the label and the one action selected by
+/// `Inventory::next_action`.
 fn fresh_workspace_degradation(
     inventory: &crate::inventory::Inventory,
 ) -> Option<(String, String)> {
-    let daemon_health = inventory.daemon_health();
-    let daemon_label = match daemon_health {
-        crate::inventory::DaemonHealth::Failed => Some("Daemon is unhealthy"),
-        crate::inventory::DaemonHealth::Unreachable => Some("Daemon is unreachable"),
+    let action = inventory.next_action()?;
+    let command = crate::ui::access::action_line(&action).command;
+    match action {
+        crate::inventory::NextAction::Doctor {
+            target: crate::inventory::ActionTarget::Workspace,
+        } => Some((
+            match inventory.daemon_health() {
+                crate::inventory::DaemonHealth::Unreachable => "Daemon is unreachable",
+                _ => "Workspace needs attention",
+            }
+            .to_owned(),
+            command,
+        )),
+        crate::inventory::NextAction::Doctor {
+            target: crate::inventory::ActionTarget::Filesystem(id),
+        } => inventory
+            .filesystems
+            .iter()
+            .find(|filesystem| filesystem.spec.id() == &id)
+            .map(|filesystem| {
+                (
+                    format!(
+                        "{} ({}) filesystem is {}",
+                        filesystem.spec.protocol().as_str(),
+                        filesystem.spec.runtime().as_str(),
+                        filesystem.state.label()
+                    ),
+                    command,
+                )
+            }),
         _ => None,
-    };
-    if let Some(label) = daemon_label
-        && let Some(fix) = daemon_health.context_fix()
-    {
-        return Some((label.to_owned(), fix.to_owned()));
     }
-
-    let daemon_up = matches!(
-        daemon_health,
-        crate::inventory::DaemonHealth::Running
-            | crate::inventory::DaemonHealth::Starting
-            | crate::inventory::DaemonHealth::Degraded
-    );
-    if !daemon_up {
-        return None;
-    }
-    inventory.filesystems.iter().find_map(|filesystem| {
-        if filesystem.state.severity() < crate::inventory::Severity::Attention {
-            return None;
-        }
-        let fix = filesystem.fix.clone()?;
-        Some((
-            format!(
-                "{} ({}) filesystem is {}",
-                filesystem.spec.protocol().as_str(),
-                filesystem.spec.runtime().as_str(),
-                filesystem.state.label()
-            ),
-            fix,
-        ))
-    })
 }
 
 fn exit_for_verdict(verdict: DoctorVerdict) -> ExitCode {
@@ -563,7 +558,7 @@ mod tests {
 
     /// An unreachable daemon flips the verdict to `Degraded` (exit 5) even
     /// with zero mounts; the screen must name it and reuse
-    /// `DaemonHealth::context_fix` verbatim rather than re-deriving the fix.
+    /// the Inventory-selected doctor action.
     #[test]
     fn fresh_workspace_screen_names_an_unreachable_daemon() {
         let inventory = crate::inventory::Inventory::test(
@@ -576,16 +571,13 @@ mod tests {
             super::fresh_workspace_degradation(&inventory),
             Some((
                 "Daemon is unreachable".to_owned(),
-                crate::inventory::DaemonHealth::Unreachable
-                    .context_fix()
-                    .unwrap()
-                    .to_owned()
+                "omnifs doctor".to_owned()
             ))
         );
         let screen = super::fresh_workspace_screen(&inventory, caps(false));
         assert!(screen.starts_with(&fresh_workspace_block(caps(false))));
         assert!(
-            screen.contains("Daemon is unreachable:  `omnifs logs`"),
+            screen.contains("Daemon is unreachable:  `omnifs doctor`"),
             "{screen}"
         );
     }
@@ -618,13 +610,12 @@ mod tests {
             super::fresh_workspace_degradation(&inventory),
             Some((
                 "fuse (docker) filesystem is failed".to_owned(),
-                "omnifs logs (container exited)".to_owned()
+                "omnifs doctor".to_owned()
             ))
         );
         let screen = super::fresh_workspace_screen(&inventory, caps(false));
         assert!(
-            screen
-                .contains("fuse (docker) filesystem is failed:  `omnifs logs (container exited)`"),
+            screen.contains("fuse (docker) filesystem is failed:  `omnifs doctor`"),
             "{screen}"
         );
     }

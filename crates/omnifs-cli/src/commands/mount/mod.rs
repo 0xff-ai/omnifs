@@ -118,6 +118,10 @@ impl MountArgs {
 pub(crate) struct MountsResult {
     mounts: Vec<crate::inventory::MountStatus>,
     verdict: crate::inventory::Verdict,
+    #[serde(skip)]
+    host_location: Option<std::path::PathBuf>,
+    #[serde(skip)]
+    next_action: Option<crate::inventory::NextAction>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -168,9 +172,13 @@ async fn show(args: &ShowArgs, output: Output) -> anyhow::Result<ExitCode> {
 pub(crate) async fn list_with_output(workspace: &Workspace) -> anyhow::Result<MountsResult> {
     let inventory = crate::inventory::Inventory::collect(workspace).await?;
     let verdict = inventory.verdict();
+    let host_location = crate::ui::access::primary_host_location(&inventory).map(ToOwned::to_owned);
+    let next_action = inventory.next_action();
     Ok(MountsResult {
         mounts: inventory.mounts,
         verdict,
+        host_location,
+        next_action,
     })
 }
 
@@ -236,7 +244,11 @@ fn config_summary_line(value: &serde_json::Value) -> Option<String> {
 fn render_mounts(result: &MountsResult) -> String {
     let mut report = crate::ui::table::Report::new();
     report.push(crate::ui::table::Block::Resources(
-        crate::status::mount_table(&result.mounts),
+        crate::status::mount_table(
+            &result.mounts,
+            result.host_location.as_deref(),
+            result.next_action.as_ref(),
+        ),
     ));
     report.render()
 }
@@ -699,6 +711,8 @@ mod tests {
         let result = MountsResult {
             mounts: mounts.clone(),
             verdict: crate::inventory::Verdict::Ok,
+            host_location: None,
+            next_action: None,
         };
         let rendered = render_mounts(&result);
         assert!(rendered.contains("Mounts"));
@@ -708,7 +722,7 @@ mod tests {
 
         let mut expected = crate::ui::table::Report::new();
         expected.push(crate::ui::table::Block::Resources(
-            crate::status::mount_table(&mounts),
+            crate::status::mount_table(&mounts, None, None),
         ));
         assert_eq!(rendered, expected.render());
     }

@@ -58,21 +58,6 @@ pub(crate) enum DaemonHealth {
     Unreachable,
 }
 
-impl DaemonHealth {
-    /// The context strip's `fix:` action for this state, if any. This is the
-    /// one owner of "which daemon states already name a next step": `status`
-    /// renders the action from it, and the closing `Browse:` line suppresses
-    /// itself through it so the report never states two competing "what to do
-    /// next" facts.
-    pub(crate) const fn context_fix(self) -> Option<&'static str> {
-        match self {
-            Self::Stopped => Some("omnifs up"),
-            Self::Failed | Self::Unreachable => Some("omnifs logs"),
-            Self::Running | Self::Starting | Self::Degraded => None,
-        }
-    }
-}
-
 impl DaemonFacts {
     pub(crate) fn health(&self) -> DaemonHealth {
         match (&self.probe, self.status.as_ref()) {
@@ -431,6 +416,24 @@ pub(crate) enum AccessState {
     Failed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActionTarget {
+    Workspace,
+    Mount(String),
+    Filesystem(fs::Id),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NextAction {
+    Doctor { target: ActionTarget },
+    Reauthenticate { mount: String },
+    StartDaemon,
+    AttachFilesystem { id: fs::Id },
+    CreateFilesystem,
+    Browse { path: PathBuf },
+    EnterFilesystem { id: fs::Id },
+}
+
 impl Inventory {
     pub(crate) async fn collect(workspace: &Workspace) -> Result<Self> {
         let repository = workspace.desired_state().observe_repository()?;
@@ -546,6 +549,95 @@ impl Inventory {
 
     pub(crate) fn daemon_health(&self) -> DaemonHealth {
         self.daemon.health()
+    }
+
+    pub(crate) fn next_action(&self) -> Option<NextAction> {
+        if matches!(
+            self.daemon_health(),
+            DaemonHealth::Degraded | DaemonHealth::Failed | DaemonHealth::Unreachable
+        ) {
+            return Some(NextAction::Doctor {
+                target: ActionTarget::Workspace,
+            });
+        }
+        if let Some(mount) = self.mounts.iter().find(|mount| {
+            mount.provider.state.severity() >= Severity::Attention
+                || matches!(mount.serving, ServingState::Failed { .. })
+                || mount.fix.as_deref() == Some("omnifs doctor")
+        }) {
+            return Some(NextAction::Doctor {
+                target: ActionTarget::Mount(mount.name.clone()),
+            });
+        }
+        if let Some(filesystem) = self.filesystems.iter().find(|filesystem| {
+            matches!(
+                filesystem.state,
+                FilesystemState::Unknown | FilesystemState::Failed
+            )
+        }) {
+            return Some(NextAction::Doctor {
+                target: ActionTarget::Filesystem(filesystem.spec.id().clone()),
+            });
+        }
+        if let Some(mount) = self
+            .mounts
+            .iter()
+            .find(|mount| mount.auth.command().is_some())
+        {
+            return Some(NextAction::Reauthenticate {
+                mount: mount.name.clone(),
+            });
+        }
+        if !self.mounts.is_empty()
+            && (self.daemon_health() == DaemonHealth::Stopped
+                || self.mounts.iter().any(|mount| {
+                    matches!(
+                        mount.serving,
+                        ServingState::Stopped | ServingState::NotLoaded
+                    )
+                }))
+        {
+            return Some(NextAction::StartDaemon);
+        }
+        if let Some(filesystem) = self
+            .filesystems
+            .iter()
+            .find(|filesystem| filesystem.state == FilesystemState::Detached)
+        {
+            return Some(NextAction::AttachFilesystem {
+                id: filesystem.spec.id().clone(),
+            });
+        }
+        if self.filesystems.is_empty() && !self.mounts.is_empty() {
+            return Some(NextAction::CreateFilesystem);
+        }
+        let first_mount = self
+            .mounts
+            .iter()
+            .find(|mount| matches!(mount.serving, ServingState::Live | ServingState::Offline))
+            .or_else(|| self.mounts.first());
+        if let Some(filesystem) = self.filesystems.iter().find(|filesystem| {
+            filesystem.state.provides_access() && filesystem.spec.runtime() == fs::Runtime::Host
+        }) {
+            let path = first_mount.map_or_else(
+                || filesystem.spec.location().to_path_buf(),
+                |mount| {
+                    filesystem
+                        .spec
+                        .location()
+                        .join(mount.root.strip_prefix("/").unwrap_or(mount.root.as_path()))
+                },
+            );
+            return Some(NextAction::Browse { path });
+        }
+        self.filesystems
+            .iter()
+            .find(|filesystem| {
+                filesystem.state.provides_access() && filesystem.spec.runtime() != fs::Runtime::Host
+            })
+            .map(|filesystem| NextAction::EnterFilesystem {
+                id: filesystem.spec.id().clone(),
+            })
     }
 
     #[cfg(test)]
@@ -1305,6 +1397,91 @@ mod tests {
         let mut unreachable = base;
         unreachable.daemon = DaemonFacts::test(DaemonHealth::Unreachable);
         assert_eq!(unreachable.verdict(), Verdict::Degraded);
+    }
+
+    #[test]
+    fn next_action_has_one_stable_priority_order() {
+        let mount = MountStatus {
+            name: "github".into(),
+            root: "/github".into(),
+            provider: ProviderPin {
+                name: "github".into(),
+                version: None,
+                artifact: "a".repeat(64),
+                state: ProviderPinState::Available,
+            },
+            auth: AuthState::Ready,
+            serving: ServingState::Live,
+            access_count: 1,
+            fix: None,
+        };
+        let filesystem = FilesystemStatus {
+            spec: fs::Spec::new(
+                "host".parse().unwrap(),
+                fs::Protocol::Nfs,
+                fs::Runtime::Host,
+                "/mnt/omnifs".into(),
+            )
+            .unwrap(),
+            state: FilesystemState::Attached,
+            mount_count: 1,
+            fix: None,
+        };
+
+        let healthy = Inventory::test(
+            DaemonHealth::Running,
+            vec![filesystem.clone()],
+            vec![mount.clone()],
+        );
+        assert_eq!(
+            healthy.next_action(),
+            Some(NextAction::Browse {
+                path: "/mnt/omnifs/github".into()
+            })
+        );
+
+        let mut detached = healthy.clone();
+        detached.filesystems[0].state = FilesystemState::Detached;
+        assert_eq!(
+            detached.next_action(),
+            Some(NextAction::AttachFilesystem {
+                id: "host".parse().unwrap()
+            })
+        );
+
+        let no_filesystem = Inventory::test(DaemonHealth::Running, Vec::new(), vec![mount.clone()]);
+        assert_eq!(
+            no_filesystem.next_action(),
+            Some(NextAction::CreateFilesystem)
+        );
+
+        let mut auth = healthy.clone();
+        auth.mounts[0].auth = AuthState::Expired {
+            command: "omnifs mount reauth github".into(),
+        };
+        assert_eq!(
+            auth.next_action(),
+            Some(NextAction::Reauthenticate {
+                mount: "github".into()
+            })
+        );
+
+        let mut broken = auth;
+        broken.filesystems[0].state = FilesystemState::Failed;
+        assert_eq!(
+            broken.next_action(),
+            Some(NextAction::Doctor {
+                target: ActionTarget::Filesystem("host".parse().unwrap())
+            })
+        );
+
+        broken.daemon = DaemonFacts::test(DaemonHealth::Unreachable);
+        assert_eq!(
+            broken.next_action(),
+            Some(NextAction::Doctor {
+                target: ActionTarget::Workspace
+            })
+        );
     }
 
     #[test]

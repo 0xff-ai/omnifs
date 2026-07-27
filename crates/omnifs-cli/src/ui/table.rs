@@ -6,9 +6,10 @@
 
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
-use unicode_width::UnicodeWidthChar as _;
 
 use crossterm::terminal;
+use tabled::builder::Builder;
+use tabled::settings::{Alignment, Padding, Span, Style};
 
 use super::render::display_width;
 
@@ -54,13 +55,18 @@ impl Report {
     /// the process terminal.
     pub(crate) fn render_with(&self, options: RenderOptions) -> String {
         let mut out = String::new();
+        let mut action_rendered = false;
         for (index, block) in self.blocks.iter().enumerate() {
             if index > 0 {
                 out.push('\n');
             }
             match block {
-                Block::Context(context) => context.render_into(&mut out, options),
-                Block::Resources(table) => table.render_into(&mut out, options),
+                Block::Context(context) => {
+                    context.render_into(&mut out, options, &mut action_rendered);
+                },
+                Block::Resources(table) => {
+                    table.render_into(&mut out, options, &mut action_rendered);
+                },
             }
         }
         out
@@ -107,7 +113,7 @@ impl ContextStrip {
         self
     }
 
-    fn render_into(&self, out: &mut String, options: RenderOptions) {
+    fn render_into(&self, out: &mut String, options: RenderOptions, action_rendered: &mut bool) {
         let left = format!("{}  {}", self.title, self.location);
         let state = self.state.render(options.color);
         let gap = options
@@ -126,8 +132,11 @@ impl ContextStrip {
                     .join(", ")
             );
         }
-        if let Some(action) = self.action.as_ref() {
+        if let Some(action) = self.action.as_ref()
+            && !*action_rendered
+        {
             let _ = writeln!(out, "  fix:  {}", action.command);
+            *action_rendered = true;
         }
     }
 }
@@ -158,7 +167,7 @@ impl Meta {
 #[derive(Debug, Clone)]
 pub(crate) struct ResourceTable {
     pub(crate) title: String,
-    pub(crate) count: CountLabel,
+    pub(crate) summary: SectionSummary,
     pub(crate) columns: Vec<Column>,
     pub(crate) rows: Vec<ResourceRow>,
 }
@@ -166,12 +175,12 @@ pub(crate) struct ResourceTable {
 impl ResourceTable {
     pub(crate) fn new(
         title: impl Into<String>,
-        count: impl Into<CountLabel>,
+        summary: impl Into<SectionSummary>,
         columns: Vec<Column>,
     ) -> Self {
         Self {
             title: title.into(),
-            count: count.into(),
+            summary: summary.into(),
             columns,
             rows: Vec::new(),
         }
@@ -182,10 +191,10 @@ impl ResourceTable {
     }
 
     fn heading(&self) -> String {
-        format!("{}  {}", self.title, self.count.0)
+        format!("{}  {}", self.title, self.summary.0)
     }
 
-    fn render_into(&self, out: &mut String, options: RenderOptions) {
+    fn render_into(&self, out: &mut String, options: RenderOptions, action_rendered: &mut bool) {
         let _ = writeln!(out, "{}", self.heading());
         if self.rows.is_empty() {
             let _ = writeln!(out, "  (none)");
@@ -193,64 +202,65 @@ impl ResourceTable {
         }
 
         if options.width <= 71 {
-            self.render_stacked(out, options);
+            self.render_stacked(out, options, action_rendered);
         } else {
-            self.render_wide(out, options);
+            self.render_wide(out, options, action_rendered);
         }
     }
 
-    fn render_wide(&self, out: &mut String, options: RenderOptions) {
+    fn render_wide(&self, out: &mut String, options: RenderOptions, action_rendered: &mut bool) {
         let active = self.active_columns(options.width);
-        let widths = self.column_widths(&active);
-        let shared = shared_actions(&self.rows);
-
-        let mut header = String::new();
-        for (position, column_index) in active.iter().enumerate() {
-            let column = &self.columns[*column_index];
-            header.push_str("  ");
-            header.push_str(&pad_right(column.heading, widths[position]));
-        }
-        let _ = writeln!(out, "{}", header.trim_end());
+        let mut builder = Builder::default();
+        builder.push_record(
+            active
+                .iter()
+                .map(|column_index| self.columns[*column_index].heading),
+        );
+        let mut spanned_rows = Vec::new();
+        let mut record_index = 1;
 
         for row in &self.rows {
-            let mut line = String::from("  ");
-            for (position, column_index) in active.iter().enumerate() {
-                let value = row
-                    .cells
+            builder.push_record(active.iter().map(|column_index| {
+                row.cells
                     .get(*column_index)
-                    .map_or_else(String::new, |cell| {
-                        column_value(
-                            &cell.render(options.color),
-                            self.columns[*column_index].width,
-                        )
-                    });
-                line.push_str("  ");
-                line.push_str(&pad_right(&value, widths[position]));
-            }
-            let _ = writeln!(out, "{}", line.trim_end());
+                    .map_or_else(String::new, |cell| cell.render(options.color))
+            }));
+            record_index += 1;
             if let Some(action) = row.action.as_ref()
-                && !shared.contains(&action.command)
+                && !*action_rendered
             {
-                let _ = writeln!(out, "    fix:  {}", action.command);
+                let mut action_row = vec![format!("fix:  {}", action.command)];
+                action_row.resize(active.len(), String::new());
+                builder.push_record(action_row);
+                spanned_rows.push(record_index);
+                record_index += 1;
+                *action_rendered = true;
             }
         }
-        for action in shared_actions_for_render(&self.rows, &shared) {
-            let _ = writeln!(out, "  fix:  {}", action.command);
+
+        let mut table = builder.build();
+        table
+            .with(Style::empty())
+            .with(Padding::new(0, 2, 0, 0))
+            .with(Alignment::left());
+        let span = isize::try_from(active.len()).unwrap_or(isize::MAX);
+        for row in spanned_rows {
+            table.modify((row, 0), Span::column(span));
+        }
+        for line in table.to_string().lines() {
+            let _ = writeln!(out, "  {}", line.trim_end());
         }
     }
 
-    fn render_stacked(&self, out: &mut String, options: RenderOptions) {
-        let shared = shared_actions(&self.rows);
+    fn render_stacked(&self, out: &mut String, options: RenderOptions, action_rendered: &mut bool) {
         for row in &self.rows {
             let identity = self
                 .columns
                 .iter()
                 .enumerate()
                 .filter(|(_, column)| column.priority == Priority::Identity)
-                .filter_map(|(index, column)| {
-                    row.cells
-                        .get(index)
-                        .map(|cell| column_value(&cell.render(options.color), column.width))
+                .filter_map(|(index, _column)| {
+                    row.cells.get(index).map(|cell| cell.render(options.color))
                 })
                 .collect::<Vec<_>>();
             let left = format!("  {}", identity.join("  "));
@@ -266,26 +276,20 @@ impl ResourceTable {
                 .enumerate()
                 .filter(|(_, column)| column.priority != Priority::Identity)
                 .filter_map(|(index, column)| {
-                    row.cells.get(index).map(|cell| {
-                        format!(
-                            "{}  {}",
-                            column.heading,
-                            column_value(&cell.render(options.color), column.width)
-                        )
-                    })
+                    row.cells
+                        .get(index)
+                        .map(|cell| format!("{}  {}", column.heading, cell.render(options.color)))
                 })
                 .collect::<Vec<_>>();
             if !metadata.is_empty() {
                 let _ = writeln!(out, "    {}", metadata.join(", "));
             }
             if let Some(action) = row.action.as_ref()
-                && !shared.contains(&action.command)
+                && !*action_rendered
             {
                 let _ = writeln!(out, "    fix:  {}", action.command);
+                *action_rendered = true;
             }
-        }
-        for action in shared_actions_for_render(&self.rows, &shared) {
-            let _ = writeln!(out, "  fix:  {}", action.command);
         }
     }
 
@@ -297,7 +301,15 @@ impl ResourceTable {
         while self.layout_width(&active) > width {
             let removable = active
                 .iter()
-                .find(|index| self.columns[**index].priority == Priority::Secondary);
+                .find(|index| {
+                    let column = &self.columns[**index];
+                    column.priority == Priority::Secondary && column.width == WidthPolicy::Path
+                })
+                .or_else(|| {
+                    active
+                        .iter()
+                        .find(|index| self.columns[**index].priority == Priority::Secondary)
+                });
             let Some(index) = removable.copied() else {
                 break;
             };
@@ -306,49 +318,46 @@ impl ResourceTable {
         active
     }
 
-    fn column_widths(&self, active: &[usize]) -> Vec<usize> {
-        active
-            .iter()
-            .map(|index| {
-                let column = &self.columns[*index];
-                let heading = display_width(column.heading);
-                let content = self
-                    .rows
-                    .iter()
-                    .filter_map(|row| row.cells.get(*index))
-                    .map(|cell| display_width(&column_value(&cell.render(false), column.width)))
-                    .max()
-                    .unwrap_or(0);
-                heading.max(content)
-            })
-            .collect()
-    }
-
     fn layout_width(&self, active: &[usize]) -> usize {
-        2 + active
-            .iter()
-            .map(|index| {
-                let column = &self.columns[*index];
-                let heading = display_width(column.heading);
-                let content = self
-                    .rows
-                    .iter()
-                    .filter_map(|row| row.cells.get(*index))
-                    .map(|cell| display_width(&column_value(&cell.render(false), column.width)))
-                    .max()
-                    .unwrap_or(0);
-                heading.max(content) + 2
-            })
-            .sum::<usize>()
+        let mut builder = Builder::default();
+        builder.push_record(
+            active
+                .iter()
+                .map(|column_index| self.columns[*column_index].heading),
+        );
+        for row in &self.rows {
+            builder.push_record(active.iter().map(|column_index| {
+                row.cells
+                    .get(*column_index)
+                    .map_or_else(String::new, |cell| cell.render(false))
+            }));
+        }
+        let mut table = builder.build();
+        table
+            .with(Style::empty())
+            .with(Padding::new(0, 2, 0, 0))
+            .with(Alignment::left());
+        2 + table
+            .to_string()
+            .lines()
+            .map(display_width)
+            .max()
+            .unwrap_or(0)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CountLabel(String);
+pub(crate) struct SectionSummary(String);
 
-impl From<usize> for CountLabel {
-    fn from(count: usize) -> Self {
-        Self(count.to_string())
+impl From<String> for SectionSummary {
+    fn from(summary: String) -> Self {
+        Self(summary)
+    }
+}
+
+impl From<&str> for SectionSummary {
+    fn from(summary: &str) -> Self {
+        Self(summary.to_owned())
     }
 }
 
@@ -517,80 +526,6 @@ pub(crate) struct RenderOptions {
     pub(crate) color: bool,
 }
 
-fn column_value(value: &str, policy: WidthPolicy) -> String {
-    match policy {
-        WidthPolicy::Auto => value.to_owned(),
-        WidthPolicy::Path => truncate_display(value, 32),
-    }
-}
-
-fn shared_actions(rows: &[ResourceRow]) -> Vec<String> {
-    let mut commands = Vec::new();
-    for command in rows
-        .iter()
-        .filter_map(|row| row.action.as_ref().map(|action| action.command.clone()))
-    {
-        if !commands.contains(&command) {
-            commands.push(command);
-        }
-    }
-    commands
-        .into_iter()
-        .filter(|command| {
-            rows.iter()
-                .filter(|row| {
-                    row.action
-                        .as_ref()
-                        .is_some_and(|action| action.command == *command)
-                })
-                .count()
-                > 1
-        })
-        .collect()
-}
-
-fn shared_actions_for_render<'a>(rows: &'a [ResourceRow], commands: &[String]) -> Vec<&'a Action> {
-    commands
-        .iter()
-        .filter_map(|command| {
-            rows.iter().find_map(|row| {
-                row.action
-                    .as_ref()
-                    .filter(|action| action.command == *command)
-            })
-        })
-        .collect()
-}
-
-fn truncate_display(value: &str, max_width: usize) -> String {
-    if display_width(value) <= max_width {
-        return value.to_owned();
-    }
-    if max_width <= 1 {
-        return "…".to_owned();
-    }
-    let mut output = String::new();
-    let mut used = 0;
-    for ch in value.chars() {
-        let width = ch.width().unwrap_or(0);
-        if used + width + 1 > max_width {
-            break;
-        }
-        output.push(ch);
-        used += width;
-    }
-    output.push('…');
-    output
-}
-
-fn pad_right(value: &str, width: usize) -> String {
-    let padding = width.saturating_sub(display_width(value));
-    let mut padded = String::with_capacity(value.len() + padding);
-    padded.push_str(value);
-    padded.push_str(&" ".repeat(padding));
-    padded
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,7 +538,7 @@ mod tests {
             Column::new("Details", Priority::Detail, WidthPolicy::Auto),
         ];
         let action = Action::fix("omnifs mount reauth github");
-        let mut table = ResourceTable::new("Filesystems", 2, columns);
+        let mut table = ResourceTable::new("Filesystems", "2 configured", columns);
         table.push(
             ResourceRow::new(
                 [
@@ -639,7 +574,7 @@ mod tests {
             width: 120,
             color: false,
         });
-        assert!(output.starts_with("Filesystems  2\n"));
+        assert!(output.starts_with("Filesystems  2 configured\n"));
         assert!(output.contains("Name"));
         assert!(output.contains("Location"));
         assert!(!output.contains('│'));
@@ -675,7 +610,7 @@ mod tests {
     fn declared_state_columns_keep_their_schema_order() {
         let mut table = ResourceTable::new(
             "Mounts",
-            1,
+            "1 configured",
             vec![
                 Column::new("Name", Priority::Identity, WidthPolicy::Auto),
                 Column::new("Auth", Priority::Essential, WidthPolicy::Auto),
@@ -753,15 +688,13 @@ mod tests {
         assert_eq!(display_width("\u{1b}[31m火\u{1b}[0m"), 2);
         assert_eq!(display_width("e\u{301}"), 1);
         assert_eq!(display_width("🚀"), 2);
-        assert_eq!(truncate_display("東京駅", 5), "東京…");
-        assert_eq!(display_width(&pad_right("火", 4)), 4);
     }
 
     #[test]
     fn rendered_rows_align_colored_and_wide_cells() {
         let mut table = ResourceTable::new(
             "Mounts",
-            2,
+            "2 configured",
             vec![
                 Column::new("Name", Priority::Identity, WidthPolicy::Auto),
                 Column::new("Location", Priority::Essential, WidthPolicy::Auto),
@@ -792,7 +725,7 @@ mod tests {
 
     #[test]
     fn empty_table_is_explicit() {
-        let table = ResourceTable::new("Mounts", 0, vec![]);
+        let table = ResourceTable::new("Mounts", "none configured", vec![]);
         let mut report = Report::new();
         report.push(Block::Resources(table));
         assert!(
