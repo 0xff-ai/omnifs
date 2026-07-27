@@ -1175,12 +1175,11 @@ fn status_and_filesystem_listing_ignore_runner_records() {
     assert!(stopped_text.contains("omnifs  "), "{stopped_text}");
     assert!(stopped_text.contains("mounts configured"), "{stopped_text}");
     assert!(!stopped_text.contains("API -"), "{stopped_text}");
-    for heading in ["Filesystems  ", "Mounts  "] {
-        assert!(
-            stopped_text.contains(heading),
-            "missing {heading:?} in {stopped_text}"
-        );
-    }
+    assert!(stopped_text.contains("Mounts  "), "{stopped_text}");
+    assert!(
+        !stopped_text.contains("Filesystems  "),
+        "clean stopped status must omit detached filesystem rows: {stopped_text}"
+    );
 
     let runner_location = fixture.home_path().join("runner-mount");
     std::fs::create_dir_all(&runner_location).expect("runner mount directory");

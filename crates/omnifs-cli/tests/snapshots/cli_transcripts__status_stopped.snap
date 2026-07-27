@@ -6,12 +6,8 @@ exit: 0
 stdout:
 omnifs  $OMNIFS_HOME                                            ○ stopped
 0 mounts configured
-  fix:  omnifs up
 
-Filesystems  0
-  (none)
-
-Mounts  0
+Mounts  none configured
   (none)
 
 stderr:
