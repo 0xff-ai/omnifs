@@ -1,32 +1,18 @@
 use anyhow::anyhow;
-use omnifs_api::{MountRecord, ProviderMetadata};
+use omnifs_api::MountRecord;
 use omnifs_core::MountName;
 
 use crate::error::WithHint;
 
-pub(crate) fn select(
-    embedded: &[ProviderMetadata],
-    provider_arg: Option<&str>,
-    interactive: bool,
-    output: &crate::ui::output::Output,
-) -> anyhow::Result<String> {
-    if let Some(provider) = provider_arg {
-        return Ok(provider.to_owned());
-    }
-    if !interactive {
-        anyhow::bail!("non-interactive mode requires a provider path, digest, or embedded name");
-    }
-    let mut providers = embedded
-        .iter()
-        .map(|provider| provider.reference.name.clone())
-        .collect::<Vec<_>>();
-    providers.sort();
-    if providers.is_empty() {
-        anyhow::bail!("the embedded provider bundle contains no providers");
-    }
-    crate::ui::prompt::Select::new("Which provider?")
-        .items(providers)
-        .ask_with_output(output)
+/// Resolve the provider selector for `mount add`. The only interactive
+/// "Which provider?" prompt lives in `create.rs`'s aligned catalog picker,
+/// which runs before this and supplies its pick as `provider_arg`; this
+/// function's job is purely to validate that a selector ended up chosen,
+/// never to prompt for one itself.
+pub(crate) fn select(provider_arg: Option<&str>) -> anyhow::Result<String> {
+    provider_arg.map(str::to_owned).ok_or_else(|| {
+        anyhow!("non-interactive mode requires a provider path, digest, or embedded name")
+    })
 }
 
 pub(crate) fn mount_name(

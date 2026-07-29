@@ -92,19 +92,16 @@ impl<'a> AuthImportDecision<'a> {
         })
     }
 
-    /// Interactive import decision. A single detected credential offers three
-    /// honest options; multiple credentials use a picker with a sign-in fallback.
-    /// The host treats every ambient source the same way regardless of kind
-    /// (env var or command): only the provider declares where to look, never how
-    /// much to trust what it finds.
+    /// Interactive import decision, for one detected credential or several
+    /// alike: each detected source gets its own "import from X" option,
+    /// alongside the shared sign-in and skip alternatives. The host treats
+    /// every ambient source the same way regardless of kind (env var or
+    /// command): only the provider declares where to look, never how much to
+    /// trust what it finds.
     fn prompt_for_import(
         detected: &[detect::DetectedCredential],
         output: &crate::ui::output::Output,
     ) -> anyhow::Result<Option<SecretString>> {
-        if detected.len() == 1 {
-            return prompt_single_import(&detected[0], output);
-        }
-
         let mut options: Vec<String> = detected
             .iter()
             .map(|credential| format!("import from {}", credential.source()))
@@ -123,28 +120,6 @@ impl<'a> AuthImportDecision<'a> {
                 return Ok(Some(cred.value()));
             }
         }
-        Ok(None)
-    }
-}
-
-fn prompt_single_import(
-    cred: &detect::DetectedCredential,
-    output: &crate::ui::output::Output,
-) -> anyhow::Result<Option<SecretString>> {
-    let import = format!("import from {}", cred.source());
-    let options = vec![
-        import.clone(),
-        "sign in with OAuth instead".to_string(),
-        "skip auth for now".to_string(),
-    ];
-    // `.prompt()` so ESC/ctrl-c cancels the whole command; declining is the
-    // explicit "skip auth for now" option, never a silent fallback.
-    let answer = crate::ui::prompt::Select::new("How should this mount authenticate?")
-        .items(options)
-        .ask_with_output(output)?;
-    if answer == import {
-        Ok(Some(cred.value()))
-    } else {
         Ok(None)
     }
 }
