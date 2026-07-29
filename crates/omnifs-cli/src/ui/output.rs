@@ -359,12 +359,10 @@ impl Output {
 }
 
 /// Prompt policy derived once per invocation from [`Output`] state
-/// ([`Output::prompt_mode`]), or forced by the one caller
-/// ([`Self::forced_yes`]) that must skip prompting outright regardless of the
-/// invocation's own terminal/no-input state. Fields are private so no other
-/// call site can hand-assemble a self-contradictory combination (such as
-/// `interactive: true` alongside `no_input: true`, which neither constructor
-/// can produce).
+/// ([`Output::prompt_mode`]). Fields are private so no other call site can
+/// hand-assemble a self-contradictory combination (such as `interactive:
+/// true` alongside `no_input: true`, which the one constructor can never
+/// produce).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PromptMode {
     interactive: bool,
@@ -373,18 +371,6 @@ pub(crate) struct PromptMode {
 }
 
 impl PromptMode {
-    /// The one legitimate hand-built case: a caller (setup's per-provider
-    /// configure step under `--yes`) that must behave exactly as if `--yes`
-    /// and `--no-input` were both passed, independent of whether the real
-    /// invocation happens to be interactive.
-    pub(crate) const fn forced_yes() -> Self {
-        Self {
-            interactive: false,
-            yes: true,
-            no_input: true,
-        }
-    }
-
     pub(crate) const fn interactive(self) -> bool {
         self.interactive
     }
@@ -424,8 +410,8 @@ impl PromptMode {
 
     /// Build an arbitrary (possibly real-terminal-independent) prompt policy
     /// for a unit test. Real code always derives [`PromptMode`] from
-    /// [`Output::prompt_mode`] or [`Self::forced_yes`]; this exists only so
-    /// tests can exercise [`Self::resolve`]'s branching without a PTY.
+    /// [`Output::prompt_mode`]; this exists only so tests can exercise
+    /// [`Self::resolve`]'s branching without a PTY.
     #[cfg(test)]
     pub(crate) const fn for_test(interactive: bool, yes: bool, no_input: bool) -> Self {
         Self {
@@ -435,14 +421,6 @@ impl PromptMode {
         }
     }
 }
-
-/// A caller-supplied destination for narration/progress text that this
-/// invocation would otherwise print itself. Boxed as a trait object (rather
-/// than a generic parameter) because [`Output`] is cloned freely through
-/// short-lived progress handles and command call chains, and every clone
-/// must carry the same concrete sink without infecting `Output`'s own type
-/// with a caller's closure type.
-type NarrationSink = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Output policy owned by one CLI invocation. Commands clone this handle and
 /// pass it through short-lived progress handles instead of consulting
@@ -456,7 +434,6 @@ pub(crate) struct Output {
     command: &'static str,
     state: Arc<Mutex<OutputState>>,
     stdout: Arc<Mutex<OutputWriter>>,
-    narration_sink: Option<NarrationSink>,
 }
 
 impl std::fmt::Debug for Output {
@@ -482,32 +459,7 @@ impl Output {
             command: "invocation",
             state: Arc::new(Mutex::new(OutputState::default())),
             stdout: Arc::new(Mutex::new(Box::new(io::stdout()))),
-            narration_sink: None,
         }
-    }
-
-    /// Redirect this invocation's narration and progress text into `sink`
-    /// instead of printing it. A caller that runs several operations whose
-    /// narration would otherwise each print their own rows (each one
-    /// fighting a shared live region's own redraw) instead folds every one
-    /// of those rows into whatever single visible line it owns. This is an `Output`-owned
-    /// capability rather than a caller-side workaround so every existing
-    /// `narrate`/`note`/`ledger_row`/progress call site is redirected
-    /// automatically, with no changes needed at those call sites.
-    pub(crate) fn with_narration_sink(
-        mut self,
-        sink: impl Fn(&str) + Send + Sync + 'static,
-    ) -> Self {
-        self.narration_sink = Some(Arc::new(sink));
-        self
-    }
-
-    /// The sink this invocation's narration is redirected into, if any.
-    /// `Spinner`/`LiveRegion` read this directly (rather than going through
-    /// `narrate`/`ledger_row`) because their transient draw/erase mechanics
-    /// have no equivalent of those two methods to redirect through.
-    pub(crate) fn narration_sink(&self) -> Option<&NarrationSink> {
-        self.narration_sink.as_ref()
     }
 
     #[cfg(test)]
@@ -558,10 +510,6 @@ impl Output {
             return;
         }
         let text = line.to_string();
-        if let Some(sink) = &self.narration_sink {
-            sink(&text);
-            return;
-        }
         let caps = stderr_capabilities(self.quiet);
         crate::ui::eprint_raw(&super::render::narration_line(&text, caps));
     }
@@ -607,10 +555,6 @@ impl Output {
     /// each row sizing its own key column.
     pub(crate) fn ledger_row(&self, row: &super::render::LedgerRow, key_width: usize) {
         if self.mode != OutputMode::Human {
-            return;
-        }
-        if let Some(sink) = &self.narration_sink {
-            sink(&row.value);
             return;
         }
         let caps = stderr_capabilities(self.quiet);
@@ -788,62 +732,6 @@ impl Output {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // -- narration sink: setup's per-enable suppression mechanism -----------
-
-    #[test]
-    fn narrate_redirects_into_a_narration_sink_instead_of_printing() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let sink_seen = Arc::clone(&seen);
-        let output = Output::new(OutputMode::Human, false)
-            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
-        output.narrate("Connecting to Docker");
-        assert_eq!(*seen.lock().unwrap(), ["Connecting to Docker".to_owned()]);
-    }
-
-    #[test]
-    fn quiet_suppresses_narration_even_with_a_sink_set() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let sink_seen = Arc::clone(&seen);
-        let output = Output::new(OutputMode::Human, true)
-            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
-        output.narrate("should never appear");
-        assert!(seen.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn ledger_row_redirects_its_value_into_a_narration_sink_instead_of_printing() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let sink_seen = Arc::clone(&seen);
-        let output = Output::new(OutputMode::Human, false)
-            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
-        let row = crate::ui::render::LedgerRow::new(
-            crate::ui::style::Glyph::Done,
-            "filesystem image",
-            "ghcr.io/omnifs:latest ready",
-        );
-        output.ledger_row(&row, 9);
-        assert_eq!(
-            *seen.lock().unwrap(),
-            ["ghcr.io/omnifs:latest ready".to_owned()]
-        );
-    }
-
-    #[test]
-    fn structured_output_never_reads_a_narration_sink() {
-        // The sink is a human-narration substitution; a structured
-        // invocation's `ledger_row` stays a no-op regardless of whether a
-        // sink happens to be set, the same as it already was without one.
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let sink_seen = Arc::clone(&seen);
-        let output = Output::new(OutputMode::Json, false)
-            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
-        output.ledger_row(
-            &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "k", "v"),
-            1,
-        );
-        assert!(seen.lock().unwrap().is_empty());
-    }
 
     #[test]
     fn output_policy_matrix() {
@@ -1161,13 +1049,5 @@ mod tests {
             || Ok("typed"),
         );
         assert_eq!(resolved.unwrap(), "typed");
-    }
-
-    #[test]
-    fn forced_yes_is_non_interactive_and_takes_the_default() {
-        let mode = PromptMode::forced_yes();
-        assert!(!mode.interactive());
-        assert!(mode.yes());
-        assert!(mode.no_input());
     }
 }

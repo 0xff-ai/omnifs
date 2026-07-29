@@ -74,7 +74,7 @@ pub enum Commands {
     /// List or remove stored credentials
     Credential(commands::credential::CredentialArgs),
 
-    /// Configure providers, start the daemon, and attach platform filesystems
+    /// Start the daemon, list providers, and offer quick-start mounts and filesystems
     Setup(commands::setup::SetupArgs),
 
     /// Install omnifs usage skills for agent harnesses
@@ -293,7 +293,7 @@ fn fresh_profile_block(caps: crate::ui::render::Capabilities) -> String {
     let get_started = fresh_profile_row(
         "Get started:",
         "omnifs setup",
-        "pick services, sign in, mount",
+        "boot the daemon and quick-start mounts",
         caps,
     );
     let piecewise = fresh_profile_row(
@@ -388,7 +388,7 @@ mod tests {
     /// ```text
     /// No mounts yet. omnifs projects external services as files.
     ///
-    /// Get started:  omnifs setup        pick services, sign in, mount
+    /// Get started:  omnifs setup        boot the daemon and quick-start mounts
     /// or piecewise: omnifs mount add    configure one mount
     /// ```
     #[test]
@@ -397,7 +397,7 @@ mod tests {
             fresh_profile_block(caps(false)),
             "No mounts yet. omnifs projects external services as files.\n\
              \n\
-             Get started:  omnifs setup        pick services, sign in, mount\n\
+             Get started:  omnifs setup        boot the daemon and quick-start mounts\n\
              or piecewise: omnifs mount add    configure one mount"
         );
     }

@@ -6,6 +6,6 @@ exit: 0
 stdout:
 No mounts yet. omnifs projects external services as files.
 
-Get started:  omnifs setup        pick services, sign in, mount
+Get started:  omnifs setup        boot the daemon and quick-start mounts
 or piecewise: omnifs mount add    configure one mount
 stderr:

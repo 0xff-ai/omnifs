@@ -555,3 +555,49 @@ async fn down_stops_daemon_but_keeps_cli_filesystem_specs() {
             .is_file()
     );
 }
+
+/// `--no-input setup` boots the daemon and prints the provider catalog and
+/// the `Next:` block, but neither prompt has anything to answer without a
+/// terminal, so it must decline both quick-starts and still exit 0 rather
+/// than mounting or attaching anything on the operator's behalf.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_input_setup_boots_and_orients_without_mounting_or_attaching() {
+    let fixture = Fixture::new();
+    let setup = fixture.run(&["--no-input", "setup"]);
+    assert_success(&setup, "setup");
+    let stderr = String::from_utf8_lossy(&setup.stderr);
+    assert!(stderr.contains("Providers you can mount"), "{stderr}");
+    assert!(stderr.contains("Next:"), "{stderr}");
+    assert!(stderr.contains("omnifs mount add"), "{stderr}");
+    assert!(stderr.contains("omnifs status"), "{stderr}");
+    assert!(stderr.contains("omnifs fs list"), "{stderr}");
+
+    let mounts = fixture.run(&["--output", "json", "mount", "ls"]);
+    assert_success(&mounts, "mount ls");
+    let mounts_json: serde_json::Value = serde_json::from_slice(&mounts.stdout)
+        .expect("mount ls --output json must produce valid JSON");
+    assert_eq!(
+        mounts_json["result"]["mounts"]
+            .as_array()
+            .expect("mount ls result.mounts array")
+            .len(),
+        0,
+        "a --no-input run must not mount anything"
+    );
+
+    let filesystems = fixture.run(&["--output", "json", "fs", "ls"]);
+    assert_success(&filesystems, "fs ls");
+    let filesystems_json: serde_json::Value = serde_json::from_slice(&filesystems.stdout)
+        .expect("fs ls --output json must produce valid JSON");
+    assert_eq!(
+        filesystems_json["result"]["filesystems"]
+            .as_array()
+            .expect("fs ls result.filesystems array")
+            .len(),
+        0,
+        "a --no-input run must not attach anything"
+    );
+
+    let down = fixture.run(&["down"]);
+    assert_success(&down, "down");
+}

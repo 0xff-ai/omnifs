@@ -81,10 +81,10 @@ pub(crate) fn terminal_width() -> usize {
 /// exactly at the edge.
 ///
 /// The one owner of this math: every raw-mode frame drawer that tracks drawn
-/// rows (`ui/prompt.rs`'s `redraw`/`erase`, `ui/live.rs`'s
-/// `LiveRegion::draw`/`erase` and `Spinner`) computes through this function
-/// instead of re-deriving the ceiling division locally, so a `MoveUp` always
-/// targets the row a previous frame actually wrapped onto.
+/// rows (`ui/prompt.rs`'s `redraw`/`erase`, `ui/live.rs`'s `Spinner`)
+/// computes through this function instead of re-deriving the ceiling
+/// division locally, so a `MoveUp` always targets the row a previous frame
+/// actually wrapped onto.
 pub(crate) fn physical_rows(line: &str, width: usize) -> usize {
     if width == 0 {
         return 1;

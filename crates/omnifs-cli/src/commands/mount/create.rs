@@ -12,6 +12,7 @@ use omnifs_api::{
 use omnifs_core::{MountName, MountRevision, ProviderId};
 use omnifs_provider::{ProviderAuthManifest, ProviderManifest};
 use serde::{Serialize, de::DeserializeOwned};
+use serde_json::Value;
 
 use super::spec_creation::create_config;
 use super::{AddArgs, AuthImportDecision, ImportOutcome, provider_selection};
@@ -336,26 +337,11 @@ pub(crate) async fn assemble_mount_build(
     {
         oauth.scopes = Some(args.scopes.clone());
     }
-    let mut limits = (!manifest.limits.is_empty()).then(|| MountLimits {
-        max_memory_mb: manifest
-            .limits
-            .max_memory_mb
-            .as_ref()
-            .map(|limit| limit.value),
-        max_fetch_blob_bytes: manifest
-            .limits
-            .max_fetch_blob_bytes
-            .as_ref()
-            .map(|limit| limit.value),
-    });
+    let mut limits = manifest_limits(&manifest);
     if let Some(raw) = args.limits_json.as_deref() {
         limits = Some(parse_json_flag("--limits-json", raw)?);
     }
-    let mut config = config_raw
-        .map(|config| serde_json::to_vec(&config))
-        .transpose()
-        .context("encode provider config")?
-        .unwrap_or_else(|| b"{}".to_vec());
+    let mut config = config_bytes(config_raw)?;
     args.apply_mount_overrides(&manifest, &mut config)?;
 
     let auth_ready = if token.is_none() {
@@ -535,6 +521,70 @@ pub(super) fn parse_json_flag<T: DeserializeOwned>(
     raw: &str,
 ) -> anyhow::Result<T> {
     serde_json::from_str(raw).with_context(|| format!("parse {flag}"))
+}
+
+/// The manifest's declared resource limits translated into the wire
+/// `MountLimits` shape, or `None` when the provider declares none. Shared by
+/// `mount add`'s default path and setup's quick-start path
+/// ([`quick_start_definition`]) so both express a provider's limits
+/// identically before any `--limits-json` override.
+fn manifest_limits(manifest: &ProviderManifest) -> Option<MountLimits> {
+    (!manifest.limits.is_empty()).then(|| MountLimits {
+        max_memory_mb: manifest
+            .limits
+            .max_memory_mb
+            .as_ref()
+            .map(|limit| limit.value),
+        max_fetch_blob_bytes: manifest
+            .limits
+            .max_fetch_blob_bytes
+            .as_ref()
+            .map(|limit| limit.value),
+    })
+}
+
+/// Serialize a generated config to the wire bytes a mount definition carries,
+/// falling back to an empty object when the provider generated none. Shared
+/// by `mount add`'s default path and [`quick_start_definition`].
+fn config_bytes(config: Option<Value>) -> anyhow::Result<Vec<u8>> {
+    Ok(match config {
+        Some(config) => serde_json::to_vec(&config).context("encode provider config")?,
+        None => b"{}".to_vec(),
+    })
+}
+
+/// Build a ready-to-submit `MountDefinition` for a provider that needs no
+/// sign-in and no interactive config input: `omnifs setup`'s quick-start
+/// mount batch. Shares config and limits derivation with `mount add`'s
+/// default path ([`manifest_limits`], [`config_bytes`]) so both commands
+/// write the same defaults for the same provider; unlike `mount add` there is
+/// no `--config-json`/`--limits-json` override and no auth to resolve, since
+/// setup only ever offers this path to a provider whose manifest declares
+/// neither.
+pub(crate) async fn quick_start_definition(
+    rpc: &RpcClient,
+    output: &crate::ui::output::Output,
+    provider_id: ProviderId,
+    manifest: &ProviderManifest,
+) -> anyhow::Result<MountDefinition> {
+    let mounts = rpc.list_mounts().await?;
+    let mount_name = provider_selection::mount_name(
+        &mounts,
+        &manifest.default_mount,
+        None,
+        false,
+        true,
+        output,
+        mount_add_key_width(),
+    )?;
+    let config = config_bytes(create_config(manifest, output, false)?)?;
+    Ok(MountDefinition {
+        name: mount_name,
+        provider: provider_id,
+        auth: None,
+        limits: manifest_limits(manifest),
+        config,
+    })
 }
 
 #[cfg(test)]
