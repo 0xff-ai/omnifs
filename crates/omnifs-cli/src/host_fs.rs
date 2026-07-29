@@ -1,6 +1,7 @@
 //! Host filesystem launch, runner probing, and control.
 
 use crate::client_fs_state::ClientFilesystemState;
+use crate::error::WithHint;
 use crate::filesystem_driver::{Candidate, ensure_identity_unchanged, ensure_no_orphaned_state};
 use anyhow::{Context as _, Result, ensure};
 use omnifs_core::fs;
@@ -50,7 +51,8 @@ impl HostDriver {
                 "host filesystem",
                 "runner record",
                 mount_point.display(),
-            )?;
+            )
+            .with_hint("Run `omnifs doctor` to diagnose")?;
             return Ok(None);
         };
         crate::filesystem_driver::ensure_record_matches(&record.spec, spec)?;
@@ -59,11 +61,12 @@ impl HostDriver {
             .await
             .with_context(|| {
                 format!(
-                    "host filesystem at {} could not confirm runner {}; run `omnifs doctor`",
+                    "host filesystem at {} could not confirm runner {}",
                     mount_point.display(),
                     record.instance_id
                 )
-            })?;
+            })
+            .with_hint("Run `omnifs doctor` to diagnose")?;
         Ok(Some((record, state.phase)))
     }
 
@@ -72,6 +75,8 @@ impl HostDriver {
         ctx: &crate::filesystem_driver::LaunchContext<'_>,
     ) -> Result<()> {
         probe(ctx.spec.protocol())?;
+        ctx.output
+            .narrate(format!("Starting host filesystem `{}`", ctx.spec.id()));
         PendingHostFilesystem::spawn(
             &self.state_dir,
             ctx.client_state,
@@ -80,7 +85,21 @@ impl HostDriver {
             ctx.attach_unix()?,
         )?
         .wait_until_mounted(ctx.spec)
-        .await
+        .await?;
+        let key_width = crate::ui::output::Output::ledger_block_width(&["filesystem"]);
+        ctx.output.ledger_row(
+            &crate::ui::render::LedgerRow::new(
+                crate::ui::style::Glyph::Done,
+                "filesystem",
+                format!(
+                    "{} mounted at {}",
+                    ctx.spec.id(),
+                    ctx.spec.location().display()
+                ),
+            ),
+            key_width,
+        );
+        Ok(())
     }
 
     /// The one teardown entry point for a proven identity: reconfirm the
@@ -225,11 +244,11 @@ impl PendingHostFilesystem {
                         .try_wait()
                         .context("inspect host filesystem process")?
                     {
-                        anyhow::bail!(
-                            "host filesystem `{}` exited with {status}; see {}",
-                            wait.spec.id(),
-                            wait.pending.log_path.display()
-                        );
+                        return Err(anyhow::anyhow!(
+                            "host filesystem `{}` exited with {status}",
+                            wait.spec.id()
+                        ))
+                        .with_hint(format!("See {}", wait.pending.log_path.display()));
                     }
                     match RunnerRecord::read(&wait.pending.state_dir) {
                         Ok(Some(record)) if record.instance_id == wait.pending.instance_id => {
@@ -241,11 +260,16 @@ impl PendingHostFilesystem {
                                 wait.last_phase = Some(state.phase.clone());
                                 match state.phase {
                                     RunnerPhase::Mounted => return Ok(Some(())),
-                                    RunnerPhase::Failed { message } => anyhow::bail!(
-                                        "host filesystem `{}` failed: {message}; see {}",
-                                        wait.spec.id(),
-                                        wait.pending.log_path.display()
-                                    ),
+                                    RunnerPhase::Failed { message } => {
+                                        return Err(anyhow::anyhow!(
+                                            "host filesystem `{}` failed: {message}",
+                                            wait.spec.id()
+                                        ))
+                                        .with_hint(format!(
+                                            "See {}",
+                                            wait.pending.log_path.display()
+                                        ));
+                                    },
                                     RunnerPhase::Preflight
                                     | RunnerPhase::Attaching
                                     | RunnerPhase::Mounting
@@ -254,11 +278,14 @@ impl PendingHostFilesystem {
                                 }
                             }
                         },
-                        Ok(Some(record)) => anyhow::bail!(
-                            "host filesystem state at {} belongs to runner {}; run `omnifs doctor`",
-                            wait.pending.state_dir.display(),
-                            record.instance_id
-                        ),
+                        Ok(Some(record)) => {
+                            return Err(anyhow::anyhow!(
+                                "host filesystem state at {} belongs to runner {}",
+                                wait.pending.state_dir.display(),
+                                record.instance_id
+                            ))
+                            .with_hint("Run `omnifs doctor` to diagnose");
+                        },
                         Ok(None) => {},
                         Err(error) => return Err(error.into()),
                     }
@@ -269,14 +296,14 @@ impl PendingHostFilesystem {
         ready.map_or_else(
             || {
                 let phase = phase_label(wait.last_phase.clone());
-                anyhow::bail!(
+                Err(anyhow::anyhow!(
                     "host filesystem `{}` did not confirm mount startup within {}s; \
-                     last proved phase was {phase}; runner {} was left alive for safe cleanup; see {}",
+                     last proved phase was {phase}; runner {} was left alive for safe cleanup",
                     spec.id(),
                     STARTUP_TIMEOUT.as_secs(),
-                    wait.pending.instance_id,
-                    wait.pending.log_path.display()
-                )
+                    wait.pending.instance_id
+                ))
+                .with_hint(format!("See {}", wait.pending.log_path.display()))
             },
             Ok,
         )

@@ -88,7 +88,9 @@ pub(crate) fn ensure_record_matches(record_spec: &fs::Spec, expected: &fs::Spec)
 /// backend's `confirmed` opens with: prove nothing is left to reconcile
 /// before returning `None`, rather than silently reporting the filesystem as
 /// absent while a mount or helper is still live. `what` names the backend's
-/// state, `record_noun` the record it expected to find alongside it.
+/// state, `record_noun` the record it expected to find alongside it. Callers
+/// attach the `omnifs doctor` remediation as a hint, since this shared
+/// helper has no `Output` to reach through `with_hint`'s call-site pattern.
 pub(crate) fn ensure_no_orphaned_state(
     state_exists: bool,
     what: &str,
@@ -97,7 +99,7 @@ pub(crate) fn ensure_no_orphaned_state(
 ) -> Result<()> {
     ensure!(
         !state_exists,
-        "{what} state exists at {location} without a {record_noun}; run `omnifs doctor`"
+        "{what} state exists at {location} without a {record_noun}"
     );
     Ok(())
 }

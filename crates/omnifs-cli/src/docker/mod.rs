@@ -149,6 +149,8 @@ impl DockerClient {
         &self,
         ctx: &crate::filesystem_driver::LaunchContext<'_>,
     ) -> Result<()> {
+        ctx.output
+            .narrate(format!("Starting Docker filesystem `{}`", ctx.spec.id()));
         self.narrate_connecting();
         self.ping()
             .await
@@ -214,6 +216,15 @@ impl DockerClient {
                 .await;
             return err_after_rollback(mount_error, cleanup, "the failed filesystem container");
         }
+        let key_width = Output::ledger_block_width(&["filesystem"]);
+        self.output.ledger_row(
+            &crate::ui::render::LedgerRow::new(
+                crate::ui::style::Glyph::Done,
+                "filesystem",
+                format!("{} running in `{}`", spec.id(), self.container_name()),
+            ),
+            key_width,
+        );
         Ok(())
     }
 
@@ -596,12 +607,9 @@ impl DockerClient {
             .await
         {
             Ok(_) => {
-                self.output
-                    .narrate(format!("Found existing container `{name}`"));
-                self.output
-                    .narrate(format!("Stopping existing container `{name}` (1s timeout)"));
-                self.output
-                    .narrate(format!("Removing existing container `{name}`"));
+                self.output.narrate(format!(
+                    "Removing existing container `{name}` (1s stop timeout)"
+                ));
                 self.stop_and_remove(name.as_str()).await?;
             },
             Err(bollard::errors::Error::DockerResponseServerError {
