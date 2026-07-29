@@ -500,6 +500,13 @@ mod tests {
         );
     }
 
+    /// Every interactive prompt site in the crate paired with the flag (or,
+    /// for `auth/login`'s manual-code paste, the documented absence of one;
+    /// see `auth::login::tests::no_input_bails_before_the_manual_code_paste`
+    /// for that site's own coverage) that answers it without a terminal.
+    /// Only flags that actually exist on the named subcommand belong here:
+    /// `has_arg` panics rather than silently passing on a renamed or removed
+    /// subcommand, so a row can never go stale unnoticed.
     #[test]
     fn prompt_sites_have_non_interactive_flags() {
         let command = Cli::command();
@@ -512,6 +519,23 @@ mod tests {
             ("mount add auth suppression", "mount add", "no-auth"),
             ("mount add provider config", "mount add", "config-json"),
             ("mount add resource limits", "mount add", "limits-json"),
+            (
+                "token_source's static-token password prompt",
+                "mount add",
+                "token",
+            ),
+            (
+                "spec_creation's host-file path prompt",
+                "mount add",
+                "config-json",
+            ),
+            (
+                "spec_creation's dynamic-domain allowlist prompt",
+                "mount add",
+                "config-json",
+            ),
+            ("setup's quick-start offer confirms", "setup", "yes"),
+            ("doctor's repair confirm", "doctor", "yes"),
         ];
 
         for (prompt, subcommand, arg) in table {
@@ -592,17 +616,20 @@ mod tests {
     }
 
     /// Resolve a whitespace-separated subcommand path (for example `mount add`)
-    /// and check whether the leaf subcommand declares the argument.
+    /// and check whether the leaf subcommand declares the argument. An
+    /// unknown path segment panics rather than silently falling back to the
+    /// global-only check: a coverage row naming a subcommand that was
+    /// renamed or removed must fail loudly, not quietly pass on whatever
+    /// global args happen to exist.
     fn has_arg(command: &clap::Command, subcommand: &str, arg: &str) -> bool {
         let global = command
             .get_arguments()
             .any(|candidate| candidate.get_id() == arg || candidate.get_long() == Some(arg));
         let mut current = command;
         for segment in subcommand.split_whitespace() {
-            let Some(next) = current.find_subcommand(segment) else {
-                return global;
-            };
-            current = next;
+            current = current.find_subcommand(segment).unwrap_or_else(|| {
+                panic!("unknown subcommand path segment `{segment}` in `{subcommand}`")
+            });
         }
         global
             || current
