@@ -127,9 +127,12 @@ async fn cli_main(cli: Cli) {
                     let _ = output.emit_error(error::canceled_envelope(command_path, "canceled"));
                 } else if !output.is_closed() {
                     // A consent decline already printed its own closing line
-                    // (`Kept everything as it was.`) before
-                    // returning this same cancellation, so the generic
-                    // `canceled` line would be a second, redundant close.
+                    // (`Kept everything as it was.`), and a plain prompt
+                    // cancel (Esc during a Select/Text/Password/Confirm)
+                    // already printed its own dim `canceled` line in place;
+                    // either way `output.is_closed()` is now true, so this is
+                    // the backstop for a cancellation that reached here
+                    // without any prompt site having printed anything yet.
                     ui::eprint_raw(&format!(
                         "{}\n",
                         ui::style::dim("canceled", ui::style::Stream::Stderr)
