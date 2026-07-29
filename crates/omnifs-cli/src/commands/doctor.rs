@@ -516,44 +516,34 @@ fn build_rows(findings: &[Finding]) -> (Vec<Row>, Vec<Row>, Vec<Row>, Vec<Row>) 
     (environment, profile, mounts, filesystems)
 }
 
+/// Severity and key come from `DaemonHealth::descriptor`, the one mapping
+/// shared with `omnifs status`'s context strip; `value` and `fix` are
+/// doctor's own remediation-facing prose, which the shared descriptor
+/// (severity and a bare label only) never carried.
 fn daemon_row(inventory: &Inventory) -> Row {
-    match inventory.daemon.health() {
-        DaemonHealth::Running => Row {
-            severity: Severity::Positive,
-            key: "running".to_owned(),
-            value: daemon_running_value(inventory),
-            fix: None,
-        },
-        DaemonHealth::Starting => Row {
-            severity: Severity::Attention,
-            key: "starting".to_owned(),
-            value: "daemon is still coming up".to_owned(),
-            fix: None,
-        },
-        DaemonHealth::Degraded => Row {
-            severity: Severity::Attention,
-            key: "degraded".to_owned(),
-            value: "daemon reports a degraded subsystem".to_owned(),
-            fix: Some("omnifs status".to_owned()),
-        },
-        DaemonHealth::Stopped => Row {
-            severity: Severity::Neutral,
-            key: "stopped".to_owned(),
-            value: "daemon is not running".to_owned(),
-            fix: None,
-        },
-        DaemonHealth::Failed => Row {
-            severity: Severity::Failure,
-            key: "failed".to_owned(),
-            value: "daemon is unhealthy".to_owned(),
-            fix: Some("omnifs logs".to_owned()),
-        },
-        DaemonHealth::Unreachable => Row {
-            severity: Severity::Failure,
-            key: "unreachable".to_owned(),
-            value: "daemon identity exists but the control socket did not answer".to_owned(),
-            fix: Some("omnifs logs".to_owned()),
-        },
+    let (severity, key) = inventory.daemon.health().descriptor();
+    let (value, fix): (String, Option<String>) = match inventory.daemon.health() {
+        DaemonHealth::Running => (daemon_running_value(inventory), None),
+        DaemonHealth::Starting => ("daemon is still coming up".to_owned(), None),
+        DaemonHealth::Degraded => (
+            "daemon reports a degraded subsystem".to_owned(),
+            Some("omnifs status".to_owned()),
+        ),
+        DaemonHealth::Stopped => ("daemon is not running".to_owned(), None),
+        DaemonHealth::Failed => (
+            "daemon is unhealthy".to_owned(),
+            Some("omnifs logs".to_owned()),
+        ),
+        DaemonHealth::Unreachable => (
+            "daemon identity exists but the control socket did not answer".to_owned(),
+            Some("omnifs logs".to_owned()),
+        ),
+    };
+    Row {
+        severity,
+        key: key.to_owned(),
+        value,
+        fix,
     }
 }
 

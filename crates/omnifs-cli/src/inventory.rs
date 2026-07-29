@@ -7,7 +7,7 @@
 use anyhow::Result;
 #[cfg(test)]
 use omnifs_api::DaemonPhase;
-use omnifs_api::{CredentialHealth, DaemonInventory, HealthState, MountHealth};
+use omnifs_api::{CredentialHealth, DaemonInventory, HealthState, MountHealth, MountRecord};
 use omnifs_core::MountRevision;
 use omnifs_core::fs;
 use serde::Serialize;
@@ -52,6 +52,28 @@ pub(crate) enum DaemonHealth {
     Stopped,
     Failed,
     Unreachable,
+}
+
+impl DaemonHealth {
+    /// The one (severity, label) pair every consumer renders a bare daemon
+    /// health as: `omnifs status`'s context strip and `omnifs doctor`'s
+    /// daemon row both start from this instead of each spelling out its own
+    /// six-variant match. `Running` renders plainly as "running" here;
+    /// status's context strip additionally folds in the whole profile's
+    /// verdict (mounts and filesystems, not just the daemon) to show
+    /// "healthy" instead when everything else is clean too, a distinction
+    /// doctor's daemon-only row deliberately does not make (mount and
+    /// filesystem problems get their own rows there).
+    pub(crate) const fn descriptor(self) -> (Severity, &'static str) {
+        match self {
+            Self::Running => (Severity::Positive, "running"),
+            Self::Starting => (Severity::Attention, "starting"),
+            Self::Degraded => (Severity::Attention, "degraded"),
+            Self::Stopped => (Severity::Neutral, "stopped"),
+            Self::Failed => (Severity::Failure, "failed"),
+            Self::Unreachable => (Severity::Failure, "unreachable"),
+        }
+    }
 }
 
 impl DaemonFacts {
@@ -299,6 +321,48 @@ impl MountStatus {
         })
     }
 
+    /// One mount's status derived from its daemon record. The one owner of
+    /// this record-to-status projection: `mount ls`'s table (via
+    /// `all_observed`) and `mount show`'s detail card both read a mount's
+    /// health, auth, and serving state through this same conversion instead
+    /// of each deriving its own labels from the raw `MountHealth`.
+    pub(crate) fn from_record(mount: &MountRecord) -> Self {
+        let name = mount.definition.name.to_string();
+        let (provider_state, serving) = match &mount.health {
+            MountHealth::Active | MountHealth::AuthRequired => {
+                (ProviderPinState::Available, ServingState::Live)
+            },
+            MountHealth::ProviderUnavailable { reason } => (
+                ProviderPinState::Missing,
+                ServingState::Failed {
+                    message: reason.clone(),
+                },
+            ),
+            MountHealth::Failed { reason } => (
+                ProviderPinState::Corrupt {
+                    message: reason.clone(),
+                },
+                ServingState::Failed {
+                    message: reason.clone(),
+                },
+            ),
+        };
+        let auth = AuthState::from_mount(mount, &name);
+        Self {
+            root: PathBuf::from(format!("/{name}")),
+            provider: ProviderPin {
+                name: mount.provider.name.clone(),
+                version: mount.provider.version.clone(),
+                artifact: mount.provider.id.to_string(),
+                state: provider_state,
+            },
+            name,
+            auth,
+            serving,
+            access_count: 0,
+        }
+    }
+
     /// Build canonical mount rows from the daemon's reported inventory,
     /// sorted by root then name. Not a `From` impl: the sort is part of
     /// this constructor's contract, and a `From` would hide it.
@@ -306,42 +370,7 @@ impl MountStatus {
         let mut mounts = inventory
             .mounts
             .iter()
-            .map(|mount| {
-                let name = mount.definition.name.to_string();
-                let (provider_state, serving) = match &mount.health {
-                    MountHealth::Active | MountHealth::AuthRequired => {
-                        (ProviderPinState::Available, ServingState::Live)
-                    },
-                    MountHealth::ProviderUnavailable { reason } => (
-                        ProviderPinState::Missing,
-                        ServingState::Failed {
-                            message: reason.clone(),
-                        },
-                    ),
-                    MountHealth::Failed { reason } => (
-                        ProviderPinState::Corrupt {
-                            message: reason.clone(),
-                        },
-                        ServingState::Failed {
-                            message: reason.clone(),
-                        },
-                    ),
-                };
-                let auth = AuthState::from_mount(mount, &name);
-                Self {
-                    root: PathBuf::from(format!("/{name}")),
-                    provider: ProviderPin {
-                        name: mount.provider.name.clone(),
-                        version: mount.provider.version.clone(),
-                        artifact: mount.provider.id.to_string(),
-                        state: provider_state,
-                    },
-                    name,
-                    auth,
-                    serving,
-                    access_count: 0,
-                }
-            })
+            .map(Self::from_record)
             .collect::<Vec<_>>();
         mounts.sort_by(|left, right| {
             left.root

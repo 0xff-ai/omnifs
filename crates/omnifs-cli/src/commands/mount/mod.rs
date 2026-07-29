@@ -132,7 +132,7 @@ impl MountArgs {
 
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct MountsResult {
-    mounts: Vec<MountRecord>,
+    mounts: Vec<crate::inventory::MountStatus>,
     verdict: ResultVerdict,
 }
 
@@ -142,16 +142,26 @@ pub(crate) struct MountShowResult {
     verdict: ResultVerdict,
 }
 
+/// `mount ls` reads the same `Inventory` status.rs and the bare-`omnifs`
+/// screen already collect, so its table and its verdict never drift from
+/// what `omnifs status` would say about the same mounts.
 async fn ls(output: Output) -> anyhow::Result<ExitCode> {
-    let result = list_with_output().await?;
-    let exit_code = match result.verdict {
+    let inventory = crate::inventory::Inventory::collect_rpc().await?;
+    let verdict = list_verdict(&inventory.mounts);
+    let exit_code = match verdict {
         ResultVerdict::Ok => ExitCode::Success,
         ResultVerdict::Degraded => ExitCode::Degraded,
     };
     if output.is_structured() {
-        output.emit_result(result.verdict, &result)?;
+        output.emit_result(
+            verdict,
+            MountsResult {
+                mounts: inventory.mounts,
+                verdict,
+            },
+        )?;
     } else {
-        crate::ui::print_raw(&render_mounts(&result));
+        crate::ui::print_raw(&render_mounts(&inventory));
     }
     Ok(exit_code)
 }
@@ -169,12 +179,6 @@ async fn show(args: &ShowArgs, output: Output) -> anyhow::Result<ExitCode> {
     })
 }
 
-pub(crate) async fn list_with_output() -> anyhow::Result<MountsResult> {
-    let mounts = crate::rpc::RpcClient::resolve()?.list_mounts().await?;
-    let verdict = mounts_verdict(&mounts);
-    Ok(MountsResult { mounts, verdict })
-}
-
 pub(crate) async fn show_with_output(name: &str) -> anyhow::Result<MountShowResult> {
     let name = MountName::new(name.to_owned())?;
     let mount = crate::rpc::RpcClient::resolve()?
@@ -185,63 +189,48 @@ pub(crate) async fn show_with_output(name: &str) -> anyhow::Result<MountShowResu
     Ok(MountShowResult { mount, verdict })
 }
 
-fn render_mounts(result: &MountsResult) -> String {
-    use crate::ui::table::{
-        Block, Cell, Column, Priority, Report, ResourceRow, ResourceTable, WidthPolicy,
-    };
-    let mut table = ResourceTable::new(
-        "Mounts",
-        format!("{} configured", result.mounts.len()),
-        vec![
-            Column::new("Mount", Priority::Identity, WidthPolicy::Auto),
-            Column::new("Provider", Priority::Essential, WidthPolicy::Auto),
-            Column::new("Auth", Priority::Secondary, WidthPolicy::Auto),
-            Column::new("Revision", Priority::Secondary, WidthPolicy::Auto),
-            Column::new("Health", Priority::Essential, WidthPolicy::Auto),
-        ],
-    );
-    for mount in &result.mounts {
-        let state = health_state(&mount.health);
-        table.push(ResourceRow::new(
-            [
-                Cell::new(mount.definition.name.to_string()),
-                Cell::new(provider_label(&mount.provider)),
-                Cell::new(auth_label(mount.definition.auth.as_ref())),
-                Cell::new(mount.revision.get().to_string()),
-                Cell::state(state.clone()),
-            ],
-            state,
-        ));
-    }
-    let mut report = Report::new();
-    report.push(Block::Resources(table));
+/// `mount ls`'s table is exactly `omnifs status`'s Mounts section
+/// (`status.rs::mount_table`), so the two commands can never show a mount in
+/// two different shapes.
+fn render_mounts(inventory: &crate::inventory::Inventory) -> String {
+    let mut report = crate::ui::table::Report::new();
+    report.push(crate::ui::table::Block::Resources(
+        crate::status::mount_table(
+            &inventory.mounts,
+            inventory.primary_host_location(),
+            inventory.next_action().as_ref(),
+        ),
+    ));
     report.render()
 }
 
-/// `mount show` renders one daemon-owned mount as a detail card.
+/// `mount show` renders one daemon-owned mount as a detail card, deriving its
+/// health/auth labels from the same `MountStatus` projection `mount ls` and
+/// `omnifs status` read, via `MountStatus::from_record`. `revision`,
+/// `version`, `pin`, `limits`, and `config` stay sourced from the raw
+/// `MountRecord`: `MountStatus` is a health-and-access view and never
+/// carried those facts.
 fn render_mount_show(result: &MountShowResult) -> String {
     use crate::ui::table::{Block, ContextStrip, Meta, Report};
     let mount = &result.mount;
+    let status = crate::inventory::MountStatus::from_record(mount);
+    let state = crate::status::mount_row_state(&status);
+    let provider = status.provider.to_string();
     let mut report = Report::new();
     report.push(Block::Context(
-        ContextStrip::new(
-            mount.definition.name.to_string(),
-            String::new(),
-            health_state(&mount.health),
-        )
-        .with_metadata([
-            Meta::new("provider", provider_label(&mount.provider)),
+        ContextStrip::new(mount.definition.name.to_string(), String::new(), state).with_metadata([
+            Meta::new("provider", provider.clone()),
             Meta::new("revision", mount.revision.get().to_string()),
             Meta::new("version", mount.version.to_string()),
         ]),
     ));
     let mut facts = vec![
-        ("provider", provider_label(&mount.provider)),
+        ("provider", provider),
         ("pin", mount.provider.id.to_string()),
         ("revision", mount.revision.get().to_string()),
         ("version", mount.version.to_string()),
-        ("auth", auth_label(mount.definition.auth.as_ref())),
-        ("health", health_label(&mount.health)),
+        ("auth", status.auth.label().to_owned()),
+        ("health", status.headline().1.to_owned()),
     ];
     if let Some(limits) = mount.definition.limits.as_ref() {
         facts.push(("limits", format_limits(limits)));
@@ -255,11 +244,12 @@ fn render_mount_show(result: &MountShowResult) -> String {
     card
 }
 
-/// Compute the overall verdict from daemon-reported mount health.
-fn mounts_verdict(mounts: &[MountRecord]) -> ResultVerdict {
+/// `mount ls`'s verdict: degraded when any listed mount needs attention, the
+/// same per-mount predicate `omnifs status`'s own report uses.
+fn list_verdict(mounts: &[crate::inventory::MountStatus]) -> ResultVerdict {
     if mounts
         .iter()
-        .any(|mount| !matches!(&mount.health, omnifs_api::MountHealth::Active))
+        .any(crate::inventory::MountStatus::needs_attention)
     {
         ResultVerdict::Degraded
     } else {
@@ -272,44 +262,6 @@ fn mount_health_verdict(health: &omnifs_api::MountHealth) -> ResultVerdict {
         ResultVerdict::Ok
     } else {
         ResultVerdict::Degraded
-    }
-}
-
-fn provider_label(provider: &omnifs_api::ProviderReference) -> String {
-    provider.version.as_ref().map_or_else(
-        || provider.name.clone(),
-        |version| format!("{}@{version}", provider.name),
-    )
-}
-
-fn auth_label(auth: Option<&omnifs_api::MountCredential>) -> String {
-    auth.map_or_else(
-        || "none".to_owned(),
-        |auth| format!("{} ({})", auth.scheme, auth.account_label),
-    )
-}
-
-fn health_label(health: &omnifs_api::MountHealth) -> String {
-    match health {
-        omnifs_api::MountHealth::Active => "active".to_owned(),
-        omnifs_api::MountHealth::AuthRequired => "auth required".to_owned(),
-        omnifs_api::MountHealth::ProviderUnavailable { reason } => {
-            format!("provider unavailable: {reason}")
-        },
-        omnifs_api::MountHealth::Failed { reason } => format!("failed: {reason}"),
-    }
-}
-
-fn health_state(health: &omnifs_api::MountHealth) -> crate::ui::table::StateToken {
-    match health {
-        omnifs_api::MountHealth::Active => crate::ui::table::StateToken::positive("active"),
-        omnifs_api::MountHealth::AuthRequired => {
-            crate::ui::table::StateToken::attention("auth required")
-        },
-        omnifs_api::MountHealth::ProviderUnavailable { .. }
-        | omnifs_api::MountHealth::Failed { .. } => {
-            crate::ui::table::StateToken::failure(health_label(health))
-        },
     }
 }
 
@@ -651,16 +603,19 @@ mod tests {
     /// the Filesystems table alongside it.
     #[test]
     fn render_mounts_is_exactly_the_status_mounts_section() {
-        let mounts = vec![daemon_mount(omnifs_api::MountHealth::Active)];
-        let result = MountsResult {
-            mounts: mounts.clone(),
-            verdict: ResultVerdict::Ok,
-        };
-        let rendered = render_mounts(&result);
+        let status = crate::inventory::MountStatus::from_record(&daemon_mount(
+            omnifs_api::MountHealth::Active,
+        ));
+        let inventory = crate::inventory::Inventory::test(
+            crate::inventory::DaemonHealth::Running,
+            Vec::new(),
+            vec![status],
+        );
+        let rendered = render_mounts(&inventory);
         assert!(rendered.contains("Mounts"));
         assert!(rendered.contains("github"));
         assert!(!rendered.contains("Filesystems"), "{rendered:?}");
-        assert!(rendered.contains("active"));
+        assert!(rendered.contains("live"), "{rendered:?}");
     }
 
     fn daemon_mount(health: omnifs_api::MountHealth) -> MountRecord {
@@ -700,15 +655,17 @@ mod tests {
     }
 
     /// `mount show` is a detail card, never the tabular
-    /// single-row table `render_mounts` (`mount ls`) already owns.
+    /// single-row table `render_mounts` (`mount ls`) already owns. Its
+    /// health/auth facts read the same `MountStatus` labels the table does
+    /// ("live"/"ready"), not the raw wire health's own prose.
     #[test]
     fn render_mount_show_is_a_detail_card_not_a_table() {
         let rendered = render_mount_show(&show_result(healthy_mount()));
         let lines = rendered.lines().collect::<Vec<_>>();
         assert!(lines[0].starts_with("github"), "{rendered:?}");
-        assert!(lines[0].contains("active"), "{rendered:?}");
+        assert!(lines[0].contains("live"), "{rendered:?}");
         assert!(!rendered.contains("Mounts"), "{rendered:?}");
-        assert!(rendered.contains("oauth (work)"), "{rendered:?}");
+        assert!(rendered.contains("ready"), "{rendered:?}");
         assert!(rendered.contains("revision"), "{rendered:?}");
 
         let config_line = lines
@@ -719,10 +676,12 @@ mod tests {
     }
 
     #[test]
-    fn degraded_mounts_degrade_verdict() {
-        assert_eq!(
-            mounts_verdict(&[daemon_mount(omnifs_api::MountHealth::AuthRequired)]),
-            ResultVerdict::Degraded
-        );
+    fn degraded_mounts_degrade_the_list_verdict() {
+        let status = crate::inventory::MountStatus::from_record(&daemon_mount(
+            omnifs_api::MountHealth::ProviderUnavailable {
+                reason: "artifact missing".to_owned(),
+            },
+        ));
+        assert_eq!(list_verdict(&[status]), ResultVerdict::Degraded);
     }
 }
