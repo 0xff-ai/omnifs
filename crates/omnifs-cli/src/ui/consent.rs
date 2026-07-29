@@ -171,6 +171,32 @@ impl Decision {
     }
 }
 
+/// The shared `--yes`/`--no-input`/interactive-ask ladder for a lower-stakes
+/// yes/no gate: an optional offer, a "sign in now?" nudge. Unlike
+/// [`Decision::resolve`], a negative answer here is not cancellation; it is
+/// just `false`, and the caller decides what that means (`setup`'s offers
+/// silently skip; the OAuth sign-in confirm reports `SignInDeclined`).
+/// `--yes` takes `default` without asking; `--no-input`, or a run with no
+/// real terminal, takes `on_no_input` without asking; otherwise the operator
+/// is asked `question`.
+pub(crate) fn resolve_confirm(
+    prompt: PromptMode,
+    question: impl Into<String>,
+    default: bool,
+    on_no_input: bool,
+    output: &Output,
+) -> anyhow::Result<bool> {
+    if prompt.yes() {
+        return Ok(default);
+    }
+    if prompt.no_input() || !prompt.interactive() {
+        return Ok(on_no_input);
+    }
+    super::prompt::Confirm::new(question)
+        .with_default(default)
+        .ask_with_output(output)
+}
+
 /// Severity of one settled operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

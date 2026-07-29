@@ -364,15 +364,7 @@ fn resolve_offer_decision(
     prompt: PromptMode,
     question: impl Into<String>,
 ) -> Result<bool> {
-    if output.yes() {
-        return Ok(true);
-    }
-    if prompt.no_input() || !prompt.interactive() {
-        return Ok(false);
-    }
-    crate::ui::prompt::Confirm::new(question)
-        .with_default(true)
-        .ask_with_output(output)
+    crate::ui::consent::resolve_confirm(prompt, question, true, false, output)
 }
 
 // -- next block and closing ------------------------------------------------

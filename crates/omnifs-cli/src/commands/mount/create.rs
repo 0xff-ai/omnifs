@@ -226,12 +226,7 @@ pub(crate) async fn assemble_mount_build(
     } else {
         None
     };
-    let selector = provider_selection::select(
-        &embedded,
-        args.provider.as_deref().or(picked.as_deref()),
-        interactive,
-        output,
-    )?;
+    let selector = provider_selection::select(args.provider.as_deref().or(picked.as_deref()))?;
     let resolved = ProviderResolver::new(rpc)
         .resolve(&selector, &embedded)
         .await?;
@@ -405,18 +400,21 @@ impl MountBuild {
             )
             .await?
         } else if auth.is_oauth() {
-            // Gate the browser handoff when interactive: a decline is a clean skip,
-            // not a failure.
-            if interactive && !prompt.yes() {
-                let proceed = crate::ui::prompt::Confirm::new(format!(
+            // A decline is a clean skip, not a failure; `--no-input` (or a run
+            // with no real terminal) also declines rather than attempting a
+            // browser handoff nobody is present to complete.
+            let proceed = crate::ui::consent::resolve_confirm(
+                prompt,
+                format!(
                     "Sign in to {} in your browser now?",
                     plan.manifest.display_name
-                ))
-                .with_default(true)
-                .ask_with_output(output)?;
-                if !proceed {
-                    return Ok(MountInitStatus::SignInDeclined);
-                }
+                ),
+                true,
+                false,
+                output,
+            )?;
+            if !proceed {
+                return Ok(MountInitStatus::SignInDeclined);
             }
             let account = auth.account_or_default();
             crate::auth::login::login_for_submission(
