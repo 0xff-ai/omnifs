@@ -5,7 +5,6 @@ use serde::Serialize;
 
 use crate::error::ExitCode;
 use crate::image::BUILD_CHANNEL;
-use crate::inventory::Inventory;
 use crate::ui::output::{Output, ResultVerdict};
 
 pub async fn run(output: Output) -> Result<ExitCode> {
@@ -36,16 +35,23 @@ struct DaemonVersionJson {
 }
 
 impl VersionJson {
+    /// Version and pid need one `GetInventory` RPC and nothing else; skip
+    /// `Inventory::collect_rpc`'s local filesystem-registry reads and status
+    /// derivations, which this command has no use for. A daemon that cannot
+    /// be reached (not running, or any other resolve/RPC failure) reports the
+    /// CLI's own version with a null `daemon` section, exactly as before.
     async fn collect() -> Result<Self> {
-        let inventory = Inventory::collect_rpc().await?;
-        let daemon = inventory
-            .daemon
-            .status
-            .as_ref()
-            .map(|status| DaemonVersionJson {
-                version: status.info.version.clone(),
-                pid: status.info.pid,
-            });
+        let daemon = match crate::rpc::RpcClient::resolve() {
+            Ok(rpc) => rpc
+                .inventory()
+                .await
+                .ok()
+                .map(|inventory| DaemonVersionJson {
+                    version: inventory.info.version,
+                    pid: inventory.info.pid,
+                }),
+            Err(_) => None,
+        };
         Ok(Self {
             cli: env!("CARGO_PKG_VERSION").to_string(),
             channel: BUILD_CHANNEL.word(),

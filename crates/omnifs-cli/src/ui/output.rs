@@ -7,7 +7,7 @@
 
 use anyhow::Context as _;
 use serde::Serialize;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub(crate) const SCHEMA_VERSION: u8 = 1;
@@ -23,15 +23,11 @@ pub(crate) const SCHEMA_VERSION: u8 = 1;
 /// fallback of 80, which would word-wrap content mid-path (a real path or
 /// command embedded in a sentence) the moment stderr is redirected.
 pub(crate) fn stderr_capabilities(quiet: bool) -> super::render::Capabilities {
-    let is_tty = io::stderr().is_terminal();
+    let (is_tty, width, color) = super::style::probe(super::style::Stream::Stderr);
     super::render::Capabilities {
-        width: if is_tty {
-            crossterm::terminal::size().map_or(80, |(columns, _rows)| usize::from(columns))
-        } else {
-            120
-        },
+        width,
         is_tty,
-        color: super::style::color_enabled(super::style::Stream::Stderr),
+        color,
         quiet,
     }
 }
@@ -470,6 +466,19 @@ impl Output {
 
     pub(crate) const fn is_structured(&self) -> bool {
         self.mode.is_structured()
+    }
+
+    /// Bail with a consistent message when a passthrough command (one that
+    /// hands its stdout to something else entirely: a shell-completion
+    /// script, a skill install, a raw log stream) is asked for structured
+    /// output it has no way to produce. `command` is the bare subcommand
+    /// name as the operator typed it (`"logs"`, not `"omnifs logs"`).
+    pub(crate) fn require_human(&self, command: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.is_structured(),
+            "{command} is a passthrough command and only supports human output"
+        );
+        Ok(())
     }
 
     pub(crate) const fn mode(&self) -> OutputMode {

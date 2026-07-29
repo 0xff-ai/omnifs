@@ -86,6 +86,26 @@ pub(crate) fn color_enabled(stream: Stream) -> bool {
     })
 }
 
+/// The three OS-level facts (is-tty, terminal width, color) every renderer
+/// needs before it can turn typed content into bytes for `stream`, probed
+/// fresh rather than cached: a prompt or progress handle can change terminal
+/// state (raw mode, size) between one render call and the next. Piped output
+/// gets a stable 120-column width, never the `crossterm::terminal::size()`
+/// error fallback of 80, which would word-wrap content mid-path (a real path
+/// or command embedded in a sentence) the moment the stream is redirected.
+pub(crate) fn probe(stream: Stream) -> (bool, usize, bool) {
+    let is_tty = match stream {
+        Stream::Stdout => std::io::stdout().is_terminal(),
+        Stream::Stderr => std::io::stderr().is_terminal(),
+    };
+    let width = if is_tty {
+        crossterm::terminal::size().map_or(80, |(columns, _rows)| usize::from(columns))
+    } else {
+        120
+    };
+    (is_tty, width, color_enabled(stream))
+}
+
 /// Apply an owo styling only when color is enabled; otherwise return the plain
 /// text, so no ANSI ever reaches a non-color sink.
 fn paint(

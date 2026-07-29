@@ -5,9 +5,7 @@
 //! renderer owns layout, terminal width, and action placement.
 
 use std::fmt::Write as _;
-use std::io::IsTerminal as _;
 
-use crossterm::terminal;
 use tabled::builder::Builder;
 use tabled::settings::{Alignment, Padding, Span, Style, Width};
 
@@ -32,19 +30,11 @@ impl Report {
     /// Render using the current terminal when possible. Piped output uses a
     /// stable width and never contains ANSI escape sequences.
     pub(crate) fn render(&self) -> String {
-        let is_tty = std::io::stdout().is_terminal();
-        let width = if is_tty {
-            terminal::size().map_or(80, |(width, _)| width as usize)
-        } else {
-            120
-        };
-        self.render_with(RenderOptions {
-            width,
-            // The stdout color decision has one owner (`style::color_enabled`)
-            // so `NO_COLOR` and `CLICOLOR_FORCE` behave identically here and
-            // on every other stdout-bound render.
-            color: super::style::color_enabled(super::style::Stream::Stdout),
-        })
+        // Same stdout probe every stdout-bound renderer uses, so `NO_COLOR`,
+        // `CLICOLOR_FORCE`, and the piped-width fallback behave identically
+        // here and everywhere else.
+        let (_is_tty, width, color) = super::style::probe(super::style::Stream::Stdout);
+        self.render_with(RenderOptions { width, color })
     }
 
     pub(crate) fn print(&self) {

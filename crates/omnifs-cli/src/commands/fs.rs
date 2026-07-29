@@ -522,15 +522,19 @@ pub(crate) fn client_owner_id() -> Result<ClientOwnerId> {
 }
 
 pub(crate) async fn wait_for_attachment(spec: &fs::Spec) -> bool {
-    // Any resolve/inventory failure is transient and treated the same as
-    // "not attached yet": keep polling rather than aborting, so `check`
-    // never actually returns `Err`.
+    // A resolve failure is not transient (it never depends on daemon state),
+    // so it short-circuits the wait instead of polling for something that
+    // cannot change.
+    let Ok(rpc) = RpcClient::resolve() else {
+        return false;
+    };
+    // The client is built once and its connection reused across ticks
+    // instead of reconnecting every 200ms. An inventory-fetch failure is
+    // transient and treated the same as "not attached yet": keep polling
+    // rather than aborting, so `check` never actually returns `Err`.
     crate::process::poll_until(ATTACH_TIMEOUT, POLL, || async {
-        let attached = match RpcClient::resolve() {
-            Ok(rpc) => match rpc.inventory().await {
-                Ok(inventory) => inventory.attachments.contains(spec),
-                Err(_) => false,
-            },
+        let attached = match rpc.inventory().await {
+            Ok(inventory) => inventory.attachments.contains(spec),
             Err(_) => false,
         };
         Ok(attached.then_some(()))
@@ -541,10 +545,7 @@ pub(crate) async fn wait_for_attachment(spec: &fs::Spec) -> bool {
 }
 
 async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
-    ensure!(
-        !output.is_structured(),
-        "fs shell is a passthrough command and only supports human output"
-    );
+    output.require_human("fs shell")?;
     let client_state = ClientFilesystemState::resolve()?;
     let registry = client_state.registry();
     let claim = registry.claim(&args.name)?;
