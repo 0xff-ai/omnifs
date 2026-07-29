@@ -11,8 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::client_fs_state::{Claim, ClientFilesystemState, Registry};
 use crate::docker::{
-    DockerClient, DockerContainerIdentity, DockerTarget, OwnedFilesystemCandidate,
-    OwnedFilesystemContainer,
+    DockerClient, DockerContainerIdentity, DockerTarget, OwnedFilesystemContainer,
 };
 use crate::filesystem_driver::Candidate;
 use crate::image::ImageRef;
@@ -461,6 +460,17 @@ impl Finding {
             fix: Some(command),
             remediation: Some(Remediation::MountReauth(mount.name.clone())),
         })
+    }
+}
+
+/// The check a backend's ownership-scan failure reports under, shared by a
+/// whole-backend listing failure (`Candidate::ListingFailed`) and one
+/// unreadable scan entry (`Candidate::Invalid`).
+fn ownership_check_for(backend: &str) -> Check {
+    match backend {
+        "docker" => Check::DockerFilesystemOwnership,
+        "libkrun" => Check::LibkrunFilesystemOwnership,
+        _ => Check::FilesystemState,
     }
 }
 
@@ -968,19 +978,31 @@ impl Doctor {
         for candidate in candidates {
             match candidate {
                 Candidate::ListingFailed { backend, error } => {
-                    let check = match backend {
-                        "docker" => Check::DockerFilesystemOwnership,
-                        "libkrun" => Check::LibkrunFilesystemOwnership,
-                        _ => Check::FilesystemState,
-                    };
                     findings.push(Finding::from_probe(
                         Section::Filesystems,
-                        check,
+                        ownership_check_for(backend),
                         None,
                         ProbeResult::Err(error),
                     ));
                 },
-                Candidate::Host(probe) => match self.host_candidate_finding(probe, daemon_health) {
+                Candidate::Invalid {
+                    backend,
+                    target,
+                    error,
+                } => {
+                    findings.push(Finding::from_probe(
+                        Section::Filesystems,
+                        ownership_check_for(backend),
+                        target,
+                        ProbeResult::Err(error),
+                    ));
+                },
+                Candidate::Host {
+                    state_dir,
+                    record,
+                    confirmed,
+                } => match self.host_candidate_finding(state_dir, record, confirmed, daemon_health)
+                {
                     Ok(finding) => findings.extend(finding),
                     Err(error) => findings.push(Finding::from_probe(
                         Section::Filesystems,
@@ -989,10 +1011,7 @@ impl Doctor {
                         ProbeResult::Err(format!("{error:#}")),
                     )),
                 },
-                Candidate::Docker(OwnedFilesystemCandidate::Invalid { target, error }) => {
-                    findings.push(docker_ownership_finding(target, ProbeResult::Err(error)));
-                },
-                Candidate::Docker(OwnedFilesystemCandidate::Valid(owned)) => match &client_owner {
+                Candidate::Docker(owned) => match &client_owner {
                     Ok(client_owner) => {
                         findings.extend(
                             self.docker_candidate_finding(owned, *client_owner, daemon_health)
@@ -1009,8 +1028,17 @@ impl Doctor {
                         }
                     },
                 },
-                Candidate::Libkrun(candidate) => {
-                    findings.extend(self.libkrun_candidate_finding(candidate, daemon_health));
+                Candidate::Libkrun {
+                    id,
+                    state_dir,
+                    confirmed,
+                } => {
+                    findings.extend(self.libkrun_candidate_finding(
+                        &id,
+                        state_dir,
+                        confirmed,
+                        daemon_health,
+                    ));
                 },
             }
         }
@@ -1020,27 +1048,16 @@ impl Doctor {
     /// One host runner candidate: `Ok(None)` when it needs no finding
     /// (confirmed and attached), an error only when proving the mount's
     /// active state itself fails (the runner control probe's own failure is
-    /// reported as a finding, not propagated).
+    /// reported as a finding, not propagated). An unreadable candidate is
+    /// handled by the shared `Candidate::Invalid` arm before this is ever
+    /// called, so this only ever sees a runner that was actually read.
     fn host_candidate_finding(
         &self,
-        probe: crate::host_fs::RunnerProbe,
+        state_dir: PathBuf,
+        record: omnifs_mtab::RunnerRecord,
+        confirmed: Result<omnifs_thin::host_control::RunnerPhase, String>,
         daemon_health: DaemonHealth,
     ) -> anyhow::Result<Option<Finding>> {
-        let (state_dir, record, confirmed) = match probe {
-            crate::host_fs::RunnerProbe::Runner {
-                state_dir,
-                record,
-                confirmed,
-            } => (state_dir, record, confirmed),
-            crate::host_fs::RunnerProbe::Invalid { state_dir, error } => {
-                return Ok(Some(Finding::from_probe(
-                    Section::Filesystems,
-                    Check::FilesystemState,
-                    Some(state_dir.display().to_string()),
-                    ProbeResult::Err(error),
-                )));
-            },
-        };
         let spec = record.spec.clone();
         let mount_point = spec.location().to_path_buf();
         let is_attached = self.attached(&spec);
@@ -1207,63 +1224,52 @@ impl Doctor {
     /// One libkrun helper candidate, matching
     /// [`Self::host_candidate_finding`] and [`Self::docker_candidate_finding`]'s
     /// shape: 0 or 1 findings, stray filesystem or the reason it could not
-    /// be confirmed.
+    /// be confirmed. An unreadable candidate is handled by the shared
+    /// `Candidate::Invalid` arm before this is ever called.
     fn libkrun_candidate_finding(
         &self,
-        candidate: crate::libkrun_runner::LibkrunCandidate,
+        id: &fs::Id,
+        state_dir: PathBuf,
+        confirmed: Result<Option<omnifs_libkrun::HelperRecord>, String>,
         daemon_health: DaemonHealth,
     ) -> Vec<Finding> {
-        match candidate {
-            crate::libkrun_runner::LibkrunCandidate::Invalid { target, error } => {
+        match confirmed {
+            Ok(Some(record)) if record.spec.id() != id => {
                 vec![Finding::from_probe(
                     Section::Filesystems,
                     Check::LibkrunFilesystemOwnership,
-                    target,
-                    ProbeResult::Err(error),
+                    Some(id.to_string()),
+                    ProbeResult::Err(format!(
+                        "helper claims filesystem `{}` instead of matching its state path",
+                        record.spec.id()
+                    )),
                 )]
             },
-            crate::libkrun_runner::LibkrunCandidate::Runner {
-                id,
-                state_dir,
-                confirmed,
-            } => match confirmed {
-                Ok(Some(record)) if record.spec.id() != &id => {
-                    vec![Finding::from_probe(
-                        Section::Filesystems,
-                        Check::LibkrunFilesystemOwnership,
-                        Some(id.to_string()),
-                        ProbeResult::Err(format!(
-                            "helper claims filesystem `{}` instead of matching its state path",
-                            record.spec.id()
-                        )),
-                    )]
-                },
-                Ok(Some(record)) => {
-                    if self.attached(&record.spec) {
-                        return Vec::new();
-                    }
-                    let remediation = (daemon_health == DaemonHealth::Stopped)
-                        .then_some(Remediation::StopLibkrunFilesystem { state_dir, record });
-                    vec![Finding {
-                        section: Section::Filesystems,
-                        check: Check::StrayFilesystem,
-                        target: Some(id.to_string()),
-                        severity: Severity::Attention,
-                        message: format!(
-                            "helper identity is confirmed but daemon health is {daemon_health:?} and reports no matching attachment"
-                        ),
-                        fix: remediation.as_ref().map(Remediation::command_line),
-                        remediation,
-                    }]
-                },
-                Ok(None) => Vec::new(),
-                Err(error) => vec![Finding::from_probe(
-                    Section::Filesystems,
-                    Check::LibkrunFilesystemOwnership,
-                    Some(id.to_string()),
-                    ProbeResult::Err(error),
-                )],
+            Ok(Some(record)) => {
+                if self.attached(&record.spec) {
+                    return Vec::new();
+                }
+                let remediation = (daemon_health == DaemonHealth::Stopped)
+                    .then_some(Remediation::StopLibkrunFilesystem { state_dir, record });
+                vec![Finding {
+                    section: Section::Filesystems,
+                    check: Check::StrayFilesystem,
+                    target: Some(id.to_string()),
+                    severity: Severity::Attention,
+                    message: format!(
+                        "helper identity is confirmed but daemon health is {daemon_health:?} and reports no matching attachment"
+                    ),
+                    fix: remediation.as_ref().map(Remediation::command_line),
+                    remediation,
+                }]
             },
+            Ok(None) => Vec::new(),
+            Err(error) => vec![Finding::from_probe(
+                Section::Filesystems,
+                Check::LibkrunFilesystemOwnership,
+                Some(id.to_string()),
+                ProbeResult::Err(error),
+            )],
         }
     }
 

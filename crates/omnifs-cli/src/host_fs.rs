@@ -1,33 +1,20 @@
 //! Host filesystem launch, runner probing, and control.
 
 use crate::client_fs_state::ClientFilesystemState;
+use crate::filesystem_driver::{Candidate, ensure_identity_unchanged, ensure_no_orphaned_state};
 use anyhow::{Context as _, Result, ensure};
 use omnifs_core::fs;
 use omnifs_mtab::{RunnerClaim, RunnerRecord};
 use omnifs_thin::host_control::{
     RunnerControlClient, RunnerPhase, StopOutcome, control_socket_for,
 };
-use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::time::Duration;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
 const STOP_TIMEOUT: Duration = Duration::from_secs(6);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-#[derive(Debug)]
-pub(crate) enum RunnerProbe {
-    Runner {
-        state_dir: PathBuf,
-        record: RunnerRecord,
-        confirmed: Result<RunnerPhase, String>,
-    },
-    Invalid {
-        state_dir: PathBuf,
-        error: String,
-    },
-}
 
 pub(crate) fn probe(protocol: fs::Protocol) -> Result<()> {
     if protocol == fs::Protocol::Fuse && !Path::new("/dev/fuse").exists() {
@@ -58,15 +45,15 @@ impl HostDriver {
     ) -> Result<Option<(RunnerRecord, RunnerPhase)>> {
         let mount_point = spec.location();
         let Some(record) = RunnerRecord::read(&self.state_dir)? else {
-            if omnifs_nfs::mount_is_active_checked(mount_point)? {
-                anyhow::bail!(
-                    "active host filesystem mount {} has no runner record; run `omnifs doctor`",
-                    mount_point.display()
-                );
-            }
+            ensure_no_orphaned_state(
+                omnifs_nfs::mount_is_active_checked(mount_point)?,
+                "host filesystem",
+                "runner record",
+                mount_point.display(),
+            )?;
             return Ok(None);
         };
-        validate_record(&record, spec)?;
+        crate::filesystem_driver::ensure_record_matches(&record.spec, spec)?;
         let state = RunnerControlClient::new(&record)
             .ping()
             .await
@@ -104,10 +91,7 @@ impl HostDriver {
     pub(crate) async fn stop_confirmed(&self, expected: &RunnerRecord) -> Result<()> {
         let record = RunnerRecord::read(&self.state_dir)?
             .context("runner record disappeared before confirmed stop")?;
-        ensure!(
-            record == *expected,
-            "runner identity changed before confirmed stop"
-        );
+        ensure_identity_unchanged(Some(&record), expected, "runner")?;
         let client = RunnerControlClient::new(&record);
         client.ping().await.context("reconfirm host filesystem")?;
         let (_, outcome) = client.stop().await?;
@@ -174,14 +158,6 @@ impl PendingHostFilesystem {
             .context("filesystem log path has no parent directory")?;
         std::fs::create_dir_all(log_parent)
             .with_context(|| format!("create {}", log_parent.display()))?;
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .with_context(|| format!("open filesystem log {}", log_path.display()))?;
-        let stderr = log
-            .try_clone()
-            .with_context(|| format!("clone filesystem log {}", log_path.display()))?;
 
         let mut command = Command::new(&executable);
         command
@@ -203,15 +179,12 @@ impl PendingHostFilesystem {
             .arg("--runner-instance")
             .arg(&instance_id)
             .arg("--runner-control")
-            .arg(&control_socket)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log))
-            .stderr(Stdio::from(stderr));
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt as _;
-            command.process_group(0);
-        }
+            .arg(&control_socket);
+        crate::process::configure_detached_child(
+            &mut command,
+            &log_path,
+            crate::process::LogMode::Append,
+        )?;
         let child = command.spawn().with_context(|| {
             format!(
                 "start host {} filesystem with {}",
@@ -260,7 +233,10 @@ impl PendingHostFilesystem {
                     }
                     match RunnerRecord::read(&wait.pending.state_dir) {
                         Ok(Some(record)) if record.instance_id == wait.pending.instance_id => {
-                            validate_record(&record, wait.spec)?;
+                            crate::filesystem_driver::ensure_record_matches(
+                                &record.spec,
+                                wait.spec,
+                            )?;
                             if let Ok(state) = RunnerControlClient::new(&record).ping().await {
                                 wait.last_phase = Some(state.phase.clone());
                                 match state.phase {
@@ -345,19 +321,20 @@ async fn wait_for_cleanup(
     )
 }
 
-pub(crate) async fn owned(filesystem: &ClientFilesystemState) -> Result<Vec<RunnerProbe>> {
-    let mut probes = Vec::new();
+pub(crate) async fn owned(filesystem: &ClientFilesystemState) -> Result<Vec<Candidate>> {
+    let mut candidates = Vec::new();
     let entries = match std::fs::read_dir(filesystem.state_root()) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(probes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
         Err(error) => return Err(error.into()),
     };
     for entry in entries {
         let state_dir = match entry {
             Ok(entry) => entry.path(),
             Err(error) => {
-                probes.push(RunnerProbe::Invalid {
-                    state_dir: filesystem.state_root().clone(),
+                candidates.push(Candidate::Invalid {
+                    backend: "host",
+                    target: Some(filesystem.state_root().display().to_string()),
                     error: error.to_string(),
                 });
                 continue;
@@ -367,8 +344,9 @@ pub(crate) async fn owned(filesystem: &ClientFilesystemState) -> Result<Vec<Runn
             Ok(Some(record)) => record,
             Ok(None) => continue,
             Err(error) => {
-                probes.push(RunnerProbe::Invalid {
-                    state_dir,
+                candidates.push(Candidate::Invalid {
+                    backend: "host",
+                    target: Some(state_dir.display().to_string()),
                     error: error.to_string(),
                 });
                 continue;
@@ -379,22 +357,13 @@ pub(crate) async fn owned(filesystem: &ClientFilesystemState) -> Result<Vec<Runn
             .await
             .map(|state| state.phase)
             .map_err(|error| error.to_string());
-        probes.push(RunnerProbe::Runner {
+        candidates.push(Candidate::Host {
             state_dir,
             record,
             confirmed,
         });
     }
-    Ok(probes)
-}
-
-fn validate_record(record: &RunnerRecord, spec: &fs::Spec) -> Result<()> {
-    ensure!(
-        record.spec == *spec,
-        "runner record does not match configured filesystem `{}`",
-        spec.id()
-    );
-    Ok(())
+    Ok(candidates)
 }
 
 #[cfg(test)]
@@ -473,16 +442,17 @@ mod tests {
         .unwrap();
         std::fs::write(invalid_dir.join("runner.json"), b"{broken").unwrap();
 
-        let probes = owned(&filesystem).await.unwrap();
-        assert_eq!(probes.len(), 2);
-        assert!(probes.iter().any(|probe| matches!(
-            probe,
-            RunnerProbe::Runner { record, .. }
+        let candidates = owned(&filesystem).await.unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|candidate| matches!(
+            candidate,
+            Candidate::Host { record, .. }
                 if record.spec.location() == Path::new("/mnt/valid")
         )));
-        assert!(probes.iter().any(|probe| matches!(
-            probe,
-            RunnerProbe::Invalid { state_dir, .. } if state_dir == &invalid_dir
+        assert!(candidates.iter().any(|candidate| matches!(
+            candidate,
+            Candidate::Invalid { target, .. }
+                if target.as_deref() == Some(invalid_dir.display().to_string().as_str())
         )));
     }
 }

@@ -494,12 +494,8 @@ async fn launch_and_confirm(
         "filesystem `{}` mounted but did not attach to the daemon",
         spec.id()
     );
-    match stop_runtime(client_state, spec, output).await {
-        Ok(()) => Err(attach_error),
-        Err(cleanup_error) => Err(attach_error.context(format!(
-            "the failed filesystem also could not be detached safely: {cleanup_error:#}"
-        ))),
-    }
+    let cleanup = stop_runtime(client_state, spec, output).await;
+    crate::filesystem_driver::err_after_rollback(attach_error, cleanup, "the failed filesystem")
 }
 
 async fn stop_runtime(

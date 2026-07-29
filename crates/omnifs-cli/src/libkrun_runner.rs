@@ -35,7 +35,7 @@
 //! hijacking.
 
 use std::future::Future;
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -51,6 +51,7 @@ use omnifs_libkrun::{
 use tokio::io::AsyncReadExt as _;
 
 use crate::client_fs_state::ClientConfig;
+use crate::filesystem_driver::{Candidate, ensure_identity_unchanged, err_after_rollback};
 use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
 #[cfg(test)]
 use crate::process::is_alive as process_alive;
@@ -64,6 +65,19 @@ const SEED_STAGING_NAME: &str = "seed-staging";
 /// to the host and Docker drivers' launch timeouts because it covers a full
 /// microVM boot, not just a process or container start.
 const LAUNCH_READY_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long a launch waits for the just-spawned helper to publish its
+/// durable record.
+const HELPER_RECORD_TIMEOUT: Duration = Duration::from_secs(5);
+/// Poll interval shared by every short deadline-poll loop in this module.
+const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// How long teardown waits for a directly-owned child (still attached to
+/// this process) to exit on its own before escalating to `kill`.
+const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long teardown waits for a directly-owned child to exit after `kill`.
+const CHILD_KILL_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long teardown waits for a detached (not directly owned) helper to
+/// remove its own durable record after a shutdown request.
+const DETACHED_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Guest vsock port the daemon's attach listener is proxied onto.
 const ATTACH_VSOCK_PORT: u32 = 1024;
@@ -149,25 +163,6 @@ pub(crate) fn ensure_socat_available() -> Result<()> {
     }
 }
 
-/// One filesystem id directory found while [`LibkrunRunner::owned`] scans a
-/// client's libkrun runtime root.
-#[derive(Debug)]
-pub(crate) enum LibkrunCandidate {
-    /// A directory with a `libkrun` state dir, whose helper record
-    /// confirmation either succeeded (present or absent) or failed.
-    Runner {
-        id: fs::Id,
-        state_dir: PathBuf,
-        confirmed: Result<Option<HelperRecord>, String>,
-    },
-    /// A directory entry that could not be identified as a valid filesystem
-    /// id, or a runtime root that could not be scanned at all.
-    Invalid {
-        target: Option<String>,
-        error: String,
-    },
-}
-
 /// The libkrun microVM filesystem runner. Durable client state and explicit
 /// teardown live here; one launch's resources live in [`LibkrunLaunchLease`].
 pub(crate) struct LibkrunRunner {
@@ -231,7 +226,7 @@ impl LibkrunRunner {
         self.dir().join(DIAGNOSTIC_LOG_NAME)
     }
 
-    pub(crate) fn has_operational_state(&self) -> bool {
+    fn has_operational_state(&self) -> bool {
         [
             self.pidfile(),
             self.root_raw(),
@@ -514,8 +509,7 @@ impl<'a> LibkrunLaunchLease<'a> {
     }
 
     async fn run(mut self, attached: impl Future<Output = Result<()>>) -> Result<()> {
-        let result = self.run_to_publish(attached).await;
-        match result {
+        match self.run_to_publish(attached).await {
             Ok(()) => Ok(()),
             Err(error) => {
                 let cleanup = if self.replaced {
@@ -524,13 +518,7 @@ impl<'a> LibkrunLaunchLease<'a> {
                     self.ready_listener.take();
                     Ok(())
                 };
-                match cleanup {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => {
-                        Err(error
-                            .context(format!("libkrun launch rollback also failed: {cleanup:#}")))
-                    },
-                }
+                err_after_rollback(error, cleanup, "the failed libkrun launch")
             },
         }
     }
@@ -580,28 +568,13 @@ impl<'a> LibkrunLaunchLease<'a> {
             &installation,
         )?;
         self.instance_id = Some(instance_id);
-        let diagnostic_path = helper_config.diagnostic_log();
-        let diagnostic = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(diagnostic_path)
-            .with_context(|| format!("open helper log {}", diagnostic_path.display()))?;
-        let diagnostic_stderr = diagnostic
-            .try_clone()
-            .with_context(|| format!("clone helper log {}", diagnostic_path.display()))?;
         let mut command = Command::new(installation.helper());
         helper_config.apply_to(&mut command);
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(diagnostic))
-            .stderr(Stdio::from(diagnostic_stderr));
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt as _;
-            command.process_group(0);
-        }
+        crate::process::configure_detached_child(
+            &mut command,
+            helper_config.diagnostic_log(),
+            crate::process::LogMode::TruncateRestricted0600,
+        )?;
 
         // Detached: the VM outlives this CLI invocation. The lease retains
         // the pid until readiness publishes, while explicit teardown later
@@ -696,8 +669,8 @@ impl<'a> LibkrunLaunchLease<'a> {
 
     async fn wait_for_helper_record(&mut self) -> Result<HelperRecord> {
         let ready = crate::process::poll_until_mut(
-            Duration::from_secs(5),
-            Duration::from_millis(100),
+            HELPER_RECORD_TIMEOUT,
+            HELPER_POLL_INTERVAL,
             self,
             |lease| {
                 Box::pin(async move {
@@ -728,8 +701,9 @@ impl<'a> LibkrunLaunchLease<'a> {
         .await?;
         ready.with_context(|| {
             format!(
-                "omnifs-libkrun did not publish {} within 5s;\n{}",
+                "omnifs-libkrun did not publish {} within {}s;\n{}",
                 self.runner.pidfile().display(),
+                HELPER_RECORD_TIMEOUT.as_secs(),
                 self.runner.diagnostic_tail()
             )
         })
@@ -751,7 +725,7 @@ impl<'a> LibkrunLaunchLease<'a> {
                             return Ok::<(), anyhow::Error>(());
                         }
                     }
-                    () = tokio::time::sleep(Duration::from_millis(100)) => {
+                    () = tokio::time::sleep(HELPER_POLL_INTERVAL) => {
                         if let Some(status) = self
                             .child
                             .as_mut()
@@ -783,10 +757,7 @@ impl<'a> LibkrunLaunchLease<'a> {
         self.ready_listener.take();
         let record = self.runner.read_helper_record()?;
         if let Some(expected) = self.expected_record.as_ref() {
-            anyhow::ensure!(
-                record.as_ref() == Some(expected),
-                "libkrun helper identity changed; refusing to stop its replacement"
-            );
+            ensure_identity_unchanged(record.as_ref(), expected, "libkrun helper")?;
         }
         if let Some(expected) = record.as_ref() {
             self.runner.confirm_record(expected)?;
@@ -800,10 +771,7 @@ impl<'a> LibkrunLaunchLease<'a> {
         }
 
         if self.child.is_some() {
-            if !self
-                .wait_for_owned_child_exit(Duration::from_secs(5))
-                .await?
-            {
+            if !self.wait_for_owned_child_exit(CHILD_EXIT_TIMEOUT).await? {
                 let child = self
                     .child
                     .as_mut()
@@ -813,14 +781,13 @@ impl<'a> LibkrunLaunchLease<'a> {
                     .kill()
                     .with_context(|| format!("kill directly-owned libkrun child {pid}"))?;
                 anyhow::ensure!(
-                    self.wait_for_owned_child_exit(Duration::from_secs(3))
-                        .await?,
+                    self.wait_for_owned_child_exit(CHILD_KILL_TIMEOUT).await?,
                     "directly-owned libkrun child {pid} remained live after termination; \
                      recovery identity was preserved"
                 );
             }
         } else if let Some(expected) = record.as_ref() {
-            self.wait_for_detached_exit(expected, Duration::from_secs(10))
+            self.wait_for_detached_exit(expected, DETACHED_EXIT_TIMEOUT)
                 .await?;
         }
 
@@ -835,7 +802,7 @@ impl<'a> LibkrunLaunchLease<'a> {
 
     async fn wait_for_owned_child_exit(&mut self, timeout: Duration) -> Result<bool> {
         Ok(
-            crate::process::poll_until_mut(timeout, Duration::from_millis(100), self, |lease| {
+            crate::process::poll_until_mut(timeout, HELPER_POLL_INTERVAL, self, |lease| {
                 Box::pin(async move {
                     let exited = lease
                         .child
@@ -856,7 +823,7 @@ impl<'a> LibkrunLaunchLease<'a> {
         expected: &HelperRecord,
         timeout: Duration,
     ) -> Result<()> {
-        crate::process::poll_until(timeout, Duration::from_millis(100), || async {
+        crate::process::poll_until(timeout, HELPER_POLL_INTERVAL, || async {
             match self.runner.read_helper_record()? {
                 None => Ok(Some(())),
                 Some(current) if current != *expected => {
@@ -935,11 +902,12 @@ impl LibkrunRunner {
     /// drivers' `confirmed`.
     pub(crate) fn confirmed(&self) -> Result<Option<HelperRecord>> {
         let Some(record) = self.read_helper_record()? else {
-            anyhow::ensure!(
-                !self.has_operational_state(),
-                "libkrun filesystem state exists at {} without a helper record; run `omnifs doctor`",
-                self.dir().display()
-            );
+            crate::filesystem_driver::ensure_no_orphaned_state(
+                self.has_operational_state(),
+                "libkrun filesystem",
+                "helper record",
+                self.dir().display(),
+            )?;
             return Ok(None);
         };
         self.confirm_record(&record)?;
@@ -959,13 +927,14 @@ impl LibkrunRunner {
     /// helper record identity. Not a `&self` method: it enumerates every
     /// filesystem's libkrun runtime, not just one instance's, matching the
     /// host driver's `owned` and Docker's `owned`.
-    pub(crate) fn owned(runtime_root: &Path) -> Vec<LibkrunCandidate> {
+    pub(crate) fn owned(runtime_root: &Path) -> Vec<Candidate> {
         let mut owned = Vec::new();
         let entries = match std::fs::read_dir(runtime_root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return owned,
             Err(error) => {
-                owned.push(LibkrunCandidate::Invalid {
+                owned.push(Candidate::Invalid {
+                    backend: "libkrun",
                     target: Some(runtime_root.display().to_string()),
                     error: error.to_string(),
                 });
@@ -976,7 +945,8 @@ impl LibkrunRunner {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
-                    owned.push(LibkrunCandidate::Invalid {
+                    owned.push(Candidate::Invalid {
+                        backend: "libkrun",
                         target: None,
                         error: error.to_string(),
                     });
@@ -991,7 +961,8 @@ impl LibkrunRunner {
             let id = match fs::Id::new(raw_id.clone()) {
                 Ok(id) => id,
                 Err(error) => {
-                    owned.push(LibkrunCandidate::Invalid {
+                    owned.push(Candidate::Invalid {
+                        backend: "libkrun",
                         target: Some(raw_id),
                         error: error.to_string(),
                     });
@@ -1001,7 +972,7 @@ impl LibkrunRunner {
             let confirmed = Self::new(state_dir.clone())
                 .confirmed()
                 .map_err(|error| format!("{error:#}"));
-            owned.push(LibkrunCandidate::Runner {
+            owned.push(Candidate::Libkrun {
                 id,
                 state_dir,
                 confirmed,
