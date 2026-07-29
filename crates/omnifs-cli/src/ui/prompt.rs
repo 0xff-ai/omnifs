@@ -69,9 +69,12 @@ fn prompt_error(error: io::Error) -> anyhow::Error {
 
 /// Print the durable cancellation line. Called only after the transient frame
 /// has already been erased and raw mode restored, so this is plain, cooked-mode
-/// output like every other line in the transcript.
-fn print_canceled(stream: Stream) {
+/// output like every other line in the transcript. Marks `output` closed so
+/// the top-level cancel handler in `main.rs` does not print a second,
+/// redundant `canceled` line once this one already appeared in place.
+fn print_canceled(output: &Output, stream: Stream) {
     let _ = writeln!(io::stderr(), "{}", style::dim("canceled", stream));
+    output.mark_closed();
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +325,7 @@ impl Text {
                 Ok(answer)
             },
             Resolution::Canceled => {
-                print_canceled(stream);
+                print_canceled(output, stream);
                 Err(Canceled.into())
             },
         }
@@ -363,7 +366,7 @@ impl Password {
                 Ok(state.buffer)
             },
             Resolution::Canceled => {
-                print_canceled(stream);
+                print_canceled(output, stream);
                 Err(Canceled.into())
             },
         }
@@ -471,7 +474,7 @@ impl Confirm {
                 Ok(state.value)
             },
             Resolution::Canceled => {
-                print_canceled(stream);
+                print_canceled(output, stream);
                 Err(Canceled.into())
             },
         }
@@ -665,7 +668,7 @@ impl<T: Clone + std::fmt::Display> Select<T> {
                 Ok(chosen.value.clone())
             },
             Resolution::Canceled => {
-                print_canceled(stream);
+                print_canceled(output, stream);
                 Err(Canceled.into())
             },
         }
@@ -689,6 +692,20 @@ mod tests {
         let error = prompt_error(io::ErrorKind::NotConnected.into());
         assert!(!is_canceled(&error));
         assert!(error.to_string().contains("pass --yes or --no-input"));
+    }
+
+    /// `main.rs`'s top-level cancel handler only prints its own generic
+    /// `canceled` line when `!output.is_closed()`. Every prompt cancel
+    /// resolves through `print_canceled`, so if this stopped marking the
+    /// output closed, an Esc during any `Select`/`Text`/`Password`/`Confirm`
+    /// would double-print `canceled`: once here, in place, and once from the
+    /// top-level fallback.
+    #[test]
+    fn print_canceled_marks_output_closed_so_the_top_level_fallback_stays_silent() {
+        let output = Output::new(super::super::output::OutputMode::Human, false);
+        assert!(!output.is_closed());
+        print_canceled(&output, Stream::Stderr);
+        assert!(output.is_closed());
     }
 
     #[test]

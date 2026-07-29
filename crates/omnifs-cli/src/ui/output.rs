@@ -614,11 +614,23 @@ impl Output {
         }
     }
 
+    /// Mark the closing line as already printed, without printing anything
+    /// here: a prompt cancellation prints its own dim `canceled` line in
+    /// place, at the moment it happens, rather than through [`Self::outro`]'s
+    /// sentence styling. Marking closed keeps that one print the only one:
+    /// see [`Self::is_closed`].
+    pub(crate) fn mark_closed(&self) {
+        state(self).closed = true;
+    }
+
     /// Whether this invocation already printed its own closing line (via
-    /// [`Self::outro`]). The top-level cancel handler checks this so a
-    /// consent decline's `Kept everything as it was.` is not
-    /// followed by the generic `canceled` line every other prompt cancel
-    /// prints.
+    /// [`Self::outro`] or [`Self::mark_closed`]). The top-level cancel
+    /// handler checks this so neither a consent decline's `Kept everything
+    /// as it was.` nor an in-place prompt cancellation's `canceled` line is
+    /// followed by the generic top-level `canceled` fallback; that fallback
+    /// is the backstop for a cancellation that reaches `main` without any
+    /// prompt site having printed anything (a raw `Interrupted` I/O error
+    /// caught before a prompt's own resolution match, for example).
     pub(crate) fn is_closed(&self) -> bool {
         state(self).closed
     }
