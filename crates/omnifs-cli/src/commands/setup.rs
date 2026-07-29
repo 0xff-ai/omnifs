@@ -15,20 +15,21 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use clap::Args;
 use omnifs_api::ProviderMetadata;
-use omnifs_auth::AuthScheme;
 use omnifs_core::fs;
 use omnifs_provider::ProviderManifest;
 
 use crate::client_fs_state::ClientFilesystemState;
 use crate::client_state::ClientState;
 use crate::commands::daemon_start;
-use crate::commands::fs::{available_filesystems, default_runtime};
 use crate::error::ExitCode;
-use crate::inventory::{Inventory, NextAction};
+use crate::inventory::Inventory;
 use crate::mutation::PlannedOp;
+use crate::provider_catalog::{
+    align_provider_catalog_rows, needs_no_sign_in, provider_catalog_row,
+};
 use crate::provider_resolver::ProviderResolver;
 use crate::rpc::RpcClient;
-use crate::ui::access::ActionLine;
+use crate::ui::access::mount_next_action_line;
 use crate::ui::output::{Output, PromptMode};
 use crate::ui::render::{self, Capabilities, LedgerRow};
 use crate::ui::style::{self, Glyph};
@@ -70,17 +71,14 @@ impl SetupArgs {
             .collect();
         let mounted = offer_quick_start_mounts(&rpc, &state, &output, prompt, &mount_offer).await?;
 
-        let recommended = recommended_filesystems();
+        let recommended = crate::commands::fs::recommended_filesystems();
         let fs_offer = filesystem_offer(&recommended, &daemon_inventory.attachments);
         let attached_host_location =
             offer_quick_start_filesystems(&output, prompt, &fs_offer).await?;
 
         print_next_block(&entries, &mounted, &output);
 
-        let recommended_fs_id = recommended
-            .first()
-            .map(|&(protocol, runtime)| fs::Id::new(format!("{protocol}-{runtime}")))
-            .transpose()?;
+        let recommended_fs_id = crate::commands::fs::recommended_filesystem_id()?;
         let closing = closing_sentence(
             &mounted,
             attached_host_location.as_deref(),
@@ -152,73 +150,25 @@ fn catalog_entries(embedded: &[ProviderMetadata], mounted: &BTreeSet<String>) ->
     entries
 }
 
-/// Whether a provider needs no sign-in at all: no declared auth scheme, and
-/// no interactive config input (a dynamic domain authority or a host-file
-/// field) that setup's quick-start batch cannot answer on the operator's
-/// behalf.
-fn needs_no_sign_in(manifest: &ProviderManifest) -> bool {
-    manifest.auth.is_none() && !manifest.requires_mount_input()
-}
-
-/// The honest auth label for one provider's catalog row, derived only from
-/// its manifest: never a hardcoded provider-name table.
-fn provider_auth_label(manifest: &ProviderManifest) -> &'static str {
-    if needs_no_sign_in(manifest) {
-        return "no sign-in";
-    }
-    if manifest.requires_mount_input() {
-        return "needs config";
-    }
-    match manifest
-        .auth
-        .as_ref()
-        .and_then(|auth| auth.default_scheme())
-    {
-        Some((_, AuthScheme::StaticToken(_))) => "needs a token",
-        _ => "needs sign-in",
-    }
-}
-
-fn catalog_description(manifest: &ProviderManifest) -> &str {
-    manifest
-        .description
-        .as_deref()
-        .unwrap_or(&manifest.display_name)
-}
-
-/// The fixed gap after the widest name/description column in the catalog and
-/// the "Next:" block, mirroring `render.rs::LEDGER_GAP`'s role for ledger
-/// rows.
-const CATALOG_GAP: usize = 4;
+/// The fixed gap after the widest command column in the "Next:" block,
+/// mirroring `render.rs::LEDGER_GAP`'s role for ledger rows (the provider
+/// catalog's own column gap lives with its alignment logic in
+/// `provider_catalog.rs`).
+const NEXT_GAP: usize = 4;
 
 /// The provider catalog's printed rows: `name`, `description`, and
-/// `auth label`, column-aligned, with a dim `mounted` marker appended to any
-/// row for a provider already configured.
+/// `auth label`, column-aligned via the same logic `mount add`'s interactive
+/// picker uses, with a dim `mounted` marker appended to any row for a
+/// provider already configured.
 fn catalog_lines(entries: &[CatalogEntry], caps: Capabilities) -> Vec<String> {
-    let name_width = entries
+    let rows: Vec<_> = entries
         .iter()
-        .map(|entry| render::display_width(&entry.manifest.id))
-        .max()
-        .unwrap_or(0);
-    let desc_width = entries
-        .iter()
-        .map(|entry| render::display_width(catalog_description(&entry.manifest)))
-        .max()
-        .unwrap_or(0);
+        .map(|entry| provider_catalog_row(&entry.manifest))
+        .collect();
     entries
         .iter()
-        .map(|entry| {
-            let name = &entry.manifest.id;
-            let description = catalog_description(&entry.manifest);
-            let label = provider_auth_label(&entry.manifest);
-            let name_pad = name_width.saturating_sub(render::display_width(name)) + CATALOG_GAP;
-            let desc_pad =
-                desc_width.saturating_sub(render::display_width(description)) + CATALOG_GAP;
-            let mut line = format!(
-                "{name}{}{description}{}{label}",
-                " ".repeat(name_pad),
-                " ".repeat(desc_pad)
-            );
+        .zip(align_provider_catalog_rows(&rows))
+        .map(|(entry, mut line)| {
             if entry.mounted {
                 line.push_str("  ");
                 line.push_str(&style::dim("mounted", caps.color));
@@ -302,15 +252,6 @@ async fn offer_quick_start_mounts(
 }
 
 // -- filesystem quick-start -----------------------------------------------
-
-/// Every filesystem this platform recommends by default, in
-/// `available_filesystems`'s order.
-fn recommended_filesystems() -> Vec<(fs::Protocol, fs::Runtime)> {
-    available_filesystems()
-        .into_iter()
-        .filter(|&(protocol, runtime)| default_runtime(protocol) == Some(runtime))
-        .collect()
-}
 
 /// `recommended`, minus whatever is already attached per the daemon's live
 /// inventory.
@@ -449,7 +390,7 @@ fn next_block_lines(example_provider: Option<&str>) -> Vec<String> {
         .iter()
         .zip(descriptions)
         .map(|(command, description)| {
-            let pad = width.saturating_sub(render::display_width(command)) + CATALOG_GAP;
+            let pad = width.saturating_sub(render::display_width(command)) + NEXT_GAP;
             format!("{command}{}{description}", " ".repeat(pad))
         })
         .collect()
@@ -481,21 +422,18 @@ fn closing_sentence(
     elapsed: Duration,
 ) -> String {
     let elapsed = format_elapsed(elapsed);
-    if let (Some(first), Some(location)) = (mounted.first(), attached_host_location) {
-        let action = ActionLine::from(&NextAction::Browse {
-            path: location.join(first),
-        })
-        .render();
+    // The browse-or-attach hint is the same fact `mount add`'s adaptive
+    // outro derives; `None` here only means "nothing was mounted this run",
+    // since setup (unlike `mount add`) can genuinely have nothing to say yet.
+    if let Some(action) = mount_next_action_line(
+        mounted.first().map(String::as_str),
+        attached_host_location,
+        recommended_fs_id,
+    ) {
         return format!("All set in {elapsed}. {action}");
     }
     if attached_host_location.is_some() {
         return format!("All set in {elapsed}. Add a service:  `omnifs mount add`");
-    }
-    if !mounted.is_empty()
-        && let Some(id) = recommended_fs_id
-    {
-        let action = ActionLine::from(&NextAction::AttachFilesystem { id: id.clone() }).render();
-        return format!("All set in {elapsed}. {action}");
     }
     format!("All set in {elapsed}.")
 }
@@ -513,7 +451,8 @@ fn format_elapsed(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_auth::{OAuthFlow, OauthScheme, PkceLoopbackConfig, StaticTokenScheme};
+    use crate::provider_catalog::provider_auth_label;
+    use omnifs_auth::{AuthScheme, OAuthFlow, OauthScheme, PkceLoopbackConfig, StaticTokenScheme};
     use omnifs_provider::{
         ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, LimitDeclarations,
         PreopenMode, ProviderAuthManifest,

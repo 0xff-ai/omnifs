@@ -23,11 +23,11 @@ cargo install omnifs-cli
 ## Quick start
 
 ```bash
-omnifs setup --providers github
+omnifs setup
 omnifs fs ls
 ```
 
-`omnifs setup` is a thin first-run composition: it configures exact embedded providers through daemon RPC, starts the daemon, creates named platform filesystems, and attaches them. `--no-up` configures mounts without launching lifecycle actions. The CLI stores profile config at `OMNIFS_HOME/config.toml` and filesystem state under `OMNIFS_HOME/client`; the daemon stores credentials, mounts, providers, cache, and logs under `OMNIFS_HOME/daemon-state`.
+`omnifs setup` boots the daemon, shows status, and lists every embedded provider through daemon RPC with an honest auth label. It then offers two default-yes confirms: mount every provider that needs no sign-in in one atomic batch, and attach the platform-recommended filesystem. `--yes` accepts both without asking; `--no-input` declines both and still exits 0. Anything that needs a sign-in or a config value goes through `omnifs mount add`. The CLI stores profile config at `OMNIFS_HOME/config.toml` and filesystem state under `OMNIFS_HOME/client`; the daemon stores credentials, mounts, providers, cache, and logs under `OMNIFS_HOME/daemon-state`.
 
 ## Platform
 

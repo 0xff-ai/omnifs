@@ -14,7 +14,7 @@ pub(crate) use add::AddArgs;
 pub(crate) use add::{render_consent_block, run_static_token_init};
 pub(crate) use auth_import::AuthImportDecision;
 pub(crate) use auth_import::ImportOutcome;
-pub(crate) use create::{MountInitStatus, ReceiptStyle, configure_mount};
+pub(crate) use create::{MountInitStatus, configure_mount};
 pub(crate) use revoke::RevokeArgs;
 
 use anyhow::{Context, anyhow};

@@ -60,12 +60,6 @@ pub(crate) struct MountBuild {
     limits: Option<MountLimits>,
     config: Vec<u8>,
     credential_ready: bool,
-    // Whether the provider needs no sign-in at all (captured from the raw
-    // auth selection before `AuthImportDecision` resolves it), so the
-    // deferred `mount ... created` row (printed only after persist, once
-    // authentication has already settled) can still carry the compact
-    // receipt's "(no sign-in needed)" annotation.
-    no_auth_needed: bool,
     // Credential material `authenticate` collected but has not yet been sent
     // to the daemon. `configure_mount` folds it into the same batch as the
     // mount-create op, so a fresh sign-in and a new mount always commit or
@@ -73,27 +67,12 @@ pub(crate) struct MountBuild {
     pending_submission: Option<CredentialSubmission>,
 }
 
-/// How much a per-mount receipt says. Exactly two honest
-/// callers need different verbosity from the same mount-creation path:
-/// `mount add`'s [`Full`](ReceiptStyle::Full) receipt names every settled
-/// fact including the provider artifact retained in the store, while `omnifs
-/// setup`'s [`Compact`](ReceiptStyle::Compact) receipt drops that row (the
-/// provider already appeared in the services multi-select moments earlier)
-/// and annotates a mount needing no authentication inline instead of relying
-/// on the reader to infer it from the absence of a `signed in` row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReceiptStyle {
-    Full,
-    Compact,
-}
-
 /// Keys `configure_mount`'s block may ever print, across every branch: a
 /// block's key column is sized to the whole block, computed once up
 /// front, even though rows settle one at a time as each stage of mount
 /// creation completes). `mount name` only fires on an interactive/`--yes`
-/// name collision ([`crate::commands::mount::provider_selection`]);
-/// `provider` only for [`ReceiptStyle::Full`]; the sign-in branch prints
-/// exactly one of `sign in` (declined) or the shared
+/// name collision ([`crate::commands::mount::provider_selection`]); the
+/// sign-in branch prints exactly one of `sign in` (declined) or the shared
 /// [`crate::auth::AUTH_RECEIPT_KEYS`] (`oauth`/`signed in`/`credential`,
 /// completed) depending on the auth path taken. A key that never actually
 /// fires still counts toward the width, so the block stays aligned
@@ -109,17 +88,12 @@ pub(crate) async fn configure_mount(
     args: AddArgs,
     output: &crate::ui::output::Output,
     prompt: PromptMode,
-    receipt_style: ReceiptStyle,
 ) -> anyhow::Result<MountInitOutcome> {
     crate::commands::daemon_start::start().await?;
     let rpc = RpcClient::resolve()?;
     let state = ClientState::resolve()?;
-    let mut plan = assemble_mount_build(&args, &rpc, output, prompt, receipt_style).await?;
-    if plan
-        .authenticate(&args, output, prompt, receipt_style)
-        .await?
-        == MountInitStatus::SignInDeclined
-    {
+    let mut plan = assemble_mount_build(&args, &rpc, output, prompt).await?;
+    if plan.authenticate(&args, output, prompt).await? == MountInitStatus::SignInDeclined {
         return Ok(MountInitOutcome {
             mount_name: plan.mount_name.to_string(),
             status: MountInitStatus::SignInDeclined,
@@ -165,7 +139,7 @@ pub(crate) async fn configure_mount(
         &crate::ui::render::LedgerRow::new(
             crate::ui::style::Glyph::Done,
             "mount",
-            mount_created_value(&plan.mount_name, receipt_style, plan.no_auth_needed),
+            mount_created_value(&plan.mount_name),
         ),
         mount_add_key_width(),
     );
@@ -190,30 +164,58 @@ pub(crate) async fn assemble_mount_build(
     rpc: &RpcClient,
     output: &crate::ui::output::Output,
     prompt: PromptMode,
-    receipt_style: ReceiptStyle,
 ) -> anyhow::Result<MountBuild> {
     let interactive = init_interactive(prompt);
     let embedded = rpc.list_embedded_providers().await?;
 
     // No provider argument in an interactive output: choose one with the
-    // generic single-select prompt instead of a bare list. The panel carries
-    // the full, untruncated consent facts: domains called, memory
-    // ceiling, and auth scheme, one sentence per line, never the compact
-    // truncated summary `mount add`'s later consent block uses.
+    // generic single-select prompt instead of a bare list. Rows render the
+    // same three aligned columns (name, description, auth label) as `omnifs
+    // setup`'s provider catalog, with a dim `mounted` marker on an
+    // already-configured provider rather than hiding it: a second mount of
+    // the same provider under a different name is legitimate. The detail
+    // panel carries the full, untruncated consent facts: domains called,
+    // memory ceiling, and auth scheme, one sentence per line, never the
+    // compact truncated summary `mount add`'s later consent block uses.
     let picked = if args.provider.is_none() && interactive {
-        let options = crate::provider_resolver::provider_options(
-            &embedded,
-            &std::collections::BTreeMap::default(),
+        let mounted: std::collections::BTreeSet<String> = rpc
+            .list_mounts()
+            .await?
+            .iter()
+            .map(|mount| mount.provider.name.clone())
+            .collect();
+        let options = crate::provider_resolver::provider_options(&embedded, &mounted);
+        // `provider_options` only ever returns an option whose manifest bytes
+        // already parsed once; re-parsing those same bytes here is a pure
+        // function of them and cannot fail differently, so `manifests` stays
+        // index-aligned with `options`.
+        let manifests: Vec<ProviderManifest> = options
+            .iter()
+            .filter_map(|option| {
+                embedded
+                    .iter()
+                    .find(|entry| entry.reference.name == option.name)
+                    .and_then(|entry| ProviderManifest::from_bytes(&entry.manifest).ok())
+            })
+            .collect();
+        let rows: Vec<_> = manifests
+            .iter()
+            .map(crate::provider_catalog::provider_catalog_row)
+            .collect();
+        let aligned = crate::provider_catalog::align_provider_catalog_rows(&rows);
+        let choices = options.into_iter().zip(manifests.iter()).zip(aligned).map(
+            |((option, manifest), mut label)| {
+                if option.mounted {
+                    label.push_str("  ");
+                    label.push_str(&crate::ui::style::dim(
+                        "mounted",
+                        crate::ui::style::Stream::Stderr,
+                    ));
+                }
+                let detail = crate::capability::consent_detail(manifest);
+                (option.name, label, detail)
+            },
         );
-        let choices = options.into_iter().map(|option| {
-            let detail = embedded
-                .iter()
-                .find(|entry| entry.reference.name == option.name)
-                .and_then(|entry| ProviderManifest::from_bytes(&entry.manifest).ok())
-                .map(|manifest| crate::capability::consent_detail(&manifest))
-                .unwrap_or_default();
-            (option.name.clone(), option.name, detail)
-        });
         Some(
             crate::ui::prompt::Select::new("Which provider?")
                 .detailed_options(choices)
@@ -256,11 +258,6 @@ pub(crate) async fn assemble_mount_build(
     let reference = resolved.reference;
     let provider_id = reference.id;
     let manifest = resolved.manifest;
-    // Auth is resolved before either receipt row prints, not just before
-    // `authenticate` runs, because the compact receipt folds
-    // whether this provider needs a sign-in step into the `mount` row's
-    // value itself (`no sign-in needed`) rather than relying on the reader
-    // to infer it from the absence of a later `signed in` row.
     let auth_manifest = manifest
         .auth
         .as_ref()
@@ -273,29 +270,19 @@ pub(crate) async fn assemble_mount_build(
     // validated and free. The remaining work below (auth, then the actual
     // spec write in `persist_mount_spec`) either fills in these two rows'
     // consequences or fails outright, so nothing here overclaims.
-    // The compact style (setup) drops the `provider` row: the provider
-    // already appeared in the services multi-select moments earlier, so
-    // repeating its retained-artifact fact here would be noise.
     let key_width = mount_add_key_width();
-    if receipt_style == ReceiptStyle::Full {
-        let provider_identity = reference.meta.version.as_ref().map_or_else(
-            || provider_name.clone(),
-            |version| format!("{provider_name}@{version}"),
-        );
-        output.ledger_row(
-            &crate::ui::render::LedgerRow::new(
-                crate::ui::style::Glyph::Done,
-                "provider",
-                format!("{provider_identity} retained"),
-            ),
-            key_width,
-        );
-    }
-    // Captured before `default_auth` moves into `AuthImportDecision::new`
-    // below; the deferred `mount ... created` row (printed by `configure_mount`
-    // only once the spec is actually persisted) still needs this fact for its
-    // compact-receipt annotation.
-    let no_auth_needed = default_auth.is_none();
+    let provider_identity = reference.meta.version.as_ref().map_or_else(
+        || provider_name.clone(),
+        |version| format!("{provider_name}@{version}"),
+    );
+    output.ledger_row(
+        &crate::ui::render::LedgerRow::new(
+            crate::ui::style::Glyph::Done,
+            "provider",
+            format!("{provider_identity} retained"),
+        ),
+        key_width,
+    );
 
     // An ambient credential (imported under --yes or on the interactive
     // prompt) promotes an OAuth default to a static token, which lets a
@@ -371,7 +358,6 @@ pub(crate) async fn assemble_mount_build(
         auth,
         limits,
         config,
-        no_auth_needed,
         credential_ready: auth_ready,
         pending_submission: None,
     })
@@ -390,16 +376,8 @@ impl MountBuild {
         args: &AddArgs,
         output: &crate::ui::output::Output,
         prompt: PromptMode,
-        receipt_style: ReceiptStyle,
     ) -> anyhow::Result<MountInitStatus> {
-        // The compact receipt (setup) skips the description/needs/limits
-        // lines: the services multi-select's detail panel already showed the
-        // same consent facts (`capability.rs::consent_detail`) moments
-        // earlier, so repeating them here would be noise rather than new
-        // information.
-        if receipt_style == ReceiptStyle::Full {
-            super::render_consent_block(output, &self.manifest);
-        }
+        super::render_consent_block(output, &self.manifest);
         let plan = self;
         let Some(auth) = plan.auth.as_ref() else {
             return Ok(MountInitStatus::Ready);
@@ -494,20 +472,10 @@ impl MountBuild {
     }
 }
 
-/// The `mount` receipt row's value: `/<name> created`, plus a
-/// `(no sign-in needed)` annotation only for the compact style when the
-/// provider has no default auth at all. Pure so the exact wording is
-/// testable without a profile.
-fn mount_created_value(
-    mount_name: &MountName,
-    receipt_style: ReceiptStyle,
-    no_auth_needed: bool,
-) -> String {
-    if receipt_style == ReceiptStyle::Compact && no_auth_needed {
-        format!("/{mount_name} created  (no sign-in needed)")
-    } else {
-        format!("/{mount_name} created")
-    }
+/// The `mount` receipt row's value: `/<name> created`. Pure so the exact
+/// wording is testable without a profile.
+fn mount_created_value(mount_name: &MountName) -> String {
+    format!("/{mount_name} created")
 }
 
 /// The OAuth sign-in failure note: unlike a decline, an actual
@@ -589,29 +557,12 @@ pub(crate) async fn quick_start_definition(
 
 #[cfg(test)]
 mod tests {
-    use super::{MountName, ReceiptStyle, mount_created_value, sign_in_failed_value};
+    use super::{MountName, mount_created_value, sign_in_failed_value};
 
     #[test]
-    fn mount_created_value_is_plain_for_full_receipts_even_without_auth() {
+    fn mount_created_value_names_the_mount() {
         let name = MountName::try_from("dns").unwrap();
-        assert_eq!(
-            mount_created_value(&name, ReceiptStyle::Full, true),
-            "/dns created"
-        );
-    }
-
-    #[test]
-    fn mount_created_value_annotates_no_sign_in_needed_only_for_compact_without_auth() {
-        let name = MountName::try_from("dns").unwrap();
-        assert_eq!(
-            mount_created_value(&name, ReceiptStyle::Compact, true),
-            "/dns created  (no sign-in needed)"
-        );
-        let name = MountName::try_from("github").unwrap();
-        assert_eq!(
-            mount_created_value(&name, ReceiptStyle::Compact, false),
-            "/github created"
-        );
+        assert_eq!(mount_created_value(&name), "/dns created");
     }
 
     #[test]

@@ -63,11 +63,25 @@ impl AddArgs {
         output: crate::ui::output::Output,
     ) -> anyhow::Result<crate::error::ExitCode> {
         let prompt = output.prompt_mode();
-        let outcome =
-            super::configure_mount(self, &output, prompt, super::ReceiptStyle::Full).await?;
+        let outcome = super::configure_mount(self, &output, prompt).await?;
         match outcome.status {
             super::MountInitStatus::Ready => {
-                output.outro(format!("Mounted `{0}` at /{0}.", outcome.mount_name));
+                // `show_progress` is exactly the mode/quiet combination under
+                // which the outro below would print anything at all, so the
+                // inventory round trip that feeds it is skipped otherwise
+                // (structured output, or a quiet human run) rather than spent
+                // on a hint nobody sees.
+                if output.show_progress() {
+                    let inventory = crate::inventory::Inventory::collect_rpc().await?;
+                    let recommended_fs_id = crate::commands::fs::recommended_filesystem_id()?;
+                    if let Some(action) = crate::ui::access::mount_next_action_line(
+                        Some(outcome.mount_name.as_str()),
+                        inventory.primary_host_location(),
+                        recommended_fs_id.as_ref(),
+                    ) {
+                        output.outro(action);
+                    }
+                }
             },
             super::MountInitStatus::SignInDeclined => {
                 output.outro(format!(

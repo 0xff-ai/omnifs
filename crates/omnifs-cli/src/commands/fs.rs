@@ -227,6 +227,29 @@ pub(crate) fn default_runtime(protocol: fs::Protocol) -> Option<fs::Runtime> {
     }
 }
 
+/// Every filesystem this platform recommends by default. Shared by `omnifs
+/// setup`'s filesystem quick-start offer and `mount add`'s adaptive closing
+/// hint, so both point at the same recommendation.
+pub(crate) fn recommended_filesystems() -> Vec<(fs::Protocol, fs::Runtime)> {
+    available_filesystems()
+        .into_iter()
+        .filter(|&(protocol, runtime)| default_runtime(protocol) == Some(runtime))
+        .collect()
+}
+
+/// The id `omnifs setup`'s filesystem quick-start would offer first, if this
+/// platform recommends any filesystem at all. Shared with `mount add`'s
+/// adaptive closing hint, which names the same id when no host filesystem is
+/// attached yet.
+pub(crate) fn recommended_filesystem_id() -> Result<Option<fs::Id>> {
+    recommended_filesystems()
+        .into_iter()
+        .next()
+        .map(|(protocol, runtime)| fs::Id::new(format!("{protocol}-{runtime}")))
+        .transpose()
+        .map_err(Into::into)
+}
+
 /// The location a filesystem would be attached at, whether or not it has
 /// been configured yet: the existing configured spec's location if one is
 /// already claimed under `id`, else the runtime's default. Shared by
