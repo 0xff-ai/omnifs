@@ -227,6 +227,41 @@ pub(crate) fn default_runtime(protocol: fs::Protocol) -> Option<fs::Runtime> {
     }
 }
 
+/// The location a filesystem would be attached at, whether or not it has
+/// been configured yet: the existing configured spec's location if one is
+/// already claimed under `id`, else the runtime's default. Shared by
+/// [`ensure_setup_filesystem`] (which creates the spec at this same location
+/// when none exists yet) and setup's quick-start prompt
+/// ([`preview_filesystem_location`]), which previews it before the user
+/// accepts.
+fn default_location_for(
+    client_state: &ClientFilesystemState,
+    runtime: fs::Runtime,
+    id: &fs::Id,
+) -> PathBuf {
+    match runtime {
+        fs::Runtime::Host => client_state.default_host_location(id),
+        fs::Runtime::Docker | fs::Runtime::Libkrun => PathBuf::from(fs::GUEST_LOCATION),
+    }
+}
+
+/// The location `omnifs setup`'s quick-start filesystem prompt would attach
+/// `protocol`/`runtime` at, without creating or attaching anything. Read-only
+/// preview built from the same claim-or-default logic
+/// [`ensure_setup_filesystem`] uses when it actually creates the spec, so the
+/// question text and the settled fact never disagree with each other.
+pub(crate) fn preview_filesystem_location(
+    client_state: &ClientFilesystemState,
+    protocol: fs::Protocol,
+    runtime: fs::Runtime,
+) -> Result<PathBuf> {
+    let id = fs::Id::new(format!("{protocol}-{runtime}"))?;
+    if let Some(spec) = client_state.registry().claim(&id)?.get()? {
+        return Ok(spec.location().to_path_buf());
+    }
+    Ok(default_location_for(client_state, runtime, &id))
+}
+
 pub(crate) async fn ensure_setup_filesystem(
     protocol: fs::Protocol,
     runtime: fs::Runtime,
@@ -243,10 +278,7 @@ pub(crate) async fn ensure_setup_filesystem(
         );
         spec
     } else {
-        let location = match runtime {
-            fs::Runtime::Host => client_state.default_host_location(&id),
-            fs::Runtime::Docker | fs::Runtime::Libkrun => PathBuf::from(fs::GUEST_LOCATION),
-        };
+        let location = default_location_for(&client_state, runtime, &id);
         let spec = fs::Spec::new(id, protocol, runtime, location)?;
         claim.create(&spec)?;
         spec

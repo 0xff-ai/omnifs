@@ -1,10 +1,10 @@
-//! The transient layer: spinners, live regions, and byte
-//! progress. Everything here exists only on a TTY and never survives in
-//! scrollback; every primitive settles into a durable row (`ui/report.rs`)
-//! once its operation finishes. This module owns cursor movement, redraw
-//! throttling, non-TTY/quiet degradation to stable settle lines, and Ctrl-C
-//! erasure for the whole transient layer; `ui/progress.rs` is retired into
-//! this file rather than surviving as a second owner of the same concern.
+//! The transient layer: spinners and byte progress. Everything here exists
+//! only on a TTY and never survives in scrollback; every primitive settles
+//! into a durable row (`ui/report.rs`) once its operation finishes. This
+//! module owns cursor movement, redraw throttling, non-TTY/quiet degradation
+//! to stable settle lines, and Ctrl-C erasure for the whole transient layer;
+//! `ui/progress.rs` is retired into this file rather than surviving as a
+//! second owner of the same concern.
 
 #![allow(clippy::disallowed_macros, clippy::print_stderr)]
 
@@ -24,8 +24,7 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 const APPEARANCE_DELAY: Duration = Duration::from_millis(150);
 const UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 
-/// The transient spinner frame, indented two spaces to match
-/// [`region_frame`]'s in-flight rows: `key_width` is the same
+/// The transient spinner frame, indented two spaces: `key_width` is the same
 /// block-scoped width its settled row (via [`Spinner::settle`]) renders at,
 /// so the frame never jumps column when it resolves.
 fn spinner_line(frame: &str, key: &str, text: &str, key_width: usize) -> String {
@@ -75,8 +74,7 @@ pub(crate) struct Spinner {
     next_update: Instant,
     drawn: bool,
     /// Physical rows the last real draw occupied (0 when nothing has been
-    /// drawn on the real terminal yet, including every draw redirected
-    /// through a narration sink instead). A spinner line can wrap past one
+    /// drawn on the real terminal yet). A spinner line can wrap past one
     /// column just like a multi-line frame, so the next draw must move up
     /// past every wrapped row, not just one, before overwriting it.
     drawn_rows: usize,
@@ -106,16 +104,6 @@ impl Spinner {
             return;
         }
         self.next_update = now + UPDATE_INTERVAL;
-        // Setup folds several concurrent enables' narration into one
-        // aggregate live region instead of letting each print its own row
-        // redirecting here rather than drawing keeps this
-        // spinner's row suppressed the same way `Output::narrate` and
-        // `Output::ledger_row` already redirect for the same sink.
-        if let Some(sink) = self.output.narration_sink() {
-            sink(text);
-            self.drawn = true;
-            return;
-        }
         if !self.tty || self.started.elapsed() < APPEARANCE_DELAY {
             return;
         }
@@ -166,12 +154,7 @@ impl Spinner {
         if !self.output.show_progress() {
             return;
         }
-        // A sink-redirected spinner never drew its own line on the real
-        // terminal (`update` returned early into the sink instead), so
-        // there is nothing here to clear; issuing a raw cursor move/clear
-        // anyway would corrupt whatever the sink's owner has since drawn at
-        // the real cursor position (setup's aggregate live region).
-        if self.drawn && self.output.narration_sink().is_none() {
+        if self.drawn {
             let mut err = std::io::stderr();
             if self.drawn_rows > 1 {
                 let _ = queue!(err, cursor::MoveUp(rows(self.drawn_rows - 1)));
@@ -207,155 +190,6 @@ fn rows(count: usize) -> u16 {
     u16::try_from(count).unwrap_or(u16::MAX)
 }
 
-/// One in-flight unit inside a [`LiveRegion`].
-#[derive(Debug, Clone)]
-struct Unit {
-    key: String,
-    text: String,
-}
-
-/// Render one live-region frame as plain text (no cursor control), one line
-/// per unit at a two-space indent. Kept separate from the terminal-writing
-/// path so the frame content is deterministically testable.
-fn region_frame(units: &[Unit], frame_symbol: &str) -> Vec<String> {
-    units
-        .iter()
-        .map(|unit| {
-            format!(
-                "  {} {}",
-                style::dim(frame_symbol, style::Stream::Stderr),
-                unit.text
-            )
-        })
-        .collect()
-}
-
-/// Parallel operations rendered as one block of two-space-indented lines
-/// Non-TTY or `--quiet` never draws a region at
-/// all: `update` becomes a no-op and [`LiveRegion::finish`] /
-/// [`LiveRegion::cancel`] still emit exactly the one durable row a TTY run
-/// would leave behind, so both paths agree on the record that survives.
-pub(crate) struct LiveRegion {
-    output: Output,
-    tty: bool,
-    units: Vec<Unit>,
-    frame: usize,
-    started: Instant,
-    next_update: Instant,
-    drawn_lines: usize,
-}
-
-impl LiveRegion {
-    pub(crate) fn new(output: Output, keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        let tty = output.show_progress() && std::io::stderr().is_terminal();
-        Self {
-            output,
-            tty,
-            units: keys
-                .into_iter()
-                .map(|key| Unit {
-                    key: key.into(),
-                    text: String::new(),
-                })
-                .collect(),
-            frame: 0,
-            started: Instant::now(),
-            next_update: Instant::now(),
-            drawn_lines: 0,
-        }
-    }
-
-    /// Update one unit's in-flight label. A no-op for an unknown key because
-    /// the region's key set is fixed at construction.
-    pub(crate) fn update(&mut self, key: &str, text: impl Into<String>) {
-        if let Some(unit) = self.units.iter_mut().find(|unit| unit.key == key) {
-            unit.text = text.into();
-        }
-        self.redraw_if_due();
-    }
-
-    fn redraw_if_due(&mut self) {
-        if !self.tty {
-            return;
-        }
-        let now = Instant::now();
-        if now < self.next_update {
-            return;
-        }
-        self.next_update = now + UPDATE_INTERVAL;
-        if self.started.elapsed() < APPEARANCE_DELAY {
-            return;
-        }
-        self.frame = (self.frame + 1) % SPINNER_FRAMES.len();
-        self.draw();
-    }
-
-    /// `drawn_lines` tracks physical terminal rows, not logical region
-    /// lines: a unit's text wider than the terminal wraps onto more than one
-    /// row, and the `MoveUp` above moves by rows, so counting logical lines
-    /// would undercount and leave stale rows from the previous draw on
-    /// screen. A single `Clear(FromCursorDown)` replaces the previous
-    /// per-line `Clear(CurrentLine)` loop for the same reason: a unit's
-    /// wrapped row count can shrink between draws (a spinner settling to
-    /// shorter text), and clearing only the rows the *new* frame occupies
-    /// would leave that now-unused wrapped remnant on screen. Terminal width
-    /// is sampled fresh per draw (see `render::terminal_width`'s why-comment
-    /// on why a cached width would corrupt tracking across a mid-session
-    /// resize).
-    fn draw(&mut self) {
-        let mut err = std::io::stderr();
-        if self.drawn_lines > 0 {
-            let _ = queue!(err, cursor::MoveUp(rows(self.drawn_lines)));
-        }
-        let _ = queue!(err, Clear(ClearType::FromCursorDown));
-        let frame = region_frame(&self.units, SPINNER_FRAMES[self.frame]);
-        for line in &frame {
-            let _ = write!(err, "{line}\r\n");
-        }
-        let width = render::terminal_width();
-        self.drawn_lines = frame
-            .iter()
-            .map(|line| render::physical_rows(line, width))
-            .sum();
-        let _ = err.flush();
-    }
-
-    /// Erase every drawn region line, leaving the cursor where the region
-    /// started. A no-op when nothing was ever drawn (non-TTY, quiet, or a
-    /// group that settled before its appearance delay elapsed). One
-    /// `Clear(FromCursorDown)` after the `MoveUp` covers every wrapped row
-    /// the last draw occupied, whatever `drawn_lines`' physical-row count
-    /// happens to be, rather than looping a fixed `MoveDown(1)` per logical
-    /// line, which assumed one row per line.
-    fn erase(&mut self) {
-        if !self.tty || self.drawn_lines == 0 {
-            return;
-        }
-        let mut err = std::io::stderr();
-        let _ = queue!(err, cursor::MoveUp(rows(self.drawn_lines)));
-        let _ = queue!(err, Clear(ClearType::FromCursorDown));
-        let _ = err.flush();
-        self.drawn_lines = 0;
-    }
-
-    /// The whole group completed: erase the transient region and print
-    /// exactly one durable summary row (for example
-    /// `✓ providers  2/2 warm (1.2s)`), aligned to `key_width` so it lines
-    /// up with the surrounding ledger block even though this row is printed
-    /// well after the others in that block have already settled.
-    pub(crate) fn finish(
-        mut self,
-        glyph: Glyph,
-        key: impl Into<String>,
-        value: impl Into<String>,
-        key_width: usize,
-    ) {
-        self.erase();
-        self.output
-            .ledger_row(&render::LedgerRow::new(glyph, key, value), key_width);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,64 +218,5 @@ mod tests {
         // width) still gets the full 3-space `LEDGER_GAP`, never truncates.
         let plain = super::super::strip_ansi(&spinner_line("⠋", "daemon", "starting", 6));
         assert_eq!(plain.chars().nth(13), Some('s'), "{plain:?}");
-    }
-
-    #[test]
-    fn region_frame_renders_one_indented_line_per_unit() {
-        let units = [
-            Unit {
-                key: "github".to_owned(),
-                text: "warming github".to_owned(),
-            },
-            Unit {
-                key: "linear".to_owned(),
-                text: "linear warm".to_owned(),
-            },
-        ];
-        let frame = region_frame(&units, "⠋");
-        assert_eq!(frame.len(), 2);
-        let pending = super::super::strip_ansi(&frame[0]);
-        assert_eq!(pending, "  ⠋ warming github");
-        let second = super::super::strip_ansi(&frame[1]);
-        assert_eq!(second, "  ⠋ linear warm");
-    }
-
-    #[test]
-    fn live_region_update_is_a_no_op_for_unknown_keys() {
-        let output = Output::new(super::super::output::OutputMode::Human, true);
-        let mut region = LiveRegion::new(output, ["filesystems"]);
-        region.update("missing", "ignored");
-        assert!(region.units.iter().all(|unit| unit.text.is_empty()));
-    }
-
-    // -- Spinner narration-sink redirection (setup's per-enable suppression) -
-
-    #[test]
-    fn spinner_update_redirects_into_a_narration_sink_instead_of_drawing() {
-        // The sink path runs before the real-TTY check, so it is
-        // deterministically testable even though this test binary's stderr
-        // is not a terminal (`Spinner::tty` would otherwise gate the draw
-        // out entirely).
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink_seen = std::sync::Arc::clone(&seen);
-        let output = Output::new(super::super::output::OutputMode::Human, false)
-            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
-        let mut spinner = Spinner::new(output, "filesystem image", 9);
-        spinner.update("pulling layer 1/3");
-        assert_eq!(*seen.lock().unwrap(), ["pulling layer 1/3".to_owned()]);
-    }
-
-    #[test]
-    fn spinner_settle_redirects_the_final_value_into_a_narration_sink() {
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink_seen = std::sync::Arc::clone(&seen);
-        let output = Output::new(super::super::output::OutputMode::Human, false)
-            .with_narration_sink(move |text| sink_seen.lock().unwrap().push(text.to_owned()));
-        let mut spinner = Spinner::new(output, "filesystem image", 9);
-        spinner.update("pulling");
-        spinner.settle_ok("ghcr.io/omnifs:latest ready");
-        let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 2, "{seen:?}");
-        assert!(seen[1].contains("ghcr.io/omnifs:latest ready"), "{seen:?}");
     }
 }

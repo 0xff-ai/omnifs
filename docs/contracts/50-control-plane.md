@@ -34,7 +34,7 @@ The public binary is one `omnifs` executable. The hidden `omnifs daemon` subcomm
 
 Global `--output human|json|jsonl`, `--quiet`, `--no-input`, and `--yes` apply to one invocation after Clap parses it. JSON emits one terminal envelope. JSONL emits stream records followed by one terminal result or error. Clap usage errors exit 2 before output mode applies.
 
-`omnifs setup [--providers NAME] [--no-up] [--no-browser]` composes provider selection, credential UX, mount RPC, daemon start, filesystem creation, and attachment. `--no-up` stops after configuration. There is no `omnifs up`, `omnifs apply`, or offline product mode.
+`omnifs setup` starts the daemon, lists every embedded provider with an honest auth label, then offers two quick-start confirms: mount every provider that needs no sign-in in one atomic batch, and attach the platform's recommended filesystem. It never selects providers on the caller's behalf and never starts an OAuth flow; a provider that needs a sign-in or a config value is left for `omnifs mount add`. There is no `omnifs up`, `omnifs apply`, or offline product mode.
 
 `omnifs down` sends `Shutdown { stop_filesystems: true }`, waits for the bounded drain, reports busy attachments, and then stops the daemon. Daemon spawn and replacement never launch or stop filesystem runners implicitly.
 

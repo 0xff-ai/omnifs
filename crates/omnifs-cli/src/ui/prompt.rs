@@ -18,8 +18,7 @@ use crossterm::queue;
 use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode};
 
 use super::output::Output;
-use super::render::LedgerRow;
-use super::style::{self, Glyph, Stream};
+use super::style::{self, Stream};
 
 /// Marker error returned when an interactive prompt is canceled with Esc or
 /// Ctrl-C. The top-level command boundary treats this as a normal exit.
@@ -484,16 +483,13 @@ impl Confirm {
 // ---------------------------------------------------------------------------
 
 /// One picker choice: `value` is what the caller gets back, `label` is what
-/// is drawn in the option row, `detail` is the full-sentence description
+/// is drawn in the option row, and `detail` is the full-sentence description
 /// shown in the panel below the list while the row is highlighted (empty for
-/// options with nothing more to say than their label), and `checked` is the
-/// initial checkbox state a [`MultiSelect`] draws it with ([`Select`] never
-/// reads this field: a single-select has no checkbox to initialize).
+/// options with nothing more to say than their label).
 struct SelectItem<T> {
     value: T,
     label: String,
     detail: Vec<String>,
-    checked: bool,
 }
 
 fn item_from_value<T: std::fmt::Display>(value: T) -> SelectItem<T> {
@@ -502,7 +498,6 @@ fn item_from_value<T: std::fmt::Display>(value: T) -> SelectItem<T> {
         value,
         label,
         detail: Vec::new(),
-        checked: false,
     }
 }
 
@@ -636,7 +631,6 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
                 value,
                 label,
                 detail,
-                checked: false,
             }));
         self
     }
@@ -680,173 +674,6 @@ impl<T: Clone + Eq + std::fmt::Display> Select<T> {
             },
         }
     }
-}
-
-struct MultiSelectState {
-    cursor: usize,
-    checked: Vec<bool>,
-}
-
-fn multi_select_transition(
-    state: &mut MultiSelectState,
-    len: usize,
-    event: PickerEvent,
-) -> LoopControl {
-    match event {
-        PickerEvent::Up => {
-            move_cursor(&mut state.cursor, len, Direction::Up);
-            LoopControl::Continue
-        },
-        PickerEvent::Down => {
-            move_cursor(&mut state.cursor, len, Direction::Down);
-            LoopControl::Continue
-        },
-        PickerEvent::Toggle => {
-            if let Some(checked) = state.checked.get_mut(state.cursor) {
-                *checked = !*checked;
-            }
-            LoopControl::Continue
-        },
-        PickerEvent::Confirm => LoopControl::Resolve,
-        PickerEvent::Cancel => LoopControl::Cancel,
-    }
-}
-
-fn multi_select_frame<T>(
-    hint_line: &str,
-    items: &[SelectItem<T>],
-    state: &MultiSelectState,
-    stream: Stream,
-) -> Vec<String> {
-    let mut lines = vec![hint_line.to_owned()];
-    for (index, item) in items.iter().enumerate() {
-        let selected = index == state.cursor;
-        let marker = if selected {
-            style::accent("\u{203a}", stream)
-        } else {
-            " ".to_owned()
-        };
-        let checkbox = if state.checked[index] { "[x]" } else { "[ ]" };
-        let label = if selected {
-            style::accent(&item.label, stream)
-        } else {
-            item.label.clone()
-        };
-        lines.push(format!("{marker} {checkbox} {label}"));
-    }
-    if let Some(item) = items.get(state.cursor) {
-        lines.extend(detail_panel(&item.detail, stream));
-    }
-    lines
-}
-
-/// A multi-select prompt. Unlike [`Select`], its echo is always a ledger row
-/// so construction takes
-/// the row's `key` alongside the question.
-pub(crate) struct MultiSelect<T> {
-    question: String,
-    key: String,
-    items: Vec<SelectItem<T>>,
-}
-
-impl<T: Clone + Eq + std::fmt::Display> MultiSelect<T> {
-    pub(crate) fn new(question: impl Into<String>, key: impl Into<String>) -> Self {
-        Self {
-            question: question.into(),
-            key: key.into(),
-            items: Vec::new(),
-        }
-    }
-
-    /// Add `(value, label, detail, checked)` choices: `detail` is the panel's
-    /// full-sentence description, and `checked` is the option's initial state
-    ///
-    pub(crate) fn detailed_options(
-        mut self,
-        items: impl IntoIterator<Item = (T, String, Vec<String>, bool)>,
-    ) -> Self {
-        self.items.extend(
-            items
-                .into_iter()
-                .map(|(value, label, detail, checked)| SelectItem {
-                    value,
-                    label,
-                    detail,
-                    checked,
-                }),
-        );
-        self
-    }
-
-    pub(crate) fn ask_with_output(self, output: &Output) -> anyhow::Result<Vec<T>> {
-        output.ensure_prompt_allowed()?;
-        if !is_terminal() {
-            return Err(not_a_terminal_error());
-        }
-        if self.items.is_empty() {
-            anyhow::bail!("no choices to select from");
-        }
-        let stream = Stream::Stderr;
-        let key = self.key;
-        let items = self.items;
-        let len = items.len();
-        let hint_line = format!(
-            "{}  {}",
-            style::accentuate(&self.question, stream),
-            style::dim(
-                "(\u{2191}\u{2193} browse, space toggle, enter confirm, esc cancel)",
-                stream
-            )
-        );
-        let resolution = run_prompt_loop(
-            MultiSelectState {
-                cursor: 0,
-                checked: items.iter().map(|item| item.checked).collect(),
-            },
-            |state| multi_select_frame(&hint_line, &items, state, stream),
-            map_picker_key,
-            |state, event| multi_select_transition(state, len, event),
-        )
-        .map_err(prompt_error)?;
-        match resolution {
-            Resolution::Resolved(state) => {
-                let (chosen, value) = multi_select_echo(&items, &state.checked);
-                // A standalone single-row block: every current `MultiSelect`
-                // call site (`setup.rs`'s services/filesystems pickers) prints
-                // this echo on its own, with no sibling ledger row nearby.
-                let key_width = Output::ledger_block_width(&[key.as_str()]);
-                output.ledger_row(&LedgerRow::new(Glyph::Done, key, value), key_width);
-                Ok(chosen)
-            },
-            Resolution::Canceled => {
-                print_canceled(stream);
-                Err(Canceled.into())
-            },
-        }
-    }
-}
-
-/// The resolved chosen values and the ledger-row echo text.
-/// Pure so the echo shape is testable without a terminal loop.
-fn multi_select_echo<T: Clone>(items: &[SelectItem<T>], checked: &[bool]) -> (Vec<T>, String) {
-    let chosen: Vec<T> = items
-        .iter()
-        .zip(checked)
-        .filter(|(_, checked)| **checked)
-        .map(|(item, _)| item.value.clone())
-        .collect();
-    let labels: Vec<&str> = items
-        .iter()
-        .zip(checked)
-        .filter(|(_, checked)| **checked)
-        .map(|(item, _)| item.label.as_str())
-        .collect();
-    let value = if labels.is_empty() {
-        "none".to_owned()
-    } else {
-        labels.join(", ")
-    };
-    (chosen, value)
 }
 
 #[cfg(test)]
@@ -1032,49 +859,6 @@ mod tests {
     }
 
     #[test]
-    fn multi_select_transition_toggles_the_highlighted_row_only() {
-        let mut state = MultiSelectState {
-            cursor: 0,
-            checked: vec![false, false, false],
-        };
-        multi_select_transition(&mut state, 3, PickerEvent::Down);
-        assert_eq!(state.cursor, 1);
-        assert!(matches!(
-            multi_select_transition(&mut state, 3, PickerEvent::Toggle),
-            LoopControl::Continue
-        ));
-        assert_eq!(state.checked, [false, true, false]);
-        // Toggling again unchecks it.
-        multi_select_transition(&mut state, 3, PickerEvent::Toggle);
-        assert_eq!(state.checked, [false, false, false]);
-    }
-
-    #[test]
-    fn multi_select_confirm_resolves_with_whatever_is_checked() {
-        let mut state = MultiSelectState {
-            cursor: 2,
-            checked: vec![true, false, true],
-        };
-        assert!(matches!(
-            multi_select_transition(&mut state, 3, PickerEvent::Confirm),
-            LoopControl::Resolve
-        ));
-        assert_eq!(state.checked, [true, false, true]);
-    }
-
-    #[test]
-    fn multi_select_cancel_never_resolves() {
-        let mut state = MultiSelectState {
-            cursor: 0,
-            checked: vec![true],
-        };
-        assert!(matches!(
-            multi_select_transition(&mut state, 1, PickerEvent::Cancel),
-            LoopControl::Cancel
-        ));
-    }
-
-    #[test]
     fn picker_key_mapping_covers_browse_toggle_and_cancel() {
         assert!(matches!(
             map_picker_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
@@ -1132,65 +916,5 @@ mod tests {
         assert_eq!(lines.len(), 1 + items.len());
         assert!(crate::ui::strip_ansi(&lines[1]).starts_with(' '));
         assert!(crate::ui::strip_ansi(&lines[2]).starts_with('\u{203a}'));
-    }
-
-    #[test]
-    fn multi_select_frame_shows_checkbox_state_per_row() {
-        let items = vec![
-            item_from_value("github".to_owned()),
-            item_from_value("dns".to_owned()),
-        ];
-        let state = MultiSelectState {
-            cursor: 0,
-            checked: vec![true, false],
-        };
-        let lines = multi_select_frame("Pick services", &items, &state, Stream::Stderr);
-        assert!(crate::ui::strip_ansi(&lines[1]).contains("[x]"));
-        assert!(crate::ui::strip_ansi(&lines[2]).contains("[ ]"));
-    }
-
-    #[test]
-    fn multi_select_echo_joins_checked_labels_or_reports_none() {
-        let items = vec![
-            item_from_value("github".to_owned()),
-            item_from_value("dns".to_owned()),
-        ];
-        let (chosen, value) = multi_select_echo(&items, &[true, true]);
-        assert_eq!(chosen, vec!["github".to_owned(), "dns".to_owned()]);
-        assert_eq!(value, "github, dns");
-
-        let (chosen, value) = multi_select_echo(&items, &[true, false]);
-        assert_eq!(chosen, vec!["github".to_owned()]);
-        assert_eq!(value, "github");
-
-        let (chosen, value) = multi_select_echo(&items, &[false, false]);
-        assert!(chosen.is_empty());
-        assert_eq!(value, "none");
-    }
-
-    #[test]
-    fn multi_select_detailed_options_carries_the_initial_checked_state() {
-        let multi = MultiSelect::new("Which filesystems?", "filesystems").detailed_options([
-            (
-                "nfs-host".to_owned(),
-                "nfs (host)".to_owned(),
-                vec!["Native mount, nothing to install.".to_owned()],
-                true,
-            ),
-            (
-                "fuse-docker".to_owned(),
-                "fuse (docker)".to_owned(),
-                vec!["FUSE in a container, for containerized workflows.".to_owned()],
-                false,
-            ),
-        ]);
-        assert_eq!(
-            multi
-                .items
-                .iter()
-                .map(|item| item.checked)
-                .collect::<Vec<_>>(),
-            vec![true, false]
-        );
     }
 }

@@ -1,11 +1,12 @@
-//! The one-time `omnifs setup` wordmark reveal. No other command
+//! The one-time `omnifs setup` splash banner. No other command
 //! ever prints a banner; [`should_splash`] is the single gate that keeps it
 //! that way across every output mode and terminal state this crate supports.
 //! The reveal itself runs on `prompt.rs`'s raw-mode primitives
 //! ([`prompt::RawTerminal`], [`prompt::redraw`], [`prompt::erase`]) and stays
 //! untested here for the same reason `run_prompt_loop` does: a live terminal
-//! loop cannot run under `cargo nextest` without a PTY. `should_splash` is
-//! the pure boundary, and it carries the whole suppression matrix.
+//! loop cannot run under `cargo nextest` without a PTY. `should_splash` and
+//! [`fits`] are the pure boundary, and together they carry the whole
+//! suppression matrix.
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -16,9 +17,23 @@ use super::prompt::{self, Canceled};
 use super::render::Capabilities;
 use super::style::{self, Stream};
 
-const WORDMARK: &str = "omnifs";
-const TAGLINE: &str = "your services, as files";
-const LETTER_DELAY: Duration = Duration::from_millis(55);
+/// The static banner, drawn as one block with no letter-by-letter reveal.
+/// Every line is dim except [`TAGLINE_LINE`], which renders bold.
+const BANNER: [&str; 9] = [
+    "        ·         .              *              ·",
+    "   ⋆                     .                 .",
+    "                                                       *",
+    "              ╔═╗ ╔╦╗ ╔╗╔ ╦ ╔═╗ ╔═╗",
+    "   ·          ║ ║ ║║║ ║║║ ║ ╠╣  ╚═╗               ⋆",
+    "              ╚═╝ ╩ ╩ ╝╚╝ ╩ ╚   ╚═╝",
+    "                                                       .",
+    "        *           open a path, read the world.",
+    "   ·         ⋆               .              *",
+];
+
+/// The one line in [`BANNER`] that renders bold instead of dim.
+const TAGLINE_LINE: &str = "        *           open a path, read the world.";
+
 const HOLD: Duration = Duration::from_millis(1300);
 
 /// Whether the splash may draw at all: a real stderr TTY, human
@@ -29,14 +44,31 @@ pub(crate) fn should_splash(caps: Capabilities, no_input: bool, structured: bool
     caps.is_tty && !caps.quiet && !no_input && !structured
 }
 
-/// Draw the `omnifs setup` wordmark reveal if the terminal allows it, then
+/// The banner's widest line, in terminal columns.
+fn banner_width() -> usize {
+    BANNER
+        .iter()
+        .map(|line| super::render::display_width(line))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Whether `caps`'s terminal is wide enough to show [`BANNER`] without
+/// wrapping. A terminal narrower than the banner skips it entirely rather
+/// than letting it wrap into an unreadable mess.
+fn fits(caps: Capabilities) -> bool {
+    caps.width >= banner_width()
+}
+
+/// Draw the `omnifs setup` splash banner if the terminal allows it, then
 /// dissolve it completely before the first prompt draws; a no-op under any
-/// of [`should_splash`]'s suppression conditions. Ctrl-C during the reveal
-/// cancels the whole command through the same path as every other prompt
+/// of [`should_splash`]'s suppression conditions or when the terminal is too
+/// narrow for the banner ([`fits`]). Ctrl-C during the hold cancels the whole
+/// command through the same path as every other prompt
 /// (`ui::prompt::Canceled`, caught at the top level); any other key just
-/// fast-forwards past the reveal.
+/// skips the hold.
 pub(crate) fn show(caps: Capabilities, no_input: bool, structured: bool) -> anyhow::Result<()> {
-    if !should_splash(caps, no_input, structured) {
+    if !should_splash(caps, no_input, structured) || !fits(caps) {
         return Ok(());
     }
     let _raw = prompt::RawTerminal::enter()?;
@@ -77,35 +109,24 @@ fn poll_interrupt(timeout: Duration) -> io::Result<Option<Interrupt>> {
 
 fn run() -> anyhow::Result<()> {
     let stream = Stream::Stderr;
+    let lines: Vec<String> = BANNER
+        .iter()
+        .map(|line| {
+            if *line == TAGLINE_LINE {
+                style::bold(*line, stream)
+            } else {
+                style::dim(*line, stream)
+            }
+        })
+        .collect();
     let mut drawn = 0usize;
-    let mut interrupted = false;
-    for count in 1..=WORDMARK.chars().count() {
-        let partial: String = WORDMARK.chars().take(count).collect();
-        prompt::redraw(&mut drawn, &[style::bold(partial, stream)])?;
-        match poll_interrupt(LETTER_DELAY)? {
-            None => {},
-            Some(Interrupt::Skip) => {
-                interrupted = true;
-                break;
-            },
-            Some(Interrupt::Cancel) => {
-                prompt::erase(drawn)?;
-                return Err(Canceled.into());
-            },
-        }
-    }
-    prompt::redraw(
-        &mut drawn,
-        &[style::bold(WORDMARK, stream), style::dim(TAGLINE, stream)],
-    )?;
-    if !interrupted {
-        match poll_interrupt(HOLD)? {
-            None | Some(Interrupt::Skip) => {},
-            Some(Interrupt::Cancel) => {
-                prompt::erase(drawn)?;
-                return Err(Canceled.into());
-            },
-        }
+    prompt::redraw(&mut drawn, &lines)?;
+    match poll_interrupt(HOLD)? {
+        None | Some(Interrupt::Skip) => {},
+        Some(Interrupt::Cancel) => {
+            prompt::erase(drawn)?;
+            return Err(Canceled.into());
+        },
     }
     prompt::erase(drawn)?;
     Ok(())
@@ -138,5 +159,18 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn banner_skips_a_terminal_narrower_than_its_widest_line() {
+        let width = banner_width();
+        assert!(fits(Capabilities {
+            width,
+            ..caps(true, false)
+        }));
+        assert!(!fits(Capabilities {
+            width: width - 1,
+            ..caps(true, false)
+        }));
     }
 }

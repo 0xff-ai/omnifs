@@ -1,43 +1,41 @@
-//! `omnifs setup`: the guided first-run walkthrough. A thin
-//! composition over `mount add`'s stages, `up`'s launch choreography, and
-//! named filesystem creation and attachment, narrated as three numbered steps rather than as a
-//! sequence of separate command invocations.
+//! `omnifs setup`: boot-and-orient.
+//!
+//! Starts the daemon, shows what is already running, lists every embedded
+//! provider with an honestly derived auth label, then offers two quick-start
+//! confirms: mount every provider that needs no sign-in in one atomic batch,
+//! and attach the platform's recommended filesystem. Setup never selects
+//! providers on the caller's behalf, never starts an OAuth flow, and never
+//! handles credential material; anything that needs a sign-in or a config
+//! value is left for `omnifs mount add`.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result};
 use clap::Args;
+use omnifs_api::ProviderMetadata;
+use omnifs_auth::AuthScheme;
+use omnifs_core::fs;
+use omnifs_provider::ProviderManifest;
 
+use crate::client_fs_state::ClientFilesystemState;
+use crate::client_state::ClientState;
 use crate::commands::daemon_start;
 use crate::commands::fs::{available_filesystems, default_runtime};
-use crate::commands::mount::{AddArgs, ReceiptStyle};
 use crate::error::ExitCode;
-use crate::inventory::Inventory;
-use crate::provider_resolver::{provider_options, safe_for_setup};
-use crate::ui::live::LiveRegion;
+use crate::inventory::{Inventory, NextAction};
+use crate::mutation::PlannedOp;
+use crate::provider_resolver::ProviderResolver;
+use crate::rpc::RpcClient;
+use crate::ui::access::ActionLine;
 use crate::ui::output::{Output, PromptMode};
-use crate::ui::render::{self, Capabilities};
+use crate::ui::render::{self, Capabilities, LedgerRow};
 use crate::ui::style::{self, Glyph};
-use omnifs_core::fs;
 
 #[derive(Args, Debug, Clone, Default)]
-#[command(
-    after_help = "Examples:\n  omnifs setup\n  omnifs setup --providers github,dns\n  omnifs setup --providers dns --no-up"
-)]
-pub struct SetupArgs {
-    /// Configure these exact embedded provider names. Repeat or comma-separate.
-    #[arg(long, value_name = "PROVIDER", value_delimiter = ',')]
-    pub providers: Vec<String>,
-    /// Configure mounts without attaching filesystems.
-    #[arg(long)]
-    pub no_up: bool,
-    /// Print OAuth URLs instead of opening a browser.
-    #[arg(long)]
-    pub no_browser: bool,
-}
+#[command(after_help = "Examples:\n  omnifs setup")]
+pub struct SetupArgs {}
 
 impl SetupArgs {
     pub async fn run(self, output: Output) -> Result<ExitCode> {
@@ -45,58 +43,52 @@ impl SetupArgs {
     }
 
     async fn run_in_workspace(self, output: Output) -> Result<ExitCode> {
-        // Setup always configures mounts through the daemon. `--no-up` only
-        // skips the client-owned filesystem attachment step below.
         daemon_start::start().await?;
-        let rpc = crate::rpc::RpcClient::resolve()?;
+        let rpc = RpcClient::resolve()?;
+        let state = ClientState::resolve()?;
         let started = Instant::now();
         let prompt = output.prompt_mode();
         let caps = crate::ui::output::stderr_capabilities(output.quiet());
 
         crate::ui::splash::show(caps, output.no_input(), output.is_structured())?;
 
-        output.narrate("Welcome. Three steps: pick services, sign in, choose how files appear.");
+        let daemon_inventory = rpc.inventory().await?;
+        print_status_lines(&daemon_inventory, &output);
+
+        let mounted_providers: BTreeSet<String> = daemon_inventory
+            .mounts
+            .iter()
+            .map(|mount| mount.provider.name.clone())
+            .collect();
+        let embedded = rpc.list_embedded_providers().await?;
+        let entries = catalog_entries(&embedded, &mounted_providers);
+        print_provider_catalog(&entries, &output, caps);
+
+        let mount_offer: Vec<String> = no_sign_in_offer(&entries)
+            .into_iter()
+            .map(|manifest| manifest.id.clone())
+            .collect();
+        let mounted = offer_quick_start_mounts(&rpc, &state, &output, prompt, &mount_offer).await?;
+
+        let recommended = recommended_filesystems();
+        let fs_offer = filesystem_offer(&recommended, &daemon_inventory.attachments);
+        let attached_host_location =
+            offer_quick_start_filesystems(&output, prompt, &fs_offer).await?;
+
+        print_next_block(&entries, &mounted, &output);
+
+        let recommended_fs_id = recommended
+            .first()
+            .map(|&(protocol, runtime)| fs::Id::new(format!("{protocol}-{runtime}")))
+            .transpose()?;
+        let closing = closing_sentence(
+            &mounted,
+            attached_host_location.as_deref(),
+            recommended_fs_id.as_ref(),
+            started.elapsed(),
+        );
         output.narrate("");
-        output.heading("1. Services");
-        let selected = self.select_providers(&rpc, &output, prompt).await?;
-        let configure_prompt = Self::configure_prompt(&output, prompt);
-
-        output.narrate("");
-        output.heading("2. Sign in");
-        for provider in selected {
-            crate::commands::mount::configure_mount(
-                AddArgs {
-                    provider: Some(provider),
-                    name: None,
-                    no_browser: self.no_browser,
-                    token: None,
-                    token_env: None,
-                    no_validate: false,
-                    scopes: Vec::new(),
-                    scheme: None,
-                    no_auth: false,
-                    config_json: None,
-                    limits_json: None,
-                },
-                &output,
-                configure_prompt,
-                ReceiptStyle::Compact,
-            )
-            .await?;
-        }
-
-        if !self.no_up && !rpc.list_mounts().await?.is_empty() {
-            output.narrate("");
-            output.heading("3. Your files");
-            output
-                .narrate("A filesystem serves the tree to your OS. You can attach more than one.");
-            let filesystems = select_filesystems(&output, prompt)?;
-            output.narrate("");
-
-            if !filesystems.is_empty() {
-                Box::pin(Self::attach_filesystems(&output, &filesystems)).await?;
-            }
-        }
+        output.outro(closing);
 
         let inventory = Inventory::collect_rpc().await?;
         let exit_code = match inventory.verdict() {
@@ -105,424 +97,407 @@ impl SetupArgs {
         };
         if output.is_structured() {
             output.emit_result(inventory.verdict(), inventory)?;
-        } else {
-            Self::print_closing_block(&inventory, &output, started, caps);
         }
         Ok(exit_code)
     }
-
-    async fn select_providers(
-        &self,
-        rpc: &crate::rpc::RpcClient,
-        output: &Output,
-        prompt: PromptMode,
-    ) -> Result<Vec<String>> {
-        let embedded = rpc.list_embedded_providers().await?;
-        let mounts = rpc.list_mounts().await?;
-        let configured_names = mounts
-            .iter()
-            .map(|mount| mount.provider.name.clone())
-            .collect::<BTreeSet<_>>();
-
-        if !self.providers.is_empty() {
-            let mut seen = BTreeSet::new();
-            for provider in &self.providers {
-                if seen.insert(provider)
-                    && !embedded
-                        .iter()
-                        .any(|entry| entry.reference.name == *provider)
-                {
-                    bail!(
-                        "provider `{provider}` is not an exact embedded provider name; pass one of: {}",
-                        embedded
-                            .iter()
-                            .map(|entry| entry.reference.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                }
-            }
-            let (new, skipped) = split_requested_providers(&self.providers, &configured_names);
-            // Every skip repeats the same literal key, so the block's width
-            // is just that key's own width regardless of how many print.
-            let key_width = Output::ledger_block_width(&["provider"]);
-            for provider in &skipped {
-                output.ledger_row(
-                    &crate::ui::render::LedgerRow::new(
-                        Glyph::Skip,
-                        "provider",
-                        format!("{provider} already configured"),
-                    ),
-                    key_width,
-                );
-            }
-            return Ok(new);
-        }
-
-        // `provider_options` wants a name->mount-name map; the mount name is
-        // never read by its filtering (only `contains_key` is), so an empty
-        // placeholder value is fine.
-        let configured_map: BTreeMap<String, String> = configured_names
-            .iter()
-            .map(|name| (name.clone(), String::new()))
-            .collect();
-
-        if output.yes() {
-            let selected = provider_options(&embedded, &configured_map)
-                .into_iter()
-                .filter(|option| {
-                    embedded
-                        .iter()
-                        .find(|provider| provider.reference.name == option.name)
-                        .and_then(|provider| {
-                            omnifs_provider::ProviderManifest::from_bytes(&provider.manifest).ok()
-                        })
-                        .is_some_and(|manifest| safe_for_setup(&manifest))
-                })
-                .map(|option| option.name)
-                .collect();
-            return Ok(selected);
-        }
-
-        if prompt.no_input() || !prompt.interactive() {
-            bail!("setup needs --providers <NAME>, or pass --yes to select safe providers");
-        }
-
-        let options = provider_options(&embedded, &configured_map);
-        if options.is_empty() {
-            return Ok(Vec::new());
-        }
-        let choices = options.into_iter().map(|option| {
-            let detail = embedded
-                .iter()
-                .find(|entry| entry.reference.name == option.name)
-                .and_then(|entry| {
-                    omnifs_provider::ProviderManifest::from_bytes(&entry.manifest).ok()
-                })
-                .map(|manifest| crate::capability::consent_detail(&manifest))
-                .unwrap_or_default();
-            let checked = option.default_selected;
-            (option.name.clone(), option.name, detail, checked)
-        });
-        crate::ui::prompt::MultiSelect::new("Which services should setup configure?", "services")
-            .detailed_options(choices)
-            .ask_with_output(output)
-    }
-
-    fn configure_prompt(output: &Output, prompt: PromptMode) -> PromptMode {
-        if output.yes() {
-            PromptMode::forced_yes()
-        } else {
-            prompt
-        }
-    }
-
-    /// Create and attach every selected filesystem, aggregating the outcome into one
-    /// `filesystems` ledger row
-    /// instead of one row per runtime: the multi-select echo above already
-    /// named which filesystems setup chose, so the outcome only needs a count.
-    /// Setup creates deterministic names for missing specs, then uses the same
-    /// runtime launch and attachment checks as `omnifs fs attach`.
-    ///
-    /// Each attach call narrates its own progress (a Docker image pull
-    /// spinner, container lifecycle lines) through `Output`, and left alone
-    /// those rows would print into scrollback while the aggregate region
-    /// above is still drawn, so every redraw of one fights the other's
-    /// cursor math. Instead, each attach gets an `Output` clone whose
-    /// narration is redirected (`Output::with_narration_sink`) into this
-    /// region's one `filesystems` line, combined with the running
-    /// `n/m attaching…` counter, so a slow image pull still reads as live
-    /// text instead of vanishing into a suppressed row. The region is
-    /// shared behind a `Mutex` because the sink closure and this loop both
-    /// need to drive it: the closure updates it live while attach runs,
-    /// and the loop updates it between calls as each result lands.
-    async fn attach_filesystems(
-        output: &Output,
-        filesystems: &[(fs::Protocol, fs::Runtime)],
-    ) -> Result<()> {
-        let total = filesystems.len();
-        let key_width = Output::ledger_block_width(&["filesystems"]);
-        let region = Arc::new(Mutex::new(LiveRegion::new(output.clone(), ["filesystems"])));
-        update_region(&region, format!("0/{total} attaching…"));
-        let mut attached = 0;
-        for (protocol, runtime) in filesystems {
-            let attached_so_far = attached;
-            let sink_region = Arc::clone(&region);
-            let attach_output = output.clone().with_narration_sink(move |line| {
-                update_region(
-                    &sink_region,
-                    format!("{attached_so_far}/{total} attaching… {line}"),
-                );
-            });
-            Box::pin(crate::commands::fs::ensure_setup_filesystem(
-                *protocol,
-                *runtime,
-                attach_output,
-            ))
-            .await?;
-            attached += 1;
-            update_region(&region, format!("{attached}/{total} attaching…"));
-        }
-        let glyph = if attached == total {
-            Glyph::Done
-        } else {
-            Glyph::Warn
-        };
-        // Every sink clone above is scoped to one loop iteration's attach
-        // call and is dropped when that call returns, so by the time the
-        // loop exits this is the only remaining handle: safe to reclaim the
-        // region out of the `Arc<Mutex<_>>` and call the consuming
-        // `finish`.
-        let region = Arc::try_unwrap(region)
-            .ok()
-            .expect("no attach call outlives its own loop iteration")
-            .into_inner()
-            .unwrap_or_else(PoisonError::into_inner);
-        region.finish(
-            glyph,
-            "filesystems",
-            format!("{attached}/{total} attached"),
-            key_width,
-        );
-        Ok(())
-    }
-
-    /// The closing block: the tree reveal, the access lines,
-    /// then the single closing sentence naming elapsed time and the
-    /// suggested first command.
-    fn print_closing_block(
-        inventory: &Inventory,
-        output: &Output,
-        started: Instant,
-        caps: Capabilities,
-    ) {
-        let tree = tree_lines(inventory, caps);
-        let block = closing_block(inventory, tree, started.elapsed());
-        for line in block.body {
-            output.narrate(line);
-        }
-        output.outro(block.closing_sentence);
-    }
 }
 
-/// Update the shared aggregate region from either the loop in
-/// [`SetupArgs::attach_filesystems`] or one of its per-attach narration sink
-/// closures. A tiny free function rather than inlining the lock at each call
-/// site, since both callers need the exact same poisoning behavior.
-fn update_region(region: &Arc<Mutex<LiveRegion>>, text: String) {
-    region
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .update("filesystems", text);
+// -- status lines -------------------------------------------------------
+
+fn print_status_lines(daemon_inventory: &omnifs_api::DaemonInventory, output: &Output) {
+    let key_width = Output::ledger_block_width(&["daemon", "state"]);
+    output.ledger_row(
+        &LedgerRow::new(
+            Glyph::Done,
+            "daemon",
+            format!("running (pid {})", daemon_inventory.info.pid),
+        ),
+        key_width,
+    );
+    output.ledger_row(
+        &LedgerRow::new(
+            Glyph::Done,
+            "state",
+            format!(
+                "{}, {}",
+                render::count(daemon_inventory.mounts.len(), "mount"),
+                render::count(daemon_inventory.credentials.len(), "credential"),
+            ),
+        ),
+        key_width,
+    );
 }
 
-/// Split `requested` provider names (the explicit `--providers` path) into
-/// ones not yet configured and ones already present in `configured`,
-/// preserving `requested`'s order. Pure so the skip-vs-select split is
-/// testable without a real profile: `configured` is exactly the set
-/// `select_providers` derives from the existing mount registry.
-fn split_requested_providers(
-    requested: &[String],
-    configured: &BTreeSet<String>,
-) -> (Vec<String>, Vec<String>) {
-    let mut new = Vec::new();
-    let mut skipped = Vec::new();
-    for provider in requested {
-        if configured.contains(provider) {
-            skipped.push(provider.clone());
-        } else {
-            new.push(provider.clone());
-        }
-    }
-    (new, skipped)
+// -- provider catalog -----------------------------------------------------
+
+/// One embedded provider as it appears in the catalog: its manifest, plus
+/// whether it is already configured as a mount.
+struct CatalogEntry {
+    manifest: ProviderManifest,
+    mounted: bool,
 }
 
-/// Which filesystems setup enables: every
-/// filesystem supported on this OS, pre-checked at the platform's recommended
-/// default (`fs::default_runtime`). `--yes`, `--no-input`,
-/// and a non-interactive run all take that recommended default without
-/// prompting, mirroring `PromptMode::resolve`'s explicit/yes/no-input
-/// precedence even though a multi-select has no single "explicit" value to
-/// check. A free function (not a `SetupArgs` method): it needs only the
-/// invocation's output policy and prompt mode, never `SetupArgs` itself.
-fn select_filesystems(
-    output: &Output,
-    prompt: PromptMode,
-) -> Result<Vec<(fs::Protocol, fs::Runtime)>> {
-    let available = available_filesystems();
-    if output.yes() || prompt.no_input() || !prompt.interactive() {
-        return Ok(available
-            .into_iter()
-            .filter(|&(protocol, runtime)| default_runtime(protocol) == Some(runtime))
-            .collect());
-    }
-    let choices = available.into_iter().map(|(protocol, runtime)| {
-        let checked = default_runtime(protocol) == Some(runtime);
-        (
-            FilesystemChoice { protocol, runtime },
-            filesystem_label(protocol, runtime),
-            vec![filesystem_detail(protocol, runtime).to_owned()],
-            checked,
-        )
-    });
-    let selected: Vec<FilesystemChoice> = crate::ui::prompt::MultiSelect::new(
-        "Which filesystems should serve your files?",
-        "filesystems",
-    )
-    .detailed_options(choices)
-    .ask_with_output(output)?;
-    Ok(selected
-        .into_iter()
-        .map(|choice| (choice.protocol, choice.runtime))
-        .collect())
-}
-
-/// One filesystem multi-select choice: a filesystem/runtime pair with a
-/// `Display` impl (`MultiSelect<T>` requires one, the same way a plain
-/// string value would satisfy it), so `select_filesystems` can hand the
-/// picker a real value type instead of a bare tuple.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FilesystemChoice {
-    protocol: fs::Protocol,
-    runtime: fs::Runtime,
-}
-
-impl std::fmt::Display for FilesystemChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&filesystem_label(self.protocol, self.runtime))
-    }
-}
-
-/// The filesystem multi-select's option label (`nfs (host)`).
-fn filesystem_label(protocol: fs::Protocol, runtime: fs::Runtime) -> String {
-    format!("{protocol} ({runtime})")
-}
-
-/// The filesystem multi-select's detail-panel education copy: one
-/// plain sentence naming what each filesystem/runtime combination actually
-/// is, since a first-run user has no other way to know the difference
-/// between, say, a libkrun and a Docker FUSE filesystem.
-fn filesystem_detail(protocol: fs::Protocol, runtime: fs::Runtime) -> &'static str {
-    match (protocol, runtime) {
-        (fs::Protocol::Nfs, fs::Runtime::Host) => "Native mount, nothing to install.",
-        (fs::Protocol::Fuse, fs::Runtime::Host) => "Native FUSE mount, nothing to install.",
-        (fs::Protocol::Fuse, fs::Runtime::Libkrun) => {
-            "FUSE in a lightweight microVM, closest to Linux behavior."
-        },
-        (fs::Protocol::Fuse, fs::Runtime::Docker) => {
-            "FUSE in a container, for containerized workflows."
-        },
-        (fs::Protocol::Nfs, fs::Runtime::Docker | fs::Runtime::Libkrun) => {
-            "NFS is host-only; this combination is not offered."
-        },
-    }
-}
-
-/// The tree-reveal root label: the attached host filesystem's
-/// location when one exists, else the guest wire mount point (display-only,
-/// but still the right label when only a guest attach is live).
-fn tree_root_label(inventory: &Inventory) -> String {
-    inventory.primary_host_location().map_or_else(
-        || fs::GUEST_LOCATION.to_owned(),
-        |path| path.display().to_string(),
-    )
-}
-
-/// One mount's tree-reveal annotation: the first few entry names at its
-/// root, comma-joined, from a cheap bounded listing. `None` on any read
-/// failure, an empty/dynamic root (a namespace like `dns/` that has nothing
-/// to enumerate at its own root), or without a host filesystem to list
-/// through at all (a guest-only attach cannot be read from the host). Never
-/// an error: every failure mode just omits the annotation.
-fn mount_annotation(host_root: Option<&Path>, mount_name: &str) -> Option<String> {
-    let root = host_root?;
-    let entries = std::fs::read_dir(root.join(mount_name)).ok()?;
-    let names: Vec<String> = entries
-        .filter_map(std::result::Result::ok)
-        .take(4)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    if names.is_empty() {
-        return None;
-    }
-    Some(names.join(", "))
-}
-
-/// The tree-reveal lines for every mount in `inventory`, root
-/// label plus per-mount listing via [`mount_annotation`].
-fn tree_lines(inventory: &Inventory, caps: Capabilities) -> Vec<String> {
-    let root = tree_root_label(inventory);
-    let host_root = inventory.primary_host_location();
-    let rows: Vec<(String, Option<String>)> = inventory
-        .mounts
+/// Every embedded provider that parses, alphabetized by name so the catalog
+/// reads the same across runs regardless of the daemon's own listing order.
+fn catalog_entries(embedded: &[ProviderMetadata], mounted: &BTreeSet<String>) -> Vec<CatalogEntry> {
+    let mut entries: Vec<CatalogEntry> = embedded
         .iter()
-        .map(|mount| (mount.name.clone(), mount_annotation(host_root, &mount.name)))
+        .filter_map(|entry| {
+            let manifest = ProviderManifest::from_bytes(&entry.manifest).ok()?;
+            let mounted = mounted.contains(&manifest.id);
+            Some(CatalogEntry { manifest, mounted })
+        })
         .collect();
-    render_tree_lines(&root, &rows, caps)
+    entries.sort_by(|left, right| left.manifest.id.cmp(&right.manifest.id));
+    entries
 }
 
-/// The fixed gap between the longest mount name and its annotation, mirroring
-/// `render.rs::LEDGER_GAP`'s role for ledger rows.
-const TREE_GAP: usize = 4;
+/// Whether a provider needs no sign-in at all: no declared auth scheme, and
+/// no interactive config input (a dynamic domain authority or a host-file
+/// field) that setup's quick-start batch cannot answer on the operator's
+/// behalf.
+fn needs_no_sign_in(manifest: &ProviderManifest) -> bool {
+    manifest.auth.is_none() && !manifest.requires_mount_input()
+}
 
-/// Pure tree-reveal render: the root
-/// label, then one `├──`/`└──` row per mount with its annotation dim and
-/// column-aligned to the longest mount name. Pure and split into lines (not
-/// one joined block) so a fixed listing fixture can assert the exact shape,
-/// and so the caller narrates each line the same way `up`'s access block
-/// does.
-fn render_tree_lines(
-    root: &str,
-    rows: &[(String, Option<String>)],
-    caps: Capabilities,
-) -> Vec<String> {
-    let mut lines = vec![root.to_owned()];
-    let name_width = rows
+/// The honest auth label for one provider's catalog row, derived only from
+/// its manifest: never a hardcoded provider-name table.
+fn provider_auth_label(manifest: &ProviderManifest) -> &'static str {
+    if needs_no_sign_in(manifest) {
+        return "no sign-in";
+    }
+    if manifest.requires_mount_input() {
+        return "needs config";
+    }
+    match manifest
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.default_scheme())
+    {
+        Some((_, AuthScheme::StaticToken(_))) => "needs a token",
+        _ => "needs sign-in",
+    }
+}
+
+fn catalog_description(manifest: &ProviderManifest) -> &str {
+    manifest
+        .description
+        .as_deref()
+        .unwrap_or(&manifest.display_name)
+}
+
+/// The fixed gap after the widest name/description column in the catalog and
+/// the "Next:" block, mirroring `render.rs::LEDGER_GAP`'s role for ledger
+/// rows.
+const CATALOG_GAP: usize = 4;
+
+/// The provider catalog's printed rows: `name`, `description`, and
+/// `auth label`, column-aligned, with a dim `mounted` marker appended to any
+/// row for a provider already configured.
+fn catalog_lines(entries: &[CatalogEntry], caps: Capabilities) -> Vec<String> {
+    let name_width = entries
         .iter()
-        .map(|(name, _)| render::display_width(name) + 1)
+        .map(|entry| render::display_width(&entry.manifest.id))
         .max()
         .unwrap_or(0);
-    let last = rows.len().saturating_sub(1);
-    for (index, (name, annotation)) in rows.iter().enumerate() {
-        let connector = if index == last {
-            "└── "
-        } else {
-            "├── "
-        };
-        let label = format!("{name}/");
-        let mut line = format!("{connector}{label}");
-        if let Some(annotation) = annotation {
-            let pad = name_width.saturating_sub(render::display_width(&label)) + TREE_GAP;
-            line.push_str(&" ".repeat(pad));
-            line.push_str(&style::dim(annotation, caps.color));
+    let desc_width = entries
+        .iter()
+        .map(|entry| render::display_width(catalog_description(&entry.manifest)))
+        .max()
+        .unwrap_or(0);
+    entries
+        .iter()
+        .map(|entry| {
+            let name = &entry.manifest.id;
+            let description = catalog_description(&entry.manifest);
+            let label = provider_auth_label(&entry.manifest);
+            let name_pad = name_width.saturating_sub(render::display_width(name)) + CATALOG_GAP;
+            let desc_pad =
+                desc_width.saturating_sub(render::display_width(description)) + CATALOG_GAP;
+            let mut line = format!(
+                "{name}{}{description}{}{label}",
+                " ".repeat(name_pad),
+                " ".repeat(desc_pad)
+            );
+            if entry.mounted {
+                line.push_str("  ");
+                line.push_str(&style::dim("mounted", caps.color));
+            }
+            line
+        })
+        .collect()
+}
+
+fn print_provider_catalog(entries: &[CatalogEntry], output: &Output, caps: Capabilities) {
+    if entries.is_empty() {
+        return;
+    }
+    output.narrate("");
+    output.heading("Providers you can mount:");
+    output.narrate("");
+    for line in catalog_lines(entries, caps) {
+        output.narrate(line);
+    }
+}
+
+/// The providers offered by the no-sign-in quick-start batch: every catalog
+/// entry that needs no sign-in and is not already mounted.
+fn no_sign_in_offer(entries: &[CatalogEntry]) -> Vec<&ProviderManifest> {
+    entries
+        .iter()
+        .filter(|entry| !entry.mounted && needs_no_sign_in(&entry.manifest))
+        .map(|entry| &entry.manifest)
+        .collect()
+}
+
+fn mount_offer_question(offer: &[String]) -> String {
+    format!(
+        "Mount the {} that need no sign-in ({})?",
+        render::count(offer.len(), "service"),
+        offer.join(", ")
+    )
+}
+
+/// Mount every provider in `offer` in one atomic batch if the operator
+/// accepts, printing one `mounted` ledger row naming what got mounted.
+/// Returns the mount names actually created (empty when the offer was empty,
+/// declined, or answered no).
+async fn offer_quick_start_mounts(
+    rpc: &RpcClient,
+    state: &ClientState,
+    output: &Output,
+    prompt: PromptMode,
+    offer: &[String],
+) -> Result<Vec<String>> {
+    if offer.is_empty() {
+        return Ok(Vec::new());
+    }
+    output.narrate("");
+    if !resolve_offer_decision(output, prompt, mount_offer_question(offer))? {
+        return Ok(Vec::new());
+    }
+    let mut ops = Vec::with_capacity(offer.len());
+    let mut mounted = Vec::with_capacity(offer.len());
+    for name in offer {
+        let resolved = ProviderResolver::new(rpc).resolve(name).await?;
+        let definition = crate::commands::mount::create::quick_start_definition(
+            rpc,
+            output,
+            resolved.reference.id,
+            &resolved.manifest,
+        )
+        .await?;
+        mounted.push(definition.name.to_string());
+        ops.push(PlannedOp::mount_create(definition));
+    }
+    let outcome = crate::mutation::run(rpc, state, output, || async move { Ok(ops) })
+        .await?
+        .context("quick-start mount batch produced no result")?;
+    crate::mutation::narrate_serving(output, &outcome.serving);
+    output.ledger_row(
+        &LedgerRow::new(Glyph::Done, "mounted", mounted.join(", ")),
+        Output::ledger_block_width(&["mounted"]),
+    );
+    Ok(mounted)
+}
+
+// -- filesystem quick-start -----------------------------------------------
+
+/// Every filesystem this platform recommends by default, in
+/// `available_filesystems`'s order.
+fn recommended_filesystems() -> Vec<(fs::Protocol, fs::Runtime)> {
+    available_filesystems()
+        .into_iter()
+        .filter(|&(protocol, runtime)| default_runtime(protocol) == Some(runtime))
+        .collect()
+}
+
+/// `recommended`, minus whatever is already attached per the daemon's live
+/// inventory.
+fn filesystem_offer(
+    recommended: &[(fs::Protocol, fs::Runtime)],
+    attached: &[fs::Spec],
+) -> Vec<(fs::Protocol, fs::Runtime)> {
+    recommended
+        .iter()
+        .copied()
+        .filter(|&(protocol, runtime)| {
+            !attached
+                .iter()
+                .any(|spec| spec.protocol() == protocol && spec.runtime() == runtime)
+        })
+        .collect()
+}
+
+/// A short, friendly platform name for the filesystem quick-start question.
+fn os_label() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macOS",
+        "linux" => "Linux",
+        other => other,
+    }
+}
+
+fn filesystem_offer_question(
+    offer: &[(fs::Protocol, fs::Runtime)],
+    locations: &[String],
+) -> String {
+    let noun = if offer.len() == 1 {
+        "filesystem"
+    } else {
+        "filesystems"
+    };
+    let joined = offer
+        .iter()
+        .zip(locations)
+        .map(|(&(protocol, _), location)| format!("{protocol} at {location}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Attach the recommended {noun} for {} ({joined})?",
+        os_label()
+    )
+}
+
+/// Attach every filesystem in `offer` sequentially if the operator accepts,
+/// with plain narration (the defaults are host-native and fast, so no
+/// aggregate live region is needed the way a Docker image pull would want
+/// one). Prints one `attached` ledger row naming what got attached. Returns
+/// the first attached host-runtime filesystem's location, if any: the
+/// closing sentence's browse hint needs a real host path to join a mount
+/// name onto.
+async fn offer_quick_start_filesystems(
+    output: &Output,
+    prompt: PromptMode,
+    offer: &[(fs::Protocol, fs::Runtime)],
+) -> Result<Option<PathBuf>> {
+    if offer.is_empty() {
+        return Ok(None);
+    }
+    let client_state = ClientFilesystemState::resolve()?;
+    let mut locations = Vec::with_capacity(offer.len());
+    for &(protocol, runtime) in offer {
+        let location =
+            crate::commands::fs::preview_filesystem_location(&client_state, protocol, runtime)?;
+        locations.push(location.display().to_string());
+    }
+    output.narrate("");
+    if !resolve_offer_decision(output, prompt, filesystem_offer_question(offer, &locations))? {
+        return Ok(None);
+    }
+    let mut labels = Vec::with_capacity(offer.len());
+    let mut host_location = None;
+    for &(protocol, runtime) in offer {
+        crate::commands::fs::ensure_setup_filesystem(protocol, runtime, output.clone()).await?;
+        let location =
+            crate::commands::fs::preview_filesystem_location(&client_state, protocol, runtime)?;
+        let id = fs::Id::new(format!("{protocol}-{runtime}"))?;
+        if runtime == fs::Runtime::Host {
+            host_location.get_or_insert_with(|| location.clone());
         }
-        lines.push(line);
+        labels.push(format!("{id} at {}", location.display()));
     }
-    lines
+    output.ledger_row(
+        &LedgerRow::new(Glyph::Done, "attached", labels.join(", ")),
+        Output::ledger_block_width(&["attached"]),
+    );
+    Ok(host_location)
 }
 
-/// The closing block's ordered content: a blank line, the tree
-/// reveal, then the one Inventory-selected action in the closing sentence
-/// (rendered separately through [`Output::outro`] so its wrapping and
-/// "already closed" bookkeeping stay owned by `Output`).
-struct ClosingBlock {
-    body: Vec<String>,
-    closing_sentence: String,
+/// The shared decision for both quick-start prompts: `--yes` always accepts;
+/// `--no-input` and a non-interactive run both decline without prompting
+/// (setup still exits successfully either way); otherwise ask, defaulting to
+/// yes.
+fn resolve_offer_decision(
+    output: &Output,
+    prompt: PromptMode,
+    question: impl Into<String>,
+) -> Result<bool> {
+    if output.yes() {
+        return Ok(true);
+    }
+    if prompt.no_input() || !prompt.interactive() {
+        return Ok(false);
+    }
+    crate::ui::prompt::Confirm::new(question)
+        .with_default(true)
+        .ask_with_output(output)
 }
 
-fn closing_block(inventory: &Inventory, tree: Vec<String>, elapsed: Duration) -> ClosingBlock {
-    let mut body = vec![String::new()];
-    body.extend(tree);
-    let action = inventory
-        .next_action()
-        .map(|action| crate::ui::access::ActionLine::from(&action).render());
-    ClosingBlock {
-        body,
-        closing_sentence: action.map_or_else(
-            || format!("All set in {}.", format_elapsed(elapsed)),
-            |action| format!("All set in {}. {action}", format_elapsed(elapsed)),
+// -- next block and closing ------------------------------------------------
+
+fn next_block_lines(example_provider: Option<&str>) -> Vec<String> {
+    let commands = [
+        example_provider.map_or_else(
+            || "omnifs mount add".to_owned(),
+            |name| format!("omnifs mount add {name}"),
         ),
+        "omnifs status".to_owned(),
+        "omnifs fs list".to_owned(),
+    ];
+    let descriptions = [
+        "mount a service (opens sign-in if needed)",
+        "see everything at a glance",
+        "manage filesystems (fuse, microVM, docker)",
+    ];
+    let width = commands
+        .iter()
+        .map(|command| render::display_width(command))
+        .max()
+        .unwrap_or(0);
+    commands
+        .iter()
+        .zip(descriptions)
+        .map(|(command, description)| {
+            let pad = width.saturating_sub(render::display_width(command)) + CATALOG_GAP;
+            format!("{command}{}{description}", " ".repeat(pad))
+        })
+        .collect()
+}
+
+fn print_next_block(entries: &[CatalogEntry], mounted: &[String], output: &Output) {
+    output.narrate("");
+    output.heading("Next:");
+    output.narrate("");
+    let example = entries
+        .iter()
+        .find(|entry| !entry.mounted && !mounted.iter().any(|name| name == &entry.manifest.id))
+        .map(|entry| entry.manifest.id.as_str());
+    for line in next_block_lines(example) {
+        output.narrate(line);
     }
+}
+
+/// The closing sentence's four cases, in the order they are checked:
+/// providers mounted and a host filesystem attached names both in a browse
+/// hint; a filesystem attached with nothing newly mounted points at
+/// `mount add`; providers mounted without an attached host filesystem points
+/// at attaching the platform's recommended one; otherwise the sentence
+/// stays plain. Pure so every case is testable without a live daemon.
+fn closing_sentence(
+    mounted: &[String],
+    attached_host_location: Option<&Path>,
+    recommended_fs_id: Option<&fs::Id>,
+    elapsed: Duration,
+) -> String {
+    let elapsed = format_elapsed(elapsed);
+    if let (Some(first), Some(location)) = (mounted.first(), attached_host_location) {
+        let action = ActionLine::from(&NextAction::Browse {
+            path: location.join(first),
+        })
+        .render();
+        return format!("All set in {elapsed}. {action}");
+    }
+    if attached_host_location.is_some() {
+        return format!("All set in {elapsed}. Add a service:  `omnifs mount add`");
+    }
+    if !mounted.is_empty()
+        && let Some(id) = recommended_fs_id
+    {
+        let action = ActionLine::from(&NextAction::AttachFilesystem { id: id.clone() }).render();
+        return format!("All set in {elapsed}. {action}");
+    }
+    format!("All set in {elapsed}.")
 }
 
 /// `38s` under a minute, `2m 10s` at or above one.
@@ -538,11 +513,12 @@ fn format_elapsed(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inventory::{
-        AuthState, DaemonHealth, FilesystemState, MountStatus, ProviderPin, ProviderPinState,
-        ServingState,
+    use omnifs_auth::{OAuthFlow, OauthScheme, PkceLoopbackConfig, StaticTokenScheme};
+    use omnifs_provider::{
+        ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, LimitDeclarations,
+        PreopenMode, ProviderAuthManifest,
     };
-    use std::path::PathBuf;
+    use std::collections::BTreeMap;
 
     fn caps() -> Capabilities {
         Capabilities {
@@ -553,149 +529,336 @@ mod tests {
         }
     }
 
-    // -- select_providers: --providers skip-vs-select split -----------------
-
-    #[test]
-    fn split_requested_providers_separates_new_from_already_configured() {
-        let requested = vec!["github".to_owned(), "dns".to_owned(), "linear".to_owned()];
-        let mut configured = BTreeSet::new();
-        configured.insert("dns".to_owned());
-        let (new, skipped) = split_requested_providers(&requested, &configured);
-        assert_eq!(new, vec!["github".to_owned(), "linear".to_owned()]);
-        assert_eq!(skipped, vec!["dns".to_owned()]);
-    }
-
-    // -- select_filesystems: --yes/--no-input/non-interactive all default -----
-
-    fn prompt(interactive: bool, yes: bool, no_input: bool) -> PromptMode {
-        PromptMode::for_test(interactive, yes, no_input)
-    }
-
-    fn expected_default_filesystems() -> Vec<(fs::Protocol, fs::Runtime)> {
-        available_filesystems()
-            .into_iter()
-            .filter(|&(protocol, runtime)| default_runtime(protocol) == Some(runtime))
-            .collect()
-    }
-
-    #[test]
-    fn non_prompting_setup_modes_take_the_platform_default() {
-        for (output, mode) in [
-            (
-                Output::new(crate::ui::output::OutputMode::Human, false).with_yes(true),
-                prompt(true, true, false),
-            ),
-            (
-                Output::new(crate::ui::output::OutputMode::Human, false),
-                prompt(true, false, true),
-            ),
-            (
-                Output::new(crate::ui::output::OutputMode::Human, false),
-                prompt(false, false, false),
-            ),
-        ] {
-            assert_eq!(
-                select_filesystems(&output, mode).unwrap(),
-                expected_default_filesystems()
-            );
+    fn manifest(
+        id: &str,
+        auth: Option<ProviderAuthManifest>,
+        config: Option<ConfigMetadata>,
+    ) -> ProviderManifest {
+        ProviderManifest {
+            id: id.to_owned(),
+            display_name: format!("{id} display"),
+            description: Some(format!("{id} description")),
+            provider: format!("{id}.wasm"),
+            default_mount: id.to_owned(),
+            version: None,
+            wit_package: None,
+            sdk_version: None,
+            refresh_interval_secs: 0,
+            capabilities: Vec::new(),
+            limits: LimitDeclarations::default(),
+            auth,
+            config,
         }
     }
 
-    // -- tree reveal: pure render from a fixed fixture -----------------------
-
-    #[test]
-    fn render_tree_lines_matches_the_documented_shape() {
-        let rows = vec![
-            ("github".to_owned(), Some("raulk, ethereum".to_owned())),
-            ("dns".to_owned(), None),
-        ];
-        let lines = render_tree_lines("~/omnifs", &rows, caps());
-        assert_eq!(lines[0], "~/omnifs");
-        assert!(lines[1].starts_with("├── github/"), "{:?}", lines[1]);
-        assert!(lines[1].contains("raulk, ethereum"), "{:?}", lines[1]);
-        assert!(lines[2].starts_with("└── dns/"), "{:?}", lines[2]);
-        // No annotation: the line ends right after the trailing slash.
-        assert_eq!(lines[2], "└── dns/");
-    }
-
-    #[test]
-    fn render_tree_lines_aligns_annotations_to_the_longest_mount_name() {
-        let rows = vec![
-            ("a".to_owned(), Some("x".to_owned())),
-            ("much-longer-name".to_owned(), Some("y".to_owned())),
-        ];
-        let lines = render_tree_lines("~/omnifs", &rows, caps());
-        let first_annotation_column = lines[1].find('x').unwrap();
-        let second_annotation_column = lines[2].find('y').unwrap();
-        assert_eq!(first_annotation_column, second_annotation_column);
-    }
-
-    #[test]
-    fn mount_annotation_lists_the_first_entries_and_omits_on_empty_or_missing_root() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        std::fs::create_dir_all(root.join("github").join("raulk")).unwrap();
-        std::fs::create_dir_all(root.join("github").join("ethereum")).unwrap();
-        std::fs::create_dir_all(root.join("dns")).unwrap();
-
-        let annotation = mount_annotation(Some(root), "github").unwrap();
-        let mut names: Vec<&str> = annotation.split(", ").collect();
-        names.sort_unstable();
-        assert_eq!(names, vec!["ethereum", "raulk"]);
-
-        assert!(mount_annotation(Some(root), "dns").is_none());
-        assert!(mount_annotation(Some(root), "does-not-exist").is_none());
-        assert!(mount_annotation(None, "github").is_none());
-    }
-
-    // -- closing block ordering ----------------------------------------------
-
-    fn mount(name: &str) -> MountStatus {
-        MountStatus {
-            name: name.to_owned(),
-            root: PathBuf::from(format!("/{name}")),
-            provider: ProviderPin {
-                name: name.to_owned(),
-                version: None,
-                artifact: "a".repeat(64),
-                state: ProviderPinState::Available,
-            },
-            auth: AuthState::NotNeeded,
-            serving: ServingState::Live,
-            access_count: 1,
+    fn oauth_auth() -> ProviderAuthManifest {
+        ProviderAuthManifest {
+            default: "oauth".to_owned(),
+            guidance: BTreeMap::new(),
+            schemes: vec![AuthScheme::Oauth(OauthScheme {
+                key: "oauth".to_owned(),
+                display_name: "OAuth".to_owned(),
+                authorization_endpoint: "https://example.com/authorize".to_owned(),
+                token_endpoint: "https://example.com/token".to_owned(),
+                revocation_endpoint: None,
+                default_client_id: Some("client".to_owned()),
+                default_scopes: Vec::new(),
+                flow: OAuthFlow::PkceLoopback(PkceLoopbackConfig {
+                    redirect_uri_template: "http://127.0.0.1:{port}/cb".to_owned(),
+                }),
+                token_endpoint_auth: omnifs_auth::TokenEndpointAuthMethod::None,
+                refresh_token_rotates: false,
+                extra_authorize_params: Vec::new(),
+                extra_token_params: Vec::new(),
+                inject_domains: vec!["example.com".to_owned()],
+                inject_header_name: None,
+                inject_value_prefix: String::new(),
+            })],
         }
     }
 
-    fn host_fs() -> crate::inventory::FilesystemStatus {
-        crate::inventory::FilesystemStatus {
-            spec: fs::Spec::new(
-                "host".parse().unwrap(),
-                fs::Protocol::Nfs,
-                fs::Runtime::Host,
-                PathBuf::from("/Users/raulk/omnifs"),
-            )
-            .unwrap(),
-            state: FilesystemState::Attached,
-            mount_count: 1,
-            fix: None,
+    fn static_token_auth() -> ProviderAuthManifest {
+        ProviderAuthManifest {
+            default: "pat".to_owned(),
+            guidance: BTreeMap::new(),
+            schemes: vec![AuthScheme::StaticToken(StaticTokenScheme {
+                key: "pat".to_owned(),
+                header_name: Some("Authorization".to_owned()),
+                value_prefix: String::new(),
+                description: "token".to_owned(),
+                inject_domains: vec!["example.com".to_owned()],
+                creation_url: None,
+                validation: None,
+                ambient_sources: Vec::new(),
+            })],
         }
     }
 
+    fn host_file_config() -> ConfigMetadata {
+        ConfigMetadata {
+            fields: vec![ConfigField {
+                name: "path".to_owned(),
+                value_type: ConfigType::String,
+                required: false,
+                default: None,
+                description: None,
+                binding: Some(HostResourceBinding::File {
+                    mode: PreopenMode::Ro,
+                }),
+            }],
+        }
+    }
+
+    // -- needs_no_sign_in / provider_auth_label ------------------------------
+
     #[test]
-    fn closing_block_ends_with_one_inventory_action() {
-        let inventory = Inventory::test(
-            DaemonHealth::Running,
-            vec![host_fs()],
-            vec![mount("github")],
-        );
-        let tree = vec!["~/omnifs".to_owned(), "└── github/".to_owned()];
-        let block = closing_block(&inventory, tree.clone(), Duration::from_secs(38));
-        let mut expected_body = vec![String::new()];
-        expected_body.extend(tree);
-        assert_eq!(block.body, expected_body);
+    fn needs_no_sign_in_requires_no_auth_and_no_mount_input() {
+        assert!(needs_no_sign_in(&manifest("dns", None, None)));
+        assert!(!needs_no_sign_in(&manifest(
+            "github",
+            Some(oauth_auth()),
+            None
+        )));
+        assert!(!needs_no_sign_in(&manifest(
+            "db",
+            None,
+            Some(host_file_config())
+        )));
+    }
+
+    #[test]
+    fn provider_auth_label_derives_from_the_manifest_alone() {
         assert_eq!(
-            block.closing_sentence,
-            "All set in 38s. Browse:  `ls /Users/raulk/omnifs/github`"
+            provider_auth_label(&manifest("dns", None, None)),
+            "no sign-in"
+        );
+        assert_eq!(
+            provider_auth_label(&manifest("db", None, Some(host_file_config()))),
+            "needs config"
+        );
+        // `requires_mount_input` outranks an auth label even when the
+        // provider also declares auth.
+        assert_eq!(
+            provider_auth_label(&manifest(
+                "db",
+                Some(oauth_auth()),
+                Some(host_file_config())
+            )),
+            "needs config"
+        );
+        assert_eq!(
+            provider_auth_label(&manifest("github", Some(oauth_auth()), None)),
+            "needs sign-in"
+        );
+        assert_eq!(
+            provider_auth_label(&manifest("linear", Some(static_token_auth()), None)),
+            "needs a token"
+        );
+    }
+
+    // -- catalog entries / lines ----------------------------------------------
+
+    #[test]
+    fn catalog_entries_marks_already_mounted_providers_and_sorts_by_name() {
+        let embedded = vec![
+            embedded_provider(&manifest("web", None, None)),
+            embedded_provider(&manifest("arxiv", None, None)),
+        ];
+        let mut mounted = BTreeSet::new();
+        mounted.insert("web".to_owned());
+        let entries = catalog_entries(&embedded, &mounted);
+        assert_eq!(entries[0].manifest.id, "arxiv");
+        assert!(!entries[0].mounted);
+        assert_eq!(entries[1].manifest.id, "web");
+        assert!(entries[1].mounted);
+    }
+
+    #[test]
+    fn catalog_lines_column_aligns_and_appends_a_mounted_marker() {
+        let entries = vec![
+            CatalogEntry {
+                manifest: manifest("dns", None, None),
+                mounted: false,
+            },
+            CatalogEntry {
+                manifest: manifest("much-longer-name", Some(oauth_auth()), None),
+                mounted: true,
+            },
+        ];
+        let lines = catalog_lines(&entries, caps());
+        let first_label_column = lines[0].find("no sign-in").unwrap();
+        let second_label_column = lines[1].find("needs sign-in").unwrap();
+        assert_eq!(first_label_column, second_label_column);
+        assert!(lines[1].ends_with("mounted"), "{:?}", lines[1]);
+        assert!(!lines[0].contains("mounted"), "{:?}", lines[0]);
+    }
+
+    #[test]
+    fn no_sign_in_offer_excludes_mounted_and_sign_in_needed_providers() {
+        let entries = vec![
+            CatalogEntry {
+                manifest: manifest("dns", None, None),
+                mounted: false,
+            },
+            CatalogEntry {
+                manifest: manifest("arxiv", None, None),
+                mounted: true,
+            },
+            CatalogEntry {
+                manifest: manifest("github", Some(oauth_auth()), None),
+                mounted: false,
+            },
+        ];
+        let offer: Vec<&str> = no_sign_in_offer(&entries)
+            .into_iter()
+            .map(|manifest| manifest.id.as_str())
+            .collect();
+        assert_eq!(offer, vec!["dns"]);
+    }
+
+    #[test]
+    fn mount_offer_question_names_the_count_and_the_services() {
+        let offer = vec!["dns".to_owned(), "arxiv".to_owned(), "web".to_owned()];
+        assert_eq!(
+            mount_offer_question(&offer),
+            "Mount the 3 services that need no sign-in (dns, arxiv, web)?"
+        );
+    }
+
+    fn embedded_provider(manifest: &ProviderManifest) -> ProviderMetadata {
+        let bytes = serde_json::to_vec(manifest).unwrap();
+        ProviderMetadata {
+            reference: omnifs_api::ProviderReference {
+                id: omnifs_core::ProviderId::from_wasm_bytes(bytes.as_slice()),
+                name: manifest.id.clone(),
+                version: None,
+            },
+            manifest: bytes,
+        }
+    }
+
+    // -- filesystem offer ------------------------------------------------------
+
+    fn spec(protocol: fs::Protocol, runtime: fs::Runtime) -> fs::Spec {
+        fs::Spec::new(
+            format!("{protocol}-{runtime}").parse().unwrap(),
+            protocol,
+            runtime,
+            PathBuf::from("/tmp/x"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn filesystem_offer_excludes_already_attached_pairs() {
+        let recommended = vec![(fs::Protocol::Nfs, fs::Runtime::Host)];
+        let offer = filesystem_offer(&recommended, &[]);
+        assert_eq!(offer, recommended);
+
+        let attached = [spec(fs::Protocol::Nfs, fs::Runtime::Host)];
+        let offer = filesystem_offer(&recommended, &attached);
+        assert!(offer.is_empty());
+    }
+
+    #[test]
+    fn filesystem_offer_question_names_the_os_and_locations() {
+        let offer = vec![(fs::Protocol::Nfs, fs::Runtime::Host)];
+        let locations = vec!["/Users/raulk/omnifs".to_owned()];
+        let question = filesystem_offer_question(&offer, &locations);
+        assert_eq!(
+            question,
+            format!(
+                "Attach the recommended filesystem for {} (nfs at /Users/raulk/omnifs)?",
+                os_label()
+            )
+        );
+    }
+
+    // -- resolve_offer_decision: non-prompting branches ----------------------
+
+    #[test]
+    fn resolve_offer_decision_yes_always_accepts_without_prompting() {
+        let output = Output::new(crate::ui::output::OutputMode::Human, false).with_yes(true);
+        let prompt = PromptMode::for_test(true, true, false);
+        assert!(resolve_offer_decision(&output, prompt, "Mount?").unwrap());
+    }
+
+    #[test]
+    fn resolve_offer_decision_declines_without_prompting_when_no_input_or_non_interactive() {
+        let output = Output::new(crate::ui::output::OutputMode::Human, false);
+        for prompt in [
+            PromptMode::for_test(true, false, true),
+            PromptMode::for_test(false, false, false),
+        ] {
+            assert!(!resolve_offer_decision(&output, prompt, "Mount?").unwrap());
+        }
+    }
+
+    // -- next block -----------------------------------------------------------
+
+    #[test]
+    fn next_block_lines_uses_a_real_unmounted_provider_when_one_exists() {
+        let lines = next_block_lines(Some("github"));
+        assert!(
+            lines[0].starts_with("omnifs mount add github"),
+            "{:?}",
+            lines[0]
+        );
+        assert!(lines[0].contains("mount a service"));
+        assert!(lines[1].starts_with("omnifs status"));
+        assert!(lines[2].starts_with("omnifs fs list"));
+    }
+
+    #[test]
+    fn next_block_lines_falls_back_to_the_bare_command_without_an_example() {
+        let lines = next_block_lines(None);
+        assert!(
+            lines[0].starts_with("omnifs mount add") && !lines[0].starts_with("omnifs mount add g"),
+            "{:?}",
+            lines[0]
+        );
+        assert!(lines[0].contains("mount a service"));
+    }
+
+    // -- closing sentence -------------------------------------------------------
+
+    #[test]
+    fn closing_sentence_browses_when_mounted_and_attached() {
+        let mounted = vec!["dns".to_owned()];
+        let location = PathBuf::from("/Users/raulk/omnifs");
+        let sentence = closing_sentence(&mounted, Some(&location), None, Duration::from_secs(6));
+        assert_eq!(
+            sentence,
+            "All set in 6s. Browse:  `ls /Users/raulk/omnifs/dns`"
+        );
+    }
+
+    #[test]
+    fn closing_sentence_points_at_mount_add_when_attached_without_new_mounts() {
+        let location = PathBuf::from("/Users/raulk/omnifs");
+        let sentence = closing_sentence(&[], Some(&location), None, Duration::from_secs(6));
+        assert_eq!(
+            sentence,
+            "All set in 6s. Add a service:  `omnifs mount add`"
+        );
+    }
+
+    #[test]
+    fn closing_sentence_points_at_fs_attach_when_mounted_without_a_host_attach() {
+        let mounted = vec!["dns".to_owned()];
+        let id: fs::Id = "nfs-host".parse().unwrap();
+        let sentence = closing_sentence(&mounted, None, Some(&id), Duration::from_secs(6));
+        assert_eq!(
+            sentence,
+            "All set in 6s. Mount files:  `omnifs fs attach --name nfs-host`"
+        );
+    }
+
+    #[test]
+    fn closing_sentence_is_plain_when_nothing_happened() {
+        assert_eq!(
+            closing_sentence(&[], None, None, Duration::from_secs(6)),
+            "All set in 6s."
         );
     }
 
