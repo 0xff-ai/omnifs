@@ -7,6 +7,7 @@
 //! `fs::Runtime`; every other command dispatches by matching this enum's own
 //! variants instead.
 
+use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,7 +16,7 @@ use anyhow::{Context as _, Result, ensure};
 use omnifs_core::{ClientOwnerId, fs};
 
 use crate::client_fs_state::ClientFilesystemState;
-use crate::docker::{DockerClient, DockerContainerIdentity};
+use crate::docker::{DockerClient, DockerContainerIdentity, OwnedFilesystemContainer};
 use crate::host_fs::HostDriver;
 use crate::libkrun_runner::LibkrunRunner;
 use crate::ui::output::Output;
@@ -67,6 +68,74 @@ impl<'a> LaunchContext<'a> {
         self.attach_tcp
             .context("daemon has no TCP filesystem attach listener")
     }
+}
+
+/// The one spec-vs-record identity check the host and libkrun drivers'
+/// `confirmed` both need: a durable record only proves a live instance when
+/// its spec still matches the caller's configured one. Docker's `confirmed`
+/// keeps its own check (a launch-command argv comparison, since a Docker
+/// container carries no persisted `fs::Spec` to compare against directly).
+pub(crate) fn ensure_record_matches(record_spec: &fs::Spec, expected: &fs::Spec) -> Result<()> {
+    ensure!(
+        record_spec == expected,
+        "runner record does not match configured filesystem `{}`",
+        expected.id()
+    );
+    Ok(())
+}
+
+/// The "durable state survives but its record is gone" fail-shape every
+/// backend's `confirmed` opens with: prove nothing is left to reconcile
+/// before returning `None`, rather than silently reporting the filesystem as
+/// absent while a mount or helper is still live. `what` names the backend's
+/// state, `record_noun` the record it expected to find alongside it.
+pub(crate) fn ensure_no_orphaned_state(
+    state_exists: bool,
+    what: &str,
+    record_noun: &str,
+    location: impl fmt::Display,
+) -> Result<()> {
+    ensure!(
+        !state_exists,
+        "{what} state exists at {location} without a {record_noun}; run `omnifs doctor`"
+    );
+    Ok(())
+}
+
+/// The recheck every `stop_confirmed` performs before it touches anything:
+/// a proven identity can go stale between confirmation and teardown, and
+/// acting on a replacement process, container, or helper that reused the
+/// same durable slot would be a correctness bug, not just a stale message.
+/// `noun` names the backend for the one shared phrasing.
+pub(crate) fn ensure_identity_unchanged<T: PartialEq>(
+    current: Option<&T>,
+    expected: &T,
+    noun: &str,
+) -> Result<()> {
+    ensure!(
+        current == Some(expected),
+        "{noun} identity changed; refusing to touch its replacement"
+    );
+    Ok(())
+}
+
+/// Fold a rollback attempt's outcome into the error that triggered it: the
+/// original failure always wins, but a cleanup that also failed is appended
+/// as context rather than silently dropped. `what` names the thing rollback
+/// was cleaning up. Shared by every driver whose `launch` rolls back a
+/// partially started instance on failure; host deliberately never calls this
+/// (it leaves a timed-out runner alive for safe cleanup instead).
+pub(crate) fn err_after_rollback<T>(
+    primary: anyhow::Error,
+    cleanup: Result<()>,
+    what: &str,
+) -> Result<T> {
+    Err(match cleanup {
+        Ok(()) => primary,
+        Err(cleanup_error) => primary.context(format!(
+            "{what} also could not be cleaned up: {cleanup_error:#}"
+        )),
+    })
 }
 
 /// One filesystem's live driver, bound to a specific configured `spec` at
@@ -131,12 +200,7 @@ impl FilesystemDriver {
                 let Some(record) = runner.confirmed()? else {
                     return Ok(None);
                 };
-                ensure!(
-                    record.spec == *spec,
-                    "libkrun helper spec `{}` does not match configured filesystem `{}`",
-                    record.spec,
-                    spec.id()
-                );
+                ensure_record_matches(&record.spec, spec)?;
                 Ok(Some(Confirmed::Libkrun(record)))
             },
         }
@@ -200,12 +264,31 @@ impl FilesystemDriver {
 }
 
 /// One filesystem instance found by [`owned_filesystems`]'s combined scan
-/// across the three backends, or a whole backend's listing failure. Doctor's
-/// stray-filesystem check is the only consumer.
+/// across the three backends, or one entry that scan could not identify or
+/// confirm. Doctor's stray-filesystem check is the only consumer. A single
+/// flat enum rather than three backend-specific `Valid`/`Invalid` scan
+/// results each wrapped again here: every backend yields this type directly,
+/// so an unreadable or unconfirmable entry (`Invalid`) has one shape and one
+/// finding path regardless of which backend found it.
 pub(crate) enum Candidate {
-    Host(crate::host_fs::RunnerProbe),
-    Docker(crate::docker::OwnedFilesystemCandidate),
-    Libkrun(crate::libkrun_runner::LibkrunCandidate),
+    Host {
+        state_dir: PathBuf,
+        record: omnifs_mtab::RunnerRecord,
+        confirmed: Result<omnifs_thin::host_control::RunnerPhase, String>,
+    },
+    Docker(OwnedFilesystemContainer),
+    Libkrun {
+        id: fs::Id,
+        state_dir: PathBuf,
+        confirmed: Result<Option<omnifs_libkrun::HelperRecord>, String>,
+    },
+    /// One scan entry that could not be identified or read, naming the
+    /// owning backend so a caller need not re-derive it.
+    Invalid {
+        backend: &'static str,
+        target: Option<String>,
+        error: String,
+    },
     /// A whole backend's listing call failed, naming which one so the
     /// caller can label its finding without re-deriving it.
     ListingFailed {
@@ -226,7 +309,7 @@ pub(crate) async fn owned_filesystems(
 ) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     match crate::host_fs::owned(client_state).await {
-        Ok(probes) => candidates.extend(probes.into_iter().map(Candidate::Host)),
+        Ok(mut owned) => candidates.append(&mut owned),
         Err(error) => candidates.push(Candidate::ListingFailed {
             backend: "host",
             error: format!("{error:#}"),
@@ -234,17 +317,13 @@ pub(crate) async fn owned_filesystems(
     }
     if let Some(docker) = docker {
         match docker.owned(client_state.profile_root()).await {
-            Ok(owned) => candidates.extend(owned.into_iter().map(Candidate::Docker)),
+            Ok(mut owned) => candidates.append(&mut owned),
             Err(error) => candidates.push(Candidate::ListingFailed {
                 backend: "docker",
                 error: format!("{error:#}"),
             }),
         }
     }
-    candidates.extend(
-        LibkrunRunner::owned(&client_state.runtime_root())
-            .into_iter()
-            .map(Candidate::Libkrun),
-    );
+    candidates.append(&mut LibkrunRunner::owned(&client_state.runtime_root()));
     candidates
 }

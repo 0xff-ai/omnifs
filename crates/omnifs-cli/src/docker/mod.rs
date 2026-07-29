@@ -26,6 +26,7 @@ use self::container::{
 };
 use crate::client_fs_state::ClientFilesystemState;
 use crate::error::WithHint;
+use crate::filesystem_driver::{Candidate, ensure_identity_unchanged, err_after_rollback};
 use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
 use crate::ui::output::Output;
 
@@ -134,18 +135,6 @@ pub(crate) struct OwnedFilesystemContainer {
     pub(crate) names: Vec<String>,
 }
 
-/// One container discovered by [`DockerClient::owned`]'s label-filtered
-/// listing, or the specific reason it failed the identity/label validation
-/// proved once here rather than downstream at each caller.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum OwnedFilesystemCandidate {
-    Valid(OwnedFilesystemContainer),
-    Invalid {
-        target: Option<String>,
-        error: String,
-    },
-}
-
 /// How long [`DockerClient::launch`] waits for the FUSE mount to appear
 /// inside the freshly started filesystem container before rolling it back.
 const MOUNT_READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -220,15 +209,10 @@ impl DockerClient {
             .context("the launched filesystem container did not retain its exact identity")?;
 
         if let Err(mount_error) = self.wait_for_mount_ready().await {
-            return match self
+            let cleanup = self
                 .stop_confirmed(&identity, home, client_owner, spec)
-                .await
-            {
-                Ok(()) => Err(mount_error),
-                Err(cleanup_error) => Err(mount_error.context(format!(
-                    "the failed filesystem container also could not be removed: {cleanup_error:#}"
-                ))),
-            };
+                .await;
+            return err_after_rollback(mount_error, cleanup, "the failed filesystem container");
         }
         Ok(())
     }
@@ -247,7 +231,7 @@ impl DockerClient {
         })
     }
 
-    pub(crate) async fn mount_ready(&self, path: &str) -> Result<bool> {
+    async fn mount_ready(&self, path: &str) -> Result<bool> {
         tokio::time::timeout(Duration::from_secs(2), self.exec_path_exists(path))
             .await
             .context("Docker filesystem mount probe timed out")?
@@ -361,10 +345,7 @@ impl DockerClient {
     /// construction. Canonical names are still validated by doctor, since
     /// that check needs the resolved `DockerTarget` for the label's claimed
     /// filesystem id, not just the raw listing.
-    pub(crate) async fn owned(
-        &self,
-        expected_home: &std::path::Path,
-    ) -> Result<Vec<OwnedFilesystemCandidate>> {
+    pub(crate) async fn owned(&self, expected_home: &std::path::Path) -> Result<Vec<Candidate>> {
         let mut filters = HashMap::new();
         filters.insert(
             "label".to_owned(),
@@ -396,17 +377,19 @@ impl DockerClient {
                     .or_else(|| identity.as_ref().map(|identity| identity.id.clone()));
                 match (identity, filesystem_id) {
                     (Some(identity), Some(filesystem_id)) => {
-                        OwnedFilesystemCandidate::Valid(OwnedFilesystemContainer {
+                        Candidate::Docker(OwnedFilesystemContainer {
                             identity,
                             filesystem_id,
                             names,
                         })
                     },
-                    (None, _) => OwnedFilesystemCandidate::Invalid {
+                    (None, _) => Candidate::Invalid {
+                        backend: "docker",
                         target,
                         error: "Docker did not return an immutable container ID".to_owned(),
                     },
-                    (Some(_), None) => OwnedFilesystemCandidate::Invalid {
+                    (Some(_), None) => Candidate::Invalid {
+                        backend: "docker",
                         target,
                         error: "client-owned container has no filesystem identity label".to_owned(),
                     },
@@ -429,10 +412,7 @@ impl DockerClient {
             .await?
             .context("the confirmed filesystem container no longer exists")?
             .0;
-        anyhow::ensure!(
-            current == *expected,
-            "filesystem container identity changed; refusing to remove its replacement"
-        );
+        ensure_identity_unchanged(Some(&current), expected, "filesystem container")?;
         self.stop_and_remove_id(&expected.id).await
     }
 
@@ -498,7 +478,7 @@ impl DockerClient {
 
     /// Narrate the connection attempt before it starts, matching the
     /// pre-ping narration launch used to open with.
-    pub(crate) fn narrate_connecting(&self) {
+    fn narrate_connecting(&self) {
         self.output.narrate("Connecting to Docker");
     }
 
@@ -511,7 +491,7 @@ impl DockerClient {
     /// host loopback. Native Linux maps that name to the default bridge
     /// gateway instead, so the daemon must bind that gateway explicitly.
     #[cfg(target_os = "linux")]
-    pub(crate) async fn filesystem_attach_bind_ip(&self) -> Result<Ipv4Addr> {
+    async fn filesystem_attach_bind_ip(&self) -> Result<Ipv4Addr> {
         let network = self
             .docker
             .inspect_network("bridge", None)
@@ -538,7 +518,7 @@ impl DockerClient {
         self.docker.inspect_image(image).await
     }
 
-    pub(crate) async fn pull_image_with_progress(&self, image: &str) -> Result<()> {
+    async fn pull_image_with_progress(&self, image: &str) -> Result<()> {
         let (from_image, tag) = image
             .rsplit_once(':')
             .ok_or_else(|| anyhow!("image `{image}` has no tag"))?;
@@ -609,7 +589,7 @@ impl DockerClient {
         self.remove_existing(self.container_name()).await
     }
 
-    pub(crate) async fn remove_existing(&self, name: &ContainerName) -> Result<()> {
+    async fn remove_existing(&self, name: &ContainerName) -> Result<()> {
         match self
             .docker
             .inspect_container(name.as_str(), None::<InspectContainerOptions>)
@@ -674,10 +654,7 @@ impl DockerClient {
     /// Launch the filesystem container from `body`, replacing any existing
     /// container of the same name first (one filesystem container per
     /// profile). Reuses [`Self::ensure_image`]'s dev/release pull gating.
-    pub(crate) async fn launch_filesystem_container(
-        &self,
-        body: ContainerCreateBody,
-    ) -> Result<()> {
+    async fn launch_filesystem_container(&self, body: ContainerCreateBody) -> Result<()> {
         self.ensure_image().await?;
         self.remove().await?;
 
@@ -712,7 +689,7 @@ impl DockerClient {
 
     /// Mounts and env of the running container, for the fail-closed lockdown
     /// check run immediately after a filesystem container starts.
-    pub(crate) async fn inspect_mounts_and_env(
+    async fn inspect_mounts_and_env(
         &self,
     ) -> Result<(Vec<bollard::models::MountPoint>, Vec<String>)> {
         let inspect = self
@@ -734,7 +711,7 @@ impl DockerClient {
     /// True when `path` exists inside the running container, probed with
     /// `docker exec test -e <path>`. Used to wait for the FUSE mount to come
     /// up inside the filesystem container after start.
-    pub(crate) async fn exec_path_exists(&self, path: &str) -> Result<bool> {
+    async fn exec_path_exists(&self, path: &str) -> Result<bool> {
         use bollard::exec::{CreateExecOptions, StartExecResults};
 
         let exec = self
@@ -851,9 +828,7 @@ fn image_age_words(created: Option<&str>) -> Option<String> {
 }
 
 /// Coarse duration-to-words for image age: seconds, minutes, hours, or days.
-/// `pub(crate)` so doctor's daemon-uptime row reuses the same
-/// wording instead of a second bucket table.
-pub(crate) fn duration_words(secs: i64) -> String {
+fn duration_words(secs: i64) -> String {
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
     const DAY: i64 = 24 * HOUR;
