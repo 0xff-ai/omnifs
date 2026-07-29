@@ -201,22 +201,32 @@ impl Remediation {
     /// Spawn the fresh subprocess and require it to exit successfully. Array
     /// arguments only, never a shell string: the mount name came from the
     /// already-collected inventory, not from re-parsing the advisory `fix`
-    /// text.
-    async fn apply(&self, client_filesystems: &ClientFilesystemState) -> anyhow::Result<()> {
-        let binary = std::env::current_exe().context("resolve the omnifs executable")?;
+    /// text. `output` is the invocation's real `Output` (mode, quiet), passed
+    /// through to the one remediation that talks to the Docker client rather
+    /// than hardcoding a fresh human one.
+    async fn apply(
+        &self,
+        client_filesystems: &ClientFilesystemState,
+        output: &Output,
+    ) -> anyhow::Result<()> {
         match self {
-            Self::MountReauth(name) => std::process::Command::new(&binary)
-                .args(["mount", "reauth", name])
-                .status()
-                .with_context(|| format!("run `{}`", self.command_line()))
-                .and_then(|status| {
-                    anyhow::ensure!(
-                        status.success(),
-                        "`{}` exited with {status}",
-                        self.command_line()
-                    );
-                    Ok(())
-                }),
+            // Only this variant needs the CLI's own path, so it resolves it
+            // itself instead of every variant paying for a lookup it never uses.
+            Self::MountReauth(name) => {
+                let binary = std::env::current_exe().context("resolve the omnifs executable")?;
+                std::process::Command::new(&binary)
+                    .args(["mount", "reauth", name])
+                    .status()
+                    .with_context(|| format!("run `{}`", self.command_line()))
+                    .and_then(|status| {
+                        anyhow::ensure!(
+                            status.success(),
+                            "`{}` exited with {status}",
+                            self.command_line()
+                        );
+                        Ok(())
+                    })
+            },
             Self::CleanStaleInstance { identity } => {
                 let endpoint = omnifs_bootstrap::Bootstrap::<Client>::for_client()?;
                 if endpoint.remove_daemon_bootstrap_if(identity)? {
@@ -258,17 +268,14 @@ impl Remediation {
             } => {
                 let registry = client_filesystems.registry();
                 let _guard = claim_for_teardown(&registry, spec.id()).await?;
-                DockerClient::connect_for(
-                    target,
-                    Output::new(crate::ui::output::OutputMode::Human, false),
-                )?
-                .stop_confirmed(
-                    identity,
-                    profile_root,
-                    crate::commands::fs::client_owner_id()?,
-                    spec,
-                )
-                .await
+                DockerClient::connect_for(target, output.clone())?
+                    .stop_confirmed(
+                        identity,
+                        profile_root,
+                        crate::commands::fs::client_owner_id()?,
+                        spec,
+                    )
+                    .await
             },
             Self::StopLibkrunFilesystem { state_dir, record } => {
                 let registry = client_filesystems.registry();
@@ -337,6 +344,59 @@ struct Finding {
 struct DoctorResult {
     inventory: Inventory,
     findings: Vec<Finding>,
+    /// Repairs attempted this run. Empty when nothing was remediable, the
+    /// operator declined, or (structured mode only) nothing was authorized
+    /// via `--yes`. Human mode renders these as they complete instead of
+    /// carrying them here; this field exists for the JSON/JSONL contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    repairs: Vec<Repair>,
+}
+
+/// Outcome vocabulary shared with [`crate::ui::consent::OutcomeState`]:
+/// applied (done), failed, or skipped (never attempted). `MountReauth` is
+/// always skipped in structured mode rather than spawned, since a machine
+/// caller runs the fix command itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RepairState {
+    Applied,
+    Failed,
+    Skipped,
+}
+
+/// One remediation's outcome, independent of rendering.
+#[derive(Debug, Clone, Serialize)]
+struct Repair {
+    command_line: String,
+    state: RepairState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl Repair {
+    fn applied(command_line: String) -> Self {
+        Self {
+            command_line,
+            state: RepairState::Applied,
+            error: None,
+        }
+    }
+
+    fn failed(command_line: String, error: String) -> Self {
+        Self {
+            command_line,
+            state: RepairState::Failed,
+            error: Some(error),
+        }
+    }
+
+    fn skipped(command_line: String) -> Self {
+        Self {
+            command_line,
+            state: RepairState::Skipped,
+            error: None,
+        }
+    }
 }
 
 impl DoctorResult {
@@ -678,28 +738,41 @@ struct RepairSummary {
 
 /// Show the complete repair set, ask once, then continue through independent
 /// failures. Fresh ownership checks still run inside each remediation.
+/// Structured mode has no terminal to confirm on, so `--yes` is the only way
+/// a machine caller authorizes repair, and it never prints: every outcome
+/// comes back in `repairs` for the caller to fold into the JSON result
+/// instead. `MountReauth` is a genuine interactive sign-in, so structured
+/// mode always leaves it for the caller to run itself rather than spawning
+/// it with inherited stdio nobody can answer.
 async fn offer_fix(
     client_filesystems: &ClientFilesystemState,
     output: &Output,
     findings: &[Finding],
-) -> anyhow::Result<RepairSummary> {
+) -> anyhow::Result<(RepairSummary, Vec<Repair>)> {
     let remediations = remediable_fixes(findings);
-    if remediations.is_empty()
-        || output.no_input()
-        || (!output.yes() && !crate::ui::prompt::is_terminal())
-    {
-        return Ok(RepairSummary::default());
+    let structured = output.is_structured();
+    if remediations.is_empty() || output.no_input() {
+        return Ok((RepairSummary::default(), Vec::new()));
     }
-    output.narrate("");
-    output.narrate("Repairs:");
-    for remediation in &remediations {
-        output.narrate(format!("  - {}", remediation.command_line()));
-    }
-    if !output.yes()
-        && !Confirm::new(format!("Apply all {} repairs now?", remediations.len()))
-            .ask_with_output(output)?
-    {
-        return Ok(RepairSummary::default());
+    if structured {
+        if !output.yes() {
+            return Ok((RepairSummary::default(), Vec::new()));
+        }
+    } else {
+        if !output.yes() && !crate::ui::prompt::is_terminal() {
+            return Ok((RepairSummary::default(), Vec::new()));
+        }
+        output.narrate("");
+        output.narrate("Repairs:");
+        for remediation in &remediations {
+            output.narrate(format!("  - {}", remediation.command_line()));
+        }
+        if !output.yes()
+            && !Confirm::new(format!("Apply all {} repairs now?", remediations.len()))
+                .ask_with_output(output)?
+        {
+            return Ok((RepairSummary::default(), Vec::new()));
+        }
     }
 
     let caps = render::stdout_capabilities();
@@ -709,59 +782,92 @@ async fn offer_fix(
         .collect();
     let key_width = render::ledger_key_width(&ledger_rows);
     let mut summary = RepairSummary::default();
+    let mut repairs = Vec::with_capacity(remediations.len());
     for (remediation, mut ledger_row) in remediations.into_iter().zip(ledger_rows) {
-        summary.attempted += 1;
-        let outcome = remediation.apply(client_filesystems).await;
-        if let Err(error) = outcome {
-            summary.failed += 1;
-            ledger_row.glyph = Glyph::Fail;
-            ledger_row.value = format!("{}: {error:#}", ledger_row.value);
+        let command_line = remediation.command_line();
+        if structured && matches!(remediation, Remediation::MountReauth(_)) {
+            repairs.push(Repair::skipped(command_line));
+            continue;
         }
-        crate::ui::print_raw(&format!(
-            "{}\n",
-            render::ledger_row_line(&ledger_row, key_width, caps)
-        ));
+        summary.attempted += 1;
+        let outcome = remediation.apply(client_filesystems, output).await;
+        match &outcome {
+            Ok(()) => repairs.push(Repair::applied(command_line)),
+            Err(error) => {
+                summary.failed += 1;
+                repairs.push(Repair::failed(command_line, format!("{error:#}")));
+            },
+        }
+        if !structured {
+            if let Err(error) = &outcome {
+                ledger_row.glyph = Glyph::Fail;
+                ledger_row.value = format!("{}: {error:#}", ledger_row.value);
+            }
+            crate::ui::print_raw(&format!(
+                "{}\n",
+                render::ledger_row_line(&ledger_row, key_width, caps)
+            ));
+        }
     }
-    Ok(summary)
+    Ok((summary, repairs))
 }
 
 impl Doctor {
+    /// Diagnose, offer repairs (mode-aware inside [`offer_fix`]), and
+    /// re-diagnose once if anything was attempted. Human mode prints the
+    /// report before repairs run, exactly as it always has; structured mode
+    /// never prints, folding repairs into the one JSON result instead.
     async fn run(self) -> anyhow::Result<DoctorVerdict> {
         let mut result = self.diagnose().await?;
         let mut verdict = result.verdict();
-        if self.output.is_structured() {
+        let structured = self.output.is_structured();
+
+        if !structured {
+            let caps = render::stdout_capabilities();
+            crate::ui::print_raw(&render_report(
+                &result.findings,
+                &result.inventory,
+                verdict,
+                caps,
+            ));
+        }
+
+        let (summary, repairs) =
+            offer_fix(&self.client_filesystems, &self.output, &result.findings).await?;
+        if summary.attempted > 0 {
+            result = self.rediagnose_after_repairs().await?;
+            verdict = result.verdict();
+        }
+
+        if structured {
+            result.repairs = repairs;
             self.output
                 .emit_result(ResultVerdict::from(verdict), result)?;
             return Ok(verdict);
         }
-
-        let caps = render::stdout_capabilities();
-        crate::ui::print_raw(&render_report(
-            &result.findings,
-            &result.inventory,
-            verdict,
-            caps,
-        ));
-        let repairs = offer_fix(&self.client_filesystems, &self.output, &result.findings).await?;
-        if repairs.attempted > 0 {
-            let fresh = Doctor {
-                client_filesystems: self.client_filesystems.clone(),
-                inventory: Inventory::collect_rpc().await?,
-                docker_target: resolve_filesystem_target(&self.client_filesystems)
-                    .map_err(|error: anyhow::Error| format!("resolve target: {error:#}")),
-                output: self.output.clone(),
-            };
-            result = fresh.diagnose().await?;
-            verdict = result.verdict();
+        if summary.attempted > 0 {
             self.output.narrate("");
             self.output.narrate(format!(
                 "Repairs complete: {} attempted, {} failed. Final state: {}.",
-                repairs.attempted,
-                repairs.failed,
+                summary.attempted,
+                summary.failed,
                 doctor_verdict_label(verdict)
             ));
         }
         Ok(verdict)
+    }
+
+    /// Collect a fresh `Doctor` over the same client state and re-diagnose,
+    /// after a repair pass may have changed what the checklist would find.
+    async fn rediagnose_after_repairs(&self) -> anyhow::Result<DoctorResult> {
+        let fresh = Doctor {
+            client_filesystems: self.client_filesystems.clone(),
+            inventory: Inventory::collect_rpc().await?,
+            docker_target: resolve_filesystem_target(&self.client_filesystems)
+                .map_err(|error: anyhow::Error| format!("resolve target: {error:#}")),
+            output: self.output.clone(),
+        };
+        fresh.diagnose().await
     }
 
     async fn diagnose(&self) -> anyhow::Result<DoctorResult> {
@@ -776,6 +882,7 @@ impl Doctor {
         Ok(DoctorResult {
             inventory: self.inventory.clone(),
             findings,
+            repairs: Vec::new(),
         })
     }
 
@@ -1420,6 +1527,7 @@ mod golden {
                 Vec::new(),
             ),
             findings: Vec::new(),
+            repairs: Vec::new(),
         };
         assert_eq!(clean.verdict(), DoctorVerdict::Clean);
 
@@ -1430,6 +1538,7 @@ mod golden {
                 Vec::new(),
             ),
             findings: Vec::new(),
+            repairs: Vec::new(),
         };
         assert_eq!(degraded.verdict(), DoctorVerdict::Warnings);
 
@@ -1459,6 +1568,7 @@ mod golden {
                 Vec::new(),
             ),
             findings: vec![targeted_finding()],
+            repairs: Vec::new(),
         };
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string_pretty(&payload).unwrap()).unwrap();
@@ -1471,6 +1581,36 @@ mod golden {
         // must not grow the machine contract.
         assert!(value["findings"][0].get("section").is_none());
         assert!(value["findings"][0].get("remediation").is_none());
+        // Empty repairs never appear in the payload; only an attempted run
+        // grows the machine contract with a `repairs` array.
+        assert!(value.get("repairs").is_none());
+    }
+
+    #[test]
+    fn doctor_json_includes_repairs_when_present() {
+        let payload = DoctorResult {
+            inventory: Inventory::test(
+                crate::inventory::DaemonHealth::Stopped,
+                Vec::new(),
+                Vec::new(),
+            ),
+            findings: Vec::new(),
+            repairs: vec![
+                Repair::applied("omnifs fs detach --name docker".to_owned()),
+                Repair::failed(
+                    "omnifs doctor (clean stale daemon identity)".to_owned(),
+                    "boom".to_owned(),
+                ),
+                Repair::skipped("omnifs mount reauth github".to_owned()),
+            ],
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+        assert_eq!(value["repairs"][0]["state"], "applied");
+        assert!(value["repairs"][0].get("error").is_none());
+        assert_eq!(value["repairs"][1]["state"], "failed");
+        assert_eq!(value["repairs"][1]["error"], "boom");
+        assert_eq!(value["repairs"][2]["state"], "skipped");
     }
 
     #[test]
