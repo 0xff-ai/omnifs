@@ -35,6 +35,7 @@ fn help_documents_exit_codes() {
     assert!(stdout.contains("3  daemon unreachable"));
     assert!(stdout.contains("4  auth or consent required"));
     assert!(stdout.contains("5  degraded health"));
+    assert!(stdout.contains("130  canceled"));
 }
 
 #[test]

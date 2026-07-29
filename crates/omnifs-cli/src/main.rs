@@ -103,8 +103,6 @@ async fn cli_main(cli: Cli) {
         .with_yes(cli.yes);
     // Capture the usage label before `run` consumes `cli`. `None` for the
     // internal `daemon` subcommand, which records its own usage stream.
-    // Subcommands that `std::process::exit` on their own (shell, doctor) record
-    // at their exit site; this covers every command that returns to `main`.
     let usage_label = cli.usage_label();
     match Box::pin(run(cli, output.clone())).await {
         Ok(exit_code) => {

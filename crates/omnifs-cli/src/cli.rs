@@ -13,7 +13,7 @@ use crate::ui::output::{Output, OutputMode};
     name = "omnifs",
     version,
     about = "Project external services as files",
-    after_help = "Exit codes:\n  0  success\n  1  generic failure\n  2  usage error\n  3  daemon unreachable\n  4  auth or consent required\n  5  degraded health"
+    after_help = "Exit codes:\n  0  success\n  1  generic failure\n  2  usage error\n  3  daemon unreachable\n  4  auth or consent required\n  5  degraded health\n  130  canceled"
 )]
 pub struct Cli {
     /// Increase tracing verbosity. -v = info, -vv = debug with span events.
