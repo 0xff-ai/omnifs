@@ -363,3 +363,63 @@ fn format_scopes(scopes: &[String]) -> String {
         scopes.join(", ")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omnifs_auth::{OAuthFlow, OauthScheme, PkceManualCodeConfig, TokenEndpointAuthMethod};
+
+    fn manual_code_scheme() -> OauthScheme {
+        OauthScheme {
+            key: "manual".to_owned(),
+            display_name: "Manual".to_owned(),
+            authorization_endpoint: "https://example.invalid/authorize".to_owned(),
+            token_endpoint: "https://example.invalid/token".to_owned(),
+            revocation_endpoint: None,
+            default_client_id: Some("client".to_owned()),
+            default_scopes: Vec::new(),
+            flow: OAuthFlow::PkceManualCode(PkceManualCodeConfig {
+                redirect_uri: "https://example.invalid/callback".to_owned(),
+            }),
+            token_endpoint_auth: TokenEndpointAuthMethod::None,
+            refresh_token_rotates: false,
+            extra_authorize_params: Vec::new(),
+            extra_token_params: Vec::new(),
+            inject_domains: Vec::new(),
+            inject_header_name: None,
+            inject_value_prefix: String::new(),
+        }
+    }
+
+    /// The manual-code flow has no flag that answers its "paste the redirect
+    /// URL" prompt (unlike the static-token/config-json prompts, pasting a
+    /// URL back mid-flow is not something a caller can pre-supply); the
+    /// no-input contract is instead a bail, asserted here directly against
+    /// `run_oauth` rather than the higher callers that already guard every
+    /// OAuth scheme the same way, so this specific arm has its own coverage.
+    #[tokio::test]
+    async fn no_input_bails_before_the_manual_code_paste() {
+        let request = OAuthRequest::new(manual_code_scheme());
+        let output = crate::ui::output::Output::new(crate::ui::output::OutputMode::Human, false);
+        let error = run_oauth(
+            request,
+            "test-mount",
+            &SchemeGuidance::default(),
+            LoginInteractivity {
+                no_browser: true,
+                no_input: true,
+                scopes: None,
+            },
+            &output,
+            0,
+        )
+        .await
+        .expect_err("manual-code flow cannot proceed under --no-input");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot complete the manual-code OAuth flow"),
+            "{error}"
+        );
+    }
+}
