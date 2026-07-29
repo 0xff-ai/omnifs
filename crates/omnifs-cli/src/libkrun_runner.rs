@@ -51,6 +51,7 @@ use omnifs_libkrun::{
 use tokio::io::AsyncReadExt as _;
 
 use crate::client_fs_state::ClientConfig;
+use crate::error::WithHint;
 use crate::filesystem_driver::{Candidate, ensure_identity_unchanged, err_after_rollback};
 use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
 #[cfg(test)]
@@ -156,9 +157,10 @@ pub(crate) fn ensure_socat_available() -> Result<()> {
         .status()
     {
         Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
-            "socat is required to reach the libkrun guest over vsock; install it with `brew install socat`"
-        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(anyhow::anyhow!(
+            "socat is required to reach the libkrun guest over vsock"
+        ))
+        .with_hint("Install it with `brew install socat`"),
         Err(error) => Err(error).context("probe for socat on PATH"),
     }
 }
@@ -436,12 +438,13 @@ async fn resolve_guest_image(
             .await?
         },
     };
-    anyhow::ensure!(
-        path.is_file(),
-        "guest image not found at {}; build it with `just guest-image` \
-         (see docs/contracts/60-build-validation.md)",
-        path.display()
-    );
+    if !path.is_file() {
+        return Err(anyhow::anyhow!(
+            "guest image not found at {}",
+            path.display()
+        ))
+        .with_hint("Build it with `just guest-image` (see docs/contracts/60-build-validation.md)");
+    }
     Ok(path)
 }
 
@@ -461,10 +464,19 @@ struct LibkrunLaunchLease<'a> {
     spec: Option<fs::Spec>,
     expected_record: Option<HelperRecord>,
     replaced: bool,
+    /// Only consulted by [`Self::wait_for_ready`]'s launch-wait spinner;
+    /// [`Self::for_confirmed_teardown`] never reaches that path, so its own
+    /// quiet instance never narrates anything.
+    output: Output,
 }
 
 impl<'a> LibkrunLaunchLease<'a> {
-    fn new(runner: &'a LibkrunRunner, daemon_attach_socket: &Path, guest_image: PathBuf) -> Self {
+    fn new(
+        runner: &'a LibkrunRunner,
+        daemon_attach_socket: &Path,
+        guest_image: PathBuf,
+        output: Output,
+    ) -> Self {
         Self {
             runner,
             daemon_attach_socket: daemon_attach_socket.to_path_buf(),
@@ -476,6 +488,7 @@ impl<'a> LibkrunLaunchLease<'a> {
             spec: None,
             expected_record: None,
             replaced: false,
+            output,
         }
     }
 
@@ -491,6 +504,7 @@ impl<'a> LibkrunLaunchLease<'a> {
             spec: None,
             expected_record: Some(expected_record),
             replaced: true,
+            output: Output::new(crate::ui::output::OutputMode::Human, true),
         }
     }
 
@@ -502,7 +516,7 @@ impl<'a> LibkrunLaunchLease<'a> {
         let guest_image_cache = ctx.client_state.guest_image_cache();
         let guest_image =
             resolve_guest_image(&config, &guest_image_cache, ctx.output.clone()).await?;
-        let mut lease = Self::new(runner, ctx.attach_unix()?, guest_image);
+        let mut lease = Self::new(runner, ctx.attach_unix()?, guest_image, ctx.output.clone());
         lease.client_owner = Some(ctx.client_owner);
         lease.spec = Some(ctx.spec.clone());
         Ok(lease)
@@ -709,11 +723,17 @@ impl<'a> LibkrunLaunchLease<'a> {
         })
     }
 
+    /// Waits for the guest readiness beacon behind a spinner, since this is
+    /// the longest of the three drivers' launch waits (a full microVM boot,
+    /// up to [`LAUNCH_READY_TIMEOUT`]) and was previously the only one that
+    /// gave no feedback at all while it ran.
     async fn wait_for_ready(&mut self) -> Result<()> {
         let listener = self
             .ready_listener
             .take()
             .context("libkrun readiness listener was not prepared")?;
+        let key_width = Output::ledger_block_width(&["filesystem"]);
+        let mut row = self.output.progress("filesystem", key_width);
         let wait = async {
             loop {
                 tokio::select! {
@@ -726,6 +746,7 @@ impl<'a> LibkrunLaunchLease<'a> {
                         }
                     }
                     () = tokio::time::sleep(HELPER_POLL_INTERVAL) => {
+                        row.update("booting guest");
                         if let Some(status) = self
                             .child
                             .as_mut()
@@ -742,15 +763,20 @@ impl<'a> LibkrunLaunchLease<'a> {
                 }
             }
         };
-        if let Ok(result) = tokio::time::timeout(LAUNCH_READY_TIMEOUT, wait).await {
+        let outcome = if let Ok(result) = tokio::time::timeout(LAUNCH_READY_TIMEOUT, wait).await {
             result.context("read the libkrun readiness beacon")
         } else {
-            anyhow::bail!(
+            Err(anyhow::anyhow!(
                 "{} did not appear inside the filesystem within {}s",
                 fs::GUEST_LOCATION,
                 LAUNCH_READY_TIMEOUT.as_secs()
-            )
+            ))
+        };
+        match &outcome {
+            Ok(()) => row.settle_ok("guest ready"),
+            Err(error) => row.settle_fail(format!("{error:#}")),
         }
+        outcome
     }
 
     async fn stop_and_remove(&mut self) -> Result<()> {
@@ -871,6 +897,8 @@ impl LibkrunRunner {
         &self,
         ctx: &crate::filesystem_driver::LaunchContext<'_>,
     ) -> Result<()> {
+        ctx.output
+            .narrate(format!("Starting libkrun filesystem `{}`", ctx.spec.id()));
         let attached = async {
             anyhow::ensure!(
                 crate::commands::fs::wait_for_attachment(ctx.spec).await,
@@ -1079,7 +1107,12 @@ mod tests {
         std::fs::set_permissions(&guest_image, std::fs::Permissions::from_mode(0o444)).unwrap();
 
         let runner = LibkrunRunner::new(dir.clone());
-        let lease = LibkrunLaunchLease::new(&runner, &attach_socket, guest_image.clone());
+        let lease = LibkrunLaunchLease::new(
+            &runner,
+            &attach_socket,
+            guest_image.clone(),
+            Output::new(crate::ui::output::OutputMode::Human, false),
+        );
         lease.materialize_root_disk().unwrap();
         assert_eq!(
             std::fs::metadata(runner.root_raw())
