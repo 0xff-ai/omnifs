@@ -44,16 +44,14 @@ impl InventoryReport {
         let mut report = TableReport::new();
         let daemon_health = self.inventory.daemon_health();
         let next_action = self.inventory.next_action();
-        let context_state = match daemon_health {
-            DaemonHealth::Running => match self.inventory.verdict() {
+        let context_state = if daemon_health == DaemonHealth::Running {
+            match self.inventory.verdict() {
                 ResultVerdict::Ok => TableState::positive("healthy"),
                 ResultVerdict::Degraded => TableState::attention("degraded"),
-            },
-            DaemonHealth::Starting => TableState::attention("starting"),
-            DaemonHealth::Degraded => TableState::attention("degraded"),
-            DaemonHealth::Stopped => TableState::neutral("stopped"),
-            DaemonHealth::Unreachable => TableState::failure("unreachable"),
-            DaemonHealth::Failed => TableState::failure("failed"),
+            }
+        } else {
+            let (severity, label) = daemon_health.descriptor();
+            TableState::new(severity.into(), label)
         };
         let mut metadata = match self.inventory.daemon.pid() {
             Some(pid) => vec![

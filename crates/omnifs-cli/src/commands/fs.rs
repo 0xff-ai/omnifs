@@ -637,21 +637,13 @@ fn propagate(mut command: Command, context: String) -> Result<ExitCode> {
 
 async fn list(output: Output) -> Result<ExitCode> {
     let inventory = crate::inventory::Inventory::collect_rpc().await?;
+    // Read before `filesystems` moves out of `inventory` below: both derive
+    // from the whole inventory (mounts and daemon health included), the
+    // same verdict and next action `omnifs status` itself would report,
+    // rather than a filesystems-only view re-derived here.
+    let verdict = inventory.verdict();
+    let next_action = inventory.next_action();
     let filesystems = inventory.filesystems;
-    let verdict = if filesystems
-        .iter()
-        .any(|filesystem| filesystem.state.severity() >= crate::inventory::Severity::Attention)
-    {
-        crate::ui::output::ResultVerdict::Degraded
-    } else {
-        crate::ui::output::ResultVerdict::Ok
-    };
-    let next_action = filesystems
-        .iter()
-        .find(|filesystem| filesystem.state.severity() >= crate::inventory::Severity::Attention)
-        .map(|filesystem| crate::inventory::NextAction::Doctor {
-            target: crate::inventory::ActionTarget::Filesystem(filesystem.spec.id().clone()),
-        });
     let rows = filesystems
         .iter()
         .map(|filesystem| ListRow {

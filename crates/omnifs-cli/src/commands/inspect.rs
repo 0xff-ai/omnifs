@@ -116,19 +116,10 @@ impl InspectArgs {
 /// Detached specs and static examples are not evidence that a path exists.
 async fn observed_teaching_path() -> Option<String> {
     let inventory = crate::inventory::Inventory::collect_rpc().await.ok()?;
-    let filesystem = inventory.filesystems.iter().find(|filesystem| {
-        filesystem.state.provides_access()
-            && filesystem.spec.runtime() == omnifs_core::fs::Runtime::Host
-    })?;
-    let first_mount = inventory.mounts.first();
-    let path = first_mount.map_or_else(
-        || filesystem.spec.location().to_path_buf(),
-        |mount| {
-            filesystem
-                .spec
-                .location()
-                .join(mount.root.strip_prefix("/").unwrap_or(mount.root.as_path()))
-        },
+    let location = inventory.primary_host_location()?;
+    let path = inventory.mounts.first().map_or_else(
+        || location.to_path_buf(),
+        |mount| location.join(mount.root.strip_prefix("/").unwrap_or(mount.root.as_path())),
     );
     Some(path.display().to_string())
 }
