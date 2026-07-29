@@ -85,6 +85,27 @@ fn credential_label(key: &CredentialKey) -> String {
     format!("{}:{}:{}", key.provider_name, key.scheme, key.account_label)
 }
 
+/// One journaled op's human command summary, e.g. `` add mount `github` ``.
+/// The verb is derived from the persisted `kind` string
+/// (`mount.create`/`mount.update`/... set at `PlannedOp` construction above);
+/// that journal vocabulary is a durable on-disk format and stays exactly as
+/// written, only its narration back to the operator changes here. An
+/// unrecognized kind (never journaled by this build, but the record is
+/// read back from disk) falls back to printing the kind itself rather than
+/// guessing a verb.
+fn command_summary(kind: &str, target: &str) -> String {
+    let verb = match kind {
+        "mount.create" => "add mount",
+        "mount.update" => "update mount",
+        "mount.remove" => "remove mount",
+        "credential.submit" => "add credential",
+        "credential.delete" => "remove credential",
+        "credential.revoke" => "revoke credential",
+        other => other,
+    };
+    format!("{verb} `{target}`")
+}
+
 /// Result of a batch that actually reached `ApplyMutation`.
 pub(crate) struct MutationOutcome {
     pub(crate) results: Vec<omnifs_api::MutationOpResult>,
@@ -128,16 +149,16 @@ pub(crate) async fn settle(
     let summary = pending
         .ops
         .iter()
-        .map(|op| format!("{} `{}`", op.kind, op.target))
+        .map(|op| command_summary(&op.kind, &op.target))
         .collect::<Vec<_>>()
         .join(", ");
     if committed {
         output.narrate(format!(
-            "a prior mutation ({summary}) had already committed before this client learned its outcome"
+            "an earlier interrupted command's change ({summary}) had already been applied"
         ));
     } else {
         output.narrate(format!(
-            "a prior mutation ({summary}) did not commit before this client lost track of it"
+            "an earlier interrupted command's change ({summary}) was not applied"
         ));
     }
     Ok(())
@@ -255,6 +276,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_summary_translates_every_journaled_kind_into_command_vocabulary() {
+        assert_eq!(
+            command_summary("mount.create", "github"),
+            "add mount `github`"
+        );
+        assert_eq!(
+            command_summary("mount.update", "github"),
+            "update mount `github`"
+        );
+        assert_eq!(
+            command_summary("mount.remove", "github"),
+            "remove mount `github`"
+        );
+        assert_eq!(
+            command_summary("credential.submit", "github:oauth:work"),
+            "add credential `github:oauth:work`"
+        );
+        assert_eq!(
+            command_summary("credential.delete", "github:oauth:work"),
+            "remove credential `github:oauth:work`"
+        );
+        assert_eq!(
+            command_summary("credential.revoke", "github:oauth:work"),
+            "revoke credential `github:oauth:work`"
+        );
+    }
+
+    #[test]
+    fn command_summary_falls_back_to_the_kind_itself_for_an_unrecognized_kind() {
+        assert_eq!(command_summary("future.op", "x"), "future.op `x`");
+    }
 
     #[test]
     fn planned_ops_derive_their_own_journal_labels() {

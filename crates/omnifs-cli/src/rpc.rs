@@ -19,7 +19,7 @@ use tokio::sync::OnceCell;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Request};
 
-use crate::error::{ExitCode, WithExitCode};
+use crate::error::{ExitCode, WithExitCode, WithHint};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
 const MUTATION_TIMEOUT: Duration = Duration::from_secs(CONTROL_MUTATION_TIMEOUT_SECS);
@@ -451,6 +451,27 @@ fn retained_provider_metadata(
         .map_err(Into::into)
 }
 
+/// The human top-level sentence for a lease-conflict error code, or `None`
+/// for every other code. The daemon's own message (holder id, raw deadline)
+/// is never parsed or thrown away; it stays one step down the chain via
+/// `.context`, and `omnifs status` is the command that actually renders it
+/// nicely (holder id, seconds remaining), which is why the caller attaches
+/// that as the `Try:` hint rather than repeating the detail here.
+fn lease_conflict_sentence(code: omnifs_api::ControlErrorCode) -> Option<&'static str> {
+    match code {
+        omnifs_api::ControlErrorCode::MutationInProgress => {
+            Some("another omnifs command is applying changes right now")
+        },
+        omnifs_api::ControlErrorCode::LeaseExpired => {
+            Some("this command's change timed out before it could finish")
+        },
+        omnifs_api::ControlErrorCode::LeaseNotHeld => {
+            Some("this command no longer holds the slot needed to apply changes")
+        },
+        _ => None,
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn status_error(status: tonic::Status) -> anyhow::Error {
     if let Ok(detail) = wire::ErrorDetail::decode(status.details())
@@ -465,13 +486,20 @@ fn status_error(status: tonic::Status) -> anyhow::Error {
             | omnifs_api::ControlErrorCode::LeaseNotHeld => ExitCode::DaemonUnavailable,
             _ => ExitCode::GenericFailure,
         };
-        return WithExitCode::<()>::with_exit_code(Err(anyhow::anyhow!(error.message)), code)
+        let result: anyhow::Result<()> = match lease_conflict_sentence(error.code) {
+            Some(sentence) => {
+                Err(anyhow::anyhow!(error.message).context(sentence)).with_hint("omnifs status")
+            },
+            None => Err(anyhow::anyhow!(error.message)),
+        };
+        return WithExitCode::<()>::with_exit_code(result, code)
             .expect_err("status error starts from Err");
     }
     let error = anyhow::anyhow!("daemon control request failed: {}", status.message());
     match status.code() {
         Code::ResourceExhausted | Code::Unavailable | Code::DeadlineExceeded => {
-            WithExitCode::<()>::with_exit_code(Err(error), ExitCode::DaemonUnavailable)
+            let result: anyhow::Result<()> = Err(error).with_hint("omnifs logs");
+            WithExitCode::<()>::with_exit_code(result, ExitCode::DaemonUnavailable)
                 .expect_err("status error starts from Err")
         },
         _ => error,
@@ -484,10 +512,11 @@ mod tests {
     use crate::error::exit_code;
 
     #[test]
-    fn mutation_in_progress_maps_to_daemon_unavailable() {
+    fn mutation_in_progress_humanizes_the_top_level_message_and_keeps_the_daemon_detail() {
+        let daemon_message = "mutation deadbeef is already in progress; its lease expires at 123";
         let detail = wire::ErrorDetail {
             code: wire::ErrorCode::MutationInProgress as i32,
-            message: "mutation deadbeef is already in progress; its lease expires at 123".into(),
+            message: daemon_message.into(),
         };
         let status = tonic::Status::with_details(
             Code::Internal,
@@ -495,11 +524,55 @@ mod tests {
             detail.encode_to_vec().into(),
         );
         let error = status_error(status);
+        // The top-level message is a human sentence, not the daemon's raw
+        // hex-id-and-unix-ms wire message.
         assert_eq!(
             error.to_string(),
-            "mutation deadbeef is already in progress; its lease expires at 123"
+            "another omnifs command is applying changes right now"
+        );
+        // Nothing is lost: the daemon's own message (holder id, deadline)
+        // still rides in the chain for anyone who reads the full transcript.
+        assert!(
+            crate::error::message_chain(&error).contains(&daemon_message.to_owned()),
+            "{:?}",
+            crate::error::message_chain(&error)
+        );
+        assert_eq!(
+            crate::error::hints(&error),
+            vec!["omnifs status".to_owned()]
         );
         assert_eq!(exit_code(&error), ExitCode::DaemonUnavailable);
+    }
+
+    #[test]
+    fn lease_expired_and_lease_not_held_also_get_a_human_sentence_and_the_status_hint() {
+        for (code, expected) in [
+            (
+                wire::ErrorCode::LeaseExpired,
+                "this command's change timed out before it could finish",
+            ),
+            (
+                wire::ErrorCode::LeaseNotHeld,
+                "this command no longer holds the slot needed to apply changes",
+            ),
+        ] {
+            let detail = wire::ErrorDetail {
+                code: code as i32,
+                message: "daemon detail".into(),
+            };
+            let status = tonic::Status::with_details(
+                Code::Internal,
+                "fallback",
+                detail.encode_to_vec().into(),
+            );
+            let error = status_error(status);
+            assert_eq!(error.to_string(), expected);
+            assert_eq!(
+                crate::error::hints(&error),
+                vec!["omnifs status".to_owned()]
+            );
+            assert_eq!(exit_code(&error), ExitCode::DaemonUnavailable);
+        }
     }
 
     #[test]
@@ -520,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn transient_tonic_codes_map_to_daemon_unavailable() {
+    fn transient_tonic_codes_map_to_daemon_unavailable_with_a_logs_hint() {
         for code in [
             Code::ResourceExhausted,
             Code::Unavailable,
@@ -528,6 +601,7 @@ mod tests {
         ] {
             let error = status_error(tonic::Status::new(code, "transient"));
             assert_eq!(exit_code(&error), ExitCode::DaemonUnavailable);
+            assert_eq!(crate::error::hints(&error), vec!["omnifs logs".to_owned()]);
         }
     }
 
