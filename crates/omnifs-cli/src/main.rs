@@ -27,6 +27,7 @@ mod libkrun_runner;
 mod metrics;
 mod mutation;
 mod process;
+mod provider_catalog;
 mod provider_resolver;
 mod rpc;
 mod status;

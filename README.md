@@ -24,11 +24,11 @@ omnifs is written in Rust. We ship prebuilt Linux and macOS binaries through the
 
 ```bash
 npm install -g @0xff-ai/omnifs
-omnifs setup --providers github
+omnifs setup
 omnifs status
 ```
 
-`omnifs setup` configures exact embedded providers, starts the host-native daemon, creates named platform defaults, and attaches them. Use `omnifs setup --no-up` to configure mounts only, or use the commands below for separate operations.
+`omnifs setup` boots the host-native daemon, shows what is already running, and lists every embedded provider with an honest auth label. It then offers two default-yes confirms: mount every provider that needs no sign-in in one atomic batch, and attach the platform-recommended filesystem. `--yes` accepts both without asking; `--no-input` declines both and still exits 0. Anything that needs a sign-in or a config value goes through `omnifs mount add`, or use the commands below for separate operations.
 
 ---
 
