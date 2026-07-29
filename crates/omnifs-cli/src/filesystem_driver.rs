@@ -18,7 +18,6 @@ use crate::client_fs_state::ClientFilesystemState;
 use crate::docker::{DockerClient, DockerContainerIdentity};
 use crate::host_fs::HostDriver;
 use crate::libkrun_runner::LibkrunRunner;
-use crate::rpc::RpcClient;
 use crate::ui::output::Output;
 
 /// Everything a filesystem driver's `launch` needs, resolved once by
@@ -37,21 +36,25 @@ pub(crate) struct LaunchContext<'a> {
 }
 
 impl<'a> LaunchContext<'a> {
-    async fn resolve(
+    /// `info` is the caller's already-fetched `GetInventory` response's
+    /// `info` field: every launch caller already probes the daemon's
+    /// inventory before deciding to launch at all (to check attachment or
+    /// readiness), so this never re-fetches it.
+    fn resolve(
         client_state: &'a ClientFilesystemState,
         client_owner: ClientOwnerId,
         spec: &'a fs::Spec,
         output: Output,
-    ) -> Result<Self> {
-        let info = RpcClient::resolve()?.inventory().await?.info;
-        Ok(Self {
+        info: omnifs_api::DaemonInfo,
+    ) -> Self {
+        Self {
             client_state,
             client_owner,
             spec,
             output,
             attach_unix: info.attach_unix,
             attach_tcp: info.attach_tcp,
-        })
+        }
     }
 
     pub(crate) fn attach_unix(&self) -> Result<&Path> {
@@ -165,14 +168,17 @@ impl FilesystemDriver {
     }
 
     /// Launch and block until ready, uniformly across all three drivers.
+    /// `info` is the caller's already-fetched daemon inventory info; see
+    /// [`LaunchContext::resolve`].
     pub(crate) async fn launch(
         &self,
         client_state: &ClientFilesystemState,
         client_owner: ClientOwnerId,
         spec: &fs::Spec,
         output: Output,
+        info: omnifs_api::DaemonInfo,
     ) -> Result<()> {
-        let ctx = LaunchContext::resolve(client_state, client_owner, spec, output).await?;
+        let ctx = LaunchContext::resolve(client_state, client_owner, spec, output, info);
         match self {
             Self::Host(runner) => runner.launch(&ctx).await,
             Self::Docker(client) => client.launch(&ctx).await,

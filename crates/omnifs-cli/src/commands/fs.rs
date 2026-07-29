@@ -306,12 +306,8 @@ pub(crate) async fn ensure_setup_filesystem(
         claim.create(&spec)?;
         spec
     };
-    let attached = RpcClient::resolve()?
-        .inventory()
-        .await?
-        .attachments
-        .contains(&spec);
-    if attached {
+    let inventory = RpcClient::resolve()?.inventory().await?;
+    if inventory.attachments.contains(&spec) {
         return Ok(());
     }
     if runtime_running(&client_state, &spec, output.clone()).await? {
@@ -322,7 +318,13 @@ pub(crate) async fn ensure_setup_filesystem(
         );
         return Ok(());
     }
-    Box::pin(launch_and_confirm(&client_state, &spec, output)).await
+    Box::pin(launch_and_confirm(
+        &client_state,
+        &spec,
+        output,
+        inventory.info,
+    ))
+    .await
 }
 
 async fn rm(args: NameArgs, output: Output) -> Result<ExitCode> {
@@ -374,7 +376,13 @@ async fn attach(args: NameArgs, output: Output) -> Result<ExitCode> {
         spec.id(),
         spec.runtime()
     );
-    Box::pin(launch_and_confirm(&client_state, &spec, output.clone())).await?;
+    Box::pin(launch_and_confirm(
+        &client_state,
+        &spec,
+        output.clone(),
+        inventory.info,
+    ))
+    .await?;
     finish_action(&output, spec, "attached")
 }
 
@@ -405,12 +413,18 @@ async fn restart(args: NameArgs, output: Output) -> Result<ExitCode> {
         spec.runtime()
     );
     crate::commands::daemon_start::start().await?;
-    RpcClient::resolve()?
+    let inventory = RpcClient::resolve()?
         .inventory()
         .await
         .context("daemon did not become ready before restarting a filesystem")?;
     stop_runtime(&client_state, &spec, output.clone()).await?;
-    Box::pin(launch_and_confirm(&client_state, &spec, output.clone())).await?;
+    Box::pin(launch_and_confirm(
+        &client_state,
+        &spec,
+        output.clone(),
+        inventory.info,
+    ))
+    .await?;
     finish_action(&output, spec, "attached")
 }
 
@@ -455,15 +469,18 @@ async fn runtime_running(
     }
 }
 
+/// `info` is the caller's already-fetched `GetInventory` response's `info`
+/// field; see `filesystem_driver.rs::LaunchContext::resolve`.
 async fn launch_and_confirm(
     client_state: &ClientFilesystemState,
     spec: &fs::Spec,
     output: Output,
+    info: omnifs_api::DaemonInfo,
 ) -> Result<()> {
     let client_owner = client_owner_id()?;
     let driver = FilesystemDriver::for_spec(client_state, spec, output.clone())?;
     driver
-        .launch(client_state, client_owner, spec, output.clone())
+        .launch(client_state, client_owner, spec, output.clone(), info)
         .await?;
     if wait_for_attachment(spec).await {
         return Ok(());

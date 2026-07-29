@@ -167,6 +167,10 @@ pub(crate) async fn assemble_mount_build(
 ) -> anyhow::Result<MountBuild> {
     let interactive = init_interactive(prompt);
     let embedded = rpc.list_embedded_providers().await?;
+    // Fetched once here and reused below for both the interactive picker's
+    // mounted-marker set and the mount-name uniqueness check, rather than
+    // asking the daemon for the same list twice in one invocation.
+    let mounts = rpc.list_mounts().await?;
 
     // No provider argument in an interactive output: choose one with the
     // generic single-select prompt instead of a bare list. Rows render the
@@ -178,9 +182,7 @@ pub(crate) async fn assemble_mount_build(
     // memory ceiling, and auth scheme, one sentence per line, never the
     // compact truncated summary `mount add`'s later consent block uses.
     let picked = if args.provider.is_none() && interactive {
-        let mounted: std::collections::BTreeSet<String> = rpc
-            .list_mounts()
-            .await?
+        let mounted: std::collections::BTreeSet<String> = mounts
             .iter()
             .map(|mount| mount.provider.name.clone())
             .collect();
@@ -230,9 +232,10 @@ pub(crate) async fn assemble_mount_build(
         interactive,
         output,
     )?;
-    let resolved = ProviderResolver::new(rpc).resolve(&selector).await?;
+    let resolved = ProviderResolver::new(rpc)
+        .resolve(&selector, &embedded)
+        .await?;
     let provider_name = resolved.reference.meta.name.to_string();
-    let mounts = rpc.list_mounts().await?;
     let mount_name = provider_selection::mount_name(
         &mounts,
         &resolved.manifest.default_mount,
@@ -528,16 +531,17 @@ fn config_bytes(config: Option<Value>) -> anyhow::Result<Vec<u8>> {
 /// write the same defaults for the same provider; unlike `mount add` there is
 /// no `--config-json`/`--limits-json` override and no auth to resolve, since
 /// setup only ever offers this path to a provider whose manifest declares
-/// neither.
-pub(crate) async fn quick_start_definition(
-    rpc: &RpcClient,
+/// neither. `mounts` is setup's already-fetched `list_mounts()` snapshot
+/// (one per provider in the quick-start batch would otherwise re-fetch the
+/// same list), never re-fetched here.
+pub(crate) fn quick_start_definition(
     output: &crate::ui::output::Output,
     provider_id: ProviderId,
     manifest: &ProviderManifest,
+    mounts: &[omnifs_api::MountRecord],
 ) -> anyhow::Result<MountDefinition> {
-    let mounts = rpc.list_mounts().await?;
     let mount_name = provider_selection::mount_name(
-        &mounts,
+        mounts,
         &manifest.default_mount,
         None,
         false,
