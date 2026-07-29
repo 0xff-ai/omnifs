@@ -10,11 +10,17 @@ use tokio::process::{Child, Command};
 
 use crate::error::{ExitCode, WithExitCode as _};
 use crate::rpc::RpcClient;
+use crate::ui::output::Output;
 
 const READY_TIMEOUT: Duration = Duration::from_mins(2);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-pub(crate) async fn start() -> anyhow::Result<()> {
+/// Every mutating and daemon-dependent command routes through here first.
+/// Readiness polling can take up to `READY_TIMEOUT`, so a spawn narrates
+/// exactly one line before it starts waiting; an already-running daemon
+/// narrates nothing, since there is nothing this command is doing that the
+/// operator does not already know about.
+pub(crate) async fn start(output: &Output) -> anyhow::Result<()> {
     let endpoint = Bootstrap::<Client>::for_client()?;
     let _spawn_lock = endpoint
         .acquire_spawn_lock()
@@ -23,6 +29,7 @@ pub(crate) async fn start() -> anyhow::Result<()> {
     let mut child = if control_reachable(&endpoint).await? {
         None
     } else {
+        output.narrate("Starting the daemon");
         Some(spawn()?)
     };
     wait_until_ready(&rpc, child.as_mut()).await

@@ -44,7 +44,7 @@ impl SetupArgs {
     }
 
     async fn run_in_workspace(self, output: Output) -> Result<ExitCode> {
-        daemon_start::start().await?;
+        daemon_start::start(&output).await?;
         let rpc = RpcClient::resolve()?;
         let state = ClientState::resolve()?;
         let started = Instant::now();

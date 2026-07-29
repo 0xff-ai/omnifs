@@ -17,7 +17,7 @@ pub struct RevokeArgs {
 
 impl RevokeArgs {
     pub(crate) async fn run(self, output: Output) -> anyhow::Result<Receipt> {
-        crate::commands::daemon_start::start().await?;
+        crate::commands::daemon_start::start(&output).await?;
         let rpc = crate::rpc::RpcClient::resolve()?;
         let name = omnifs_core::MountName::new(self.name.clone())?;
         let requested = rpc

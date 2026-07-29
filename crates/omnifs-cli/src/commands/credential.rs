@@ -73,7 +73,7 @@ async fn ls(output: Output) -> anyhow::Result<ExitCode> {
 
 impl RemoveArgs {
     async fn run(self, output: Output) -> anyhow::Result<Receipt> {
-        crate::commands::daemon_start::start().await?;
+        crate::commands::daemon_start::start(&output).await?;
         let rpc = crate::rpc::RpcClient::resolve()?;
         let removal = CredentialRemoval::load(self, &rpc, &output).await?;
         let state = ClientState::resolve()?;
