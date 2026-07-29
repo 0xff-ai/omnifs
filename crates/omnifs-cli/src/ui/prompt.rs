@@ -479,7 +479,7 @@ impl Confirm {
 }
 
 // ---------------------------------------------------------------------------
-// Select and multi-select
+// Select
 // ---------------------------------------------------------------------------
 
 /// One picker choice: `value` is what the caller gets back, `label` is what
@@ -508,8 +508,7 @@ enum Direction {
     Down,
 }
 
-/// Move a picker cursor by one step with wraparound, the shared browse
-/// behavior for both select and multi-select.
+/// Move a picker cursor by one step with wraparound.
 fn move_cursor(cursor: &mut usize, len: usize, direction: Direction) {
     if len == 0 {
         return;
@@ -540,7 +539,6 @@ fn detail_panel(detail: &[String], stream: Stream) -> Vec<String> {
 enum PickerEvent {
     Up,
     Down,
-    Toggle,
     Confirm,
     Cancel,
 }
@@ -552,7 +550,6 @@ fn map_picker_key(key: KeyEvent) -> Option<PickerEvent> {
     match key.code {
         KeyCode::Up => Some(PickerEvent::Up),
         KeyCode::Down => Some(PickerEvent::Down),
-        KeyCode::Char(' ') => Some(PickerEvent::Toggle),
         KeyCode::Enter => Some(PickerEvent::Confirm),
         KeyCode::Esc => Some(PickerEvent::Cancel),
         _ => None,
@@ -571,7 +568,6 @@ fn select_transition(cursor: &mut usize, len: usize, event: PickerEvent) -> Loop
         },
         PickerEvent::Confirm => LoopControl::Resolve,
         PickerEvent::Cancel => LoopControl::Cancel,
-        PickerEvent::Toggle => LoopControl::Continue,
     }
 }
 
@@ -607,7 +603,7 @@ pub(crate) struct Select<T> {
     items: Vec<SelectItem<T>>,
 }
 
-impl<T: Clone + Eq + std::fmt::Display> Select<T> {
+impl<T: Clone + std::fmt::Display> Select<T> {
     pub(crate) fn new(question: impl Into<String>) -> Self {
         Self {
             question: question.into(),
@@ -815,7 +811,7 @@ mod tests {
         ));
     }
 
-    // -- select / multi-select cursor and toggle transitions -------------
+    // -- select cursor and picker-key transitions --------------------------
 
     #[test]
     fn move_cursor_wraps_in_both_directions() {
@@ -851,15 +847,10 @@ mod tests {
             select_transition(&mut cursor, 3, PickerEvent::Cancel),
             LoopControl::Cancel
         ));
-        // Toggle has no meaning for a single-select and never resolves it.
-        assert!(matches!(
-            select_transition(&mut cursor, 3, PickerEvent::Toggle),
-            LoopControl::Continue
-        ));
     }
 
     #[test]
-    fn picker_key_mapping_covers_browse_toggle_and_cancel() {
+    fn picker_key_mapping_covers_browse_and_cancel() {
         assert!(matches!(
             map_picker_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
             Some(PickerEvent::Up)
@@ -867,10 +858,6 @@ mod tests {
         assert!(matches!(
             map_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
             Some(PickerEvent::Down)
-        ));
-        assert!(matches!(
-            map_picker_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
-            Some(PickerEvent::Toggle)
         ));
         assert!(matches!(
             map_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),

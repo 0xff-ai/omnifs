@@ -71,6 +71,3 @@ omnifs-itest = { path = "../omnifs-itest" }
 
 [lints]
 workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.30", features = ["net"] }

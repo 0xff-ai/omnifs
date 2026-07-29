@@ -154,12 +154,12 @@ fn preopen_summary(entry: &PreopenedPath) -> String {
     format!("{} -> {} ({mode})", entry.host, entry.guest)
 }
 
-pub(crate) struct LimitLine {
-    pub(crate) label: &'static str,
-    pub(crate) value: String,
+struct LimitLine {
+    label: &'static str,
+    value: String,
 }
 
-pub(crate) fn limit_lines(limits: &LimitDeclarations) -> Vec<LimitLine> {
+fn limit_lines(limits: &LimitDeclarations) -> Vec<LimitLine> {
     let mut lines = Vec::new();
     if let Some(limit) = &limits.max_memory_mb {
         lines.push(LimitLine {

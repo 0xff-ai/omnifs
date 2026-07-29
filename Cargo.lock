@@ -3140,7 +3140,6 @@ dependencies = [
  "hex",
  "hyper-util",
  "insta",
- "nix 0.30.1",
  "omnifs-api",
  "omnifs-auth",
  "omnifs-bootstrap",

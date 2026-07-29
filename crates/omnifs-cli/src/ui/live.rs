@@ -1,10 +1,11 @@
-//! The transient layer: spinners and byte progress. Everything here exists
-//! only on a TTY and never survives in scrollback; every primitive settles
-//! into a durable row (`ui/report.rs`) once its operation finishes. This
-//! module owns cursor movement, redraw throttling, non-TTY/quiet degradation
-//! to stable settle lines, and Ctrl-C erasure for the whole transient layer;
-//! `ui/progress.rs` is retired into this file rather than surviving as a
-//! second owner of the same concern.
+//! The transient spinner layer: one pending operation's frame, drawn only on
+//! a real TTY and never left in scrollback. [`Spinner`] owns redraw
+//! throttling (an appearance delay so a fast operation never flashes, then a
+//! capped redraw cadence), multi-row-aware cursor erasure before each
+//! redraw, and degrading to no draw at all under `--quiet`/structured output
+//! (`Output::show_progress`). It settles into a durable ledger row through
+//! `Output::ledger_row` once the operation finishes; this file owns nothing
+//! beyond the transient frame itself.
 
 #![allow(clippy::disallowed_macros, clippy::print_stderr)]
 
