@@ -12,6 +12,7 @@
 mod auth;
 mod capability;
 mod cli;
+mod client_dir;
 mod client_fs_state;
 mod client_state;
 mod commands;

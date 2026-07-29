@@ -1,17 +1,11 @@
 //! CLI-private identity and the single-record mutation journal.
 
 use anyhow::Context as _;
-use atomic_write_file::OpenOptions as AtomicOpenOptions;
-use atomic_write_file::unix::OpenOptionsExt as _;
 use fs2::FileExt as _;
-use omnifs_bootstrap::{Bootstrap, Client};
 use omnifs_core::{ClientOwnerId, MutationId};
 use serde::{Deserialize, Serialize};
-use std::io::Write as _;
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::PathBuf;
 
-const CLIENT_DIR: &str = "client";
 const OWNER_FILE: &str = "owner-id";
 const OWNER_LOCK: &str = "owner-id.lock";
 const MUTATION_FILE: &str = "mutations.json";
@@ -42,25 +36,16 @@ pub(crate) struct ClientState {
 
 impl ClientState {
     pub(crate) fn resolve() -> anyhow::Result<Self> {
-        let endpoint = Bootstrap::<Client>::for_client()?;
         Ok(Self {
-            root: endpoint.bootstrap_dir().join(CLIENT_DIR),
+            root: crate::client_dir::client_root()?,
         })
     }
 
     pub(crate) fn owner_id(&self) -> anyhow::Result<ClientOwnerId> {
         self.prepare()?;
         let lock_path = self.root.join(OWNER_LOCK);
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&lock_path)
+        let lock = crate::client_dir::open_private_sidecar(&lock_path)
             .with_context(|| format!("open client identity lock {}", lock_path.display()))?;
-        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("restrict client identity lock {}", lock_path.display()))?;
         lock.lock_exclusive()
             .with_context(|| format!("lock client identity {}", lock_path.display()))?;
 
@@ -74,13 +59,8 @@ impl ClientState {
                 let mut bytes = [0_u8; 16];
                 getrandom::fill(&mut bytes).context("generate client owner identity")?;
                 let owner = ClientOwnerId::from_bytes(bytes);
-                let mut options = AtomicOpenOptions::new();
-                options.preserve_mode(false).mode(0o600);
-                let mut file = options
-                    .open(&path)
-                    .with_context(|| format!("create client owner identity {}", path.display()))?;
-                writeln!(file, "{owner}").context("write client owner identity")?;
-                file.commit().context("commit client owner identity")?;
+                crate::client_dir::write_private_atomic(&path, format!("{owner}\n").as_bytes())
+                    .with_context(|| format!("write client owner identity {}", path.display()))?;
                 Ok(owner)
             },
             Err(error) => {
@@ -122,26 +102,16 @@ impl ClientState {
     fn lock_mutations(&self) -> anyhow::Result<std::fs::File> {
         self.prepare()?;
         let lock_path = self.root.join(MUTATION_LOCK);
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&lock_path)
+        let lock = crate::client_dir::open_private_sidecar(&lock_path)
             .with_context(|| format!("open mutation lock {}", lock_path.display()))?;
-        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("restrict mutation lock {}", lock_path.display()))?;
         lock.lock_exclusive()
             .with_context(|| format!("lock mutation state {}", lock_path.display()))?;
         Ok(lock)
     }
 
     fn prepare(&self) -> anyhow::Result<()> {
-        std::fs::create_dir_all(&self.root)
-            .with_context(|| format!("create client state {}", self.root.display()))?;
-        std::fs::set_permissions(&self.root, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("restrict client state {}", self.root.display()))
+        crate::client_dir::ensure_private_dir(&self.root)
+            .with_context(|| format!("create client state {}", self.root.display()))
     }
 }
 
@@ -157,20 +127,15 @@ fn read_pending(path: &std::path::Path) -> anyhow::Result<Option<PendingMutation
 
 fn write_pending(path: &std::path::Path, pending: &PendingMutation) -> anyhow::Result<()> {
     let bytes = serde_json::to_vec(pending).context("encode mutation state")?;
-    let mut options = AtomicOpenOptions::new();
-    options.preserve_mode(false).mode(0o600);
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("open mutation state {}", path.display()))?;
-    file.write_all(&bytes)
-        .with_context(|| format!("write mutation state {}", path.display()))?;
-    file.commit()
-        .with_context(|| format!("commit mutation state {}", path.display()))
+    crate::client_dir::write_private_atomic(path, &bytes)
+        .with_context(|| format!("write mutation state {}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
     fn owner_identity_is_stable_and_private() {
