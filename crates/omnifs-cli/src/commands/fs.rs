@@ -647,6 +647,10 @@ async fn list(output: Output) -> Result<ExitCode> {
         output.emit_result(verdict, &result)?;
     } else if result.filesystems.is_empty() {
         crate::ui::print_raw("No filesystems configured.\n");
+        output.narrate(
+            crate::ui::access::ActionLine::from(&crate::inventory::NextAction::CreateFilesystem)
+                .render(),
+        );
     } else {
         let mut report = crate::ui::table::Report::new();
         report.push(crate::ui::table::Block::Resources(
