@@ -289,6 +289,16 @@ impl ErrorAction {
             value: command.into(),
         }
     }
+
+    /// A hint beyond the first: the first hint is the headline recovery
+    /// action (`Fix:`), and every hint after it is an alternative worth
+    /// trying, not a second equally-primary fix.
+    pub(crate) fn try_hint(command: impl Into<String>) -> Self {
+        Self {
+            label: "Try",
+            value: command.into(),
+        }
+    }
 }
 
 /// The error block shape. Wiring a live error into this shape belongs to the
@@ -351,9 +361,15 @@ fn build_error_block(messages: &[String], hints: &[String]) -> ErrorBlock {
         None
     };
 
+    // The JSON envelope already carries every hint (`error.rs::envelope`);
+    // the human block used to render only the first, silently dropping the
+    // rest. Every hint now renders: the first as the headline `Fix:`, every
+    // hint after it as an additional `Try:` alternative, in the same order
+    // they were attached.
     let mut actions = Vec::new();
-    if let Some(fix) = hints.first() {
+    if let Some((fix, rest)) = hints.split_first() {
         actions.push(ErrorAction::fix(fix.clone()));
+        actions.extend(rest.iter().cloned().map(ErrorAction::try_hint));
     }
 
     ErrorBlock {
@@ -600,6 +616,26 @@ mod tests {
         assert!(block.detail.is_none());
         assert_eq!(block.actions.len(), 1);
         assert_eq!(block.actions[0].value, "omnifs daemon start");
+    }
+
+    /// A second hint attached to the same error (e.g. `with_hint` called
+    /// twice) must still reach the human block, not just the JSON envelope:
+    /// the first hint renders as `Fix:`, every hint after it as `Try:`, in
+    /// attachment order.
+    #[test]
+    fn built_error_block_renders_every_hint_not_just_the_first() {
+        let messages = vec!["lease conflict".to_owned()];
+        let hints = vec!["omnifs status".to_owned(), "omnifs logs".to_owned()];
+        let block = build_error_block(&messages, &hints);
+        assert_eq!(block.actions.len(), 2);
+        assert_eq!(block.actions[0].label, "Fix");
+        assert_eq!(block.actions[0].value, "omnifs status");
+        assert_eq!(block.actions[1].label, "Try");
+        assert_eq!(block.actions[1].value, "omnifs logs");
+
+        let rendered = error_block(&block, caps(120, false));
+        assert!(rendered.contains("Fix:  omnifs status"), "{rendered:?}");
+        assert!(rendered.contains("Try:  omnifs logs"), "{rendered:?}");
     }
 
     #[test]

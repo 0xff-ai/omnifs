@@ -17,7 +17,7 @@ use serde_json::Value;
 use super::spec_creation::create_config;
 use super::{AddArgs, AuthImportDecision, ImportOutcome, provider_selection};
 use crate::client_state::ClientState;
-use crate::error::{ExitCode, WithExitCode};
+use crate::error::{ExitCode, WithExitCode, WithHint};
 use crate::mutation::PlannedOp;
 use crate::provider_resolver::ProviderResolver;
 use crate::rpc::RpcClient;
@@ -303,15 +303,19 @@ pub(crate) async fn assemble_mount_build(
 
     if !interactive && token.is_none() && auth.as_ref().is_some_and(Auth::is_oauth) {
         return Err(anyhow!(
-            "cannot complete OAuth for `{provider_name}` without an interactive terminal; pass --token-env VAR with --scheme <static-token-scheme>, pass --no-auth, or run interactively"
+            "cannot complete OAuth for `{provider_name}` without an interactive terminal"
         ))
+        .with_hint("pass --token-env VAR with --scheme <static-token-scheme>")
+        .with_hint("or pass --no-auth")
+        .with_hint("or run interactively")
         .with_exit_code(ExitCode::AuthRequired);
     }
 
     if !interactive && manifest.requires_mount_input() && args.config_json.is_none() {
-        anyhow::bail!(
-            "cannot complete provider config prompts for `{provider_name}` without an interactive terminal; pass --config-json <json>"
-        );
+        return Err(anyhow!(
+            "cannot complete provider config prompts for `{provider_name}` without an interactive terminal"
+        ))
+        .with_hint("pass --config-json <json>");
     }
     // A supplied --config-json owns the whole config: skip default generation
     // (which validates manifest defaults and fails on required fields the
