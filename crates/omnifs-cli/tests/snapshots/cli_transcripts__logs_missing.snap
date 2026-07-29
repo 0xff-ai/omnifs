@@ -1,11 +1,12 @@
 ---
 source: crates/omnifs-cli/tests/cli_transcripts.rs
-assertion_line: 92
+assertion_line: 67
 expression: "fixture.transcript(&fixture.run(&[\"logs\"]))"
 ---
 exit: 3
 stdout:
 stderr:
+showing daemon logs
 ✗ daemon not running
 
   Caused by:

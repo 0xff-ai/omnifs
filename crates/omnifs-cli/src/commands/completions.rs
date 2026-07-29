@@ -16,9 +16,7 @@ pub struct CompletionsArgs {
 
 impl CompletionsArgs {
     pub fn run(self, output: &Output) -> anyhow::Result<()> {
-        if output.is_structured() {
-            anyhow::bail!("completions is a passthrough command and only supports human output")
-        }
+        output.require_human("completions")?;
         let mut cmd = Cli::command();
         clap_complete::generate(self.shell, &mut cmd, "omnifs", &mut std::io::stdout());
         Ok(())

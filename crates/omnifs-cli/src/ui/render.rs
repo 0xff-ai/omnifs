@@ -10,23 +10,17 @@
 //! `render_with`-style capability injection for the responsive report and
 //! this module follows it.
 //!
-use std::io::IsTerminal as _;
-
 use super::style::{self, Glyph};
 
 /// Real stdout terminal capabilities, mirroring `output.rs`'s stderr
 /// equivalent (`stderr_capabilities`) for human-mode command output that
 /// prints its record to stdout rather than narrating to stderr.
 pub(crate) fn stdout_capabilities() -> Capabilities {
-    let is_tty = std::io::stdout().is_terminal();
+    let (is_tty, width, color) = style::probe(style::Stream::Stdout);
     Capabilities {
-        width: if is_tty {
-            crossterm::terminal::size().map_or(80, |(columns, _rows)| usize::from(columns))
-        } else {
-            120
-        },
+        width,
         is_tty,
-        color: style::color_enabled(style::Stream::Stdout),
+        color,
         quiet: false,
     }
 }

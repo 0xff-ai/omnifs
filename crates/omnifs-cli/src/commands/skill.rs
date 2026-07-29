@@ -34,44 +34,50 @@ pub enum InstallTarget {
 
 impl SkillArgs {
     pub fn run(self, output: &Output) -> anyhow::Result<()> {
-        if output.is_structured() {
-            anyhow::bail!("skill is a passthrough command and only supports human output")
-        }
+        output.require_human("skill")?;
         match self.command {
-            SkillCommand::Install { target } => target.install(),
+            SkillCommand::Install { target } => target.install(output),
         }
     }
 }
 
 impl InstallTarget {
-    fn install(self) -> anyhow::Result<()> {
+    fn install(self, output: &Output) -> anyhow::Result<()> {
         match self {
-            Self::ClaudeCode => install_claude_code(std::env::var_os("HOME").map(PathBuf::from)),
+            Self::ClaudeCode => {
+                install_claude_code(std::env::var_os("HOME").map(PathBuf::from), output)
+            },
         }
     }
 }
 
-fn install_claude_code(home: Option<PathBuf>) -> anyhow::Result<()> {
+fn install_claude_code(home: Option<PathBuf>, output: &Output) -> anyhow::Result<()> {
     let Some(home) = home else {
         anyhow::bail!(
             "Could not determine ~/.claude; source skill is at {}",
             source_path().display()
         );
     };
-    install_claude_code_in(&home)
+    install_claude_code_in(&home, output)
 }
 
-fn install_claude_code_in(home: &Path) -> anyhow::Result<()> {
+fn install_claude_code_in(home: &Path, output: &Output) -> anyhow::Result<()> {
     let target = home.join(".claude").join("skills").join(SKILL_NAME);
     std::fs::create_dir_all(&target)
         .with_context(|| format!("create skill directory {}", target.display()))?;
     let skill = target.join("SKILL.md");
     std::fs::write(&skill, USAGE_SKILL)
         .with_context(|| format!("write skill file {}", skill.display()))?;
-    crate::ui::eprint_raw(&format!(
-        "Installed `{SKILL_NAME}` skill at {}\n",
-        target.display()
-    ));
+    let key_width = crate::ui::render::key_field_width(&["skill"]);
+    output.ledger_row(
+        &crate::ui::render::LedgerRow::new(
+            crate::ui::style::Glyph::Done,
+            "skill",
+            format!("installed at {}", target.display()),
+        ),
+        key_width,
+    );
+    output.outro(format!("`{SKILL_NAME}` is ready for your agent harness."));
     Ok(())
 }
 
@@ -87,7 +93,9 @@ mod tests {
 
     #[test]
     fn install_claude_code_errors_when_home_is_unset() {
-        let error = install_claude_code(None).expect_err("missing HOME must fail, not no-op");
+        let output = Output::new(crate::ui::output::OutputMode::Human, false);
+        let error =
+            install_claude_code(None, &output).expect_err("missing HOME must fail, not no-op");
         let message = error.to_string();
         assert!(message.contains("Could not determine ~/.claude"));
         assert!(message.contains("source skill is at"));

@@ -27,17 +27,15 @@ fn log_data(item: omnifs_api::grpc::wire::LogStreamItem) -> anyhow::Result<Bytes
 
 impl LogsArgs {
     pub async fn run(self, output: &Output) -> anyhow::Result<()> {
-        if output.is_structured() {
-            anyhow::bail!("logs is a passthrough command and only supports human output")
-        }
-        let mut stream = RpcClient::resolve()?
-            .stream_logs(self.follow, self.lines)
-            .await?;
+        output.require_human("logs")?;
         output.narrate(if self.follow {
             "streaming daemon logs (Ctrl-C to stop)"
         } else {
             "showing daemon logs"
         });
+        let mut stream = RpcClient::resolve()?
+            .stream_logs(self.follow, self.lines)
+            .await?;
         while let Some(item) = stream.message().await? {
             output.write_raw_bytes(&log_data(item)?)?;
         }

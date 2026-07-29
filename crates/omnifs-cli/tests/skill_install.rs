@@ -36,8 +36,11 @@ fn skill_install_claude_code_round_trips_in_temp_home() {
         std::fs::read_to_string(installed).unwrap(),
         include_str!("../../../skills/omnifs-usage/SKILL.md")
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("Installed `omnifs-usage` skill"),
-        "quiet must preserve the completed-operation receipt"
+        stderr.contains("skill")
+            && stderr.contains("installed at")
+            && stderr.contains("omnifs-usage"),
+        "quiet must preserve the completed-operation receipt: {stderr}"
     );
 }
