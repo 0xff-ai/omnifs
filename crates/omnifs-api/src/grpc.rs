@@ -475,6 +475,11 @@ pub fn daemon_inventory(v: &wire::DaemonInventory) -> Result<DaemonInventory, Fr
             .iter()
             .map(filesystem_spec)
             .collect::<Result<_, _>>()?,
+        active_mutation: v
+            .active_mutation
+            .as_ref()
+            .map(active_mutation)
+            .transpose()?,
     })
 }
 
@@ -510,6 +515,7 @@ pub fn to_daemon_inventory(v: &DaemonInventory) -> wire::DaemonInventory {
         mounts: v.mounts.iter().map(to_mount_record).collect(),
         credentials: v.credentials.iter().map(to_credential_status).collect(),
         attachments: v.attachments.iter().map(to_filesystem_spec).collect(),
+        active_mutation: v.active_mutation.as_ref().map(to_active_mutation),
     }
 }
 
@@ -1485,12 +1491,14 @@ mod tests {
             mounts: vec![mount_record.clone()],
             credentials: vec![],
             attachments: vec![],
+            active_mutation: Some(active_mutation),
         };
         let decoded = daemon_inventory(&to_daemon_inventory(&inventory)).unwrap();
         assert_eq!(decoded.phase, inventory.phase);
         assert_eq!(decoded.durable_revision, inventory.durable_revision);
         assert_eq!(decoded.info.attach_tcp, inventory.info.attach_tcp);
         assert_eq!(decoded.mounts, vec![mount_record]);
+        assert_eq!(decoded.active_mutation, Some(active_mutation));
     }
     #[test]
     fn lookup_replies_use_message_presence_as_the_only_absence_signal() {

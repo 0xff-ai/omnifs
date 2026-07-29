@@ -55,6 +55,7 @@ impl GrpcControlService {
                 mounts: Vec::new(),
                 credentials: Vec::new(),
                 attachments: Vec::new(),
+                active_mutation: None,
             }),
             ControlPhase::Recovery(recovery) => Ok(DaemonInventory {
                 info: self.control.context.daemon_info(None, None),
@@ -69,6 +70,7 @@ impl GrpcControlService {
                 mounts: Vec::new(),
                 credentials: Vec::new(),
                 attachments: Vec::new(),
+                active_mutation: None,
             }),
             ControlPhase::Ready(daemon) => daemon.inventory().await.map_err(grpc_internal),
             ControlPhase::ShuttingDown => Err(grpc_status(ControlPhase::shutting_down())),

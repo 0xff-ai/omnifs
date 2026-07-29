@@ -116,6 +116,7 @@ impl DaemonFacts {
                 mounts: Vec::new(),
                 credentials: Vec::new(),
                 attachments: Vec::new(),
+                active_mutation: None,
             }),
         };
         Self { status, probe }
@@ -519,21 +520,11 @@ impl Inventory {
             match rpc.inventory().await {
                 Ok(inventory) => {
                     let mounts = MountStatus::all_observed(&inventory);
+                    let active_mutation = inventory.active_mutation;
                     let daemon = DaemonFacts {
                         status: Some(inventory.clone()),
                         probe: DaemonProbe::Responding,
                     };
-                    // The daemon just answered `GetInventory`, so a second
-                    // round trip for the mutation lease it does not carry is
-                    // cheap and expected to succeed alongside it; a failure
-                    // here degrades to "no active mutation known" rather than
-                    // failing the whole status report.
-                    let active_mutation = rpc
-                        .status_optional()
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|status| status.active_mutation);
                     (daemon, mounts, Some(inventory), true, active_mutation)
                 },
                 Err(error) => {
@@ -866,6 +857,7 @@ mod tests {
                 mounts: Vec::new(),
                 credentials: Vec::new(),
                 attachments: Vec::new(),
+                active_mutation: None,
             };
             assert_eq!(DaemonFacts::from(Ok(Some(status))).health(), expected);
         }

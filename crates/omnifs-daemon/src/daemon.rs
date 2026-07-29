@@ -402,6 +402,7 @@ impl Daemon {
             mounts: self.mount_records().await?,
             credentials,
             attachments: self.vfs.attachments(),
+            active_mutation: status.active_mutation,
         })
     }
 

@@ -151,6 +151,10 @@ pub struct DaemonInventory {
     pub mounts: Vec<MountRecord>,
     pub credentials: Vec<CredentialStatus>,
     pub attachments: Vec<omnifs_core::fs::Spec>,
+    /// The daemon's single mutation lease, when one is currently held. Same
+    /// source `DaemonStatus::active_mutation` reads, so a client reading
+    /// `GetInventory` for both facts needs only the one round trip.
+    pub active_mutation: Option<ActiveMutation>,
 }
 
 /// Current daemon lifecycle phase.

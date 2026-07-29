@@ -69,7 +69,16 @@ impl SetupArgs {
             .into_iter()
             .map(|manifest| manifest.id.clone())
             .collect();
-        let mounted = offer_quick_start_mounts(&rpc, &state, &output, prompt, &mount_offer).await?;
+        let mounted = offer_quick_start_mounts(
+            &rpc,
+            &state,
+            &output,
+            prompt,
+            &mount_offer,
+            &embedded,
+            &daemon_inventory.mounts,
+        )
+        .await?;
 
         let recommended = crate::commands::fs::recommended_filesystems();
         let fs_offer = filesystem_offer(&recommended, &daemon_inventory.attachments);
@@ -218,6 +227,8 @@ async fn offer_quick_start_mounts(
     output: &Output,
     prompt: PromptMode,
     offer: &[String],
+    embedded: &[ProviderMetadata],
+    mounts: &[omnifs_api::MountRecord],
 ) -> Result<Vec<String>> {
     if offer.is_empty() {
         return Ok(Vec::new());
@@ -229,14 +240,13 @@ async fn offer_quick_start_mounts(
     let mut ops = Vec::with_capacity(offer.len());
     let mut mounted = Vec::with_capacity(offer.len());
     for name in offer {
-        let resolved = ProviderResolver::new(rpc).resolve(name).await?;
+        let resolved = ProviderResolver::new(rpc).resolve(name, embedded).await?;
         let definition = crate::commands::mount::create::quick_start_definition(
-            rpc,
             output,
             resolved.reference.id,
             &resolved.manifest,
-        )
-        .await?;
+            mounts,
+        )?;
         mounted.push(definition.name.to_string());
         ops.push(PlannedOp::mount_create(definition));
     }

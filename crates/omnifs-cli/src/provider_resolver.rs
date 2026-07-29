@@ -30,7 +30,14 @@ impl<'a> ProviderResolver<'a> {
         Self { rpc }
     }
 
-    pub(crate) async fn resolve(&self, selector: &str) -> anyhow::Result<ResolvedProvider> {
+    /// `embedded` is the caller's already-fetched embedded provider listing
+    /// (every caller needs it anyway, to build a picker or validate a name),
+    /// so a name selector never re-fetches the same bundle listing here.
+    pub(crate) async fn resolve(
+        &self,
+        selector: &str,
+        embedded: &[ProviderMetadata],
+    ) -> anyhow::Result<ResolvedProvider> {
         let path = Path::new(selector);
         match fs::symlink_metadata(path) {
             Ok(metadata) => return self.resolve_path(path, &metadata).await,
@@ -38,14 +45,11 @@ impl<'a> ProviderResolver<'a> {
             Err(error) => return Err(error).with_context(|| format!("stat provider `{selector}`")),
         }
 
-        if let Some(metadata) = self
-            .rpc
-            .list_embedded_providers()
-            .await?
-            .into_iter()
+        if let Some(metadata) = embedded
+            .iter()
             .find(|metadata| metadata.reference.name == selector)
         {
-            return self.resolve_embedded(metadata).await;
+            return self.resolve_embedded(metadata.clone()).await;
         }
         if is_digest_prefix(selector) {
             return self.resolve_digest(selector).await;
@@ -119,21 +123,28 @@ impl<'a> ProviderResolver<'a> {
         self.resolve_id(id).await
     }
 
+    /// Fetches `provider_metadata(id)` at most once on either branch: the
+    /// probe's own `Some` is used directly when the artifact is already
+    /// retained, and only the not-retained branch pays for a second fetch
+    /// (unavoidable, since import only returns a reference, not the
+    /// manifest bytes `resolved_from_metadata` needs).
     async fn resolve_artifact(
         &self,
         artifact: &omnifs_provider::Artifact,
     ) -> anyhow::Result<ResolvedProvider> {
         let id = artifact.id();
-        if self.rpc.provider_metadata(id).await?.is_some() {
-            return self.resolve_id(id).await;
-        }
-        let receipt = self.import_artifact(artifact).await?;
-        anyhow::ensure!(
-            receipt.provider.id == id,
-            "daemon imported provider `{}` for requested artifact `{id}`",
-            receipt.provider.id
-        );
-        self.resolve_id(id).await
+        let metadata = if let Some(metadata) = self.rpc.provider_metadata(id).await? {
+            metadata
+        } else {
+            let receipt = self.import_artifact(artifact).await?;
+            anyhow::ensure!(
+                receipt.provider.id == id,
+                "daemon imported provider `{}` for requested artifact `{id}`",
+                receipt.provider.id
+            );
+            self.fetch_retained(id).await?
+        };
+        resolved_from_metadata(id, &metadata)
     }
 
     async fn resolve_embedded(
@@ -165,29 +176,19 @@ impl<'a> ProviderResolver<'a> {
     }
 
     async fn resolve_id(&self, id: ProviderId) -> anyhow::Result<ResolvedProvider> {
-        let metadata = self
-            .rpc
+        let metadata = self.fetch_retained(id).await?;
+        resolved_from_metadata(id, &metadata)
+    }
+
+    /// The one place that fetches a retained provider's metadata and turns
+    /// its absence into an error; every caller that already knows the
+    /// artifact is retained (or just imported it) routes through here
+    /// instead of re-deriving the same "not retained" message.
+    async fn fetch_retained(&self, id: ProviderId) -> anyhow::Result<ProviderMetadata> {
+        self.rpc
             .provider_metadata(id)
             .await?
-            .ok_or_else(|| anyhow!("provider artifact `{id}` is not retained by the daemon"))?;
-        let manifest = ProviderManifest::from_bytes(&metadata.manifest)
-            .with_context(|| format!("validate daemon metadata for provider `{id}`"))?;
-        anyhow::ensure!(
-            manifest.id == metadata.reference.name,
-            "daemon metadata name `{}` does not match manifest `{}`",
-            metadata.reference.name,
-            manifest.id
-        );
-        anyhow::ensure!(
-            metadata.reference.id == id,
-            "daemon metadata returned provider `{}` for requested `{id}`",
-            metadata.reference.id
-        );
-        let reference = provider_reference(&metadata)?;
-        Ok(ResolvedProvider {
-            reference,
-            manifest,
-        })
+            .ok_or_else(|| anyhow!("provider artifact `{id}` is not retained by the daemon"))
     }
 
     async fn import_artifact(
@@ -205,6 +206,35 @@ impl<'a> ProviderResolver<'a> {
     ) -> anyhow::Result<omnifs_api::ProviderImportReceipt> {
         self.rpc.import_embedded_provider(name.to_owned()).await
     }
+}
+
+/// Validate one daemon-retained provider's metadata and build the resolved
+/// value from it. The one owner of this validation, so every path that ends
+/// at a retained-by-id artifact (a digest match, a fresh import, an
+/// already-retained probe) agrees on what "valid" means without each
+/// re-fetching metadata just to reach this same check.
+fn resolved_from_metadata(
+    id: ProviderId,
+    metadata: &ProviderMetadata,
+) -> anyhow::Result<ResolvedProvider> {
+    let manifest = ProviderManifest::from_bytes(&metadata.manifest)
+        .with_context(|| format!("validate daemon metadata for provider `{id}`"))?;
+    anyhow::ensure!(
+        manifest.id == metadata.reference.name,
+        "daemon metadata name `{}` does not match manifest `{}`",
+        metadata.reference.name,
+        manifest.id
+    );
+    anyhow::ensure!(
+        metadata.reference.id == id,
+        "daemon metadata returned provider `{}` for requested `{id}`",
+        metadata.reference.id
+    );
+    let reference = provider_reference(metadata)?;
+    Ok(ResolvedProvider {
+        reference,
+        manifest,
+    })
 }
 
 fn provider_reference(metadata: &ProviderMetadata) -> anyhow::Result<ProviderRef> {
