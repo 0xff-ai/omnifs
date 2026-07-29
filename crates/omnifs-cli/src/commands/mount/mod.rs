@@ -26,7 +26,7 @@ use omnifs_api::{
 use omnifs_core::MountName;
 use secrecy::ExposeSecret as _;
 
-use crate::error::{ExitCode, WithExitCode};
+use crate::error::{ExitCode, WithExitCode, WithHint};
 use crate::mutation::PlannedOp;
 use crate::token_source::TokenSource;
 use crate::ui::consent::{Decision, Outcome, Plan, Row};
@@ -342,9 +342,11 @@ impl ReauthArgs {
         let mount_name = self.name.as_str();
         let rpc = crate::rpc::RpcClient::resolve()?;
         let name = MountName::new(mount_name.to_owned())?;
-        let record = rpc.get_mount(name.clone()).await?.ok_or_else(|| {
-            anyhow!("no mount named `{mount_name}`; run `omnifs mount add <provider>` to create it")
-        })?;
+        let record = rpc
+            .get_mount(name.clone())
+            .await?
+            .ok_or_else(|| anyhow!("no mount named `{mount_name}`"))
+            .with_hint("omnifs mount add <provider>")?;
         let Some(auth) = record.definition.auth.as_ref() else {
             anyhow::bail!("mount `{mount_name}` needs no authentication");
         };
@@ -377,8 +379,10 @@ impl ReauthArgs {
         let interactive = prompt.interactive();
         if !interactive && selected.is_oauth() {
             return Err(anyhow!(
-                "`omnifs mount reauth {mount_name}` cannot complete OAuth without a terminal; run it interactively, or use a static-token scheme with --token - or --token-env VAR"
+                "`omnifs mount reauth {mount_name}` cannot complete OAuth without a terminal"
             ))
+            .with_hint("run it interactively")
+            .with_hint("or use a static-token scheme with --token - or --token-env VAR")
             .with_exit_code(ExitCode::AuthRequired);
         }
 

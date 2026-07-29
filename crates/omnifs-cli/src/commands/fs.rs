@@ -4,13 +4,13 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::{Context as _, Result, anyhow, ensure};
 use clap::{Args, Subcommand};
 use omnifs_core::{ClientOwnerId, fs};
 use serde::Serialize;
 
 use crate::client_fs_state::ClientFilesystemState;
-use crate::error::ExitCode;
+use crate::error::{ExitCode, WithHint};
 use crate::filesystem_driver::{Confirmed, FilesystemDriver};
 use crate::rpc::RpcClient;
 use crate::ui::output::{Output, ResultVerdict};
@@ -363,11 +363,13 @@ async fn attach(args: NameArgs, output: Output) -> Result<ExitCode> {
         .iter()
         .find(|row| row.id() == spec.id())
     {
-        ensure!(
-            attached == &spec,
-            "filesystem `{}` is attached with different settings; run `omnifs doctor`",
-            spec.id()
-        );
+        if attached != &spec {
+            return Err(anyhow!(
+                "filesystem `{}` is attached with different settings",
+                spec.id()
+            ))
+            .with_hint("omnifs doctor");
+        }
         return finish_action(&output, spec, "already_attached");
     }
     ensure!(
@@ -438,7 +440,8 @@ async fn ensure_not_attached(spec: &fs::Spec) -> Result<()> {
     let inventory = RpcClient::resolve()?
         .inventory()
         .await
-        .context("cannot prove the daemon attachment state; run `omnifs doctor`")?;
+        .context("cannot prove the daemon attachment state")
+        .with_hint("omnifs doctor")?;
     ensure!(
         !inventory
             .attachments
@@ -461,10 +464,11 @@ async fn runtime_running(
         .await?
     {
         None => Ok(false),
-        Some(Confirmed::Docker(_, false)) => bail!(
-            "filesystem `{}` has a stopped Docker container; run `omnifs doctor`",
+        Some(Confirmed::Docker(_, false)) => Err(anyhow!(
+            "filesystem `{}` has a stopped Docker container",
             spec.id()
-        ),
+        ))
+        .with_hint("omnifs doctor"),
         Some(_) => Ok(true),
     }
 }

@@ -2,6 +2,8 @@ use anyhow::anyhow;
 use omnifs_api::{MountRecord, ProviderMetadata};
 use omnifs_core::MountName;
 
+use crate::error::WithHint;
+
 pub(crate) fn select(
     embedded: &[ProviderMetadata],
     provider_arg: Option<&str>,
@@ -77,9 +79,8 @@ fn ensure_unique_name(
         return Ok(suggestion);
     }
     if !interactive {
-        anyhow::bail!(
-            "mount `{proposed}` already exists; pass --name explicitly (suggested: `{suggestion}`)"
-        );
+        return Err(anyhow!("mount `{proposed}` already exists"))
+            .with_hint(format!("pass --name {suggestion}"));
     }
     let name = crate::ui::prompt::Text::new("New mount name")
         .with_default(suggestion.as_str())
