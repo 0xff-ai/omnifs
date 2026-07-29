@@ -89,7 +89,7 @@ pub(crate) async fn configure_mount(
     output: &crate::ui::output::Output,
     prompt: PromptMode,
 ) -> anyhow::Result<MountInitOutcome> {
-    crate::commands::daemon_start::start().await?;
+    crate::commands::daemon_start::start(output).await?;
     let rpc = RpcClient::resolve()?;
     let state = ClientState::resolve()?;
     let mut plan = assemble_mount_build(&args, &rpc, output, prompt).await?;

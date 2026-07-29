@@ -6,7 +6,8 @@
 
 use crate::inventory::{DaemonHealth, Inventory};
 use crate::ui::consent::Outcome;
-use crate::ui::render::{self, Capabilities};
+use crate::ui::output::Output;
+use crate::ui::render::{self, LedgerRow};
 use omnifs_bootstrap::{Bootstrap, Client, Instance};
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -114,20 +115,29 @@ impl DaemonTeardown {
         }
     }
 
-    /// Stop the namespace daemon and render the typed outcomes through Output.
-    /// Bails on the first failure so the exit code reflects an
-    /// incomplete teardown.
-    pub(crate) async fn down(&self) -> anyhow::Result<()> {
+    /// Stop the namespace daemon and render the typed outcomes through
+    /// `Output`, the same ledger-row primitive every other command's receipt
+    /// uses. Bails on the first failure so the exit code reflects an
+    /// incomplete teardown; that failing outcome's text becomes the bail's
+    /// own message, so it is deliberately left out of the printed rows
+    /// instead of showing once in the transcript and again in the error
+    /// block.
+    pub(crate) async fn down(&self, output: &Output) -> anyhow::Result<()> {
         let outcomes = self.down_collect().await?;
-        // `down` is only ever called for human output (`commands/down.rs`
-        // routes structured invocations through the receipt path instead),
-        // so the whole transcript prints unconditionally: it is this
-        // command's entire receipt, not narration a script would want `-q`
-        // to drop.
-        for line in transcript(&outcomes, crate::ui::output::stderr_capabilities(false)) {
-            crate::ui::eprint_raw(&format!("{line}\n"));
+        let failure = outcomes.iter().find(|outcome| outcome.is_failure());
+        match transcript(&outcomes, failure) {
+            Transcript::NothingToStop => {
+                output.narrate("Nothing to stop. The daemon isn't running.");
+            },
+            Transcript::Rows(rows) => {
+                let keys: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+                let key_width = render::key_field_width(&keys);
+                for row in &rows {
+                    output.ledger_row(row, key_width);
+                }
+            },
         }
-        if let Some(outcome) = outcomes.iter().find(|outcome| outcome.is_failure()) {
+        if let Some(outcome) = failure {
             anyhow::bail!(outcome.outcome().value);
         }
         Ok(())
@@ -312,31 +322,41 @@ impl DaemonTeardown {
     }
 }
 
-/// The exact human lines `down` prints, pure and independent of
-/// the real terminal so it is deterministically testable. Human output shows
+/// What `down`'s human output renders, pure and independent of the real
+/// terminal so it is deterministically testable: either the shared "nothing
+/// to stop" sentence, or one ledger row per visible outcome. Visible means
 /// the `daemon` row plus any *failing* `runtime-record` outcome: successful
 /// record bookkeeping is implementation detail a human never asked to see,
-/// but a kept record is exactly why the command is about to exit nonzero,
-/// so hiding it would print a transcript that contradicts the error block.
+/// but a kept record is exactly why the command is about to exit nonzero, so
+/// hiding it would print a transcript that contradicts the error block. The
+/// row matching `failure` (if any) is left out of `Rows` too: its text
+/// becomes the caller's bailed error message instead, and printing it twice
+/// would contradict the error block the same way hiding a kept record would.
 ///
 /// No visible outcome at all means the daemon was never running and its
 /// bookkeeping succeeded: an already-absent record needs no cleanup line,
 /// and a removed stale record isn't a "stop" either, since nothing was
 /// actually running.
-fn transcript(outcomes: &[TeardownOutcome], caps: Capabilities) -> Vec<String> {
+enum Transcript {
+    NothingToStop,
+    Rows(Vec<LedgerRow>),
+}
+
+fn transcript(outcomes: &[TeardownOutcome], failure: Option<&TeardownOutcome>) -> Transcript {
     let visible: Vec<&TeardownOutcome> = outcomes
         .iter()
         .filter(|outcome| outcome.id() == "daemon" || outcome.is_failure())
         .collect();
     if visible.is_empty() {
-        return vec!["Nothing to stop. The daemon isn't running.".to_owned()];
+        return Transcript::NothingToStop;
     }
-    let keys: Vec<&str> = visible.iter().map(|outcome| outcome.id()).collect();
-    let key_width = render::key_field_width(&keys);
-    visible
-        .iter()
-        .map(|outcome| render::ledger_row_line(&outcome.outcome().ledger_row(), key_width, caps))
-        .collect::<Vec<_>>()
+    Transcript::Rows(
+        visible
+            .into_iter()
+            .filter(|outcome| Some(*outcome) != failure)
+            .map(|outcome| outcome.outcome().ledger_row())
+            .collect(),
+    )
 }
 
 #[cfg(test)]
@@ -344,12 +364,12 @@ mod tests {
     use super::*;
     use crate::ui::style::Glyph;
 
-    fn caps(color: bool) -> Capabilities {
-        Capabilities {
-            width: 120,
-            is_tty: color,
-            color,
-            quiet: false,
+    /// Unwrap the `Rows` variant, panicking with a useful message on
+    /// `NothingToStop`: every test below that reaches this expects rows.
+    fn rows(transcript: Transcript) -> Vec<LedgerRow> {
+        match transcript {
+            Transcript::Rows(rows) => rows,
+            Transcript::NothingToStop => panic!("expected rows, got NothingToStop"),
         }
     }
 
@@ -374,14 +394,10 @@ mod tests {
         assert!(failed.value.contains("busy"));
     }
 
-    /// The "daemon was running" branch. `down`'s block has exactly
-    /// one key (`daemon`, 6 columns), so the field width is `6 + 3 = 9`, a
-    /// 3-space gap rather than the retired fixed-14-column rail's 8:
-    /// ```text
-    /// ✓ daemon   stopped (pid 31114, detached 2 filesystems)
-    /// ```
+    /// The "daemon was running" branch: one `daemon` ledger row, the
+    /// successful `runtime-record` bookkeeping staying invisible.
     #[test]
-    fn transcript_matches_the_stopped_daemon_shape() {
+    fn transcript_shows_the_stopped_daemon_row() {
         let outcomes = vec![
             TeardownOutcome::DaemonStopped {
                 pid: 31114,
@@ -390,11 +406,11 @@ mod tests {
             },
             TeardownOutcome::StaleRecordRemoved,
         ];
-        let lines = transcript(&outcomes, caps(false));
-        assert_eq!(
-            lines,
-            vec!["✓ daemon   stopped (pid 31114, detached 2 filesystems)".to_owned(),]
-        );
+        let rows = rows(transcript(&outcomes, None));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].key, "daemon");
+        assert_eq!(rows[0].glyph, Glyph::Done);
+        assert_eq!(rows[0].value, "stopped (pid 31114, detached 2 filesystems)");
     }
 
     /// The "nothing running" branch: `Nothing to stop. The daemon
@@ -402,30 +418,39 @@ mod tests {
     /// through even when a stale record needed cleanup.
     #[test]
     fn transcript_matches_the_nothing_running_shape() {
-        assert_eq!(
-            transcript(&[TeardownOutcome::StaleRecordAbsent], caps(false)),
-            vec!["Nothing to stop. The daemon isn't running.".to_owned()]
-        );
-        assert_eq!(
-            transcript(&[TeardownOutcome::StaleRecordRemoved], caps(false)),
-            vec!["Nothing to stop. The daemon isn't running.".to_owned()]
-        );
+        assert!(matches!(
+            transcript(&[TeardownOutcome::StaleRecordAbsent], None),
+            Transcript::NothingToStop
+        ));
+        assert!(matches!(
+            transcript(&[TeardownOutcome::StaleRecordRemoved], None),
+            Transcript::NothingToStop
+        ));
     }
 
-    /// A kept record is why `down` is about to exit nonzero, so it must show
-    /// as its own fail row instead of the contradictory "Nothing to stop"
-    /// claim that hid it before the error block.
+    /// A kept record is why `down` is about to exit nonzero, so without an
+    /// exclusion it must show as its own fail row instead of the
+    /// contradictory "Nothing to stop" claim hiding it.
     #[test]
     fn a_failing_record_outcome_is_never_hidden_behind_nothing_to_stop() {
-        let lines = transcript(
-            &[TeardownOutcome::StaleRecordKept {
-                error: "the recorded daemon process is still alive".to_owned(),
-            }],
-            caps(false),
-        );
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("record kept"), "{lines:?}");
-        assert!(!lines[0].contains("Nothing to stop"), "{lines:?}");
+        let outcome = TeardownOutcome::StaleRecordKept {
+            error: "the recorded daemon process is still alive".to_owned(),
+        };
+        let rows = rows(transcript(std::slice::from_ref(&outcome), None));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].value.contains("record kept"), "{rows:?}");
+    }
+
+    /// The one outcome that will bail is excluded from the printed rows: its
+    /// text becomes the propagated error's own message, so a caller that
+    /// still printed it as a row too would show the same failure twice.
+    #[test]
+    fn the_bailing_outcome_is_excluded_from_the_printed_rows() {
+        let outcome = TeardownOutcome::StaleRecordKept {
+            error: "the recorded daemon process is still alive".to_owned(),
+        };
+        let rows = rows(transcript(std::slice::from_ref(&outcome), Some(&outcome)));
+        assert!(rows.is_empty(), "{rows:?}");
     }
 
     #[test]
@@ -433,9 +458,9 @@ mod tests {
         let outcomes = vec![TeardownOutcome::DaemonShutdownFailed {
             error: "busy".to_owned(),
         }];
-        let lines = transcript(&outcomes, caps(false));
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("shutdown failed"), "{lines:?}");
+        let rows = rows(transcript(&outcomes, None));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].value.contains("shutdown failed"), "{rows:?}");
     }
 
     #[test]

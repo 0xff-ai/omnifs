@@ -42,7 +42,7 @@ pub async fn run(output: Output) -> anyhow::Result<ExitCode> {
         output.emit_result(receipt.verdict, receipt)?;
         exit
     } else {
-        teardown.down().await?;
+        teardown.down(&output).await?;
         ExitCode::Success
     };
     Ok(exit)

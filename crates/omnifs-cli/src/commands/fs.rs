@@ -353,7 +353,7 @@ async fn attach(args: NameArgs, output: Output) -> Result<ExitCode> {
         spec.protocol(),
         spec.runtime()
     );
-    crate::commands::daemon_start::start().await?;
+    crate::commands::daemon_start::start(&output).await?;
     let inventory = RpcClient::resolve()?
         .inventory()
         .await
@@ -412,7 +412,7 @@ async fn restart(args: NameArgs, output: Output) -> Result<ExitCode> {
         spec.protocol(),
         spec.runtime()
     );
-    crate::commands::daemon_start::start().await?;
+    crate::commands::daemon_start::start(&output).await?;
     let inventory = RpcClient::resolve()?
         .inventory()
         .await

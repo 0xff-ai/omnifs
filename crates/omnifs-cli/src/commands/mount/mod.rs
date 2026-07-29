@@ -317,7 +317,7 @@ impl ReauthArgs {
         self,
         output: Output,
     ) -> anyhow::Result<crate::commands::receipt::MountReauthReceipt> {
-        crate::commands::daemon_start::start().await?;
+        crate::commands::daemon_start::start(&output).await?;
         let prompt = output.prompt_mode();
         let result = self.run_with_output(&output, prompt).await;
         if result.is_ok() {
@@ -465,6 +465,9 @@ async fn rm_with_options(
     dry_run: bool,
     output: &Output,
 ) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
+    // `rm` runs `mutation::run`/`settle` below, the same as every other
+    // mutating mount command, both of which need the daemon up.
+    crate::commands::daemon_start::start(output).await?;
     let output = output.clone();
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;

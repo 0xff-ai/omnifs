@@ -67,7 +67,7 @@ pub(crate) struct MountUpdateReceipt {
 impl UpdateArgs {
     #[allow(clippy::too_many_lines)] // one linear patch assembly and mutation flow
     pub(crate) async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
-        crate::commands::daemon_start::start().await?;
+        crate::commands::daemon_start::start(&output).await?;
         let rpc = crate::rpc::RpcClient::resolve()?;
         let name = MountName::new(self.name.clone())
             .with_context(|| format!("invalid mount name `{}`", self.name))?;
