@@ -5,14 +5,12 @@
 //! identities received over the VFS protocol.
 
 use fs2::FileExt as _;
-use omnifs_bootstrap::{Bootstrap, Client};
 use omnifs_core::fs;
 use serde::Deserialize;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
-const CLIENT_DIR: &str = "client";
 const FILESYSTEMS_DIR: &str = "filesystems";
 const SPECS_DIR: &str = "specs";
 const LOCKS_DIR: &str = ".locks";
@@ -60,8 +58,7 @@ pub(crate) struct ClientFilesystemAssets {
 
 impl ClientFilesystemState {
     pub(crate) fn resolve() -> anyhow::Result<Self> {
-        let endpoint = Bootstrap::<Client>::for_client()?;
-        let state = Self::under_root(&endpoint.bootstrap_dir().join(CLIENT_DIR));
+        let state = Self::under_root(&crate::client_dir::client_root()?);
         state.prepare()?;
         Ok(state)
     }
@@ -95,9 +92,9 @@ impl ClientFilesystemState {
     }
 
     fn prepare(&self) -> io::Result<()> {
-        ensure_private_dir(&self.root)?;
-        ensure_private_dir(&self.root.join(FILESYSTEMS_DIR))?;
-        ensure_private_dir(&self.cache_dir)
+        crate::client_dir::ensure_private_dir(&self.root)?;
+        crate::client_dir::ensure_private_dir(&self.root.join(FILESYSTEMS_DIR))?;
+        crate::client_dir::ensure_private_dir(&self.cache_dir)
     }
 
     #[must_use]
@@ -200,34 +197,20 @@ impl Registry {
     }
 
     pub(crate) fn claim(&self, id: &fs::Id) -> Result<Claim<'_>, Error> {
-        ensure_private_dir(&self.root).map_err(|source| Error::Io {
+        crate::client_dir::ensure_private_dir(&self.root).map_err(|source| Error::Io {
             path: self.root.clone(),
             source,
         })?;
         let locks = self.root.join(LOCKS_DIR);
-        ensure_private_dir(&locks).map_err(|source| Error::Io {
+        crate::client_dir::ensure_private_dir(&locks).map_err(|source| Error::Io {
             path: locks.clone(),
             source,
         })?;
         let path = locks.join(format!("{id}.lock"));
-        let mut options = OpenOptions::new();
-        options.create(true).read(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let file = options.open(&path).map_err(|source| Error::Io {
+        let file = crate::client_dir::open_private_sidecar(&path).map_err(|source| Error::Io {
             path: path.clone(),
             source,
         })?;
-        #[cfg(unix)]
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
-            |source| Error::Io {
-                path: path.clone(),
-                source,
-            },
-        )?;
         file.try_lock_exclusive().map_err(|source| Error::Lock {
             id: id.clone(),
             source,
@@ -295,7 +278,8 @@ impl Claim<'_> {
             source,
         })?;
         bytes.push(b'\n');
-        write_atomic(&path, &bytes, 0o600).map_err(|source| Error::Io { path, source })
+        crate::client_dir::write_private_atomic(&path, &bytes)
+            .map_err(|source| Error::Io { path, source })
     }
 
     pub(crate) fn remove(&self) -> Result<(), Error> {
@@ -347,33 +331,11 @@ pub(crate) enum Error {
     ClaimMismatch { claimed: fs::Id, actual: fs::Id },
 }
 
-fn ensure_private_dir(path: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-    Ok(())
-}
-
-fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-    use atomic_write_file::OpenOptions as AtomicOpenOptions;
-    use std::io::Write as _;
-    let mut options = AtomicOpenOptions::new();
-    #[cfg(unix)]
-    {
-        use atomic_write_file::unix::OpenOptionsExt as _;
-        options.preserve_mode(false).mode(mode);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.commit()
-}
-
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
     fn registry_is_private_and_atomic() {
@@ -422,7 +384,7 @@ mod tests {
         let state = ClientFilesystemState::under_root(&temp.path().join("client"));
         state.prepare().unwrap();
         let registry = state.registry();
-        ensure_private_dir(&registry.root).unwrap();
+        crate::client_dir::ensure_private_dir(&registry.root).unwrap();
 
         std::fs::write(
             registry.root.join("main.json"),
