@@ -13,7 +13,7 @@ use omnifs_auth::{
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::Auth;
 use crate::ui::style;
@@ -129,10 +129,12 @@ async fn run_oauth(
     ));
     print_oauth_consent_summary(output, &request, guidance);
     let client = OAuthClient::new()?;
-    let printed_urls = Arc::new(Mutex::new(Vec::new()));
+    // The opener runs inside `OAuthClient`'s own flow, potentially from a
+    // different call frame than this one, so it needs its own owned handle
+    // rather than a borrow.
     let client = if no_browser {
         client.with_opener(Arc::new(PrintOpener {
-            urls: Arc::clone(&printed_urls),
+            output: output.clone(),
         }))
     } else {
         client.with_system_browser()
@@ -154,32 +156,27 @@ async fn run_oauth(
         },
         LoginRequest::ManualCode(request) => login_manual(&client, request, mount, output).await?,
         LoginRequest::DeviceCode(request) => {
-            let result = client
+            // `login_device_code` calls this before its own await point, so a
+            // borrow of `output` would live long enough; it is cloned anyway
+            // to keep every device-code line going through the same owned
+            // handle the opener above uses, rather than mixing a borrow and
+            // a clone for the same flow.
+            let device_output = output.clone();
+            client
                 .login_device_code(request, move |prompt| {
-                    present_device_prompt(&prompt, no_browser);
+                    present_device_prompt(&prompt, no_browser, &device_output);
                     async move { Ok(()) }
                 })
-                .await;
-            if result.is_ok() {
-                output.ledger_row(
-                    &crate::ui::render::LedgerRow::new(
-                        crate::ui::style::Glyph::Done,
-                        "oauth",
-                        "authorized",
-                    ),
-                    key_width,
-                );
-            }
-            result.with_hint(format!("Re-run `omnifs mount reauth {mount}` to retry"))?
+                .await
+                .with_hint(format!("Re-run `omnifs mount reauth {mount}` to retry"))?
         },
     };
-    for url in printed_urls
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .drain(..)
-    {
-        output.narrate(format!("Open {url}"));
-    }
+    // Every flow settles the same receipt row on success, in one place,
+    // rather than device-code alone printing it inside its own arm.
+    output.ledger_row(
+        &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "oauth", "authorized"),
+        key_width,
+    );
     Ok(entry)
 }
 
@@ -220,17 +217,22 @@ async fn login_manual(
     }
 }
 
-fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
-    // Printed directly through the `ui` toolkit's raw stderr writer rather
-    // than through `Output`: the callback runs before the await inside
-    // `login_device_code`, so it cannot borrow `&mut output` across the
-    // future (see `login_manual` above for the same constraint spelled out).
+/// Present the device-code prompt through `Output` narration, so it honors
+/// quiet and structured mode like every other line an invocation prints.
+/// `output` is an owned clone rather than a borrow: the caller passes this
+/// function into a `move` closure that outlives the borrow it would
+/// otherwise need.
+fn present_device_prompt(
+    prompt: &DeviceCodePrompt,
+    no_browser: bool,
+    output: &crate::ui::output::Output,
+) {
     let url = prompt
         .verification_uri_complete
         .as_deref()
         .unwrap_or(&prompt.verification_uri);
     let stream = style::Stream::Stderr;
-    crate::ui::eprint_raw(&format!("{}\n", crate::ui::style::accent(url, stream)));
+    output.narrate(crate::ui::style::accent(url, stream));
 
     // Clipboard copy is best effort only. Failure must not prevent showing
     // the code or continuing the flow.
@@ -243,7 +245,7 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
             ),
             Err(_) => crate::ui::style::bold(&prompt.user_code, stream),
         };
-    crate::ui::eprint_raw(&format!("{code_line}\n"));
+    output.narrate(code_line);
 
     // Show the code lifetime so the user knows how long they have before the
     // prompt on the provider side expires.
@@ -254,34 +256,25 @@ fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
         let mins = secs / 60;
         format!("expires in {mins}m")
     };
-    crate::ui::eprint_raw(&format!("{}\n", crate::ui::style::dim(expiry_text, stream)));
+    output.narrate(crate::ui::style::dim(expiry_text, stream));
 
     // Only attempt browser open when allowed and a complete uri is present.
     // Report outcome only on real success so we never overstate what happened.
     if !no_browser && let Some(complete_url) = &prompt.verification_uri_complete {
         match webbrowser::open(complete_url) {
             Ok(()) => {
-                crate::ui::eprint_raw(&format!(
-                    "{}\n",
-                    crate::ui::style::dim("(opened your browser)", stream)
-                ));
+                output.narrate(crate::ui::style::dim("(opened your browser)", stream));
             },
             Err(_) => {
-                crate::ui::eprint_raw(&format!(
-                    "{}\n",
-                    crate::ui::style::dim(
-                        "(could not open a browser; visit the URL above)",
-                        stream,
-                    )
+                output.narrate(crate::ui::style::dim(
+                    "(could not open a browser; visit the URL above)",
+                    stream,
                 ));
             },
         }
     }
 
-    crate::ui::eprint_raw(&format!(
-        "{}\n",
-        crate::ui::style::dim("waiting for confirmation", stream)
-    ));
+    output.narrate(crate::ui::style::dim("waiting for confirmation", stream));
 }
 
 fn print_oauth_consent_summary(
@@ -343,8 +336,12 @@ fn manual_code_from_input(input: &str) -> anyhow::Result<ManualCode> {
     Ok(ManualCode::new(code, state))
 }
 
+/// Prints each URL the flow would otherwise have opened a browser to, at the
+/// moment it would have opened it, rather than buffering for a drain later
+/// (by the time a caller could drain a buffer, the flow has already moved
+/// on, and the printed URL is stale advice).
 struct PrintOpener {
-    urls: Arc<Mutex<Vec<String>>>,
+    output: crate::ui::output::Output,
 }
 
 impl UrlOpener for PrintOpener {
@@ -353,10 +350,7 @@ impl UrlOpener for PrintOpener {
         url: &'a reqwest::Url,
     ) -> Pin<Box<dyn Future<Output = Result<(), omnifs_auth::AuthError>> + Send + 'a>> {
         Box::pin(async move {
-            self.urls
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(url.to_string());
+            self.output.narrate(format!("Open {url}"));
             Ok(())
         })
     }
