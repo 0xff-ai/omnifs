@@ -149,8 +149,6 @@ impl DockerClient {
         &self,
         ctx: &crate::filesystem_driver::LaunchContext<'_>,
     ) -> Result<()> {
-        ctx.output
-            .narrate(format!("Starting Docker filesystem `{}`", ctx.spec.id()));
         self.narrate_connecting();
         self.ping()
             .await

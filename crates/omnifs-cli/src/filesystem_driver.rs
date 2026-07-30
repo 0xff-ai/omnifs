@@ -7,10 +7,8 @@
 //! `fs::Runtime`; every other command dispatches by matching this enum's own
 //! variants instead.
 
-use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context as _, Result, ensure};
 use omnifs_core::{ClientOwnerId, fs};
@@ -84,26 +82,6 @@ pub(crate) fn ensure_record_matches(record_spec: &fs::Spec, expected: &fs::Spec)
     Ok(())
 }
 
-/// The "durable state survives but its record is gone" fail-shape every
-/// backend's `confirmed` opens with: prove nothing is left to reconcile
-/// before returning `None`, rather than silently reporting the filesystem as
-/// absent while a mount or helper is still live. `what` names the backend's
-/// state, `record_noun` the record it expected to find alongside it. Callers
-/// attach the `omnifs doctor` remediation as a hint, since this shared
-/// helper has no `Output` to reach through `with_hint`'s call-site pattern.
-pub(crate) fn ensure_no_orphaned_state(
-    state_exists: bool,
-    what: &str,
-    record_noun: &str,
-    location: impl fmt::Display,
-) -> Result<()> {
-    ensure!(
-        !state_exists,
-        "{what} state exists at {location} without a {record_noun}"
-    );
-    Ok(())
-}
-
 /// The recheck every `stop_confirmed` performs before it touches anything:
 /// a proven identity can go stale between confirmation and teardown, and
 /// acting on a replacement process, container, or helper that reused the
@@ -154,7 +132,10 @@ pub(crate) enum FilesystemDriver {
 /// libkrun, an identity-matched Docker container can be confirmed while
 /// stopped) so callers that care can distinguish it without a second probe.
 pub(crate) enum Confirmed {
-    Host(omnifs_mtab::RunnerRecord),
+    Host(
+        omnifs_mtab::RunnerRecord,
+        omnifs_thin::host_control::RunnerPhase,
+    ),
     Docker(DockerContainerIdentity, bool),
     Libkrun(omnifs_libkrun::HelperRecord),
 }
@@ -193,7 +174,7 @@ impl FilesystemDriver {
             Self::Host(runner) => Ok(runner
                 .confirmed(spec)
                 .await?
-                .map(|(record, _phase)| Confirmed::Host(record))),
+                .map(|(record, phase)| Confirmed::Host(record, phase))),
             Self::Docker(client) => Ok(client
                 .confirmed(client_state.profile_root(), client_owner, spec)
                 .await?
@@ -217,7 +198,9 @@ impl FilesystemDriver {
         confirmed: Confirmed,
     ) -> Result<()> {
         match (self, confirmed) {
-            (Self::Host(runner), Confirmed::Host(record)) => runner.stop_confirmed(&record).await,
+            (Self::Host(runner), Confirmed::Host(record, _phase)) => {
+                runner.stop_confirmed(&record).await
+            },
             (Self::Docker(client), Confirmed::Docker(identity, _running)) => {
                 client
                     .stop_confirmed(&identity, client_state.profile_root(), client_owner, spec)
@@ -245,22 +228,15 @@ impl FilesystemDriver {
         info: omnifs_api::DaemonInfo,
     ) -> Result<()> {
         let ctx = LaunchContext::resolve(client_state, client_owner, spec, output, info);
+        ctx.output.narrate(format!(
+            "Starting {} filesystem `{}`",
+            spec.runtime(),
+            spec.id()
+        ));
         match self {
             Self::Host(runner) => runner.launch(&ctx).await,
             Self::Docker(client) => client.launch(&ctx).await,
             Self::Libkrun(runner) => runner.launch(&ctx).await,
-        }
-    }
-
-    /// Construct the shell/exec command for a confirmed live instance, or
-    /// `None` for host: entering a host filesystem is a `cd` into an
-    /// already-visible mount, not a remote exec, so `commands/fs.rs` keeps
-    /// that branch outside the driver.
-    pub(crate) fn shell_command(&self, shell: Option<&str>, argv: &[String]) -> Option<Command> {
-        match self {
-            Self::Host(_) => None,
-            Self::Docker(client) => Some(client.shell_command(shell, argv)),
-            Self::Libkrun(runner) => Some(runner.shell_command(shell, argv)),
         }
     }
 }
