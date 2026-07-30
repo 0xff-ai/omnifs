@@ -239,7 +239,7 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
     }
 
     if inventory.mounts.is_empty() {
-        crate::ui::print_raw(&format!(
+        output.report(format!(
             "{}\n",
             fresh_profile_screen(&inventory, crate::ui::render::stdout_capabilities())
         ));
@@ -248,7 +248,7 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
 
     let report = crate::status::InventoryReport { inventory };
     let closing_action = report.closing_action();
-    report.render().print();
+    output.report(report.render().render());
     if let Some(action) = closing_action {
         output.narrate("");
         output.narrate(crate::ui::access::ActionLine::from(&action).render());

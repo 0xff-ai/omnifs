@@ -79,12 +79,18 @@ impl InspectArgs {
             tokio::task::spawn_blocking(move || run_tui(label, source, teaching_path))
                 .await
                 .context("inspector TUI task")??;
-        print_session_receipt(&receipt);
+        print_session_receipt(&output, &receipt);
         run_result?;
         Ok(())
     }
 
     async fn run_plain(self, output: &Output, format: NonInteractiveFormat) -> anyhow::Result<()> {
+        // `on_line` prints unconditionally through the raw writer rather than
+        // `Output::report` (which is a no-op outside Human mode): this
+        // stream's own mode dispatch above already decided whether `format`
+        // is human-plain or the canonical Jsonl passthrough, and both are
+        // the actual stdout product for their mode, not something
+        // `emit_result` ever wraps.
         if let Some(path) = self.replay {
             return run_plain(
                 SourceKind::Replay(path),
@@ -141,8 +147,8 @@ fn check_record_path(path: Option<&Path>) -> anyhow::Result<()> {
 /// the raw stream was captured. `omnifs-inspector` hands back plain typed
 /// data ([`SessionReceipt`]); this crate owns turning it into flat ledger
 /// rows via `ui/render.rs`, consistent with the v2 register.
-fn print_session_receipt(receipt: &SessionReceipt) {
-    crate::ui::print_raw(&render_receipt(
+fn print_session_receipt(output: &Output, receipt: &SessionReceipt) {
+    output.report(render_receipt(
         receipt,
         crate::ui::render::stdout_capabilities(),
     ));

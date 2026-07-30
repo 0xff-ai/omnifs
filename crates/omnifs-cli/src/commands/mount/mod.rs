@@ -161,7 +161,7 @@ async fn ls(output: Output) -> anyhow::Result<ExitCode> {
             },
         )?;
     } else {
-        crate::ui::print_raw(&render_mounts(&inventory));
+        output.report(render_mounts(&inventory));
     }
     Ok(exit_code)
 }
@@ -171,7 +171,7 @@ async fn show(args: &ShowArgs, output: Output) -> anyhow::Result<ExitCode> {
     if output.is_structured() {
         output.emit_result(result.verdict, &result)?;
     } else {
-        crate::ui::print_raw(&render_mount_show(&result));
+        output.report(render_mount_show(&result));
     }
     Ok(match result.verdict {
         ResultVerdict::Ok => ExitCode::Success,
