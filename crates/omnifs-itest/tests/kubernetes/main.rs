@@ -2,7 +2,7 @@
 
 mod support;
 
-use omnifs_wit::provider::types::{ErrorKind, ListChildrenResult};
+use omnifs_wit::host::types::{ErrorKind, ListChildrenResult};
 use serde_json::{Value, json};
 use support::{
     TestOpExt, answer_partial_discovery, http_ok, kube_harness, list_type_names, read_bytes,

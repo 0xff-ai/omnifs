@@ -1,7 +1,7 @@
 #![cfg(not(target_os = "wasi"))]
 
 use omnifs_itest::{RuntimeHarness, TestOpExt, make_initialized_runtime};
-use omnifs_wit::provider::types::{
+use omnifs_wit::host::types::{
     ByteSource, CalloutResult, EntryKind, ErrorKind, FileSize, FsKind, Header, HttpResponse,
     ListChildrenResult, LookupChildResult, ReadFileOutcome, ReadMode, Stability,
 };

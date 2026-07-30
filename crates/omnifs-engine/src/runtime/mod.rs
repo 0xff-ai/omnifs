@@ -18,7 +18,7 @@ use omnifs_auth::{AuthBinding, CredentialHealth};
 use omnifs_core::path::Path;
 use omnifs_core::{MountName, ProviderId, ProviderRef};
 use omnifs_provider::{ConfigMetadata, ProviderManifest};
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

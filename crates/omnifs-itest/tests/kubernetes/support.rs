@@ -6,7 +6,7 @@
 
 use omnifs_engine::test_support::TestOp;
 use omnifs_itest::{RuntimeHarness, make_initialized_runtime};
-use omnifs_wit::provider::types::{
+use omnifs_wit::host::types::{
     ByteSource, CalloutResult, Header, HttpResponse, ListChildrenResult, ReadFileOutcome,
 };
 

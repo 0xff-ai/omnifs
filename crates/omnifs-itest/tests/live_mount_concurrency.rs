@@ -6,7 +6,7 @@
 //! unrelated namespace work behind one suspended provider operation.
 
 use omnifs_engine::{EngineNamespace, MountTable};
-use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
+use omnifs_wit::host::types::{CalloutResult, Header, HttpResponse};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

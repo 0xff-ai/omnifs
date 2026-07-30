@@ -19,7 +19,7 @@ use crate::callouts::{callout_denied, callout_internal, callout_network, record_
 use crate::log_redaction::{LogUrl, WitHeaders};
 use dashmap::DashMap;
 use omnifs_auth::{AuthBinding, RefreshOutcome};
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 use reqwest::Url;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::path::{Path, PathBuf};

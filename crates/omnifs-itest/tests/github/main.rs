@@ -5,7 +5,7 @@ mod support;
 use omnifs_engine::Namespace;
 use omnifs_engine::test_support::cache::publish_effects_for_test;
 use omnifs_itest::ReadFileOpExt;
-use omnifs_wit::provider::types::{
+use omnifs_wit::host::types::{
     CalloutResult, Cursor, EntryKind, Header, HttpResponse, ListChildrenResult, LookupChildResult,
     ReadFileOutcome, Stability,
 };
@@ -120,7 +120,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_issue_list_projects_files() {
-    use omnifs_wit::provider::types::{Callout, CalloutResult, HttpResponse};
+    use omnifs_wit::host::types::{Callout, CalloutResult, HttpResponse};
 
     let harness = github_harness();
     let mut response = harness.list("/octocat/Hello-World/issues/open").unwrap();
@@ -214,7 +214,7 @@ fn github_issue_list_projects_files() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_issue_list_fetches_rest_followup_pages() {
-    use omnifs_wit::provider::types::{Callout, CalloutResult, HttpResponse};
+    use omnifs_wit::host::types::{Callout, CalloutResult, HttpResponse};
 
     let harness = github_harness();
     let mut response = harness.list("/octocat/Hello-World/issues/open").unwrap();
@@ -332,7 +332,7 @@ fn github_issue_list_fetches_rest_followup_pages() {
 
 #[test]
 fn github_pr_list_projects_files() {
-    use omnifs_wit::provider::types::{Callout, CalloutResult, HttpResponse};
+    use omnifs_wit::host::types::{Callout, CalloutResult, HttpResponse};
 
     let harness = github_harness();
     let mut response = harness.list("/octocat/Hello-World/pulls/open").unwrap();
@@ -421,7 +421,7 @@ fn github_pr_list_projects_files() {
 
 #[test]
 fn github_action_run_list_projects_files() {
-    use omnifs_wit::provider::types::{Callout, CalloutResult, HttpResponse};
+    use omnifs_wit::host::types::{Callout, CalloutResult, HttpResponse};
 
     let harness = github_harness();
     let mut response = harness.list("/octocat/Hello-World/actions/runs").unwrap();
@@ -485,7 +485,7 @@ fn github_action_run_list_projects_files() {
 
 #[test]
 fn github_provider_action_run_lookup_validates_and_listing_validates() {
-    use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
+    use omnifs_wit::host::types::{CalloutResult, Header, HttpResponse};
 
     let harness = github_harness();
     // lookup_child on a run id is structural (no fetch). The run id path is
@@ -811,7 +811,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
 
 #[test]
 fn github_provider_missing_item_resources_validate_on_lookup() {
-    use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
+    use omnifs_wit::host::types::{CalloutResult, Header, HttpResponse};
 
     // Issue item dirs resolve structurally; existence is validated on read.
     let harness = github_harness();
@@ -874,7 +874,7 @@ fn github_provider_missing_item_resources_validate_on_lookup() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_pr_lookup_validates_and_exposes_diff() {
-    use omnifs_wit::provider::types::{
+    use omnifs_wit::host::types::{
         BlobFetched, ByteSource, Callout, CalloutError, CalloutResult, ErrorKind, HttpResponse,
     };
 
@@ -1048,7 +1048,7 @@ fn github_pr_lookup_validates_and_exposes_diff() {
 
 #[test]
 fn github_pr_files_list_and_read_changed_file_objects() {
-    use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
+    use omnifs_wit::host::types::{CalloutResult, HttpResponse};
 
     const CHANGED_FILE_ROW: &[u8] = br#"{"changes":7,"unknown_marker":"preserved","filename":"src/lib.rs","deletions":2,"status":"modified","patch":"@@ -1 +1 @@\n-old\n+new","additions":5}"#;
     let files_response = [b"[".as_slice(), CHANGED_FILE_ROW, b"]".as_slice()].concat();
@@ -1133,7 +1133,7 @@ fn github_pr_files_list_and_read_changed_file_objects() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_pr_reviews_and_review_comments_list_and_read_objects() {
-    use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
+    use omnifs_wit::host::types::{CalloutResult, HttpResponse};
 
     let harness = github_harness();
     let mut reviews = harness
@@ -1300,7 +1300,7 @@ fn github_pr_reviews_and_review_comments_list_and_read_objects() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
-    use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
+    use omnifs_wit::host::types::{CalloutResult, HttpResponse};
 
     let harness = github_harness();
     let mut checks = harness
@@ -1445,7 +1445,7 @@ fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
 
 #[test]
 fn github_notifications_list_and_read_thread_objects() {
-    use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
+    use omnifs_wit::host::types::{CalloutResult, HttpResponse};
 
     let harness = github_harness();
     let mut listed = harness.list("/notifications").unwrap();
@@ -1533,7 +1533,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
     // This test verifies that listing a specific run directory fetches the run
     // and preloads its status and conclusion alongside the listing (so the host
     // can cache them without a second round-trip).
-    use omnifs_wit::provider::types::{CalloutResult, HttpResponse};
+    use omnifs_wit::host::types::{CalloutResult, HttpResponse};
 
     let harness = github_harness();
 
@@ -1616,9 +1616,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
-    use omnifs_wit::provider::types::{
-        CalloutError, CalloutResult, ErrorKind, Header, HttpResponse,
-    };
+    use omnifs_wit::host::types::{CalloutError, CalloutResult, ErrorKind, Header, HttpResponse};
 
     struct Case {
         name: &'static str,
@@ -1742,7 +1740,7 @@ fn github_provider_resource_reads_do_not_fall_back_to_provider_cache() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_provider_comment_routes_id_dirs_and_refetch() {
-    use omnifs_wit::provider::types::{CalloutError, CalloutResult, Header};
+    use omnifs_wit::host::types::{CalloutError, CalloutResult, Header};
 
     fn ok_body(body: &[u8]) -> Vec<CalloutResult> {
         vec![CalloutResult::HttpResponse(HttpResponse {
@@ -1851,14 +1849,14 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
     );
     reread
         .answer_callouts(vec![CalloutResult::CalloutError(CalloutError {
-            kind: omnifs_wit::provider::types::ErrorKind::Network,
+            kind: omnifs_wit::host::types::ErrorKind::Network,
             message: "network down".to_string(),
             retryable: true,
         })])
         .unwrap();
     match reread.result().unwrap() {
         Err(error) => {
-            assert_eq!(error.kind, omnifs_wit::provider::types::ErrorKind::Network);
+            assert_eq!(error.kind, omnifs_wit::host::types::ErrorKind::Network);
         },
         other => panic!("expected Network error on comment refetch, got {other:?}"),
     }
@@ -1932,7 +1930,7 @@ fn github_provider_comment_routes_id_dirs_and_refetch() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_fallback() {
-    use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
+    use omnifs_wit::host::types::{CalloutResult, Header, HttpResponse};
 
     let harness = github_harness();
     // lookup_child on an owner segment resolves structurally without a fetch.
@@ -2135,7 +2133,7 @@ fn github_provider_polls_events_and_invalidates_caches() {
 
 #[test]
 fn github_provider_list_routes_preserve_typed_http_errors() {
-    use omnifs_wit::provider::types::{CalloutResult, ErrorKind, Header, HttpResponse};
+    use omnifs_wit::host::types::{CalloutResult, ErrorKind, Header, HttpResponse};
 
     fn denied_page() -> Vec<CalloutResult> {
         vec![CalloutResult::HttpResponse(HttpResponse {
@@ -2190,7 +2188,7 @@ fn github_provider_list_routes_preserve_typed_http_errors() {
 /// `issues/open/42` and `issues/all/42` share one object load.
 #[tokio::test]
 async fn open_then_all_one_load() {
-    use omnifs_wit::provider::types::{Callout, CalloutResult, HttpResponse, ReadFileOutcome};
+    use omnifs_wit::host::types::{Callout, CalloutResult, HttpResponse, ReadFileOutcome};
 
     let issue_json = br#"{
         "number": 42,
@@ -2261,7 +2259,7 @@ async fn open_then_all_one_load() {
 /// `item.json` bytes equal the single-item GET body verbatim.
 #[test]
 fn item_json_byte_equals_single_get() {
-    use omnifs_wit::provider::types::{
+    use omnifs_wit::host::types::{
         ByteSource, Callout, CalloutResult, HttpResponse, ReadFileOutcome,
     };
 

@@ -65,7 +65,7 @@ use crate::blob::BlobExecutor;
 use crate::git::GitExecutor;
 use crate::http::HttpStack;
 use crate::log_redaction::WitHeaders;
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;

@@ -3,7 +3,7 @@
 use omnifs_core::path::Path;
 use omnifs_engine::{LookupAnswer, Namespace};
 use omnifs_itest::{RuntimeHarness, make_initialized_runtime};
-use omnifs_wit::provider::types::{ByteSource, Effects, FsKind, Stability};
+use omnifs_wit::host::types::{ByteSource, Effects, FsKind, Stability};
 
 pub use omnifs_itest::{TestOpExt, project_paths};
 

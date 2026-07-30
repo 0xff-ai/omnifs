@@ -3,7 +3,7 @@
 use omnifs_itest::{
     ReadFileOpExt, RuntimeHarness, TestOpExt, into_inline, make_initialized_runtime,
 };
-use omnifs_wit::provider::types::{
+use omnifs_wit::host::types::{
     CalloutResult, EntryKind, ErrorKind, Header, HttpResponse, ListChildrenResult,
     LookupChildResult, ReadFileOutcome,
 };

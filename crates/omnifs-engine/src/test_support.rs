@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use crate::Runtime;
 use crate::callouts::{TestSignal, record_outcome as inner_record};
 use crate::log_redaction::{LogUrl as InternalLogUrl, WitHeaders as InternalWitHeaders};
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 
 pub use crate::BuildError;
 pub use crate::effect_apply::{LookupEntry, LookupOutcome};
@@ -89,7 +89,7 @@ pub mod cache {
     #[doc(hidden)]
     pub fn publish_effects_for_test(
         runtime: &crate::Runtime,
-        effects: &omnifs_wit::provider::types::Effects,
+        effects: &omnifs_wit::host::types::Effects,
         captured_epoch: u64,
     ) -> Result<(), crate::EngineError> {
         let retry_fence = effects.invalidations.is_empty();

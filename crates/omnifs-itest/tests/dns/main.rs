@@ -5,7 +5,7 @@ mod support;
 use omnifs_itest::{
     ReadFileOpExt, TestOpExt, expect_inline, make_initialized_runtime, try_make_runtime_from_config,
 };
-use omnifs_wit::provider::types::{
+use omnifs_wit::host::types::{
     CalloutResult, ErrorKind, HttpResponse, ListChildrenResult, LookupChildResult, ReadFileOutcome,
     Stability,
 };
@@ -22,7 +22,7 @@ fn assert_materialized_lookup(
             assert_eq!(
                 matches!(
                     entry.target.kind,
-                    omnifs_wit::provider::types::EntryKind::Directory
+                    omnifs_wit::host::types::EntryKind::Directory
                 ),
                 expected_directory
             );
@@ -273,7 +273,7 @@ async fn dns_provider_unknown_record_reads_are_not_found() {
 
 #[test]
 fn dns_record_read_emits_no_canonical_store() {
-    use omnifs_wit::provider::types::Callout;
+    use omnifs_wit::host::types::Callout;
 
     let harness = dns_harness();
     let mut op = harness.read("/example.com/A").unwrap();

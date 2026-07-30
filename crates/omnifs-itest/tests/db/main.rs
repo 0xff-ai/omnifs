@@ -7,7 +7,7 @@ use omnifs_engine::{DirCursor, LookupAnswer, Namespace};
 use omnifs_itest::{
     ReadFileOpExt, RuntimeHarness, TestOpExt, expect_inline, make_initialized_runtime, parse_path,
 };
-use omnifs_wit::provider::types::{EntryKind, ListChildrenResult, LookupChildResult};
+use omnifs_wit::host::types::{EntryKind, ListChildrenResult, LookupChildResult};
 use serde::Deserialize;
 
 fn db_config(host_file: &str) -> String {
@@ -223,10 +223,7 @@ async fn db_missing_table_is_not_found() {
         .into_result()
         .unwrap()
         .unwrap_err();
-    assert_eq!(
-        schema.kind,
-        omnifs_wit::provider::types::ErrorKind::NotFound
-    );
+    assert_eq!(schema.kind, omnifs_wit::host::types::ErrorKind::NotFound);
     assert!(matches!(
         namespace.lookup(tables.path, "NoSuchTable").await,
         Ok(answer) if answer.is_missing()

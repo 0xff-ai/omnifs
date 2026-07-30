@@ -23,7 +23,7 @@ use crate::Provider;
 use crate::runtime::wasm::ComponentEngine;
 use crate::wasi::HostState;
 use crate::{BuildError, EngineError};
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 
 #[derive(Clone)]
 pub struct Instance {

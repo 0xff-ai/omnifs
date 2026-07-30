@@ -10,7 +10,7 @@ use omnifs_engine::test_support::authority::RuntimeAuthority;
 use omnifs_engine::test_support::blob::{BlobExecutor, BlobLimits};
 use omnifs_engine::test_support::cache::{Caches, mount};
 use omnifs_engine::test_support::http::HttpStack;
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

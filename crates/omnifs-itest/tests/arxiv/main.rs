@@ -3,7 +3,7 @@
 mod support;
 
 use omnifs_engine::test_support::TestOp;
-use omnifs_wit::provider::types::{
+use omnifs_wit::host::types::{
     ByteSource, Callout, CalloutResult, Cursor, ErrorKind, HttpResponse, ListChildrenResult,
     LookupChildResult, ReadFileOutcome, Stability,
 };
@@ -46,7 +46,7 @@ fn resume_paper_atom<T>(op: &mut TestOp<'_, T>) {
 
 fn resume_blob(op: &mut TestOp<'_, ReadFileOutcome>, blob: u64) {
     op.answer_callouts(vec![CalloutResult::BlobFetched(
-        omnifs_wit::provider::types::BlobFetched {
+        omnifs_wit::host::types::BlobFetched {
             blob,
             size: 4,
             content_type: Some("application/pdf".to_string()),

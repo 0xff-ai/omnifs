@@ -1,5 +1,5 @@
 use omnifs_api::events::{is_sensitive_header, is_sensitive_query_param, write_truncated};
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 use std::fmt::{self, Write as _};
 
 pub(crate) struct LogUrl<'a>(pub(crate) &'a str);
@@ -55,7 +55,7 @@ impl fmt::Display for WitHeaders<'_> {
 #[cfg(test)]
 mod callout_log_tests {
     use super::*;
-    use omnifs_wit::provider::types as wit_types;
+    use omnifs_wit::host::types as wit_types;
 
     #[test]
     fn url_for_log_preserves_diagnostic_query_and_redacts_secrets() {
