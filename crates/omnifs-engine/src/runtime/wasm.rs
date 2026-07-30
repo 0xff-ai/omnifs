@@ -14,22 +14,18 @@ pub struct ComponentEngine {
 impl ComponentEngine {
     /// Create the production component engine.
     ///
-    /// `cache_dir`, when present, stores Wasmtime's compiled artifacts with
-    /// the workspace. An unavailable cache degrades to uncached compilation.
-    pub fn new(cache_dir: Option<&Path>) -> wasmtime::Result<Self> {
+    /// `cache_dir` stores Wasmtime's compiled artifacts with the daemon state.
+    /// Cache initialization failure prevents engine creation.
+    pub fn new(cache_dir: &Path) -> wasmtime::Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.wasm_component_model_async(true);
         config.wasm_component_model_more_async_builtins(true);
         config.wasm_component_model_async_stackful(true);
         config.concurrency_support(true);
-        if let Some(dir) = cache_dir {
-            let mut cache_config = CacheConfig::new();
-            cache_config.with_directory(dir);
-            if let Ok(cache) = Cache::new(cache_config) {
-                config.cache(Some(cache));
-            }
-        }
+        let mut cache_config = CacheConfig::new();
+        cache_config.with_directory(cache_dir);
+        config.cache(Some(Cache::new(cache_config)?));
         Ok(Self {
             inner: Engine::new(&config)?,
         })

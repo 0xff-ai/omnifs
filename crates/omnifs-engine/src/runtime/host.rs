@@ -39,7 +39,7 @@ impl HostOnline {
             wasmtime,
             clones,
         } = open;
-        let engine = ComponentEngine::new(Some(&wasmtime))?;
+        let engine = ComponentEngine::new(&wasmtime)?;
         let caches = Caches::open(&projection).map_err(HostError::Cache)?;
         let cloner = Arc::new(GitCloner::new(&clones).map_err(HostError::Cloner)?);
         Ok(Self {
