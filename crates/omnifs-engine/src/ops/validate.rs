@@ -6,7 +6,7 @@ use crate::object_id::ObjectId;
 use crate::view::{MAX_EAGER_RESPONSE_BYTES, MAX_VERSION_TOKEN_BYTES};
 use crate::wit_protocol::{try_file_attrs_from_attrs, try_file_attrs_from_file_out};
 use omnifs_core::path::{Path, Segment};
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 
 pub(crate) struct ReturnValidator<'a, F> {
     effects: &'a wit_types::Effects,

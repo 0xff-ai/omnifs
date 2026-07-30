@@ -7,7 +7,7 @@ use crate::object_id::ObjectId;
 use crate::runtime::Result;
 use crate::view::{AttrPayload, BodyId, CachedCursor, EntryMeta, FileAttrsCache, Stability};
 use omnifs_core::path::{Path, Segment};
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::future::Future;

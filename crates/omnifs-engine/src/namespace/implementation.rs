@@ -1588,7 +1588,7 @@ mod tests {
         use crate::git::GitExecutor;
         use crate::tree::MATERIALIZE_MAX_BYTES;
         use crate::tree_refs::TreeRefs;
-        use omnifs_wit::provider::types::{CalloutResult, GitOpenRequest};
+        use omnifs_wit::host::types::{CalloutResult, GitOpenRequest};
         use std::io::{Seek, SeekFrom, Write};
         #[cfg(unix)]
         use std::os::unix::fs::{PermissionsExt, symlink};

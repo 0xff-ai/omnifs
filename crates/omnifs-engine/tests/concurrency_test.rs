@@ -7,7 +7,7 @@ use std::time::Duration;
 use omnifs_engine::Namespace;
 use omnifs_engine::test_support::PendingTestCallout;
 use omnifs_itest::make_runtime;
-use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
+use omnifs_wit::host::types::{CalloutResult, Header, HttpResponse};
 
 fn http_ok(body: &[u8]) -> CalloutResult {
     CalloutResult::HttpResponse(HttpResponse {

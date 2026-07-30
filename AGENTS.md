@@ -73,7 +73,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 
 - `crates/omnifs-core`: shared path, mount and provider content identities, filesystem identity, and file-contract primitives.
 - `crates/omnifs-sdk`: provider authoring API, object model, route registration, and dispatch.
-- `crates/omnifs-wit/wit/provider.wit`: provider component contract.
+- `crates/omnifs-wit/wit/provider.wit`: provider component contract. Guest bindings live at `omnifs_wit::provider`; host (Wasmtime) bindings at `omnifs_wit::host` behind `host-bindings`.
 - `crates/omnifs-bootstrap`: profile-root resolution, the fixed control socket, daemon process identity, and the daemon spawn lock.
 - `crates/omnifs-state`: daemon-owned SQLx/SQLite state, provider artifacts, mounts, credentials, projection cache, and raw daemon logs.
 - `crates/omnifs-daemon`: daemon lifecycle and recovery, local gRPC control, namespace supervision, bounded raw-log streaming, and serialized durable mutations.
@@ -214,6 +214,7 @@ Do not use `cargo check --workspace --all-targets` as the host gate. If validati
 
 - **Bare `omnifs` on PATH may be the stale npm release.** A global `@0xff-ai/omnifs` shim under the node/fnm tree can shadow the worktree binary and serve a stale published build with retired behavior, such as the pre-host-native Docker-daemon model. When operating the daemon, mounts, or any CLI command from this worktree, always run the compiled `target/debug/omnifs` or `target/release/omnifs`, never bare `omnifs`; a stale shim answering `omnifs status` or `omnifs shell` with errors like a missing `omnifs` Docker container is this footgun, not a real regression.
 - **Default members, not workspace.** `cargo check --workspace --all-targets` forces WASM guest crates onto the host target and fails on `main` too. Guest crates build through `just build providers` and `just check providers`.
+- **`omnifs-wit` guest and host are separate modules.** SDK/providers use `omnifs_wit::provider` (`wit-bindgen`); engine/itest use `omnifs_wit::host` (wasmtime, behind `host-bindings`). Do not make those feature alternates of one module again: Cargo unification would replace guest `Guest` traits with host structs and break providers under whole-workspace checks.
 - **Stale wit-bindgen after `.wit` edits.** Incremental builds can serve stale codegen. Run `cargo clean -p omnifs-wit` or a clean build before trusting downstream errors.
 - **Provider rebuild contention under nextest.** Some `omnifs-engine` integration tests shell out to `just build providers`. Reliable flow: `just build providers`, then `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run ...` (or `just test host`, which sets that flag for you).
 - **Integration fixtures share only compiled Wasmtime artifacts.** `RuntimeHarness` must bind `HostContext` to `omnifs_engine::test_support::wasm_cache_dir`; nextest runs each test in a separate process, so falling back to a per-fixture temporary cache recompiles identical components. Keep all runtime data private to each fixture, and make CI cache the same explicit compiled-component directory.

@@ -9,7 +9,7 @@ use crate::ops::namespace::{ChunkOutcome, ListOutcome, OpenOutcome, ReadOutcome}
 use crate::runtime::{EngineError, Result};
 use omnifs_api::events::InspectorOutcome;
 use omnifs_core::path::{Path, Segment};
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 use tracing::Instrument;
 
 impl Runtime {

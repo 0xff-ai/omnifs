@@ -4,11 +4,11 @@
 //! engine/instance/mount lifecycle code.
 
 use crate::callouts::{CalloutHost, callout_internal};
-use omnifs_wit::provider::log::Host as LogHost;
-use omnifs_wit::provider::omnifs::provider::callouts::{
+use omnifs_wit::host::log::Host as LogHost;
+use omnifs_wit::host::omnifs::provider::callouts::{
     Host as CalloutsHost, HostWithStore as CalloutsHostWithStore,
 };
-use omnifs_wit::provider::types::{self as wit_types, Host as TypesHost};
+use omnifs_wit::host::types::{self as wit_types, Host as TypesHost};
 use tracing::{debug, error, info, trace, warn};
 use wasmtime::component::{Accessor, HasData};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxView, WasiView};

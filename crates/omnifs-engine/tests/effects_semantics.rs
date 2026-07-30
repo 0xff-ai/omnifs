@@ -4,7 +4,7 @@ use omnifs_core::path::Path;
 use omnifs_engine::test_support::cache::publish_effects_for_test;
 use omnifs_engine::{DirCursor, EntryKind, Namespace};
 use omnifs_itest::make_initialized_runtime;
-use omnifs_wit::provider::types::{
+use omnifs_wit::host::types::{
     ByteSource, CanonicalStore, Effects, FileAttrs, FileOut, FileSize, FsKind, FsWrite, IdCapture,
     LogicalId, Stability,
 };

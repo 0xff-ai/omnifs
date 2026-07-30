@@ -13,7 +13,7 @@ use crate::callouts::{callout_internal, callout_network, callout_too_large, reco
 use crate::http::{HttpStack, decode_response_headers};
 use crate::log_redaction::{LogUrl, WitHeaders};
 use futures::StreamExt;
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;

@@ -11,7 +11,7 @@ use crate::callouts::{callout_denied, callout_invalid, callout_network, record_o
 use crate::cloner::{CloneError, GitCloner};
 use crate::log_redaction::LogUrl;
 use crate::tree_refs::TreeRefs;
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -138,7 +138,7 @@ mod tests {
     use super::{GitCloner, GitExecutor, GitId};
     use crate::authority::RuntimeAuthority;
     use crate::tree_refs::TreeRefs;
-    use omnifs_wit::provider::types as wit_types;
+    use omnifs_wit::host::types as wit_types;
     use std::sync::Arc;
 
     #[test]

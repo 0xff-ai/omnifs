@@ -4,7 +4,7 @@ use omnifs_core::path::Path;
 use omnifs_engine::test_support::cache::publish_effects_for_test;
 use omnifs_engine::{LookupAnswer, Namespace};
 use omnifs_itest::make_initialized_runtime;
-use omnifs_wit::provider::types::{CanonicalStore, Effects, LogicalId};
+use omnifs_wit::host::types::{CanonicalStore, Effects, LogicalId};
 
 const CONFIG: &str = r#"{"provider":"test_provider.wasm","mount":"test"}"#;
 

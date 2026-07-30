@@ -16,7 +16,7 @@ use crate::view::{
 };
 use crate::wit_protocol::{cached_cursor_from_wit, entry_meta_from_kind, stability_from_wit};
 use omnifs_core::path::Path;
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 
 #[derive(Debug, Clone)]
 pub enum LookupOutcome {

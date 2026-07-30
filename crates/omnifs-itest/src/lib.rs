@@ -9,7 +9,7 @@ use omnifs_engine::{
     ProviderBuildInput, RuntimeMountConfig,
 };
 use omnifs_provider::{Artifact, ProviderManifest};
-use omnifs_wit::provider::types::{
+use omnifs_wit::host::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult,
     ReadFileOutcome, ReadFileResult,
 };
@@ -135,7 +135,7 @@ impl RuntimeHarness {
     pub fn list_with_cursor(
         &self,
         path: &str,
-        cursor: Option<&omnifs_wit::provider::types::Cursor>,
+        cursor: Option<&omnifs_wit::host::types::Cursor>,
     ) -> Result<TestOp<'_, ListChildrenResult>, EngineError> {
         let path = parse_path(path);
         self.runtime.start_list_children(&path, cursor)
@@ -149,7 +149,7 @@ impl RuntimeHarness {
 
     pub fn timer_tick(&self) -> Result<TestOp<'_, ()>, EngineError> {
         self.runtime
-            .start_event(omnifs_wit::provider::types::ProviderEvent::TimerTick)
+            .start_event(omnifs_wit::host::types::ProviderEvent::TimerTick)
     }
 
     pub fn current_epoch(&self) -> u64 {

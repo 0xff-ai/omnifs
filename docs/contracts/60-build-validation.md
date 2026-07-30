@@ -17,7 +17,7 @@ Provider build and check recipes install the pinned wasi-sdk when needed. Run `j
 
 Host integration fixtures keep runtime data private but share Wasmtime's content-addressed compiled-component cache through `omnifs_engine::test_support::wasm_cache_dir`. CI runs nextest directly from its dedicated host target directory and caches the exact compiled-component directory selected beneath it; caching Wasmtime's global default does not accelerate fixtures whose `HostContext` selects another path. Do not archive and re-extract the test binaries in the same job: the archive duplicates several gigabytes of statically linked executables, increases peak disk use, and adds no transfer boundary.
 
-Provider runtime changes must validate both binding surfaces separately: `omnifs-wit` host bindings with `--features host-bindings`, and SDK/provider guest bindings without that feature. Do not combine those into one Cargo invocation that enables host bindings while compiling the SDK.
+`omnifs-wit` keeps guest (`wit-bindgen`, always under `provider`) and host (`wasmtime` bindgen, under `host` with `--features host-bindings`) as coexisting modules, not feature alternates. SDK and providers use `omnifs_wit::provider`; engine and itest use `omnifs_wit::host`. A single Cargo invocation may enable `host-bindings` while compiling the SDK: guest bindings remain present. Still validate both surfaces (host with the feature, providers on `wasm32-wasip2`) because they exercise different bindgen stacks and targets.
 
 Provider component validation must enable the component-model async validation features used by provider exports.
 

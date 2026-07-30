@@ -2,7 +2,7 @@
 //! provider-supplied `logical-id` and reverses them when pushing a stored canonical
 //! back for a warm read. The host never inspects the contents.
 
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 
 /// A stable, serializable mirror of `wit_types::LogicalId` for postcard encoding.
 #[derive(serde::Serialize, serde::Deserialize)]

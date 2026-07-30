@@ -1,7 +1,7 @@
 //! DNS provider route-test helpers.
 
 use omnifs_itest::{RuntimeHarness, TestOpExt, make_initialized_runtime};
-use omnifs_wit::provider::types::{Callout, HttpRequest};
+use omnifs_wit::host::types::{Callout, HttpRequest};
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 

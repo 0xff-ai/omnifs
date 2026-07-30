@@ -23,7 +23,7 @@ use omnifs_core::path::Path;
 use omnifs_engine::test_support::cache::publish_effects_for_test;
 use omnifs_engine::{DirCursor, Engine, EngineNamespace, EntryKind, Namespace, NsError, NsEvent};
 use omnifs_itest::make_runtime;
-use omnifs_wit::provider::types::{Effects, Invalidation, PathOrPrefix};
+use omnifs_wit::host::types::{Effects, Invalidation, PathOrPrefix};
 use tempfile::TempDir;
 
 /// Owns the harness temp dirs that must outlive the engine, the `EngineNamespace`

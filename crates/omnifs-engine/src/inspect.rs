@@ -20,7 +20,7 @@ use tracing::{Level, Span};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::{LookupSpan, SpanRef};
 
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 
 const DEFAULT_HISTORY_CAP: usize = 1024;
 const DEFAULT_BROADCAST_CAP: usize = 256;

@@ -6,7 +6,7 @@ use crate::view::{
     BodyId, ByteSource, CachedCursor, EntryMeta, FileAttrsCache, FileSize, ReadMode, Stability,
 };
 
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 
 pub fn file_size_from_wit(size: wit_types::FileSize) -> FileSize {
     size.into()

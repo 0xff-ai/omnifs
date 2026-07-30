@@ -1,7 +1,7 @@
 //! arXiv provider route-test helpers.
 
 use omnifs_itest::{RuntimeHarness, make_initialized_runtime};
-use omnifs_wit::provider::types::{Callout, Effects, LogicalId};
+use omnifs_wit::host::types::{Callout, Effects, LogicalId};
 
 pub use omnifs_itest::TestOpExt;
 

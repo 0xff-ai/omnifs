@@ -3,8 +3,8 @@
 mod support;
 
 use omnifs_engine::test_support::TestOp;
-use omnifs_wit::provider::types::Effects;
-use omnifs_wit::provider::types::{
+use omnifs_wit::host::types::Effects;
+use omnifs_wit::host::types::{
     ByteSource, CalloutResult, FsKind, HttpResponse, ListChildrenResult, ReadFileOutcome, Stability,
 };
 use support::{TestOpExt, docker_harness, project_paths};

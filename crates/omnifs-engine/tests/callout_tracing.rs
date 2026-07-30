@@ -6,7 +6,7 @@
 //! spans the host callout kinds.
 
 use omnifs_engine::test_support::{LogUrl, WitHeaders, record_outcome};
-use omnifs_wit::provider::types as wit_types;
+use omnifs_wit::host::types as wit_types;
 use std::io;
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::fmt::MakeWriter;
