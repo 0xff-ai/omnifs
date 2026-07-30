@@ -376,7 +376,7 @@ fn next_block_lines(example_provider: Option<&str>) -> Vec<String> {
             |name| format!("omnifs mount add {name}"),
         ),
         "omnifs status".to_owned(),
-        "omnifs fs list".to_owned(),
+        "omnifs fs ls".to_owned(),
     ];
     let descriptions = [
         "mount a service (opens sign-in if needed)",
@@ -747,7 +747,7 @@ mod tests {
         );
         assert!(lines[0].contains("mount a service"));
         assert!(lines[1].starts_with("omnifs status"));
-        assert!(lines[2].starts_with("omnifs fs list"));
+        assert!(lines[2].starts_with("omnifs fs ls"));
     }
 
     #[test]
