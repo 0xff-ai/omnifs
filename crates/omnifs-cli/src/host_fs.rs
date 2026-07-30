@@ -2,7 +2,7 @@
 
 use crate::client_fs_state::ClientFilesystemState;
 use crate::error::WithHint;
-use crate::filesystem_driver::{Candidate, ensure_identity_unchanged, ensure_no_orphaned_state};
+use crate::filesystem_driver::{Candidate, ensure_identity_unchanged};
 use anyhow::{Context as _, Result, ensure};
 use omnifs_core::fs;
 use omnifs_mtab::{RunnerClaim, RunnerRecord};
@@ -46,13 +46,13 @@ impl HostDriver {
     ) -> Result<Option<(RunnerRecord, RunnerPhase)>> {
         let mount_point = spec.location();
         let Some(record) = RunnerRecord::read(&self.state_dir)? else {
-            ensure_no_orphaned_state(
-                omnifs_nfs::mount_is_active_checked(mount_point)?,
-                "host filesystem",
-                "runner record",
-                mount_point.display(),
-            )
-            .with_hint("Run `omnifs doctor` to diagnose")?;
+            if omnifs_nfs::mount_is_active_checked(mount_point)? {
+                return Err(anyhow::anyhow!(
+                    "host filesystem state exists at {} without a runner record",
+                    mount_point.display()
+                ))
+                .with_hint("Run `omnifs doctor` to diagnose");
+            }
             return Ok(None);
         };
         crate::filesystem_driver::ensure_record_matches(&record.spec, spec)?;
@@ -75,8 +75,6 @@ impl HostDriver {
         ctx: &crate::filesystem_driver::LaunchContext<'_>,
     ) -> Result<()> {
         probe(ctx.spec.protocol())?;
-        ctx.output
-            .narrate(format!("Starting host filesystem `{}`", ctx.spec.id()));
         PendingHostFilesystem::spawn(
             &self.state_dir,
             ctx.client_state,

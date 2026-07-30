@@ -464,19 +464,10 @@ struct LibkrunLaunchLease<'a> {
     spec: Option<fs::Spec>,
     expected_record: Option<HelperRecord>,
     replaced: bool,
-    /// Only consulted by [`Self::wait_for_ready`]'s launch-wait spinner;
-    /// [`Self::for_confirmed_teardown`] never reaches that path, so its own
-    /// quiet instance never narrates anything.
-    output: Output,
 }
 
 impl<'a> LibkrunLaunchLease<'a> {
-    fn new(
-        runner: &'a LibkrunRunner,
-        daemon_attach_socket: &Path,
-        guest_image: PathBuf,
-        output: Output,
-    ) -> Self {
+    fn new(runner: &'a LibkrunRunner, daemon_attach_socket: &Path, guest_image: PathBuf) -> Self {
         Self {
             runner,
             daemon_attach_socket: daemon_attach_socket.to_path_buf(),
@@ -488,7 +479,6 @@ impl<'a> LibkrunLaunchLease<'a> {
             spec: None,
             expected_record: None,
             replaced: false,
-            output,
         }
     }
 
@@ -504,7 +494,6 @@ impl<'a> LibkrunLaunchLease<'a> {
             spec: None,
             expected_record: Some(expected_record),
             replaced: true,
-            output: Output::new(crate::ui::output::OutputMode::Human, true),
         }
     }
 
@@ -516,28 +505,46 @@ impl<'a> LibkrunLaunchLease<'a> {
         let guest_image_cache = ctx.client_state.guest_image_cache();
         let guest_image =
             resolve_guest_image(&config, &guest_image_cache, ctx.output.clone()).await?;
-        let mut lease = Self::new(runner, ctx.attach_unix()?, guest_image, ctx.output.clone());
+        let mut lease = Self::new(runner, ctx.attach_unix()?, guest_image);
         lease.client_owner = Some(ctx.client_owner);
         lease.spec = Some(ctx.spec.clone());
         Ok(lease)
     }
 
-    async fn run(mut self, attached: impl Future<Output = Result<()>>) -> Result<()> {
-        match self.run_to_publish(attached).await {
-            Ok(()) => Ok(()),
+    async fn run(
+        mut self,
+        output: &Output,
+        attached: impl Future<Output = Result<()>>,
+    ) -> Result<()> {
+        let key_width = Output::ledger_block_width(&["filesystem"]);
+        let mut row = output.progress("filesystem", key_width);
+        match self.run_to_publish(attached, &mut row).await {
+            Ok(()) => {
+                row.settle_ok("guest ready");
+                Ok(())
+            },
             Err(error) => {
+                row.update("cleaning up failed launch");
                 let cleanup = if self.replaced {
                     self.stop_and_remove().await
                 } else {
                     self.ready_listener.take();
                     Ok(())
                 };
-                err_after_rollback(error, cleanup, "the failed libkrun launch")
+                let result = err_after_rollback(error, cleanup, "the failed libkrun launch");
+                if let Err(error) = &result {
+                    row.settle_fail(format!("{error:#}"));
+                }
+                result
             },
         }
     }
 
-    async fn run_to_publish(&mut self, attached: impl Future<Output = Result<()>>) -> Result<()> {
+    async fn run_to_publish(
+        &mut self,
+        attached: impl Future<Output = Result<()>>,
+        row: &mut crate::ui::live::Spinner,
+    ) -> Result<()> {
         let installation = Installation::current()?;
         installation.probe()?;
         self.replace_stale().await?;
@@ -621,7 +628,8 @@ impl<'a> LibkrunLaunchLease<'a> {
         );
         self.runner.confirm_record(&record)?;
 
-        self.wait_for_ready().await?;
+        self.wait_for_ready(row).await?;
+        row.update("attaching to daemon");
         attached.await
     }
 
@@ -723,17 +731,11 @@ impl<'a> LibkrunLaunchLease<'a> {
         })
     }
 
-    /// Waits for the guest readiness beacon behind a spinner, since this is
-    /// the longest of the three drivers' launch waits (a full microVM boot,
-    /// up to [`LAUNCH_READY_TIMEOUT`]) and was previously the only one that
-    /// gave no feedback at all while it ran.
-    async fn wait_for_ready(&mut self) -> Result<()> {
+    async fn wait_for_ready(&mut self, row: &mut crate::ui::live::Spinner) -> Result<()> {
         let listener = self
             .ready_listener
             .take()
             .context("libkrun readiness listener was not prepared")?;
-        let key_width = Output::ledger_block_width(&["filesystem"]);
-        let mut row = self.output.progress("filesystem", key_width);
         let wait = async {
             loop {
                 tokio::select! {
@@ -763,20 +765,15 @@ impl<'a> LibkrunLaunchLease<'a> {
                 }
             }
         };
-        let outcome = if let Ok(result) = tokio::time::timeout(LAUNCH_READY_TIMEOUT, wait).await {
+        if let Ok(result) = tokio::time::timeout(LAUNCH_READY_TIMEOUT, wait).await {
             result.context("read the libkrun readiness beacon")
         } else {
-            Err(anyhow::anyhow!(
+            anyhow::bail!(
                 "{} did not appear inside the filesystem within {}s",
                 fs::GUEST_LOCATION,
                 LAUNCH_READY_TIMEOUT.as_secs()
-            ))
-        };
-        match &outcome {
-            Ok(()) => row.settle_ok("guest ready"),
-            Err(error) => row.settle_fail(format!("{error:#}")),
+            )
         }
-        outcome
     }
 
     async fn stop_and_remove(&mut self) -> Result<()> {
@@ -897,8 +894,6 @@ impl LibkrunRunner {
         &self,
         ctx: &crate::filesystem_driver::LaunchContext<'_>,
     ) -> Result<()> {
-        ctx.output
-            .narrate(format!("Starting libkrun filesystem `{}`", ctx.spec.id()));
         let attached = async {
             anyhow::ensure!(
                 crate::commands::fs::wait_for_attachment(ctx.spec).await,
@@ -909,7 +904,7 @@ impl LibkrunRunner {
         };
         LibkrunLaunchLease::prepare(self, ctx)
             .await?
-            .run(attached)
+            .run(&ctx.output, attached)
             .await
     }
 }
@@ -930,12 +925,11 @@ impl LibkrunRunner {
     /// drivers' `confirmed`.
     pub(crate) fn confirmed(&self) -> Result<Option<HelperRecord>> {
         let Some(record) = self.read_helper_record()? else {
-            crate::filesystem_driver::ensure_no_orphaned_state(
-                self.has_operational_state(),
-                "libkrun filesystem",
-                "helper record",
-                self.dir().display(),
-            )?;
+            anyhow::ensure!(
+                !self.has_operational_state(),
+                "libkrun filesystem state exists at {} without a helper record",
+                self.dir().display()
+            );
             return Ok(None);
         };
         self.confirm_record(&record)?;
@@ -1107,12 +1101,7 @@ mod tests {
         std::fs::set_permissions(&guest_image, std::fs::Permissions::from_mode(0o444)).unwrap();
 
         let runner = LibkrunRunner::new(dir.clone());
-        let lease = LibkrunLaunchLease::new(
-            &runner,
-            &attach_socket,
-            guest_image.clone(),
-            Output::new(crate::ui::output::OutputMode::Human, false),
-        );
+        let lease = LibkrunLaunchLease::new(&runner, &attach_socket, guest_image.clone());
         lease.materialize_root_disk().unwrap();
         assert_eq!(
             std::fs::metadata(runner.root_raw())

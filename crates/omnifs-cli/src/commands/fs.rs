@@ -550,69 +550,60 @@ async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
     // Cloned rather than moved: the bare-location branch below still needs
     // `output` to report where the filesystem is available.
     let driver = FilesystemDriver::for_spec(&client_state, &spec, output.clone())?;
-    ensure!(
-        driver
-            .confirmed(&client_state, client_owner, &spec)
-            .await?
-            .is_some(),
-        "filesystem `{}` is detached",
-        spec.id()
-    );
+    let confirmed = driver
+        .confirmed(&client_state, client_owner, &spec)
+        .await?
+        .with_context(|| format!("filesystem `{}` is detached", spec.id()))?;
     ensure_attached(&spec).await?;
 
-    // Entering a host filesystem is a `cd` into an already-visible mount, not
-    // a remote exec, so it stays outside the driver's `shell_command`, which
-    // returns `None` for host.
-    if let FilesystemDriver::Host(runner) = &driver {
-        let (_, phase) = runner
-            .confirmed(&spec)
-            .await?
-            .context("host filesystem runner disappeared")?;
-        ensure!(
-            phase == omnifs_thin::host_control::RunnerPhase::Mounted,
-            "filesystem `{}` is not mounted; runner phase is {phase:?}",
-            spec.id()
-        );
-        return if let Some(program) = args.command.first() {
-            let mut command = Command::new(program);
-            command
-                .args(&args.command[1..])
-                .current_dir(spec.location());
-            propagate(
-                command,
-                format!("run command in filesystem `{}`", spec.id()),
-            )
-        } else if let Some(shell) = args.shell.as_deref() {
-            let mut command = Command::new(shell);
-            command.current_dir(spec.location());
-            propagate(command, format!("open shell in filesystem `{}`", spec.id()))
-        } else {
-            output.report(format!(
-                "Filesystem `{}` is available at {}.\n",
-                spec.id(),
-                spec.location().display()
-            ));
-            Ok(ExitCode::Success)
-        };
-    }
-
-    if matches!(driver, FilesystemDriver::Libkrun(_)) {
-        crate::libkrun_runner::ensure_socat_available()?;
-    }
-    let label = match &driver {
-        FilesystemDriver::Docker(client) => {
+    let (command, label) = match (&driver, confirmed) {
+        (FilesystemDriver::Host(_), Confirmed::Host(_, phase)) => {
+            ensure!(
+                phase == omnifs_thin::host_control::RunnerPhase::Mounted,
+                "filesystem `{}` is not mounted; runner phase is {phase:?}",
+                spec.id()
+            );
+            return if let Some(program) = args.command.first() {
+                let mut command = Command::new(program);
+                command
+                    .args(&args.command[1..])
+                    .current_dir(spec.location());
+                propagate(
+                    command,
+                    format!("run command in filesystem `{}`", spec.id()),
+                )
+            } else if let Some(shell) = args.shell.as_deref() {
+                let mut command = Command::new(shell);
+                command.current_dir(spec.location());
+                propagate(command, format!("open shell in filesystem `{}`", spec.id()))
+            } else {
+                output.report(format!(
+                    "Filesystem `{}` is available at {}.\n",
+                    spec.id(),
+                    spec.location().display()
+                ));
+                Ok(ExitCode::Success)
+            };
+        },
+        (FilesystemDriver::Docker(client), Confirmed::Docker(_, _)) => (
+            client.shell_command(args.shell.as_deref(), &args.command),
             format!(
                 "open shell in filesystem container `{}`",
                 client.container_name()
+            ),
+        ),
+        (FilesystemDriver::Libkrun(runner), Confirmed::Libkrun(_)) => {
+            crate::libkrun_runner::ensure_socat_available()?;
+            (
+                runner.shell_command(args.shell.as_deref(), &args.command),
+                format!("open shell in filesystem `{}`", spec.id()),
             )
         },
-        FilesystemDriver::Host(_) | FilesystemDriver::Libkrun(_) => {
-            format!("open shell in filesystem `{}`", spec.id())
-        },
+        _ => anyhow::bail!(
+            "confirmed identity belongs to a different filesystem driver than `{}`",
+            spec.id()
+        ),
     };
-    let command = driver
-        .shell_command(args.shell.as_deref(), &args.command)
-        .context("filesystem driver has no shell command")?;
     propagate(command, label)
 }
 
