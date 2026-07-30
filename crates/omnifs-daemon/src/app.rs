@@ -266,6 +266,15 @@ async fn build_daemon(
     if let Err(error) = state.mark_serving(revision).await {
         return Err(close_failed_state(state, error).await);
     }
+    let resources = match crate::resource_control::ResourceControl::new(
+        Arc::clone(&state),
+        context.instance_id(),
+    )
+    .await
+    {
+        Ok(resources) => resources,
+        Err(error) => return Err(close_failed_state(state, error).await),
+    };
     // The manager's spawned task owns the only live `HostOnline` handle for
     // the daemon's lifetime; nothing else needs to anchor it.
     let manager = MutationManager::spawn(Arc::clone(&state), host, Arc::clone(&serving));
@@ -275,6 +284,7 @@ async fn build_daemon(
         state: Arc::clone(&state),
         serving,
         manager,
+        resources,
         inspector,
         shutdown_tx,
     }));

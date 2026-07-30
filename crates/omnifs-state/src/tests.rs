@@ -1,9 +1,9 @@
 use super::*;
 use omnifs_api::{
-    AttachmentDefinition, CredentialDefinition, MountResourceDefinition, NormalizedResourceSet,
-    ProviderDefinition, ResourceDefinition, ResourceLimits,
+    ActionKind, ActionPhase, AttachmentDefinition, CredentialDefinition, MountResourceDefinition,
+    NormalizedResourceSet, ProviderDefinition, ResourceDefinition, ResourceLimits,
 };
-use omnifs_core::{AttachmentSpec, ProviderRef, ResourceName};
+use omnifs_core::{ActionId, AttachmentSpec, ProviderRef, ResourceName};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 
@@ -1806,6 +1806,150 @@ async fn legacy_resource_backfill_is_deterministic_and_excludes_deleted_credenti
         .await
         .unwrap();
     assert_eq!(reopened.resource_snapshot().await.unwrap(), first);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)] // one lost-reply and restart action lifecycle
+async fn credential_actions_are_durable_idempotent_and_generation_guarded() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = StorePaths::under_root(&temp.path().join("state"));
+    let store = StateStore::open_paths(paths.clone(), StateStoreOptions::default())
+        .await
+        .unwrap();
+    let bytes = provider_wasm(8);
+    let provider_id = ProviderId::from_wasm_bytes(&bytes);
+    let provider = upload_and_import(&store, provider_id, &bytes)
+        .await
+        .reference;
+    let desired = resource_set(provider.id, serde_json::json!({}));
+    let initial = store.resource_snapshot().await.unwrap();
+    store
+        .apply_resources(ResourceApplyRequest {
+            mutation_id: mutation_id(90),
+            base_revision: initial.revision,
+            expected_desired_digest: desired.digest(),
+            desired,
+            credential_secrets: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let unavailable = store
+        .accept_credential_action(CredentialActionRequest {
+            action_id: ActionId::from_bytes([0x90; 16]),
+            credential: ResourceName::new("alice").unwrap(),
+            expected_generation: 0,
+            operation: CredentialActionOperation::Revoke,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        unavailable,
+        ActionWriteError::ActionUnavailable(name) if name.as_str() == "alice"
+    ));
+    assert!(store.pending_actions().await.unwrap().is_empty());
+
+    let first_id = ActionId::from_bytes([0x91; 16]);
+    let first = store
+        .accept_credential_action(CredentialActionRequest {
+            action_id: first_id,
+            credential: ResourceName::new("alice").unwrap(),
+            expected_generation: 0,
+            operation: CredentialActionOperation::SetMaterial(
+                resource_sidecar(provider.id, b"first-action-secret").document,
+            ),
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.kind, ActionKind::SetCredentialMaterial);
+    assert_eq!(first.action_generation, 1);
+    assert_eq!(first.phase, ActionPhase::Accepted);
+    assert_eq!(store.pending_actions().await.unwrap(), vec![first.clone()]);
+
+    let mut retry_document = resource_sidecar(provider.id, b"different-secret").document;
+    retry_document.auth_fingerprint = AuthRuntimeFingerprint::from_digest([0x88; 32]);
+    let retry = store
+        .accept_credential_action(CredentialActionRequest {
+            action_id: first_id,
+            credential: ResourceName::new("alice").unwrap(),
+            expected_generation: 0,
+            operation: CredentialActionOperation::SetMaterial(retry_document),
+        })
+        .await
+        .unwrap();
+    assert_eq!(retry, first);
+    let stored = store
+        .get_credential(&omnifs_auth::CredentialId::new("demo", "oauth", "alice").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.material.expose(), b"first-action-secret");
+
+    let reused = store
+        .accept_credential_action(CredentialActionRequest {
+            action_id: first_id,
+            credential: ResourceName::new("alice").unwrap(),
+            expected_generation: 1,
+            operation: CredentialActionOperation::SetMaterial(
+                resource_sidecar(provider.id, b"ignored").document,
+            ),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(reused, ActionWriteError::IdReuse(id) if id == first_id));
+
+    let busy_id = ActionId::from_bytes([0x92; 16]);
+    let busy = store
+        .accept_credential_action(CredentialActionRequest {
+            action_id: busy_id,
+            credential: ResourceName::new("alice").unwrap(),
+            expected_generation: 1,
+            operation: CredentialActionOperation::Revoke,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(busy, ActionWriteError::Busy { action_id, .. } if action_id == first_id));
+    store.shutdown().await.unwrap();
+
+    let reopened = StateStore::open_paths(paths, StateStoreOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.action_receipt(first_id).await.unwrap(),
+        Some(first.clone())
+    );
+    assert_eq!(reopened.pending_actions().await.unwrap(), vec![first]);
+    reopened
+        .transition_action(first_id, ActionPhase::Ready, None, None)
+        .await
+        .unwrap();
+
+    let stale = reopened
+        .accept_credential_action(CredentialActionRequest {
+            action_id: ActionId::from_bytes([0x93; 16]),
+            credential: ResourceName::new("alice").unwrap(),
+            expected_generation: 0,
+            operation: CredentialActionOperation::Revoke,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        stale,
+        ActionWriteError::GenerationConflict { actual: 1, .. }
+    ));
+    let revoke = reopened
+        .accept_credential_action(CredentialActionRequest {
+            action_id: ActionId::from_bytes([0x94; 16]),
+            credential: ResourceName::new("alice").unwrap(),
+            expected_generation: 1,
+            operation: CredentialActionOperation::Revoke,
+        })
+        .await
+        .unwrap();
+    assert_eq!(revoke.kind, ActionKind::RevokeCredential);
+    assert_eq!(revoke.action_generation, 2);
+    assert_eq!(reopened.pending_actions().await.unwrap(), vec![revoke]);
     reopened.shutdown().await.unwrap();
 }
 

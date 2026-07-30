@@ -1,5 +1,6 @@
 //! Daemon-private durable state.
 
+mod action;
 mod batch;
 mod blob;
 mod credential;
@@ -39,6 +40,7 @@ use provider::{
 };
 use writer::StateWriter;
 
+pub use action::{ActionWriteError, CredentialActionOperation, CredentialActionRequest};
 pub use batch::{BatchError, OpOutcome, StateOp, StateOpError};
 pub use credential::{
     CredentialDocument, CredentialRefreshKind, CredentialRefreshOutcome,
@@ -220,6 +222,69 @@ impl StateStore {
             })
             .await
             .map_err(ResourceApplyError::Store)?
+    }
+
+    /// Accept one credential action and its secret input in the same writer
+    /// transaction as the durable non-secret receipt.
+    pub async fn accept_credential_action(
+        &self,
+        request: CredentialActionRequest,
+    ) -> Result<omnifs_api::ActionReceipt, ActionWriteError> {
+        self.writer
+            .call(move |mut connection| async move {
+                let result = Db::new(&mut connection)
+                    .accept_credential_action(request)
+                    .await;
+                (connection, result)
+            })
+            .await?
+    }
+
+    pub async fn action_receipt(
+        &self,
+        action_id: omnifs_core::ActionId,
+    ) -> anyhow::Result<Option<omnifs_api::ActionReceipt>> {
+        let mut connection = self
+            .reads
+            .acquire()
+            .await
+            .context("acquire action receipt reader")?;
+        action::action_receipt(&mut connection, action_id).await
+    }
+
+    pub async fn pending_actions(&self) -> anyhow::Result<Vec<omnifs_api::ActionReceipt>> {
+        let mut connection = self
+            .reads
+            .acquire()
+            .await
+            .context("acquire pending action reader")?;
+        action::pending_actions(&mut connection).await
+    }
+
+    pub async fn action_receipts(&self) -> anyhow::Result<Vec<omnifs_api::ActionReceipt>> {
+        let mut connection = self
+            .reads
+            .acquire()
+            .await
+            .context("acquire action receipt reader")?;
+        action::action_receipts(&mut connection).await
+    }
+
+    pub async fn transition_action(
+        &self,
+        action_id: omnifs_core::ActionId,
+        phase: omnifs_api::ActionPhase,
+        error_code: Option<String>,
+        detail: Option<String>,
+    ) -> Result<omnifs_api::ActionReceipt, ActionWriteError> {
+        self.writer
+            .call(move |mut connection| async move {
+                let result = Db::new(&mut connection)
+                    .transition_action(action_id, phase, error_code, detail)
+                    .await;
+                (connection, result)
+            })
+            .await?
     }
 
     /// Read one exact durable head for serving-generation preparation.

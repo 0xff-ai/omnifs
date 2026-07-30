@@ -14,8 +14,34 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Output};
 use std::time::{Duration, Instant};
 
+use hyper_util::rt::TokioIo;
+use omnifs_api::grpc::{self, wire};
 use omnifs_itest::live::{self, hermetic_home, omnifs_bin, platform_can_mount};
 use tempfile::TempDir;
+use tokio::net::UnixStream;
+use tonic::transport::Endpoint;
+use tower::service_fn;
+
+type ControlClient = wire::control_client::ControlClient<tonic::transport::Channel>;
+
+async fn control_client(path: &std::path::Path) -> ControlClient {
+    try_control_client(path)
+        .await
+        .expect("connect to isolated daemon control socket")
+}
+
+async fn try_control_client(
+    path: &std::path::Path,
+) -> Result<ControlClient, tonic::transport::Error> {
+    let path = path.to_owned();
+    let channel = Endpoint::from_static("http://[::]:50051")
+        .connect_with_connector(service_fn(move |_| {
+            let path = path.clone();
+            async move { UnixStream::connect(path).await.map(TokioIo::new) }
+        }))
+        .await?;
+    Ok(ControlClient::new(channel))
+}
 
 /// A host-native daemon serving only its profile-local control socket, torn
 /// down on drop.
@@ -90,6 +116,27 @@ impl Daemon {
             std::thread::sleep(Duration::from_millis(150));
         }
     }
+
+    async fn wait_serving_async(&mut self) {
+        let control_socket = self.control_socket();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Ok(mut control) = try_control_client(&control_socket).await
+                && control.ready(wire::Empty {}).await.is_ok()
+            {
+                return;
+            }
+            if let Ok(Some(status)) = self.child.try_wait() {
+                panic!("daemon exited ({status}) before control readiness");
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "daemon never answered on {} within 30s",
+                control_socket.display()
+            );
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
 }
 
 /// Run `omnifs status --output json` against `home`, resolving through the
@@ -124,6 +171,129 @@ fn status_json(output: &Output) -> serde_json::Value {
             String::from_utf8_lossy(&output.stderr),
         )
     })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one end-to-end acknowledgement scenario"
+)]
+async fn declarative_apply_commits_before_reconcile_and_watch_resumes_from_snapshot() {
+    let mut daemon = Daemon::spawn().expect("spawn isolated omnifs daemon");
+    daemon.wait_serving_async().await;
+    let mut control = control_client(&daemon.control_socket()).await;
+    let listed = control
+        .list_providers(wire::Empty {})
+        .await
+        .unwrap()
+        .into_inner();
+    let (metadata, _, _) = listed
+        .providers
+        .iter()
+        .find(|provider| provider.embedded)
+        .map(grpc::provider_entry)
+        .transpose()
+        .unwrap()
+        .expect("daemon exposes at least one embedded provider");
+    control
+        .import_embedded_provider(wire::ImportEmbeddedProviderRequest {
+            name: metadata.reference.name.clone(),
+        })
+        .await
+        .unwrap();
+
+    let provider_name = omnifs_core::ResourceName::new(metadata.reference.name.clone()).unwrap();
+    let declarations = omnifs_api::ResourceDeclarations {
+        api_version: omnifs_api::API_VERSION.to_owned(),
+        resources: vec![
+            omnifs_api::ResourceDefinition::Provider(omnifs_api::ProviderDefinition {
+                name: provider_name.clone(),
+                artifact: metadata.reference.id,
+            }),
+            omnifs_api::ResourceDefinition::Mount(omnifs_api::MountResourceDefinition {
+                name: omnifs_core::ResourceName::new(format!(
+                    "{}-control-plane",
+                    provider_name.as_str()
+                ))
+                .unwrap(),
+                provider: provider_name,
+                credential: None,
+                config: serde_json::json!({}),
+                limits: None,
+            }),
+        ],
+    };
+    let initial = control
+        .get_resources(wire::Empty {})
+        .await
+        .unwrap()
+        .into_inner();
+    let initial_revision = grpc::get_resources_response(&initial).unwrap().revision;
+    let plan = control
+        .plan_resources(grpc::to_plan_resources_request(&declarations))
+        .await
+        .unwrap()
+        .into_inner();
+    let plan = grpc::plan_resources_response(&plan).unwrap();
+    assert_eq!(plan.base_revision, initial_revision);
+    assert_eq!(plan.changes.len(), 2);
+
+    let applied = control
+        .apply_resources(grpc::to_apply_resources_request(
+            &omnifs_api::ApplyResourcesRequest {
+                mutation_id: omnifs_core::MutationId::from_bytes([0x71; 16]),
+                base_revision: plan.base_revision,
+                expected_desired_digest: plan.desired_digest,
+                declarations,
+                credential_material: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let receipt = grpc::apply_resources_response(&applied).unwrap();
+    assert!(receipt.changed);
+
+    let mut first = control
+        .watch_progress(grpc::to_progress_target(
+            omnifs_api::ProgressTarget::DesiredRevision(receipt.revision),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let snapshot = grpc::progress_event(&first.message().await.unwrap().unwrap()).unwrap();
+    assert!(matches!(
+        snapshot.event,
+        omnifs_api::ProgressEventKind::Snapshot(ref snapshot)
+            if snapshot.desired_revision == receipt.revision
+                && snapshot.resources.iter().all(|status| {
+                    status.phase == omnifs_api::ResourcePhase::Pending
+                })
+    ));
+    drop(first);
+
+    let current = control
+        .get_resources(wire::Empty {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        grpc::get_resources_response(&current).unwrap().revision,
+        receipt.revision
+    );
+    let mut resumed = control
+        .watch_progress(grpc::to_progress_target(
+            omnifs_api::ProgressTarget::DesiredRevision(receipt.revision),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(matches!(
+        grpc::progress_event(&resumed.message().await.unwrap().unwrap())
+            .unwrap()
+            .event,
+        omnifs_api::ProgressEventKind::Snapshot(_)
+    ));
 }
 
 #[test]

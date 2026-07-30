@@ -178,6 +178,71 @@ pub(crate) fn manager_error(error: &ManagerError) -> ControlError {
     ControlError::new(code, message)
 }
 
+pub(crate) fn resource_control_error(
+    error: &crate::resource_control::ResourceControlError,
+) -> ControlError {
+    use crate::resource_control::ResourceControlError;
+
+    let code = match error {
+        ResourceControlError::ShuttingDown => ControlErrorCode::NotReady,
+        ResourceControlError::PlanTooLarge { .. } => ControlErrorCode::PlanTooLarge,
+        ResourceControlError::MissingProviderArtifact(_) => {
+            ControlErrorCode::MissingProviderArtifact
+        },
+        ResourceControlError::InvalidCredentialScheme { .. }
+        | ResourceControlError::CredentialNotFound(_)
+        | ResourceControlError::DuplicateCredentialMaterial(_)
+        | ResourceControlError::InvalidCredentialMaterial(_)
+        | ResourceControlError::Definition(
+            omnifs_api::ResourceDefinitionError::InvalidCredentialField(_)
+            | omnifs_api::ResourceDefinitionError::MountConfigNotObject(_)
+            | omnifs_api::ResourceDefinitionError::MissingProvider { .. }
+            | omnifs_api::ResourceDefinitionError::MissingCredentialProvider { .. }
+            | omnifs_api::ResourceDefinitionError::MissingCredential { .. }
+            | omnifs_api::ResourceDefinitionError::CredentialProviderMismatch { .. }
+            | omnifs_api::ResourceDefinitionError::DuplicateKey(_),
+        )
+        | ResourceControlError::Apply(
+            omnifs_state::ResourceApplyError::InvalidCredentialSecret { .. },
+        )
+        | ResourceControlError::Action(omnifs_state::ActionWriteError::InvalidCredential {
+            ..
+        }) => ControlErrorCode::InvalidResource,
+        ResourceControlError::Definition(
+            omnifs_api::ResourceDefinitionError::UnsupportedApiVersion(_),
+        ) => ControlErrorCode::UnsupportedApiVersion,
+        ResourceControlError::DesiredDigestMismatch
+        | ResourceControlError::Apply(omnifs_state::ResourceApplyError::DesiredDigestMismatch) => {
+            ControlErrorCode::DesiredDigestMismatch
+        },
+        ResourceControlError::Apply(omnifs_state::ResourceApplyError::MutationIdReuse(_)) => {
+            ControlErrorCode::MutationIdReuseMismatch
+        },
+        ResourceControlError::Apply(omnifs_state::ResourceApplyError::StaleRevision { .. }) => {
+            ControlErrorCode::StaleBaseRevision
+        },
+        ResourceControlError::Action(omnifs_state::ActionWriteError::IdReuse(_)) => {
+            ControlErrorCode::ActionIdReuseMismatch
+        },
+        ResourceControlError::Action(
+            omnifs_state::ActionWriteError::ResourceNotFound(_)
+            | omnifs_state::ActionWriteError::ActionUnavailable(_)
+            | omnifs_state::ActionWriteError::NotFound(_),
+        ) => ControlErrorCode::ActionUnavailable,
+        ResourceControlError::Action(
+            omnifs_state::ActionWriteError::GenerationConflict { .. }
+            | omnifs_state::ActionWriteError::Terminal { .. },
+        ) => ControlErrorCode::Conflict,
+        ResourceControlError::Action(omnifs_state::ActionWriteError::Busy { .. }) => {
+            ControlErrorCode::Busy
+        },
+        ResourceControlError::Apply(omnifs_state::ResourceApplyError::Store(_))
+        | ResourceControlError::Action(omnifs_state::ActionWriteError::Store(_))
+        | ResourceControlError::Other(_) => ControlErrorCode::Internal,
+    };
+    ControlError::new(code, error.to_string())
+}
+
 const fn mount_write_error_code(error: &omnifs_state::MountWriteError) -> ControlErrorCode {
     match error {
         omnifs_state::MountWriteError::AlreadyExists(_) => ControlErrorCode::AlreadyExists,

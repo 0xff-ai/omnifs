@@ -1,9 +1,9 @@
 //! Strict resource declarations, normalization, digesting, and pure planning.
 
-use crate::AttachmentDefinition;
+use crate::{AttachmentDefinition, CredentialClientOverrides, CredentialMaterial};
 use omnifs_core::{
-    AttachmentSpec, ProviderId, ResourceDigest, ResourceKey, ResourceKind, ResourceName,
-    ResourceRevision, validate_account, validate_key_part,
+    AttachmentSpec, MutationId, ProviderId, ResourceDigest, ResourceKey, ResourceKind,
+    ResourceName, ResourceRevision, validate_account, validate_key_part,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -433,13 +433,66 @@ pub struct ResourcePlan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApplyReceipt {
-    pub mutation_id: omnifs_core::MutationId,
+    pub mutation_id: MutationId,
     pub revision: ResourceRevision,
     pub desired_digest: ResourceDigest,
     pub created: u32,
     pub updated: u32,
     pub deleted: u32,
     pub changed: bool,
+}
+
+/// One complete non-secret desired-state snapshot returned by the daemon.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceSnapshot {
+    pub revision: ResourceRevision,
+    pub desired_digest: ResourceDigest,
+    pub resources: Vec<ResourceDefinition>,
+    pub resource_statuses: Vec<ResourceStatus>,
+}
+
+/// Request-only secret material paired with one declared credential resource.
+///
+/// This value must never be returned by a control method, stored in an action
+/// receipt, or included in progress output.
+pub struct CredentialMaterialSidecar {
+    pub credential: ResourceName,
+    pub material: CredentialMaterial,
+    pub overrides: CredentialClientOverrides,
+}
+
+impl std::fmt::Debug for CredentialMaterialSidecar {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CredentialMaterialSidecar")
+            .field("credential", &self.credential)
+            .field("material", &self.material)
+            .field("overrides", &self.overrides)
+            .finish()
+    }
+}
+
+/// One complete desired-set compare-and-swap request.
+pub struct ApplyResourcesRequest {
+    pub mutation_id: MutationId,
+    pub base_revision: ResourceRevision,
+    pub expected_desired_digest: ResourceDigest,
+    pub declarations: ResourceDeclarations,
+    pub credential_material: Vec<CredentialMaterialSidecar>,
+}
+
+impl std::fmt::Debug for ApplyResourcesRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApplyResourcesRequest")
+            .field("mutation_id", &self.mutation_id)
+            .field("base_revision", &self.base_revision)
+            .field("expected_desired_digest", &self.expected_desired_digest)
+            .field("declarations", &self.declarations)
+            .field("credential_material", &self.credential_material)
+            .finish()
+    }
 }
 
 /// Stable observed lifecycle state for one desired resource.

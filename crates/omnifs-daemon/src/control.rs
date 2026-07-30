@@ -36,7 +36,7 @@ use tower::limit::ConcurrencyLimitLayer;
 use tracing::{info, warn};
 
 use crate::daemon::{DRAIN_TIMEOUT, Daemon};
-use mapping::manager_error;
+use mapping::{manager_error, resource_control_error};
 use service::GrpcControlService;
 
 const CONTROL_CONNECTION_LIMIT: usize = 64;
@@ -259,14 +259,24 @@ impl ControlServer {
 
 pub(crate) fn grpc_code(code: ControlErrorCode) -> tonic::Code {
     match code {
-        ControlErrorCode::InvalidRequest => tonic::Code::InvalidArgument,
+        ControlErrorCode::InvalidRequest
+        | ControlErrorCode::UnsupportedApiVersion
+        | ControlErrorCode::InvalidResource
+        | ControlErrorCode::DesiredDigestMismatch
+        | ControlErrorCode::PlanTooLarge => tonic::Code::InvalidArgument,
         ControlErrorCode::Busy => tonic::Code::ResourceExhausted,
         ControlErrorCode::NotReady
         | ControlErrorCode::RecoveryRequired
         | ControlErrorCode::LeaseExpired
         | ControlErrorCode::LeaseNotHeld => tonic::Code::FailedPrecondition,
-        ControlErrorCode::MutationInProgress | ControlErrorCode::Conflict => tonic::Code::Aborted,
-        ControlErrorCode::NotFound => tonic::Code::NotFound,
+        ControlErrorCode::MutationInProgress
+        | ControlErrorCode::Conflict
+        | ControlErrorCode::StaleBaseRevision
+        | ControlErrorCode::MutationIdReuseMismatch
+        | ControlErrorCode::ActionIdReuseMismatch => tonic::Code::Aborted,
+        ControlErrorCode::NotFound
+        | ControlErrorCode::MissingProviderArtifact
+        | ControlErrorCode::ActionUnavailable => tonic::Code::NotFound,
         ControlErrorCode::AlreadyExists => tonic::Code::AlreadyExists,
         ControlErrorCode::Internal => tonic::Code::Internal,
     }
@@ -291,8 +301,25 @@ pub(crate) fn grpc_invalid(error: impl std::fmt::Display) -> Status {
     ))
 }
 
+pub(crate) fn resource_grpc_error(error: &omnifs_api::grpc::FromGrpcError) -> Status {
+    let code = match error {
+        omnifs_api::grpc::FromGrpcError::UnsupportedApiVersion(_) => {
+            ControlErrorCode::UnsupportedApiVersion
+        },
+        omnifs_api::grpc::FromGrpcError::TooManyResources { .. } => ControlErrorCode::PlanTooLarge,
+        _ => ControlErrorCode::InvalidRequest,
+    };
+    grpc_status(ControlError::new(code, error.to_string()))
+}
+
 pub(crate) fn manager_status(error: &ManagerError) -> Status {
     grpc_status(manager_error(error))
+}
+
+pub(crate) fn resource_control_status(
+    error: &crate::resource_control::ResourceControlError,
+) -> Status {
+    grpc_status(resource_control_error(error))
 }
 
 pub(crate) fn required<T>(value: Option<T>, name: &'static str) -> Result<T, Status> {

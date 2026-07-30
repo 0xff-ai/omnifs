@@ -57,6 +57,7 @@ pub(crate) struct Daemon {
     pub(crate) inspector: Option<Arc<Inspector>>,
     pub(crate) serving: Arc<ServingCell>,
     pub(crate) manager: Arc<crate::manager::MutationManager>,
+    pub(crate) resources: Arc<crate::resource_control::ResourceControl>,
     pub(crate) vfs: Arc<omnifs_vfs::VfsServer>,
     pub(crate) bound_tcp: OnceLock<omnifs_vfs::Endpoint>,
     pub(crate) shutdown_tx: tokio::sync::watch::Sender<bool>,
@@ -68,6 +69,7 @@ pub(crate) struct DaemonParts {
     pub(crate) state: Arc<StateStore>,
     pub(crate) serving: Arc<ServingCell>,
     pub(crate) manager: Arc<crate::manager::MutationManager>,
+    pub(crate) resources: Arc<crate::resource_control::ResourceControl>,
     pub(crate) inspector: Option<Arc<Inspector>>,
     pub(crate) shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -80,6 +82,7 @@ impl Daemon {
             state,
             serving,
             manager,
+            resources,
             inspector,
             shutdown_tx,
         } = parts;
@@ -91,6 +94,7 @@ impl Daemon {
             state,
             inspector,
             manager,
+            resources,
             serving,
             vfs,
             bound_tcp: OnceLock::new(),
@@ -129,6 +133,7 @@ impl Daemon {
     /// `repairs.recv()`. Every caller that wants the process to actually
     /// stop already sends the signal itself.
     pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
+        self.resources.shutdown();
         let manager_result = self
             .manager
             .shutdown()

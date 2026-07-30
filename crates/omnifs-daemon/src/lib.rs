@@ -4,14 +4,19 @@
 //! subcommand. This crate owns daemon startup, serving, and control handling.
 
 mod app;
+mod auth_fingerprint;
 mod context;
 mod control;
+mod credential_codec;
+mod credential_document;
 mod daemon;
 mod generation_builder;
 mod log_stream;
 mod logging;
 mod manager;
+mod progress;
 mod provider_bundle;
+mod resource_control;
 
 pub use app::run;
 

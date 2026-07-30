@@ -9,6 +9,7 @@ mod attachment;
 mod control;
 mod credential;
 mod mount;
+mod progress;
 mod resource;
 
 /// Protobuf wire types and strict conversions for the local control API.
@@ -16,11 +17,12 @@ pub mod grpc;
 
 pub use attachment::AttachmentDefinition;
 pub use control::{
-    CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MESSAGE_MAX_BYTES, CONTROL_MUTATION_TIMEOUT_SECS,
-    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_SHUTDOWN_DRAIN_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS,
-    CONTROL_STREAM_ITEM_MAX_BYTES, CONTROL_STREAM_PAYLOAD_MAX_BYTES, ControlError,
-    ControlErrorCode, MutationOp, MutationOpResult, ProviderImportDisposition,
-    ProviderImportReceipt, ProviderReference, ServingOutcome,
+    ActionKind, ActionPhase, ActionReceipt, CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MESSAGE_MAX_BYTES,
+    CONTROL_MUTATION_TIMEOUT_SECS, CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_RESOURCE_MAX_COUNT,
+    CONTROL_SHUTDOWN_DRAIN_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS, CONTROL_STREAM_ITEM_MAX_BYTES,
+    CONTROL_STREAM_PAYLOAD_MAX_BYTES, ControlError, ControlErrorCode, CredentialReceipt,
+    MutationOp, MutationOpResult, ProviderImportDisposition, ProviderImportReceipt,
+    ProviderReference, RevokeCredentialRequest, ServingOutcome, SetCredentialMaterialRequest,
 };
 pub use credential::{
     CredentialClientOverrides, CredentialKey, CredentialKind, CredentialMaterial, CredentialStatus,
@@ -30,11 +32,17 @@ pub use mount::{
     MountCredential, MountDefinition, MountField, MountHealth, MountLimits, MountOpResult,
     MountPatch, MountRecord,
 };
+pub use progress::{
+    AttachmentProgress, AttachmentProgressStage, CredentialProgress, CredentialProgressStage,
+    ProgressEvent, ProgressEventKind, ProgressSnapshot, ProgressTarget,
+    ProviderPreparationProgress, ProviderPreparationStage, ServingProgress, ServingProgressStage,
+};
 pub use resource::{
-    API_VERSION, ApplyReceipt, CredentialDefinition, MountResourceDefinition,
-    NormalizedResourceSet, ProviderDefinition, ResourceChange, ResourceChangeAction,
-    ResourceDeclarations, ResourceDefinition, ResourceDefinitionError, ResourceLimits,
-    ResourcePhase, ResourcePlan, ResourceStatus, plan,
+    API_VERSION, ApplyReceipt, ApplyResourcesRequest, CredentialDefinition,
+    CredentialMaterialSidecar, MountResourceDefinition, NormalizedResourceSet, ProviderDefinition,
+    ResourceChange, ResourceChangeAction, ResourceDeclarations, ResourceDefinition,
+    ResourceDefinitionError, ResourceLimits, ResourcePhase, ResourcePlan, ResourceSnapshot,
+    ResourceStatus, plan,
 };
 
 /// JSONL activity-event schema and redaction for the inspector observability

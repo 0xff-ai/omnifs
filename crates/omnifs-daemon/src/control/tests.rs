@@ -217,6 +217,10 @@ async fn test_daemon_with_limits(
         omnifs_engine::ServingCell::new(context.namespace_epoch().daemon_instance(), parts.ready);
     parts.pending_refreshes.activate(&state).await.unwrap();
     state.mark_serving(parts.revision).await.unwrap();
+    let resources =
+        crate::resource_control::ResourceControl::new(Arc::clone(&state), context.instance_id())
+            .await
+            .unwrap();
     let manager = crate::manager::MutationManager::spawn_with_lease(
         Arc::clone(&state),
         host,
@@ -231,6 +235,7 @@ async fn test_daemon_with_limits(
         state,
         serving,
         manager,
+        resources,
         inspector: None,
         shutdown_tx: shutdown.clone(),
     }));
@@ -284,6 +289,18 @@ async fn tonic_reports_starting_state_and_invalid_requests() {
     );
     let status = c.ready(wire::Empty {}).await.unwrap_err();
     assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    let resources = c.get_resources(wire::Empty {}).await.unwrap_err();
+    assert_eq!(error_code(&resources), ControlErrorCode::NotReady);
+    control.set_recovery(DaemonRecovery {
+        phase: DaemonPhase::RecoveryRequired,
+        durable_revision: None,
+        serving_revision: None,
+        failed_mutation: None,
+        store_health: HealthReport::new(HealthState::Unhealthy, "test recovery"),
+        repair: None,
+    });
+    let resources = c.get_resources(wire::Empty {}).await.unwrap_err();
+    assert_eq!(error_code(&resources), ControlErrorCode::RecoveryRequired);
     let invalid = c
         .repair_state(wire::RepairStateRequest::default())
         .await
@@ -869,5 +886,225 @@ async fn batch_second_op_failure_leaves_no_first_op_row_behind() {
     // The lease released on failure too: a fresh mutation can begin.
     let next = omnifs_core::MutationId::from_bytes([8; 16]);
     c.begin_mutation(begin_request(next)).await.unwrap();
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(unsafe_code)]
+#[allow(clippy::too_many_lines)]
+async fn typed_resources_apply_fast_and_progress_recovers_after_disconnect() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::ENV_LOCK.lock().await;
+    let home = std::fs::canonicalize(dir.path()).unwrap();
+    unsafe {
+        std::env::set_var("OMNIFS_HOME", &home);
+    }
+    let runtime = test_daemon(&dir).await;
+    let mut c = client(&home.join("control.sock")).await;
+    let provider = import_test_provider(&mut c, provider_wasm()).await;
+    let provider_name = omnifs_core::ResourceName::new("demo").unwrap();
+    let credential_name = omnifs_core::ResourceName::new("alice").unwrap();
+    let declarations = omnifs_api::ResourceDeclarations {
+        api_version: omnifs_api::API_VERSION.to_owned(),
+        resources: vec![
+            omnifs_api::ResourceDefinition::Provider(omnifs_api::ProviderDefinition {
+                name: provider_name.clone(),
+                artifact: provider,
+            }),
+            omnifs_api::ResourceDefinition::Credential(omnifs_api::CredentialDefinition {
+                name: credential_name.clone(),
+                provider: provider_name.clone(),
+                scheme: "pat".to_owned(),
+                account: "alice".to_owned(),
+            }),
+            omnifs_api::ResourceDefinition::Mount(omnifs_api::MountResourceDefinition {
+                name: omnifs_core::ResourceName::new("demo-mount").unwrap(),
+                provider: provider_name,
+                credential: Some(credential_name.clone()),
+                config: serde_json::json!({}),
+                limits: None,
+            }),
+        ],
+    };
+    let plan_wire = c
+        .plan_resources(grpc::to_plan_resources_request(&declarations))
+        .await
+        .unwrap()
+        .into_inner();
+    let plan = grpc::plan_resources_response(&plan_wire).unwrap();
+    assert_eq!(plan.base_revision, omnifs_core::ResourceRevision::new(1));
+    assert_eq!(plan.changes.len(), 3);
+
+    let secret = b"service-boundary-secret";
+    let mutation_id = omnifs_core::MutationId::from_bytes([0x51; 16]);
+    let request = omnifs_api::ApplyResourcesRequest {
+        mutation_id,
+        base_revision: plan.base_revision,
+        expected_desired_digest: plan.desired_digest,
+        declarations: declarations.clone(),
+        credential_material: vec![omnifs_api::CredentialMaterialSidecar {
+            credential: credential_name.clone(),
+            material: omnifs_api::CredentialMaterial::StaticToken {
+                token: omnifs_api::SecretBytes::new(secret.to_vec()),
+            },
+            overrides: omnifs_api::CredentialClientOverrides {
+                client_id: None,
+                client_secret: None,
+                redirect_uri: None,
+                scopes: None,
+            },
+        }],
+    };
+    let response = c
+        .apply_resources(grpc::to_apply_resources_request(&request))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        !response
+            .encode_to_vec()
+            .windows(secret.len())
+            .any(|part| part == secret),
+        "apply response must not contain credential material"
+    );
+    let receipt = grpc::apply_resources_response(&response).unwrap();
+    assert!(receipt.changed);
+    assert_eq!(receipt.revision, omnifs_core::ResourceRevision::new(2));
+
+    let retry = c
+        .apply_resources(grpc::to_apply_resources_request(&request))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(grpc::apply_resources_response(&retry).unwrap(), receipt);
+
+    let action_id = omnifs_core::ActionId::from_bytes([0x61; 16]);
+    let set_request = |token: &[u8]| omnifs_api::SetCredentialMaterialRequest {
+        action_id,
+        base_action_generation: 0,
+        credential: credential_name.clone(),
+        material: omnifs_api::CredentialMaterial::StaticToken {
+            token: omnifs_api::SecretBytes::new(token.to_vec()),
+        },
+        overrides: omnifs_api::CredentialClientOverrides {
+            client_id: None,
+            client_secret: None,
+            redirect_uri: None,
+            scopes: None,
+        },
+    };
+    let action_response = c
+        .set_credential_material(grpc::to_set_credential_material_request(&set_request(
+            b"first-action-secret",
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        !action_response
+            .encode_to_vec()
+            .windows(b"first-action-secret".len())
+            .any(|part| part == b"first-action-secret")
+    );
+    let action = grpc::set_credential_material_response(&action_response)
+        .unwrap()
+        .action;
+    assert_eq!(action.action_id, action_id);
+    let action_retry = c
+        .set_credential_material(grpc::to_set_credential_material_request(&set_request(
+            b"different-secret-is-ignored",
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        grpc::set_credential_material_response(&action_retry)
+            .unwrap()
+            .action,
+        action
+    );
+
+    let mut first_watch = c
+        .watch_progress(grpc::to_progress_target(
+            omnifs_api::ProgressTarget::DesiredRevision(receipt.revision),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let initial = first_watch.message().await.unwrap().unwrap();
+    let initial = grpc::progress_event(&initial).unwrap();
+    assert!(matches!(
+        initial.event,
+        omnifs_api::ProgressEventKind::Snapshot(ref snapshot)
+            if snapshot.desired_revision == receipt.revision
+                && snapshot.resources.iter().all(|status| {
+                    status.desired_revision == receipt.revision
+                        && status.phase == omnifs_api::ResourcePhase::Pending
+                })
+    ));
+    drop(first_watch);
+
+    let resources = c.get_resources(wire::Empty {}).await.unwrap().into_inner();
+    assert_eq!(
+        grpc::get_resources_response(&resources).unwrap().revision,
+        receipt.revision
+    );
+    let mut resumed = c
+        .watch_progress(grpc::to_progress_target(
+            omnifs_api::ProgressTarget::DesiredRevision(receipt.revision),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(matches!(
+        grpc::progress_event(&resumed.message().await.unwrap().unwrap())
+            .unwrap()
+            .event,
+        omnifs_api::ProgressEventKind::Snapshot(_)
+    ));
+    drop(resumed);
+
+    let empty = omnifs_api::ResourceDeclarations {
+        api_version: omnifs_api::API_VERSION.to_owned(),
+        resources: Vec::new(),
+    };
+    let empty_digest = empty.clone().normalize().unwrap().digest();
+    let stale = c
+        .apply_resources(grpc::to_apply_resources_request(
+            &omnifs_api::ApplyResourcesRequest {
+                mutation_id: omnifs_core::MutationId::from_bytes([0x52; 16]),
+                base_revision: omnifs_core::ResourceRevision::new(0),
+                expected_desired_digest: empty_digest,
+                declarations: empty,
+                credential_material: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error_code(&stale), ControlErrorCode::StaleBaseRevision);
+
+    let unsupported = omnifs_api::ResourceDeclarations {
+        api_version: "omnifs.dev/v999".to_owned(),
+        resources: Vec::new(),
+    };
+    let unsupported = c
+        .plan_resources(grpc::to_plan_resources_request(&unsupported))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error_code(&unsupported),
+        ControlErrorCode::UnsupportedApiVersion
+    );
+
+    let unknown_action = c
+        .watch_progress(grpc::to_progress_target(
+            omnifs_api::ProgressTarget::Action(omnifs_core::ActionId::from_bytes([0x99; 16])),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error_code(&unknown_action),
+        ControlErrorCode::ActionUnavailable
+    );
     runtime.shutdown().await;
 }

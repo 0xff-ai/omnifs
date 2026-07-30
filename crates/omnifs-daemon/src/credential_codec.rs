@@ -12,9 +12,9 @@ use zeroize::Zeroizing;
 const CREDENTIAL_PAYLOAD_PREFIX: &[u8] = b"omnifs.credential.v1\0";
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct CredentialPayload {
-    pub(super) material: CredentialMaterial,
-    pub(super) overrides: CredentialClientOverrides,
+pub(crate) struct CredentialPayload {
+    pub(crate) material: CredentialMaterial,
+    pub(crate) overrides: CredentialClientOverrides,
 }
 
 #[derive(Serialize)]
@@ -23,11 +23,11 @@ struct RefreshedCredentialPayload<'a> {
     overrides: &'a CredentialClientOverrides,
 }
 
-pub(super) fn encode_payload(payload: &CredentialPayload) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn encode_payload(payload: &CredentialPayload) -> anyhow::Result<Vec<u8>> {
     encode_serialized_payload(payload)
 }
 
-pub(super) fn encode_refreshed_payload(
+pub(crate) fn encode_refreshed_payload(
     entry: &CredentialEntry,
     overrides: &CredentialClientOverrides,
 ) -> anyhow::Result<Vec<u8>> {
@@ -65,7 +65,7 @@ fn encode_serialized_payload(payload: &impl Serialize) -> anyhow::Result<Vec<u8>
     Ok(bytes)
 }
 
-pub(super) fn decode_payload(bytes: &[u8]) -> anyhow::Result<CredentialPayload> {
+pub(crate) fn decode_payload(bytes: &[u8]) -> anyhow::Result<CredentialPayload> {
     let payload = bytes
         .strip_prefix(CREDENTIAL_PAYLOAD_PREFIX)
         .context("credential material has an unknown encoding")?;

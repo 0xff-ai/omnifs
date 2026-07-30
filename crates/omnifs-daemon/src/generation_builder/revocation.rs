@@ -8,9 +8,9 @@ use omnifs_auth::{AuthKind, AuthScheme, OAuthClient, OAuthRequest};
 use omnifs_state::{StateStore, StoredCredential};
 use secrecy::SecretString;
 
-use super::auth_fingerprint::auth_fingerprint;
-use super::credential_codec::decode_payload;
 use super::{decode_entry, runtime_overrides};
+use crate::auth_fingerprint::auth_fingerprint;
+use crate::credential_codec::decode_payload;
 
 pub(crate) enum PreparedCredentialRevocation {
     LocalOnly,

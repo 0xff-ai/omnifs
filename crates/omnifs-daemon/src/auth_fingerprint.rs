@@ -18,7 +18,7 @@ struct FingerprintInput<'a> {
     overrides: &'a CredentialClientOverrides,
 }
 
-pub(super) fn auth_fingerprint(
+pub(crate) fn auth_fingerprint(
     provider: ProviderId,
     scheme: &AuthScheme,
     overrides: &CredentialClientOverrides,

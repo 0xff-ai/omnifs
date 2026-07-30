@@ -5,10 +5,12 @@ use bytes::Bytes;
 use hyper_util::rt::TokioIo;
 use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
-    CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MUTATION_TIMEOUT_SECS, CONTROL_REQUEST_TIMEOUT_SECS,
-    CONTROL_SHUTDOWN_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES, CredentialKey,
-    CredentialStatus, DaemonInventory, MountRecord, MutationOp, MutationOpResult,
-    ProviderImportReceipt, ProviderMetadata, ServingOutcome,
+    ApplyReceipt, ApplyResourcesRequest, CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MUTATION_TIMEOUT_SECS,
+    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES,
+    CredentialKey, CredentialReceipt, CredentialStatus, DaemonInventory, MountRecord, MutationOp,
+    MutationOpResult, ProgressEvent, ProgressTarget, ProviderImportReceipt, ProviderMetadata,
+    ResourceDeclarations, ResourcePlan, ResourceSnapshot, RevokeCredentialRequest, ServingOutcome,
+    SetCredentialMaterialRequest,
 };
 use omnifs_bootstrap::{Bootstrap, Client};
 use omnifs_core::{MountName, MutationId, ProviderId};
@@ -54,6 +56,29 @@ macro_rules! bounded_unary {
 pub(crate) struct ShutdownResult {
     pub(crate) detached: usize,
     pub(crate) still_attached: Vec<String>,
+}
+
+#[allow(dead_code, reason = "Plan 008 command porcelain consumes progress")]
+pub(crate) struct ProgressWatch {
+    first: Option<ProgressEvent>,
+    stream: tonic::Streaming<wire::ProgressEvent>,
+}
+
+#[allow(dead_code, reason = "Plan 008 command porcelain consumes progress")]
+impl ProgressWatch {
+    pub(crate) async fn next(&mut self) -> anyhow::Result<Option<ProgressEvent>> {
+        if let Some(first) = self.first.take() {
+            return Ok(Some(first));
+        }
+        self.stream
+            .message()
+            .await
+            .map_err(status_error)?
+            .as_ref()
+            .map(grpc::progress_event)
+            .transpose()
+            .map_err(Into::into)
+    }
 }
 
 pub(crate) struct RpcClient {
@@ -329,6 +354,104 @@ impl RpcClient {
             .map(grpc::credential_status)
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    #[allow(dead_code, reason = "Plan 007 declarative commands consume this RPC")]
+    pub(crate) async fn resources(&self) -> anyhow::Result<ResourceSnapshot> {
+        let response = bounded_unary!(self, get_resources, wire::Empty {}).into_inner();
+        grpc::get_resources_response(&response).map_err(Into::into)
+    }
+
+    #[allow(dead_code, reason = "Plan 007 declarative commands consume this RPC")]
+    pub(crate) async fn plan_resources(
+        &self,
+        declarations: &ResourceDeclarations,
+    ) -> anyhow::Result<ResourcePlan> {
+        let response = bounded_unary!(
+            self,
+            plan_resources,
+            grpc::to_plan_resources_request(declarations)
+        )
+        .into_inner();
+        grpc::plan_resources_response(&response).map_err(Into::into)
+    }
+
+    #[allow(dead_code, reason = "Plan 007 declarative commands consume this RPC")]
+    pub(crate) async fn apply_resources(
+        &self,
+        request: &ApplyResourcesRequest,
+    ) -> anyhow::Result<ApplyReceipt> {
+        let response = bounded_unary!(
+            self,
+            apply_resources,
+            grpc::to_apply_resources_request(request)
+        )
+        .into_inner();
+        grpc::apply_resources_response(&response).map_err(Into::into)
+    }
+
+    #[allow(dead_code, reason = "Plan 008 credential commands consume this RPC")]
+    pub(crate) async fn set_credential_material(
+        &self,
+        request: &SetCredentialMaterialRequest,
+    ) -> anyhow::Result<CredentialReceipt> {
+        let response = bounded_unary!(
+            self,
+            set_credential_material,
+            grpc::to_set_credential_material_request(request)
+        )
+        .into_inner();
+        grpc::set_credential_material_response(&response).map_err(Into::into)
+    }
+
+    #[allow(dead_code, reason = "Plan 008 credential commands consume this RPC")]
+    pub(crate) async fn revoke_credential(
+        &self,
+        request: &RevokeCredentialRequest,
+    ) -> anyhow::Result<CredentialReceipt> {
+        let response = bounded_unary!(
+            self,
+            revoke_credential,
+            grpc::to_revoke_credential_request(request)
+        )
+        .into_inner();
+        grpc::revoke_credential_response(&response).map_err(Into::into)
+    }
+
+    /// Open one target-scoped progress stream. Only stream setup and the
+    /// required first snapshot use the request deadline. Once subscribed,
+    /// reconciliation can run for as long as it needs.
+    #[allow(dead_code, reason = "Plan 008 command porcelain consumes progress")]
+    pub(crate) async fn watch_progress(
+        &self,
+        target: ProgressTarget,
+    ) -> anyhow::Result<ProgressWatch> {
+        tokio::time::timeout(self.setup_timeout, async {
+            let response = self
+                .client()
+                .await?
+                .watch_progress(Request::new(grpc::to_progress_target(target)))
+                .await
+                .map_err(status_error)?;
+            let mut stream = response.into_inner();
+            let first_wire = stream
+                .message()
+                .await
+                .map_err(status_error)?
+                .context("daemon closed progress stream before snapshot")?;
+            let first = grpc::progress_event(&first_wire)?;
+            anyhow::ensure!(
+                matches!(first.event, omnifs_api::ProgressEventKind::Snapshot(_)),
+                "daemon returned an invalid progress stream prelude"
+            );
+            Ok(ProgressWatch {
+                first: Some(first),
+                stream,
+            })
+        })
+        .await
+        .context("timed out starting daemon progress stream")
+        .with_exit_code(ExitCode::DaemonUnavailable)?
     }
 
     /// Acquire the daemon's single mutation lease for `id`. Rejects with a
@@ -661,6 +784,35 @@ mod tests {
             error
                 .to_string()
                 .contains("timed out starting daemon log stream")
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_progress_setup_respects_setup_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let endpoint = Bootstrap::<Client>::under_root(dir.path());
+        let listener =
+            tokio::net::UnixListener::bind(endpoint.control_socket()).expect("bind control socket");
+        tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("accept client");
+            std::future::pending::<()>().await;
+        });
+
+        let rpc = RpcClient::with_setup_timeout(endpoint, Duration::from_millis(20));
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            rpc.watch_progress(ProgressTarget::Current),
+        )
+        .await;
+        let error = match result {
+            Ok(Err(error)) => error,
+            Ok(Ok(_)) => panic!("progress RPC setup unexpectedly succeeded"),
+            Err(elapsed) => panic!("outer test timeout elapsed: {elapsed}"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("timed out starting daemon progress stream")
         );
     }
 }

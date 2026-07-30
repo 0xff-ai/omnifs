@@ -21,6 +21,12 @@ service Control {
   rpc GetMount(GetMountRequest) returns (GetMountResponse);
   rpc ListCredentials(Empty) returns (ListCredentialsResponse);
   rpc GetCredentialStatus(GetCredentialStatusRequest) returns (GetCredentialStatusResponse);
+  rpc GetResources(Empty) returns (GetResourcesResponse);
+  rpc PlanResources(PlanResourcesRequest) returns (PlanResourcesResponse);
+  rpc ApplyResources(ApplyResourcesRequest) returns (ApplyResourcesResponse);
+  rpc SetCredentialMaterial(SetCredentialMaterialRequest) returns (SetCredentialMaterialResponse);
+  rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse);
+  rpc WatchProgress(WatchProgressRequest) returns (stream ProgressEvent);
   rpc SubscribeInspector(InspectorRequest) returns (stream InspectorStreamItem);
   rpc StreamLogs(StreamLogsRequest) returns (stream LogStreamItem);
 }
@@ -100,6 +106,209 @@ message ListCredentialsResponse { repeated CredentialStatus credentials = 1; }
 message GetCredentialStatusRequest { CredentialKey key = 1; }
 message GetCredentialStatusResponse { CredentialStatus status = 1; }
 
+message GetResourcesResponse { ResourceSnapshot snapshot = 1; }
+message PlanResourcesRequest { ResourceDeclarations declarations = 1; }
+message PlanResourcesResponse { ResourcePlan plan = 1; }
+message ApplyResourcesRequest {
+  bytes mutation_id = 1;
+  uint64 base_revision = 2;
+  bytes expected_desired_digest = 3;
+  ResourceDeclarations declarations = 4;
+  repeated CredentialMaterialSidecar credential_material = 5;
+}
+message ApplyResourcesResponse { ApplyReceipt receipt = 1; }
+message SetCredentialMaterialRequest {
+  bytes action_id = 1;
+  uint64 base_action_generation = 2;
+  string credential_name = 3;
+  CredentialMaterial material = 4;
+  CredentialClientOverrides overrides = 5;
+}
+message SetCredentialMaterialResponse { CredentialReceipt receipt = 1; }
+message RevokeCredentialRequest {
+  bytes action_id = 1;
+  uint64 base_action_generation = 2;
+  string credential_name = 3;
+}
+message RevokeCredentialResponse { CredentialReceipt receipt = 1; }
+message WatchProgressRequest {
+  oneof target {
+    uint64 desired_revision = 1;
+    bytes action_id = 2;
+    Empty current = 3;
+  }
+}
+
+message ResourceSnapshot {
+  uint64 revision = 1;
+  bytes desired_digest = 2;
+  repeated ResourceDefinition resources = 3;
+  repeated ResourceStatus resources_status = 4;
+}
+message ResourceDeclarations {
+  string api_version = 1;
+  repeated ResourceDefinition resources = 2;
+}
+message ResourceDefinition {
+  oneof definition {
+    ProviderResource provider = 1;
+    CredentialResource credential = 2;
+    MountResource mount = 3;
+    AttachmentResource attachment = 4;
+  }
+}
+message ProviderResource { string name = 1; bytes artifact = 2; }
+message CredentialResource {
+  string name = 1;
+  string provider = 2;
+  string scheme = 3;
+  string account = 4;
+}
+message MountResource {
+  string name = 1;
+  string provider = 2;
+  optional string credential = 3;
+  bytes config = 4;
+  ResourceLimits limits = 5;
+}
+message ResourceLimits {
+  optional uint32 max_memory_mb = 1;
+  optional uint64 max_fetch_blob_bytes = 2;
+}
+message AttachmentResource {
+  string name = 1;
+  AttachmentSpec spec = 2;
+}
+message AttachmentSpec {
+  FsProtocol protocol = 1;
+  FsRuntime runtime = 2;
+  bytes location = 3;
+  optional string docker_image = 4;
+  optional string libkrun_guest_image = 5;
+}
+message ResourceKey { ResourceKind kind = 1; string name = 2; }
+message ResourceStatus {
+  ResourceKey key = 1;
+  uint64 desired_revision = 2;
+  optional uint64 observed_revision = 3;
+  ResourcePhase phase = 4;
+  optional string error_code = 5;
+  optional string detail = 6;
+}
+message ResourceChange {
+  ResourceKey key = 1;
+  ResourceChangeAction action = 2;
+  bool destructive = 3;
+  bool secret_impact = 4;
+}
+message ResourcePlan {
+  uint64 base_revision = 1;
+  bytes desired_digest = 2;
+  repeated ResourceDefinition normalized = 3;
+  repeated ResourceChange changes = 4;
+}
+message CredentialMaterialSidecar {
+  string credential_name = 1;
+  CredentialMaterial material = 2;
+  CredentialClientOverrides overrides = 3;
+}
+message ApplyReceipt {
+  bytes mutation_id = 1;
+  uint64 revision = 2;
+  bytes desired_digest = 3;
+  uint32 created = 4;
+  uint32 updated = 5;
+  uint32 deleted = 6;
+  bool changed = 7;
+}
+message ActionReceipt {
+  bytes action_id = 1;
+  ActionKind kind = 2;
+  ResourceKey target = 3;
+  uint64 action_generation = 4;
+  ActionPhase phase = 5;
+}
+message CredentialReceipt {
+  ActionReceipt action = 1;
+  CredentialStatusKind status = 2;
+}
+message ProgressSnapshot {
+  uint64 desired_revision = 1;
+  optional uint64 observed_revision = 2;
+  repeated ResourceStatus resources = 3;
+  repeated ActionReceipt actions = 4;
+}
+message ProgressEvent {
+  string daemon_instance_id = 1;
+  uint64 sequence = 2;
+  WatchProgressRequest target = 3;
+  oneof event {
+    ProgressSnapshot snapshot = 4;
+    ResourcePhaseChanged resource_phase_changed = 5;
+    ProviderPreparationProgress provider_preparation = 6;
+    ServingProgress serving_progress = 7;
+    CredentialProgress credential_progress = 8;
+    AttachmentProgress attachment_progress = 9;
+    RevisionReady revision_ready = 10;
+    RevisionFailed revision_failed = 11;
+    RevisionSuperseded revision_superseded = 12;
+    ActionCompleted action_completed = 13;
+    ActionFailed action_failed = 14;
+    ProgressSnapshot resync = 15;
+  }
+}
+message ResourcePhaseChanged { ResourceStatus status = 1; }
+message ProviderPreparationProgress {
+  bytes digest = 1;
+  string catalog_name = 2;
+  repeated string resource_names = 3;
+  ProviderPreparationStage stage = 4;
+  uint64 completed_bytes = 5;
+  optional uint64 total_bytes = 6;
+  optional string error_code = 7;
+  optional string detail = 8;
+  uint32 queued_digests = 9;
+  uint32 active_digests = 10;
+  uint32 retry_count = 11;
+}
+message ServingProgress {
+  uint64 revision = 1;
+  ServingProgressStage stage = 2;
+  uint32 completed = 3;
+  uint32 total = 4;
+  optional string error_code = 5;
+  optional string detail = 6;
+  uint32 queued_generations = 7;
+  uint32 retry_count = 8;
+}
+message CredentialProgress {
+  ResourceKey key = 1;
+  CredentialProgressStage stage = 2;
+  optional string error_code = 3;
+  optional string detail = 4;
+  uint32 retry_count = 5;
+}
+message AttachmentProgress {
+  ResourceKey key = 1;
+  AttachmentProgressStage stage = 2;
+  optional string error_code = 3;
+  optional string detail = 4;
+  uint32 retry_count = 5;
+}
+message RevisionReady { uint64 revision = 1; }
+message RevisionFailed {
+  uint64 revision = 1;
+  string error_code = 2;
+  string detail = 3;
+}
+message RevisionSuperseded { uint64 revision = 1; uint64 replaced_by = 2; }
+message ActionCompleted { ActionReceipt receipt = 1; }
+message ActionFailed {
+  ActionReceipt receipt = 1;
+  string error_code = 2;
+  string detail = 3;
+}
+
 message InspectorRequest {}
 message InspectorStreamItem {
   oneof value {
@@ -176,6 +385,15 @@ enum RepairAction { REPAIR_ACTION_UNSPECIFIED = 0; REPAIR_RECREATE_CONTROL_STORE
 enum RepairDisposition { REPAIR_DISPOSITION_UNSPECIFIED = 0; REPAIR_FRESH_STORE_CREATED = 1; REPAIR_CORRUPT_STORE_ARCHIVED = 2; }
 enum FsProtocol { FS_PROTOCOL_UNSPECIFIED = 0; FS_FUSE = 1; FS_NFS = 2; }
 enum FsRuntime { FS_RUNTIME_UNSPECIFIED = 0; FS_HOST = 1; FS_DOCKER = 2; FS_LIBKRUN = 3; }
+enum ResourceKind { RESOURCE_KIND_UNSPECIFIED = 0; RESOURCE_PROVIDER = 1; RESOURCE_CREDENTIAL = 2; RESOURCE_MOUNT = 3; RESOURCE_ATTACHMENT = 4; }
+enum ResourcePhase { RESOURCE_PHASE_UNSPECIFIED = 0; RESOURCE_PENDING = 1; RESOURCE_PREPARING = 2; RESOURCE_READY = 3; RESOURCE_RETRYING = 4; RESOURCE_FAILED = 5; RESOURCE_BLOCKED = 6; RESOURCE_DELETING = 7; }
+enum ResourceChangeAction { RESOURCE_CHANGE_ACTION_UNSPECIFIED = 0; RESOURCE_CREATE = 1; RESOURCE_UPDATE = 2; RESOURCE_DELETE = 3; RESOURCE_UNCHANGED = 4; }
+enum ActionKind { ACTION_KIND_UNSPECIFIED = 0; ACTION_SET_CREDENTIAL_MATERIAL = 1; ACTION_REVOKE_CREDENTIAL = 2; ACTION_RESTART_ATTACHMENT = 3; }
+enum ActionPhase { ACTION_PHASE_UNSPECIFIED = 0; ACTION_ACCEPTED = 1; ACTION_RUNNING = 2; ACTION_RETRYING = 3; ACTION_READY = 4; ACTION_FAILED = 5; }
+enum ProviderPreparationStage { PROVIDER_PREPARATION_STAGE_UNSPECIFIED = 0; PROVIDER_PREPARATION_QUEUED = 1; PROVIDER_PREPARATION_FETCHING = 2; PROVIDER_PREPARATION_VALIDATING = 3; PROVIDER_PREPARATION_COMPILING = 4; PROVIDER_PREPARATION_READY = 5; PROVIDER_PREPARATION_FAILED = 6; }
+enum ServingProgressStage { SERVING_PROGRESS_STAGE_UNSPECIFIED = 0; SERVING_QUEUED = 1; SERVING_BUILDING = 2; SERVING_DRAINING = 3; SERVING_READY = 4; SERVING_FAILED = 5; }
+enum CredentialProgressStage { CREDENTIAL_PROGRESS_STAGE_UNSPECIFIED = 0; CREDENTIAL_PROGRESS_QUEUED = 1; CREDENTIAL_PROGRESS_REFRESHING = 2; CREDENTIAL_PROGRESS_REVOKING = 3; CREDENTIAL_PROGRESS_READY = 4; CREDENTIAL_PROGRESS_FAILED = 5; }
+enum AttachmentProgressStage { ATTACHMENT_PROGRESS_STAGE_UNSPECIFIED = 0; ATTACHMENT_QUEUED = 1; ATTACHMENT_STARTING = 2; ATTACHMENT_STOPPING = 3; ATTACHMENT_READY = 4; ATTACHMENT_FAILED = 5; }
 enum ErrorCode {
   ERROR_CODE_UNSPECIFIED = 0;
   reserved 1, 2, 3;
@@ -190,5 +408,14 @@ enum ErrorCode {
   ALREADY_EXISTS = 12;
   CONFLICT = 13;
   INTERNAL = 14;
+  UNSUPPORTED_API_VERSION = 15;
+  INVALID_RESOURCE = 16;
+  STALE_BASE_REVISION = 17;
+  DESIRED_DIGEST_MISMATCH = 18;
+  MUTATION_ID_REUSE_MISMATCH = 19;
+  MISSING_PROVIDER_ARTIFACT = 20;
+  PLAN_TOO_LARGE = 21;
+  ACTION_UNAVAILABLE = 22;
+  ACTION_ID_REUSE_MISMATCH = 23;
 }
 message ErrorDetail { ErrorCode code = 1; string message = 2; }

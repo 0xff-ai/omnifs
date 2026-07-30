@@ -8,9 +8,10 @@
 //! can run concurrently, so it always runs to completion regardless of how
 //! long generation rebuild and activation take.
 
+use crate::credential_document::prepare_credential_document;
 use crate::generation_builder::{
     GenerationBuild, GenerationDraft, GenerationParts, PreparedCredentialRevocation,
-    credential_scopes, prepare_credential_document, prepare_credential_revocation,
+    credential_scopes, prepare_credential_revocation,
 };
 use anyhow::Context as _;
 use omnifs_api::{

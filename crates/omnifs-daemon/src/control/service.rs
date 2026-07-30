@@ -5,6 +5,7 @@ use super::mapping::{
     api_provider_metadata, api_provider_reference, credential_id,
 };
 use super::*;
+use tokio_stream::StreamExt as _;
 
 const PROVIDER_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
 pub(crate) struct GrpcControlService {
@@ -580,6 +581,137 @@ impl wire::control_server::Control for GrpcControlService {
         Ok(Response::new(wire::GetCredentialStatusResponse {
             status: status.as_ref().map(grpc::to_credential_status),
         }))
+    }
+
+    async fn get_resources(
+        &self,
+        _request: Request<wire::Empty>,
+    ) -> Result<Response<wire::GetResourcesResponse>, Status> {
+        let daemon = self.daemon()?;
+        let snapshot = daemon
+            .resources
+            .snapshot()
+            .await
+            .map_err(|error| resource_control_status(&error))?;
+        Ok(Response::new(wire::GetResourcesResponse {
+            snapshot: Some(grpc::to_resource_snapshot(&snapshot)),
+        }))
+    }
+
+    async fn plan_resources(
+        &self,
+        request: Request<wire::PlanResourcesRequest>,
+    ) -> Result<Response<wire::PlanResourcesResponse>, Status> {
+        let daemon = self.daemon()?;
+        let declarations = grpc::resource_declarations(&required(
+            request.into_inner().declarations,
+            "resource declarations",
+        )?)
+        .map_err(|error| resource_grpc_error(&error))?;
+        let plan = daemon
+            .resources
+            .plan(declarations)
+            .await
+            .map_err(|error| resource_control_status(&error))?;
+        Ok(Response::new(wire::PlanResourcesResponse {
+            plan: Some(grpc::to_resource_plan(&plan)),
+        }))
+    }
+
+    async fn apply_resources(
+        &self,
+        request: Request<wire::ApplyResourcesRequest>,
+    ) -> Result<Response<wire::ApplyResourcesResponse>, Status> {
+        let daemon = self.daemon()?;
+        let request = grpc::apply_resources_request(&request.into_inner())
+            .map_err(|error| resource_grpc_error(&error))?;
+        let receipt = daemon
+            .resources
+            .apply(request)
+            .await
+            .map_err(|error| resource_control_status(&error))?;
+        Ok(Response::new(wire::ApplyResourcesResponse {
+            receipt: Some(grpc::to_apply_receipt(&receipt)),
+        }))
+    }
+
+    async fn set_credential_material(
+        &self,
+        request: Request<wire::SetCredentialMaterialRequest>,
+    ) -> Result<Response<wire::SetCredentialMaterialResponse>, Status> {
+        let daemon = self.daemon()?;
+        let request =
+            grpc::set_credential_material_request(&request.into_inner()).map_err(grpc_invalid)?;
+        let receipt = daemon
+            .resources
+            .set_credential_material(request)
+            .await
+            .map_err(|error| resource_control_status(&error))?;
+        Ok(Response::new(wire::SetCredentialMaterialResponse {
+            receipt: Some(grpc::to_credential_receipt(&receipt)),
+        }))
+    }
+
+    async fn revoke_credential(
+        &self,
+        request: Request<wire::RevokeCredentialRequest>,
+    ) -> Result<Response<wire::RevokeCredentialResponse>, Status> {
+        let daemon = self.daemon()?;
+        let request =
+            grpc::revoke_credential_request(&request.into_inner()).map_err(grpc_invalid)?;
+        let receipt = daemon
+            .resources
+            .revoke_credential(request)
+            .await
+            .map_err(|error| resource_control_status(&error))?;
+        Ok(Response::new(wire::RevokeCredentialResponse {
+            receipt: Some(grpc::to_credential_receipt(&receipt)),
+        }))
+    }
+
+    type WatchProgressStream =
+        Pin<Box<dyn tokio_stream::Stream<Item = Result<wire::ProgressEvent, Status>> + Send>>;
+
+    async fn watch_progress(
+        &self,
+        request: Request<wire::WatchProgressRequest>,
+    ) -> Result<Response<Self::WatchProgressStream>, Status> {
+        let daemon = self.daemon()?;
+        let target = grpc::progress_target(&request.into_inner()).map_err(grpc_invalid)?;
+        if daemon.resources.progress().target_state(target)
+            == crate::progress::ProgressTargetState::Unavailable
+        {
+            let code = if matches!(target, omnifs_api::ProgressTarget::Action(_)) {
+                ControlErrorCode::ActionUnavailable
+            } else {
+                ControlErrorCode::NotFound
+            };
+            return Err(grpc_status(ControlError::new(
+                code,
+                "progress target is unknown or no longer retained",
+            )));
+        }
+        let permit = Arc::clone(&self.control.stream_permits)
+            .try_acquire_owned()
+            .map_err(|_| {
+                grpc_status(ControlError::new(
+                    ControlErrorCode::Busy,
+                    "stream capacity exhausted",
+                ))
+            })?;
+        let receive = daemon.resources.progress().subscribe(target);
+        let stream = ReceiverStream::new(receive).map(move |event| {
+            let _permit = &permit;
+            let event = grpc::to_progress_event(&event);
+            if event.encoded_len() > omnifs_api::CONTROL_STREAM_ITEM_MAX_BYTES {
+                return Err(grpc_status(ControlError::new(
+                    ControlErrorCode::PlanTooLarge,
+                    "progress snapshot exceeds the control stream item limit",
+                )));
+            }
+            Ok(event)
+        });
+        Ok(Response::new(Box::pin(stream)))
     }
 
     type SubscribeInspectorStream = ReceiverStream<Result<wire::InspectorStreamItem, Status>>;
