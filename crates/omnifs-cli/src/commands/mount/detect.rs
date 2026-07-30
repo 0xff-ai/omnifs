@@ -4,11 +4,11 @@
 //! command and take its trimmed stdout as a token. The init flow can offer
 //! to import a detected credential instead of starting a fresh auth flow.
 
-use omnifs_workspace::authn::{AmbientKind, AmbientSource, AuthManifest};
+use omnifs_auth::{AmbientKind, AmbientSource, AuthManifest};
 use secrecy::SecretString;
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// How long an ambient command may run before it is killed and ignored.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
@@ -105,22 +105,22 @@ fn run_command(argv: &[String]) -> Option<String> {
 /// Polls `child` until it exits or `timeout` elapses. Returns whether it
 /// exited successfully within the deadline.
 fn wait_within(child: &mut Child, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
+    crate::process::poll_until_sync(timeout, Duration::from_millis(20), || {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) if Instant::now() >= deadline => return false,
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => return false,
+            Ok(Some(status)) => Some(status.success()),
+            Ok(None) => None,
+            Err(_) => Some(false),
         }
-    }
+    })
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_workspace::authn::{AuthScheme, StaticTokenScheme};
+    use omnifs_auth::{AuthScheme, StaticTokenScheme};
     use secrecy::ExposeSecret;
+    use std::time::Instant;
 
     fn manifest_with(sources: Vec<AmbientSource>) -> AuthManifest {
         AuthManifest {

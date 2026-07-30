@@ -1,10 +1,10 @@
 //! Kernel-free tests for the engine `Namespace` surface, driving
-//! `TreeNamespace` against the in-tree `test_provider.wasm` with no fuser,
+//! `EngineNamespace` against the in-tree `test_provider.wasm` with no fuser,
 //! mount, or container.
 //!
 //! Reuses the omnifs-itest provider-loading harness (`RuntimeHarness` via
 //! `make_runtime`), keeps an `Arc<Engine>` clone so the test can fire provider
-//! effects directly, and builds a single-mount `TreeNamespace` over the same
+//! effects directly, and builds a single-mount `EngineNamespace` over the same
 //! engine. This proves the narrow filesystem-facing surface (opaque node ids,
 //! policied attrs, ranged-handle reuse, paging, and the invalidation event
 //! stream) consumed by both kernel adapters.
@@ -21,20 +21,19 @@ use std::time::Duration;
 
 use omnifs_core::path::Path;
 use omnifs_engine::test_support::cache::publish_effects_for_test;
-use omnifs_engine::{DirCursor, Engine, EntryKind, Namespace, NsError, NsEvent, TreeNamespace};
+use omnifs_engine::{DirCursor, Engine, EngineNamespace, EntryKind, Namespace, NsError, NsEvent};
 use omnifs_itest::make_runtime;
 use omnifs_wit::provider::types::{Effects, Invalidation, PathOrPrefix};
 use tempfile::TempDir;
 
-/// Owns the harness temp dirs that must outlive the engine, the `TreeNamespace`
+/// Owns the harness temp dirs that must outlive the engine, the `EngineNamespace`
 /// under test, and a second `Arc<Engine>` clone so the test can apply provider
 /// effects without going through the namespace surface (which hides them).
 struct TestNs {
-    ns: Arc<TreeNamespace>,
+    ns: Arc<EngineNamespace>,
     runtime: Arc<Engine>,
     _clone_dir: TempDir,
     _cache_dir: TempDir,
-    _config_dir: TempDir,
 }
 
 fn test_ns() -> TestNs {
@@ -46,7 +45,6 @@ fn test_ns() -> TestNs {
         runtime,
         _clone_dir: harness.clone_dir,
         _cache_dir: harness.cache_dir,
-        _config_dir: harness.config_dir,
     }
 }
 

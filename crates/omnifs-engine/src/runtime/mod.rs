@@ -4,7 +4,6 @@
 //! executor handles (HTTP, Git, and Blob), and cache/mount lifecycle.
 //! Typed operation execution is in `ops::lifecycle`; WASI store plumbing is in `wasi`.
 
-use crate::auth::binding_from_config;
 use crate::authority::RuntimeAuthority;
 use crate::blob::{BlobExecutor, BlobLimits};
 use crate::cache::MountResources;
@@ -15,14 +14,12 @@ use crate::http::HttpStack;
 use crate::instance::Instance;
 use crate::invalidation::InvalidationState;
 use crate::tree_refs::TreeRefs;
-use omnifs_auth::{AuthBinding, CredentialHealth, CredentialService};
-use omnifs_core::ProviderId;
+use omnifs_auth::{AuthBinding, CredentialHealth};
 use omnifs_core::path::Path;
+use omnifs_core::{MountName, ProviderId, ProviderRef};
+use omnifs_provider::{ConfigMetadata, ProviderManifest};
 use omnifs_wit::provider::types as wit_types;
-use omnifs_workspace::mounts::Spec;
-use omnifs_workspace::provider::{ConfigMetadata, ProviderAuthManifest, ProviderManifest};
 
-use std::path::Path as StdPath;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -34,7 +31,7 @@ pub(crate) mod wasi;
 pub(crate) mod wasm;
 
 #[allow(unused_imports)] // re-exported for callers via crate root
-pub use host::{Host, HostError, HostOffline, HostOfflineOpen, HostOnline, HostOpen};
+pub use host::{HostError, HostOnline, HostRuntimeOpen};
 
 use crate::clock;
 use crate::op_validate;
@@ -68,6 +65,25 @@ pub struct Runtime {
     // is a single set/get with no await held across it.
     rate_limit_until: std::sync::Mutex<Option<std::time::Instant>>,
     pub(crate) test_callouts: Option<std::sync::Mutex<mpsc::Receiver<TestSignal>>>,
+}
+
+/// Validated state-neutral input for one provider runtime.
+#[derive(Clone)]
+pub struct RuntimeMountConfig {
+    pub name: MountName,
+    pub provider: ProviderRef,
+    pub config: serde_json::Value,
+    pub max_fetch_blob_bytes: Option<u64>,
+}
+
+struct RuntimeBuildInput<'a> {
+    wasm: Arc<[u8]>,
+    config: &'a RuntimeMountConfig,
+    manifest: &'a ProviderManifest,
+    auth: Option<Arc<AuthBinding>>,
+    resources: Arc<MountResources>,
+    trees: Arc<TreeRefs>,
+    publish_initialize_effects: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -187,38 +203,40 @@ impl Runtime {
         self.auth.as_ref()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    // Keep mount construction ordered in one boundary: manifest validation,
-    // provider initialization, auth, caches, and runtime wiring are coupled.
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn build(
+    fn build(
         engine: &ComponentEngine,
-        wasm_path: &StdPath,
-        config: &Spec,
-        manifest: &ProviderManifest,
+        input: RuntimeBuildInput<'_>,
         cloner: Arc<GitCloner>,
-        resources: Arc<MountResources>,
-        trees: Arc<TreeRefs>,
-        credential_service: &Arc<CredentialService>,
         capture_test_callouts: bool,
     ) -> std::result::Result<Self, BuildError> {
+        let RuntimeBuildInput {
+            wasm,
+            config,
+            manifest,
+            auth,
+            resources,
+            trees,
+            publish_initialize_effects,
+        } = input;
         let (test_callouts, test_rx) = if capture_test_callouts {
             let (test_callouts, rx) = TestCallouts::channel();
             (Some(test_callouts), Some(rx))
         } else {
             (None, None)
         };
-        let mount_name = config.mount.as_str();
-        let config_bytes = config.config_bytes();
+        let mount_name = config.name.as_str();
+        let config_bytes = serde_json::to_vec(&config.config)
+            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         let config_metadata = manifest.config.as_ref();
 
         validate_instance_config(config_metadata, config, mount_name)?;
 
-        let authority = RuntimeAuthority::resolve(manifest, config)?;
+        let authority = RuntimeAuthority::resolve(manifest, Some(&config.config))?;
         let park_signal = test_callouts.as_ref().map(TestCallouts::park_signal);
         let instance = Instance::new(
             engine,
-            wasm_path,
+            wasm,
             config_bytes,
             Arc::clone(&authority),
             park_signal,
@@ -236,21 +254,9 @@ impl Runtime {
             .map(|()| initialize_effects)
             .map_err(EngineError::ProviderError)
             .map_err(BuildError::from)?;
-        let auth_manifest = manifest
-            .auth
-            .as_ref()
-            .map(ProviderAuthManifest::wasm_auth_manifest);
-        let auth = binding_from_config(
-            config.auth.as_ref(),
-            auth_manifest.as_ref(),
-            config.provider_name().as_str(),
-            credential_service,
-        )
-        .map_err(|e| BuildError::ProviderProtocol(format!("auth config error: {e}")))?;
-
         let git = git::GitExecutor::new(cloner, Arc::clone(&authority), trees.clone(), mount_name);
 
-        let blob_limits = BlobLimits::from_config(config);
+        let blob_limits = BlobLimits::from_max_fetch_bytes(config.max_fetch_blob_bytes);
         let http = Arc::new(HttpStack::new(auth.clone(), authority)?);
         let blob = BlobExecutor::new(Arc::clone(&http), Arc::clone(&resources), blob_limits);
         let mut callout_host = CalloutHost::new(Arc::clone(&http), git.clone(), blob.clone());
@@ -263,7 +269,7 @@ impl Runtime {
         let runtime = Self {
             instance,
             mount_name: mount_name.to_string(),
-            provider_name: config.provider_name().to_string(),
+            provider_name: config.provider.meta.name.to_string(),
             provider_id: config.provider.id,
             auth,
             next_operation_id: AtomicU64::new(1),
@@ -277,9 +283,15 @@ impl Runtime {
         let transition = crate::effect_apply::EffectApplier::new(&runtime.resources)
             .lower_effects(&initialize_effects, clock::now_millis())
             .map_err(|error| BuildError::ProviderProtocol(error.to_string()))?;
-        runtime
-            .publish_transition(transition, runtime.resources.current_epoch())
-            .map_err(|error| BuildError::ProviderProtocol(error.to_string()))?;
+        if publish_initialize_effects {
+            runtime
+                .publish_transition(transition, runtime.resources.current_epoch())
+                .map_err(|error| BuildError::ProviderProtocol(error.to_string()))?;
+        } else if !transition.is_empty() {
+            return Err(BuildError::ProviderProtocol(
+                "provider initialization must not mutate projection state".to_owned(),
+            ));
+        }
         Ok(runtime)
     }
 
@@ -363,16 +375,14 @@ impl Runtime {
 
 fn validate_instance_config(
     metadata: Option<&ConfigMetadata>,
-    config: &Spec,
+    config: &RuntimeMountConfig,
     mount_name: &str,
 ) -> std::result::Result<(), BuildError> {
     let Some(metadata) = metadata else {
         return Ok(());
     };
 
-    let empty_config = serde_json::Value::Object(serde_json::Map::new());
-    let config_value = config.config_raw.as_ref().unwrap_or(&empty_config);
-    match metadata.validate_config(config_value) {
+    match metadata.validate_config(&config.config) {
         Ok(()) => Ok(()),
         Err(error) => Err(BuildError::InvalidConfig(format!(
             "config for mount {mount_name} failed validation: {error}"

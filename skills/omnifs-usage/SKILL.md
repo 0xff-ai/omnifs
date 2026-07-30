@@ -37,8 +37,6 @@ Some directories expose pagination controls:
 
 Projected data can be dynamic. A file read or directory listing may call upstream, serve cached bytes, or use a validator. If a result looks stale, re-read the specific path or list the specific parent directory again. Do not assume a recursive scan refreshes the whole mount.
 
-With `omnifs up --offline`, the daemon serves only complete durable cache facts. A path that needs upstream work returns an offline miss rather than silently becoming `NotFound`; switch back to ordinary `omnifs up` when the missing data must be fetched.
-
 ## Do not
 
 - Do not run `find /omnifs` or `grep -r` from the mount root as a first move.

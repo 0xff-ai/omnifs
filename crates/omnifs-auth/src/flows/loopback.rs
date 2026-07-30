@@ -1,10 +1,10 @@
+use crate::CredentialEntry;
 use crate::callback::{LoopbackEndpoint, read_loopback_callback};
 use crate::client::OAuthClient;
 use crate::error::AuthError;
 use crate::flows::{authorization_url, exchange_code};
 use crate::request::LoopbackLoginRequest;
 use oauth2::{AuthorizationCode, PkceCodeChallenge};
-use omnifs_workspace::creds::CredentialEntry;
 
 impl OAuthClient {
     pub async fn login_loopback(

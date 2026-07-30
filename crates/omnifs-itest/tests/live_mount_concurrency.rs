@@ -5,7 +5,7 @@
 //! the captured callout is answered, proving that neither filesystem serializes
 //! unrelated namespace work behind one suspended provider operation.
 
-use omnifs_engine::{MountTable, TreeNamespace};
+use omnifs_engine::{EngineNamespace, MountTable};
 use omnifs_wit::provider::types::{CalloutResult, Header, HttpResponse};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,7 +44,7 @@ impl Filesystem {
         registry: Arc<MountTable>,
         handle: tokio::runtime::Handle,
     ) -> Result<(), String> {
-        let namespace = TreeNamespace::online(registry, handle.clone());
+        let namespace = EngineNamespace::online(registry, handle.clone());
         match self {
             Self::Fuse => {
                 let notifier = omnifs_fuse::new_notifier_handle();
@@ -180,7 +180,7 @@ fn run_concurrency(filesystem: Filesystem) {
 
     let _nfs_lock = matches!(filesystem, Filesystem::Nfs).then(omnifs_itest::live::nfs_serial_lock);
     let home = tempfile::tempdir().expect("home dir");
-    let fixture = MountFixture::new(home.path(), &wasm);
+    let fixture = MountFixture::new(home.path());
     let runtime = Arc::clone(&fixture.runtime);
     let mount_point = fixture.mount_point.clone();
     let mount_thread = std::thread::spawn({
@@ -315,47 +315,22 @@ struct MountFixture {
 }
 
 impl MountFixture {
-    fn new(home: &Path, wasm: &Path) -> Self {
+    fn new(home: &Path) -> Self {
         let cache_dir = home.join("cache");
-        let config_dir = home.join("config");
-        let providers_dir = home.join("providers");
+        let clone_dir = cache_dir.join("clones");
         let mount_point = home.join("mnt");
-        for dir in [&cache_dir, &config_dir, &providers_dir, &mount_point] {
+        for dir in [&cache_dir, &clone_dir, &mount_point] {
             std::fs::create_dir_all(dir).expect("fixture dir");
         }
 
-        let artifact =
-            omnifs_workspace::provider::Artifact::from_file(wasm).expect("parse test provider");
-        let id = artifact.id();
-        omnifs_workspace::provider::ProviderStore::new(&providers_dir)
-            .retain(&artifact)
-            .expect("retain test provider");
-        let mounts_dir = home.join("mounts");
-        std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
-        std::fs::write(
-            mounts_dir.join("test.json"),
-            format!(
-                r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"test"}}"#
-            ),
-        )
-        .expect("write mount spec");
-        let desired =
-            omnifs_workspace::mounts::Registry::load(&mounts_dir).expect("load mount snapshot");
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let host = omnifs_engine::test_support::open_test_host(
-            &cache_dir,
-            &providers_dir,
-            config_dir.join("credentials.json"),
-            cache_dir.join("clones"),
-        )
-        .expect("open test host");
+        let host = omnifs_engine::test_support::open_test_host(&cache_dir, &clone_dir)
+            .expect("open test host");
+        let input = omnifs_itest::mount_input_from_json(omnifs_itest::TEST_PROVIDER_CONFIG)
+            .expect("build durable test mount input");
         let registry = Arc::new(
-            omnifs_engine::test_support::load_mount_table_for_callout_tests(
-                &host,
-                &desired,
-                rt.handle(),
-            )
-            .expect("load test mount with captured callouts"),
+            omnifs_engine::test_support::load_mount_table_for_callout_tests(&host, vec![input])
+                .expect("load test mount with captured callouts"),
         );
         let runtime = registry.get("test").expect("load test mount runtime");
         Self {

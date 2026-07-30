@@ -12,8 +12,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::{
-    Attrs, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer, Namespace, NsError,
-    NsEvent, ReadAnswer, ReadStyle, Stability,
+    Attrs, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer, Namespace,
+    NamespaceEpoch, NamespaceEvent, NamespaceEventHub, NamespaceLease, NamespaceSubscription,
+    NsError, NsEvent, ReadAnswer, ReadStyle, ServingNamespace, Stability,
 };
 use futures::future::{BoxFuture, FutureExt};
 use omnifs_core::path::Path;
@@ -24,8 +25,8 @@ use crate::frame::{
     Frame, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, MAX_FRAME, read_frame, write_frame,
 };
 use crate::{
-    AttachTarget, Endpoint, Handshake, PROTOCOL, VfsServer, WireError, WireNamespace, WireRequest,
-    WireResponse, serve_connection,
+    AttachTarget, Endpoint, Handshake, PROTOCOL, VfsServer, WireError, WireNamespace, WireReply,
+    WireRequest, WireResponse, serve_connection,
 };
 
 const EVENT_CAPACITY: usize = 1024;
@@ -44,6 +45,14 @@ fn test_identity() -> omnifs_core::fs::Spec {
         PathBuf::from("/mnt/test"),
     )
     .unwrap()
+}
+
+fn test_owner() -> omnifs_core::ClientOwnerId {
+    "0123456789abcdef0123456789abcdef".parse().unwrap()
+}
+
+fn test_epoch() -> NamespaceEpoch {
+    NamespaceEpoch::initial([0x42; 16])
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +187,50 @@ impl Namespace for StubNamespace {
     }
 }
 
+struct StaticServingNamespace {
+    namespace: Arc<dyn Namespace>,
+    events: Arc<NamespaceEventHub>,
+    cancellation: tokio::sync::watch::Sender<bool>,
+}
+
+impl StaticServingNamespace {
+    fn new(namespace: Arc<dyn Namespace>) -> Arc<Self> {
+        let epoch = test_epoch();
+        let events = NamespaceEventHub::new(epoch, EVENT_CAPACITY);
+        let mut source = namespace.subscribe();
+        let event_sink = Arc::clone(&events);
+        tokio::spawn(async move {
+            while let Some(event) = source.recv().await {
+                event_sink.publish_if_current(epoch, event);
+            }
+        });
+        Arc::new(Self {
+            namespace,
+            events,
+            cancellation: tokio::sync::watch::channel(false).0,
+        })
+    }
+}
+
+impl ServingNamespace for StaticServingNamespace {
+    fn acquire(&self) -> Result<NamespaceLease, NsError> {
+        Ok(NamespaceLease::new(
+            self.current_epoch(),
+            Arc::clone(&self.namespace),
+            (),
+            self.cancellation.subscribe(),
+        ))
+    }
+
+    fn subscribe(&self) -> NamespaceSubscription {
+        self.events.subscribe()
+    }
+
+    fn current_epoch(&self) -> NamespaceEpoch {
+        self.events.current_epoch()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Frame-level client helpers over a duplex
 // ---------------------------------------------------------------------------
@@ -187,6 +240,7 @@ impl Namespace for StubNamespace {
 async fn client_handshake(io: &mut DuplexStream, protocol: u32) -> Result<(), WireError> {
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol,
+        client_owner: test_owner(),
         filesystem: test_identity(),
     })
     .unwrap();
@@ -209,11 +263,13 @@ async fn send_request(io: &mut DuplexStream, request_id: u64, request: &WireRequ
 async fn recv_response(io: &mut DuplexStream) -> (u64, WireResponse) {
     let frame = read_frame(io).await.expect("read").expect("frame");
     assert_eq!(frame.kind, KIND_RESPONSE, "expected a response frame");
-    (frame.request_id, postcard::from_bytes(&frame.body).unwrap())
+    let reply: WireReply = postcard::from_bytes(&frame.body).unwrap();
+    assert_eq!(reply.epoch, test_epoch());
+    (frame.request_id, reply.response)
 }
 
 fn start_local_server(namespace: Arc<dyn Namespace>, path: &StdPath) -> Arc<VfsServer> {
-    let server = VfsServer::new(namespace);
+    let server = VfsServer::new(StaticServingNamespace::new(namespace));
     server.serve_unix(path).unwrap();
     server
 }
@@ -222,7 +278,7 @@ fn start_tcp_server(namespace: Arc<dyn Namespace>) -> (Arc<VfsServer>, Endpoint)
     let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = NonZeroU16::new(probe.local_addr().unwrap().port()).unwrap();
     drop(probe);
-    let server = VfsServer::new(namespace);
+    let server = VfsServer::new(StaticServingNamespace::new(namespace));
     let target = server.serve_tcp(Ipv4Addr::LOCALHOST, port).unwrap();
     (server, target)
 }
@@ -233,7 +289,10 @@ fn serve_over_duplex(
     namespace: Arc<dyn Namespace>,
 ) -> (DuplexStream, tokio::task::JoinHandle<Result<(), WireError>>) {
     let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
-    let handle = tokio::spawn(serve_connection(namespace, server_io));
+    let handle = tokio::spawn(serve_connection(
+        StaticServingNamespace::new(namespace),
+        server_io,
+    ));
     (client_io, handle)
 }
 
@@ -413,11 +472,15 @@ async fn server_pushes_events() {
     assert_eq!(first.kind, KIND_EVENT);
     assert_eq!(second.kind, KIND_EVENT);
     assert_eq!(
-        postcard::from_bytes::<NsEvent>(&first.body).unwrap(),
+        postcard::from_bytes::<NamespaceEvent>(&first.body)
+            .unwrap()
+            .into_event(),
         NsEvent::reset()
     );
     assert_eq!(
-        postcard::from_bytes::<NsEvent>(&second.body).unwrap(),
+        postcard::from_bytes::<NamespaceEvent>(&second.body)
+            .unwrap()
+            .into_event(),
         newest
     );
 
@@ -441,14 +504,19 @@ async fn server_pushes_events() {
         .expect("operation response");
     assert_eq!(event.kind, KIND_EVENT);
     assert_eq!(
-        postcard::from_bytes::<NsEvent>(&event.body).unwrap(),
+        postcard::from_bytes::<NamespaceEvent>(&event.body)
+            .unwrap()
+            .into_event(),
         NsEvent::InvalidateSubtree {
             path: path("/test/events")
         }
     );
     assert_eq!(response.kind, KIND_RESPONSE);
     assert_eq!(response.request_id, 7);
-    match postcard::from_bytes::<WireResponse>(&response.body).unwrap() {
+    match postcard::from_bytes::<WireReply>(&response.body)
+        .unwrap()
+        .response
+    {
         WireResponse::Read(Ok(answer)) => assert_eq!(answer.bytes, 0_u64.to_le_bytes()),
         other => panic!("unexpected operation response {other:?}"),
     }
@@ -523,6 +591,7 @@ async fn handshake_version_mismatch_is_rejected() {
     // The client offers the immediately previous strict protocol version.
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL - 1,
+        client_owner: test_owner(),
         filesystem: test_identity(),
     })
     .unwrap();
@@ -580,6 +649,7 @@ async fn unix_listener_end_to_end() {
 
     let namespace = WireNamespace::attach(
         AttachTarget::Unix(socket),
+        test_owner(),
         test_identity(),
         tokio::runtime::Handle::current(),
     )
@@ -603,13 +673,14 @@ async fn unix_listener_end_to_end() {
 async fn startup_gate_holds_listener_until_ready_publication() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
-    let server = VfsServer::new(StubNamespace::new());
+    let server = VfsServer::new(StaticServingNamespace::new(StubNamespace::new()));
     let _control_gate = server.begin_startup();
     server.serve_unix(&socket).unwrap();
 
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
+        client_owner: test_owner(),
         filesystem: test_identity(),
     })
     .unwrap();
@@ -630,7 +701,7 @@ async fn startup_gate_holds_listener_until_ready_publication() {
         .expect("welcome after startup publication");
     assert!(matches!(
         postcard::from_bytes::<Handshake>(&welcome.body).unwrap(),
-        Handshake::Welcome { protocol } if protocol == PROTOCOL
+        Handshake::Welcome { protocol, .. } if protocol == PROTOCOL
     ));
     server.shutdown().await;
 }
@@ -648,6 +719,7 @@ async fn tcp_listener_end_to_end() {
         AttachTarget::Tcp {
             addr: addr.to_string(),
         },
+        test_owner(),
         test_identity(),
         tokio::runtime::Handle::current(),
     )
@@ -665,6 +737,7 @@ async fn one_name_allows_reconnect_overlap_but_rejects_conflicting_resolved_fiel
     let server = start_local_server(StubNamespace::new(), &socket);
     let first = WireNamespace::attach(
         AttachTarget::Unix(socket.clone()),
+        test_owner(),
         test_identity(),
         tokio::runtime::Handle::current(),
     )
@@ -672,6 +745,7 @@ async fn one_name_allows_reconnect_overlap_but_rejects_conflicting_resolved_fiel
     .unwrap();
     let overlap = WireNamespace::attach(
         AttachTarget::Unix(socket.clone()),
+        test_owner(),
         test_identity(),
         tokio::runtime::Handle::current(),
     )
@@ -688,6 +762,7 @@ async fn one_name_allows_reconnect_overlap_but_rejects_conflicting_resolved_fiel
     .unwrap();
     let error = WireNamespace::attach(
         AttachTarget::Unix(socket),
+        test_owner(),
         conflicting,
         tokio::runtime::Handle::current(),
     )
@@ -704,6 +779,37 @@ async fn one_name_allows_reconnect_overlap_but_rejects_conflicting_resolved_fiel
 }
 
 #[tokio::test]
+async fn one_filesystem_id_is_scoped_by_client_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("ns.sock");
+    let server = start_local_server(StubNamespace::new(), &socket);
+    let other_owner: omnifs_core::ClientOwnerId =
+        "fedcba9876543210fedcba9876543210".parse().unwrap();
+
+    let first = WireNamespace::attach(
+        AttachTarget::Unix(socket.clone()),
+        test_owner(),
+        test_identity(),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+    let second = WireNamespace::attach(
+        AttachTarget::Unix(socket),
+        other_owner,
+        test_identity(),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(server.attachments().len(), 2);
+    drop(first);
+    drop(second);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn server_stop_reaches_client_and_drain_waits_for_detach() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");
@@ -711,6 +817,7 @@ async fn server_stop_reaches_client_and_drain_waits_for_detach() {
     let (teardown_tx, mut teardown_rx) = tokio::sync::mpsc::channel(1);
     let namespace = WireNamespace::attach_with_teardown(
         AttachTarget::Unix(socket),
+        test_owner(),
         test_identity(),
         tokio::runtime::Handle::current(),
         teardown_tx,
@@ -748,6 +855,7 @@ async fn busy_client_remains_a_named_drain_straggler_and_new_admission_is_reject
     let (teardown_tx, mut teardown_rx) = tokio::sync::mpsc::channel(1);
     let namespace = WireNamespace::attach_with_teardown(
         AttachTarget::Unix(socket.clone()),
+        test_owner(),
         test_identity(),
         tokio::runtime::Handle::current(),
         teardown_tx,
@@ -767,6 +875,7 @@ async fn busy_client_remains_a_named_drain_straggler_and_new_admission_is_reject
 
     let rejected = WireNamespace::attach(
         AttachTarget::Unix(socket),
+        test_owner(),
         test_identity(),
         tokio::runtime::Handle::current(),
     )
@@ -787,7 +896,7 @@ async fn unix_listener_never_follows_an_existing_symlink() {
     let socket = dir.path().join("listener.sock");
     let target_listener = std::os::unix::net::UnixListener::bind(&target).unwrap();
     symlink(&target, &socket).unwrap();
-    let server = VfsServer::new(StubNamespace::new());
+    let server = VfsServer::new(StaticServingNamespace::new(StubNamespace::new()));
 
     server.serve_unix(&socket).unwrap();
 
@@ -804,6 +913,97 @@ async fn unix_listener_never_follows_an_existing_symlink() {
         "shutdown must remove only the owned listener"
     );
     drop(target_listener);
+}
+
+#[tokio::test]
+async fn newer_reply_resets_before_acceptance_and_stale_reply_retries() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let attach = tokio::spawn(WireNamespace::attach(
+        AttachTarget::Tcp {
+            addr: addr.to_string(),
+        },
+        test_owner(),
+        test_identity(),
+        tokio::runtime::Handle::current(),
+    ));
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let hello = read_frame(&mut stream).await.unwrap().expect("hello");
+    assert!(matches!(
+        postcard::from_bytes::<Handshake>(&hello.body).unwrap(),
+        Handshake::Hello { .. }
+    ));
+    let initial = test_epoch();
+    let newer = initial.next().unwrap();
+    let welcome = postcard::to_allocvec(&Handshake::Welcome {
+        protocol: PROTOCOL,
+        epoch: initial,
+    })
+    .unwrap();
+    write_frame(&mut stream, &Frame::new(0, KIND_RESPONSE, welcome))
+        .await
+        .unwrap();
+    let namespace = attach.await.unwrap().unwrap();
+    let mut events = namespace.subscribe();
+
+    let first_call = tokio::spawn({
+        let namespace = Arc::clone(&namespace);
+        async move { namespace.getattr(path("/newer")).await }
+    });
+    let first_request = read_frame(&mut stream)
+        .await
+        .unwrap()
+        .expect("first request");
+    let newer_reply = postcard::to_allocvec(&WireReply {
+        epoch: newer,
+        response: WireResponse::Getattr(Ok(file_attrs(7))),
+    })
+    .unwrap();
+    write_frame(
+        &mut stream,
+        &Frame::new(first_request.request_id, KIND_RESPONSE, newer_reply),
+    )
+    .await
+    .unwrap();
+    assert_eq!(events.recv().await, Some(NsEvent::reset()));
+    assert_eq!(first_call.await.unwrap().unwrap().size, 7);
+
+    let retrying_call = tokio::spawn({
+        let namespace = Arc::clone(&namespace);
+        async move { namespace.getattr(path("/stale")).await }
+    });
+    let stale_request = read_frame(&mut stream)
+        .await
+        .unwrap()
+        .expect("stale request");
+    let stale_reply = postcard::to_allocvec(&WireReply {
+        epoch: initial,
+        response: WireResponse::Getattr(Ok(file_attrs(8))),
+    })
+    .unwrap();
+    write_frame(
+        &mut stream,
+        &Frame::new(stale_request.request_id, KIND_RESPONSE, stale_reply),
+    )
+    .await
+    .unwrap();
+    let retry = read_frame(&mut stream)
+        .await
+        .unwrap()
+        .expect("retried request");
+    assert_ne!(retry.request_id, stale_request.request_id);
+    let current_reply = postcard::to_allocvec(&WireReply {
+        epoch: newer,
+        response: WireResponse::Getattr(Ok(file_attrs(9))),
+    })
+    .unwrap();
+    write_frame(
+        &mut stream,
+        &Frame::new(retry.request_id, KIND_RESPONSE, current_reply),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retrying_call.await.unwrap().unwrap().size, 9);
 }
 
 /// A disconnected wire namespace publishes one root invalidation, fails an
@@ -823,6 +1023,7 @@ async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
         AttachTarget::Tcp {
             addr: stalled_addr.to_string(),
         },
+        test_owner(),
         test_identity(),
         stalled_rt,
     ));
@@ -861,6 +1062,7 @@ async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
     };
     let attach_task = rt.spawn(WireNamespace::attach(
         attach_target,
+        test_owner(),
         test_identity(),
         rt.clone(),
     ));
@@ -877,7 +1079,11 @@ async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
         postcard::from_bytes::<Handshake>(&hello_frame.body).unwrap(),
         Handshake::Hello { .. }
     ));
-    let welcome = postcard::to_allocvec(&Handshake::Welcome { protocol: PROTOCOL }).unwrap();
+    let welcome = postcard::to_allocvec(&Handshake::Welcome {
+        protocol: PROTOCOL,
+        epoch: test_epoch(),
+    })
+    .unwrap();
     write_frame(&mut stream_a, &Frame::new(0, KIND_RESPONSE, welcome))
         .await
         .unwrap();
@@ -911,7 +1117,11 @@ async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
     let Handshake::Hello { .. } = postcard::from_bytes(&hello_frame.body).unwrap() else {
         panic!("expected a hello frame");
     };
-    let welcome = postcard::to_allocvec(&Handshake::Welcome { protocol: PROTOCOL }).unwrap();
+    let welcome = postcard::to_allocvec(&Handshake::Welcome {
+        protocol: PROTOCOL,
+        epoch: test_epoch(),
+    })
+    .unwrap();
     write_frame(&mut stream_b, &Frame::new(0, KIND_RESPONSE, welcome))
         .await
         .unwrap();
@@ -950,7 +1160,11 @@ async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
         };
         let request: WireRequest = postcard::from_bytes(&frame.body).unwrap();
         assert!(matches!(request, WireRequest::Getattr { path } if path == stable));
-        let body = postcard::to_allocvec(&WireResponse::Getattr(Ok(file_attrs(7)))).unwrap();
+        let body = postcard::to_allocvec(&WireReply {
+            epoch: test_epoch(),
+            response: WireResponse::Getattr(Ok(file_attrs(7))),
+        })
+        .unwrap();
         write_frame(
             &mut stream_b,
             &Frame::new(frame.request_id, KIND_RESPONSE, body),

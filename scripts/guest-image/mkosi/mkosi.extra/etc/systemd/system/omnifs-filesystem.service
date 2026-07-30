@@ -13,7 +13,7 @@ Type=exec
 # a missing or unreadable file fails this unit's start with a clear journal
 # message instead of running the filesystem with no attach target.
 EnvironmentFile=/mnt/seed/omnifs-seed.conf
-ExecStart=/usr/local/bin/omnifs-thin --name ${OMNIFS_FS_ID} --protocol fuse --runtime libkrun --location /omnifs
+ExecStart=/usr/local/bin/omnifs-thin --client-owner ${OMNIFS_CLIENT_OWNER} --name ${OMNIFS_FS_ID} --protocol fuse --runtime libkrun --location /omnifs
 ExecStopPost=/usr/bin/systemctl --no-block poweroff
 StandardOutput=journal+console
 StandardError=journal+console

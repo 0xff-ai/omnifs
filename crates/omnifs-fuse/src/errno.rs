@@ -22,7 +22,7 @@ pub(super) fn ns_error_errno(error: &NsError) -> Errno {
             _ => Errno::EIO,
         },
         NsRetryClass::Terminal => match error {
-            NsError::Permission => Errno::EACCES,
+            NsError::AuthRequired | NsError::Permission => Errno::EACCES,
             NsError::Invalid => Errno::EINVAL,
             _ => Errno::EIO,
         },
@@ -54,6 +54,14 @@ mod tests {
         assert_eq!(
             i32::from(ns_error_errno(&NsError::OfflineMiss)),
             i32::from(Errno::EIO)
+        );
+    }
+
+    #[test]
+    fn auth_required_maps_to_access_denied() {
+        assert_eq!(
+            i32::from(ns_error_errno(&NsError::AuthRequired)),
+            i32::from(Errno::EACCES)
         );
     }
 }

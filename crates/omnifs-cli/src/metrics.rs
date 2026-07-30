@@ -1,71 +1,72 @@
-//! CLI-side dogfood metrics.
-//!
-//! Records one line per CLI invocation to the workspace-local `cli.jsonl`. The
-//! writer, privacy contract, and record schema live in
-//! [`omnifs_workspace::metrics`]; this is the thin CLI adapter that resolves the
-//! workspace and reads the `[metrics] enabled` off-switch.
-//!
-//! It is called from every real exit point (main's return path, and the two
-//! subcommands that `std::process::exit` themselves), so it must be
-//! self-contained and never fail or block: a broken workspace or config simply
-//! skips the record.
+//! Best-effort CLI-local dogfood metrics.
 
-use omnifs_workspace::Workspace;
+use std::io::Write as _;
 
-/// Record a completed CLI invocation. `cmd` is the top-level subcommand and
-/// `exit` the process exit code. Best-effort; the internal `daemon` subcommand
-/// is excluded by its callers (it records `daemon.jsonl` instead).
-pub(crate) fn record_cli_exit(cmd: &str, exit: i32) {
-    let Ok(workspace) = Workspace::resolve() else {
-        return;
-    };
-    // A malformed config disables metrics rather than guessing: metrics is
-    // never allowed to surface an error, and off is the safe default.
-    let enabled = workspace.config().is_ok_and(|config| {
-        config.metrics.enabled && omnifs_workspace::metrics::enabled_from_env()
-    });
-    workspace.metrics().sink(enabled).cli_event(cmd, exit);
+use serde::Serialize;
+
+use crate::client_fs_state::ClientFilesystemState;
+
+const METRICS_DIR: &str = "metrics";
+const CLI_FILE: &str = "cli.jsonl";
+
+#[derive(Serialize)]
+struct CliRecord<'a> {
+    ts: String,
+    cmd: &'a str,
+    exit: i32,
 }
 
-pub(crate) async fn maybe_print_health_nudge(
-    workspace: &Workspace,
-    output: crate::ui::output::Output,
-) {
-    if !workspace.metrics().health_nudge_due() {
-        return;
-    }
-    let Some(line) = health_nudge(workspace).await else {
-        return;
-    };
-    // The nudge is a conversational aside; `-q` drops it.
-    output.narrate(line);
-    let _ = workspace.metrics().record_health_nudge();
+fn enabled(state: &ClientFilesystemState) -> bool {
+    state.config().is_ok_and(|config| {
+        config.metrics.enabled
+            && !matches!(
+                std::env::var("OMNIFS_METRICS")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "0" | "false" | "no" | "off"
+            )
+    })
 }
 
-async fn health_nudge(workspace: &Workspace) -> Option<String> {
-    let inventory = crate::inventory::Inventory::collect(workspace).await.ok()?;
-    for mount in inventory.mounts {
-        match mount.auth {
-            crate::inventory::AuthState::Missing { .. } => {
-                return Some(format!(
-                    "mount `{}` has a missing credential; run `omnifs mount reauth {}`",
-                    mount.name, mount.name
-                ));
-            },
-            crate::inventory::AuthState::Expired { .. } => {
-                return Some(format!(
-                    "mount `{}` has an expired credential; run `omnifs mount reauth {}`",
-                    mount.name, mount.name
-                ));
-            },
-            crate::inventory::AuthState::Error { .. } => {
-                return Some(format!(
-                    "mount `{}` has a credential error; run `omnifs mount reauth {}`",
-                    mount.name, mount.name
-                ));
-            },
-            crate::inventory::AuthState::NotNeeded | crate::inventory::AuthState::Ready => {},
+fn append(state: &ClientFilesystemState, file: &str, value: &impl Serialize) {
+    let dir = state.profile_root().join(METRICS_DIR);
+    let result = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         }
+        let path = dir.join(file);
+        let mut handle = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            handle.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        let mut line = serde_json::to_string(value).map_err(std::io::Error::other)?;
+        line.push('\n');
+        handle.write_all(line.as_bytes())
+    })();
+    if let Err(error) = result {
+        tracing::debug!(%error, file, "metrics write skipped");
     }
-    None
+}
+
+pub(crate) fn record_cli_exit(cmd: &str, exit: i32) {
+    let Ok(state) = ClientFilesystemState::resolve() else {
+        return;
+    };
+    if !enabled(&state) {
+        return;
+    }
+    let ts = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+    append(&state, CLI_FILE, &CliRecord { ts, cmd, exit });
 }

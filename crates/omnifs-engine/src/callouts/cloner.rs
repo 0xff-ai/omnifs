@@ -55,16 +55,6 @@ impl GitCloner {
         })
     }
 
-    /// Open the existing clone cache root without creating or sweeping it.
-    pub fn open_existing(cache_dir: impl AsRef<Path>) -> Result<Self, CloneError> {
-        let cache_dir =
-            crate::cache::existing_directory(cache_dir.as_ref()).map_err(CloneError::Cache)?;
-        Ok(Self {
-            cache_dir,
-            locks: DashMap::new(),
-        })
-    }
-
     pub(crate) fn validate_reference(reference: &str) -> Result<(), CloneError> {
         if reference.is_empty()
             || reference.starts_with('-')
@@ -124,36 +114,6 @@ impl GitCloner {
             Some(username) => format!("{username}@{host}:{path}"),
             None => format!("{host}:{path}"),
         })
-    }
-
-    /// Reopen and validate an existing mount-scoped clone without invoking Git
-    /// or consulting the network. `relative_path` is validated beneath the
-    /// repository root, and the returned path is that confined selected
-    /// directory.
-    pub(crate) fn open_cached(
-        &self,
-        mount_scope: &str,
-        id: &GitId,
-        relative_path: &str,
-    ) -> Result<PathBuf, CloneError> {
-        crate::cache::existing_directory(&self.cache_dir).map_err(CloneError::Cache)?;
-        let wrapper = self.cache_dir.join(id.filesystem_name());
-        let repo = wrapper.join(CLONE_REPO_DIR);
-        validate_owned_directory(&wrapper)?;
-        validate_owned_directory(&repo)?;
-        validate_owned_directory(&repo.join(".git"))?;
-        let binding = Self::read_binding(&Self::binding_path(&wrapper))?;
-        let canonical = Self::canonical_remote(&binding.remote)?;
-        if canonical != binding.remote {
-            return Err(CloneError::ExistingEntry);
-        }
-        if let Some(reference) = binding.reference.as_deref() {
-            Self::validate_reference(reference)?;
-        }
-        if GitId::new(mount_scope, &canonical, binding.reference.as_deref()) != *id {
-            return Err(CloneError::ExistingEntry);
-        }
-        validate_relative_selection(&repo, relative_path)
     }
 
     /// Return the local cache path for a host-derived identity, cloning if needed.
@@ -394,37 +354,6 @@ impl GitCloner {
             }
         }
     }
-}
-
-fn validate_owned_directory(path: &Path) -> Result<(), CloneError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(CloneError::Cache)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(CloneError::ExistingEntry);
-    }
-    Ok(())
-}
-
-fn validate_relative_selection(root: &Path, relative: &str) -> Result<PathBuf, CloneError> {
-    let relative = Path::new(relative);
-    if relative.is_absolute()
-        || relative.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::Prefix(_)
-                    | std::path::Component::RootDir
-                    | std::path::Component::ParentDir
-                    | std::path::Component::CurDir
-            )
-        })
-    {
-        return Err(CloneError::ExistingEntry);
-    }
-    let mut selected = root.to_path_buf();
-    for component in relative.components() {
-        selected.push(component.as_os_str());
-        validate_owned_directory(&selected)?;
-    }
-    Ok(selected)
 }
 
 #[derive(Debug, Serialize, Deserialize)]

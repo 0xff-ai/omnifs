@@ -31,21 +31,21 @@ Keep FUSE inode tables, kernel notifications, mount/unmount mechanics, and FUSE 
 
 ### Filesystem runners
 
-Every attached filesystem has a separate process, container, or VM. Host filesystems run through the full `omnifs` binary's hidden `run-fs` command. Guest filesystems use `omnifs-thin`, which contains no engine runtime, Wasmtime runtime, provider bundle, or daemon control plane. Both call the same `omnifs-thin` library entrypoint. `omnifs-vfs` owns serialization, framing, the strict protocol-v9 handshake, attach and reconnect, server-pushed stop, direct `Path` requests, and ordered invalidation events.
+Every attached filesystem has a separate process, container, or VM. Host filesystems run through the full `omnifs` binary's hidden `run-fs` command. Guest filesystems use `omnifs-thin`, which contains no engine runtime, Wasmtime runtime, provider bundle, or daemon control plane. Both call the same `omnifs-thin` library entrypoint. `omnifs-vfs` owns serialization, framing, the strict protocol-v10 handshake, attach and reconnect, server-pushed stop, direct `Path` requests, and ordered invalidation events.
 
 `NsError::OfflineMiss` is a terminal daemon-lifetime cache-only miss, distinct from `NotFound` and from retryable upstream errors. FUSE maps it to `EIO`; NFS maps it to `NFS4ERR_IO`.
 
 Disconnects and broadcast lag are represented by a root reset on the same event stream as ordinary subtree invalidations. FUSE keeps one background event owner and settles each namespace operation before publishing protocol state. NFS preserves path-backed filehandles, opens, stateids, leases, and clients across root refresh while resetting derived sizes, its bounded protocol reply cache, and its listing state. `PendingListings` and the reply cache advance local generations on every subtree invalidation, so a late completion cannot populate fresh state.
 
-The public identity is the persisted, fully resolved `fs::Spec`: ID, protocol, runtime, and location. Every launcher supplies all four through named flags. Transport never infers identity. `omnifs up` and `apply` replace only the daemon so runners reconnect. Explicit `down` asks the daemon to stop and drain attached filesystems before it exits, while preserving every spec.
+The public identity is the persisted, fully resolved `fs::Spec`: ID, protocol, runtime, and location. Every launcher supplies all four through named flags. Transport never infers identity. Mount and filesystem commands start the daemon when needed. Explicit `down` asks the daemon to stop and drain attached filesystems before it exits, while preserving every client-owned spec.
 
-Host locations are absolute and default to an ID-bearing workspace path. Docker and libkrun always use `/omnifs`. Host and libkrun runtime records and controls include the full resolved spec plus a separate random process instance ID. Docker labels carry the ID, while exact inspection verifies its full flat command against the stored spec.
+Host locations are absolute and default to an ID-bearing path under the client profile. Docker and libkrun always use `/omnifs`. Host and libkrun runtime records and controls include the full resolved spec plus a separate random process instance ID. Docker labels carry the ID, while exact inspection verifies its full flat command against the stored spec.
 
 Host lifecycle takes an exclusive per-ID claim, publishes strict `runner.json`, and serves an instance-specific mode-0600 control socket. Launch confirmation, detach, and doctor require an identity-matched `Ping`; normal teardown sends `Stop` and never signals a PID read from disk. Mount startup cancellation does not exit until the mount operation has joined and the mount is absent. Status joins persisted specs with daemon attachment rows. Commands that act on a runtime probe only the runtime named by the spec; unreported strays and stale records belong to doctor.
 
 ### Filesystem runtime and runner ownership
 
-`omnifs fs create` resolves platform defaults once and atomically writes one strict spec under `$OMNIFS_HOME/filesystems/specs`. It never launches a runtime. Duplicate IDs fail until `omnifs fs rm --name <id>` removes a proven-detached spec.
+`omnifs fs create` resolves platform defaults once and atomically writes one strict spec under `$OMNIFS_HOME/client/filesystems/specs`. It never launches a runtime. Duplicate IDs fail until `omnifs fs rm --name <id>` removes a proven-detached spec.
 
 `attach`, `detach`, `restart`, `rm`, and `shell` select only by `--name` and hold the per-ID claim. Attach is not idempotent: it rejects an attached or confirmed running instance. Every runtime launch has the same success postcondition: the OS mount completed and the exact spec appears in daemon attachments. Detach succeeds only after the mount is absent and the owned process, container, or VM has exited. Remove never detaches implicitly and refuses attached, running, or uncertain state.
 

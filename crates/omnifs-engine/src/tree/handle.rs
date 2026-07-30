@@ -22,7 +22,7 @@ use tokio::runtime::Handle;
 use super::error::{Result, TreeError};
 use super::node::Node;
 use super::read::{Chunk, enforce_declared_materialize_cap};
-use crate::TreeNamespace;
+use crate::EngineNamespace;
 
 /// Runtime-owned ranged read handle for `Deferred(Ranged)` files. Holds an
 /// `Arc<Runtime>` so it is self-contained across renderer calls. The renderer
@@ -106,7 +106,7 @@ impl RangedHandle {
     }
 }
 
-impl TreeNamespace {
+impl EngineNamespace {
     /// Probe `Namespace::open_file` for a deferred file and, when the provider's
     /// source is ranged, return a runtime-owned `RangedHandle` the renderer binds
     /// to its kernel handle. A cheap lookup leaves only a `Deferred(Full)`

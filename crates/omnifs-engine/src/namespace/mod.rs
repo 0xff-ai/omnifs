@@ -1,4 +1,4 @@
-//! Namespace facade re-exports and the in-engine [`TreeNamespace`] implementation.
+//! Namespace facade re-exports and the in-engine [`EngineNamespace`] implementation.
 //!
 //! Plain types and [`Namespace`] live in [`omnifs_vfs`]. This module re-exports
 //! them for engine call sites and hosts the projection-backed implementation.
@@ -12,4 +12,4 @@ pub use omnifs_vfs::{
 mod implementation;
 
 #[cfg(feature = "runtime")]
-pub use implementation::TreeNamespace;
+pub use implementation::EngineNamespace;

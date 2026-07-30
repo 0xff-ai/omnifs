@@ -1,0 +1,29 @@
+[package]
+name = "omnifs-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Daemon-private SQLx state store for Omnifs"
+
+[dependencies]
+omnifs-bootstrap = { workspace = true }
+omnifs-auth = { workspace = true }
+omnifs-core = { workspace = true }
+omnifs-provider = { workspace = true }
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+libsqlite3-sys = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+[lints]
+workspace = true

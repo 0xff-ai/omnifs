@@ -128,16 +128,14 @@ bun benchmarks/latency/run.ts \
 `cold_first_ms` is only a true first touch if nothing read the path before the
 timed spawn. Two things guarantee that:
 
-1. **Replace the host-native daemon and let the existing filesystem runner
-   reconnect so caches are fresh.** Run `target/debug/omnifs up` with the same
-   `OMNIFS_HOME`; `up` replaces only the daemon and leaves the runner alive.
-   Use `target/debug/omnifs fs restart --name <id>` only when the benchmark
-   requires a fresh filesystem runner as well. Wait for
-   readiness with `omnifs status` rather than reading the mount. The on-disk
-   cache under `OMNIFS_HOME` persists, so this gives *fresh-daemon cold*
-   (in-memory/session state reset, first provider callout), not
-   *upstream-cold*. To drop durable cache too, remove that workspace's cache
-   while the daemon is down.
+1. **Stop the daemon and reattach the filesystem.** Run
+   `target/debug/omnifs down`, then
+   `target/debug/omnifs fs attach --name <id>` with the same `OMNIFS_HOME`.
+   Wait for readiness with `target/debug/omnifs status` rather than reading the
+   mount. The durable cache under `<profile>/daemon-state/cache` persists, so
+   this gives *fresh-process cold* (in-memory/session state reset, first
+   provider callout), not *upstream-cold*. To drop durable cache too, remove
+   that directory while the daemon is down.
 2. **Pin `--subdir`, `--file`, and `--grep-literal`.** With all three set, the
    suite reads no tree bytes before timing (it only `stat`s the three paths to
    validate them, which is the `getattr` any `ls`/`cat` does anyway). Without

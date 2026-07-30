@@ -1,261 +1,353 @@
-//! Atomic edits to one committed mount spec.
+//! Atomic edits to one daemon-owned mount.
 
+use crate::auth::Auth;
 use anyhow::{Context, anyhow};
 use clap::{ArgGroup, Args};
+use omnifs_api::{
+    CredentialKey, CredentialMaterial, CredentialSubmission, MountField, MountLimits, MountPatch,
+    MutationOpResult,
+};
 use omnifs_core::MountName;
-use omnifs_workspace::Workspace;
-use omnifs_workspace::creds::CredentialStore as _;
-use omnifs_workspace::mounts::{Limits, Spec};
-use omnifs_workspace::provider::ProviderAuthManifest;
+use omnifs_provider::ProviderManifest;
+use secrecy::ExposeSecret as _;
 use serde::Serialize;
 
+use crate::client_state::ClientState;
 use crate::error::{ExitCode, WithExitCode as _};
-use crate::stages::PromptMode;
+use crate::mutation::PlannedOp;
 use crate::token_source::TokenSource;
 use crate::ui::output::{Output, ResultVerdict};
 
 #[derive(Args, Debug, Clone)]
-// These booleans are independent CLI switches, not hidden state.
 #[allow(clippy::struct_excessive_bools)]
 #[command(
     group(
         ArgGroup::new("change")
             .required(true)
             .multiple(true)
-            .args([
-                "scheme",
-                "no_auth",
-                "config_json",
-                "clear_config",
-                "limits_json",
-                "clear_limits",
-            ])
+            .args(["scheme", "no_auth", "config_json", "clear_config", "limits_json", "clear_limits"])
     ),
     after_help = "Example:\n  omnifs mount update github --config-json '{\"owner\":\"0xff-ai\"}'"
 )]
 pub(crate) struct UpdateArgs {
-    /// Existing mount name.
     pub(crate) name: String,
-    /// Select a provider-declared authentication scheme.
     #[arg(long, conflicts_with = "no_auth")]
     pub(crate) scheme: Option<String>,
-    /// Remove the mount's auth reference without deleting its credential.
     #[arg(long)]
     pub(crate) no_auth: bool,
-    /// Replace the complete provider config object.
     #[arg(long, value_name = "JSON", conflicts_with = "clear_config")]
     pub(crate) config_json: Option<String>,
-    /// Remove the provider config override.
     #[arg(long)]
     pub(crate) clear_config: bool,
-    /// Replace the complete resource limits object.
     #[arg(long, value_name = "JSON", conflicts_with = "clear_limits")]
     pub(crate) limits_json: Option<String>,
-    /// Remove all mount resource limits.
     #[arg(long)]
     pub(crate) clear_limits: bool,
-    /// Print the OAuth URL instead of opening a browser.
     #[arg(long)]
     pub(crate) no_browser: bool,
-    /// Read a static token from this source. Use `-` for stdin.
     #[arg(long, conflicts_with = "token_env")]
     pub(crate) token: Option<String>,
-    /// Read a static token from this environment variable.
     #[arg(long, value_name = "ENV_VAR", conflicts_with = "token")]
     pub(crate) token_env: Option<String>,
-    /// Store a static token without its upstream validation probe.
     #[arg(long)]
     pub(crate) no_validate: bool,
-    /// OAuth scope to request. Repeat for multiple scopes.
     #[arg(long = "scope")]
     pub(crate) scopes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct MountUpdateReceipt {
-    verdict: crate::commands::receipt::Verdict,
+    verdict: ResultVerdict,
     mount: String,
-    previous_revision: String,
-    revision: String,
+    previous_revision: u64,
+    revision: u64,
     changed: Vec<&'static str>,
 }
 
 impl UpdateArgs {
+    #[allow(clippy::too_many_lines)] // one linear patch assembly and mutation flow
     pub(crate) async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
-        let workspace = Workspace::resolve()?;
+        crate::commands::daemon_start::start().await?;
+        let rpc = crate::rpc::RpcClient::resolve()?;
         let name = MountName::new(self.name.clone())
             .with_context(|| format!("invalid mount name `{}`", self.name))?;
-        let observation = workspace
-            .desired_state()
-            .observe_mount(&name)?
-            .ok_or_else(|| anyhow!("no committed mount named `{name}`"))?;
-        let previous_revision = observation.revision().clone();
-        let mut candidate = observation.spec().clone();
-        let manifest =
-            omnifs_workspace::mounts::pinned_manifest(workspace.catalog(), observation.spec())?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "provider artifact `{}` for mount `{name}` is missing",
-                        observation.spec().provider.id
-                    )
-                })?;
-        let mut changed = Vec::new();
+        let state = ClientState::resolve()?;
+        let current = rpc
+            .get_mount(name.clone())
+            .await?
+            .ok_or_else(|| anyhow!("no mount named `{name}`"))?;
+        let metadata = rpc
+            .provider_metadata(current.definition.provider)
+            .await?
+            .ok_or_else(|| anyhow!("provider metadata is unavailable for `{name}`"))?;
+        let manifest = ProviderManifest::from_bytes(&metadata.manifest)
+            .context("parse daemon provider metadata")?;
+        let (patch, changed) = self.build_patch(&current, &manifest)?;
 
-        if self.no_auth {
-            set_if_changed(&mut candidate.auth, None, "auth", &mut changed);
-        } else if let Some(scheme) = self.scheme.as_deref() {
-            let account = candidate
-                .auth
-                .as_ref()
-                .and_then(omnifs_workspace::mounts::Auth::account)
-                .map(str::to_owned);
+        if changed.is_empty() {
+            // No field differed from the current mount, so no mutation was
+            // even attempted: there is no outcome here for a verdict to be
+            // derived from, only the fact that nothing needed to change.
+            let receipt = MountUpdateReceipt {
+                verdict: ResultVerdict::Ok,
+                mount: name.to_string(),
+                previous_revision: current.revision.get(),
+                revision: current.revision.get(),
+                changed,
+            };
+            if output.is_structured() {
+                output.emit_result(ResultVerdict::Ok, &receipt)?;
+            } else {
+                output.outro(format!(
+                    "Mount `{name}` already matches revision {}.",
+                    current.revision.get()
+                ));
+            }
+            return Ok(ExitCode::Success);
+        }
+
+        // Credential collection is interactive (an OAuth browser handoff or a
+        // token prompt), so it happens before any lease is acquired: neither
+        // may run under the daemon's 30s mutation lease.
+        let submission = if let MountField::Set(auth) = &patch.auth {
             let auth_manifest = manifest
                 .auth
                 .as_ref()
-                .map(ProviderAuthManifest::wasm_auth_manifest);
-            let auth = crate::auth::auth_from_scheme(auth_manifest.as_ref(), scheme, account)?;
-            set_if_changed(&mut candidate.auth, Some(auth), "auth", &mut changed);
+                .map(omnifs_provider::ProviderAuthManifest::wasm_auth_manifest);
+            let selected = crate::auth::Auth::from_scheme(
+                auth_manifest.as_ref(),
+                &auth.scheme,
+                Some(auth.account_label.clone()),
+            )?;
+            Some(
+                self.collect_submission(
+                    current.definition.provider,
+                    &manifest,
+                    &selected,
+                    auth,
+                    &output,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        let provider_name = current.provider.name.clone();
+        let rpc_ref = &rpc;
+        let manifest_ref = &manifest;
+        let this = &self;
+        let outcome = crate::mutation::run(rpc_ref, &state, &output, move || async move {
+            // Read the mount again under the lease: the authoritative patch
+            // is built from this fresh state, closing the gap between the
+            // pre-lease read above and the batch actually applying.
+            let fresh = rpc_ref
+                .get_mount(name.clone())
+                .await?
+                .ok_or_else(|| anyhow!("no mount named `{name}`"))?;
+            let (patch, changed) = this.build_patch(&fresh, manifest_ref)?;
+            if changed.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut ops = Vec::with_capacity(2);
+            if let Some(submission) = submission {
+                let key = CredentialKey {
+                    provider_name,
+                    scheme: submission.scheme.clone(),
+                    account_label: submission.account_label.clone(),
+                };
+                ops.push(PlannedOp::submit_credential(&key, submission));
+            }
+            ops.push(PlannedOp::mount_update(name, patch));
+            Ok(ops)
+        })
+        .await?;
+
+        let Some(outcome) = outcome else {
+            output.outro(format!(
+                "Mount `{}` already matches the requested state.",
+                self.name
+            ));
+            let receipt = MountUpdateReceipt {
+                verdict: ResultVerdict::Ok,
+                mount: self.name.clone(),
+                previous_revision: current.revision.get(),
+                revision: current.revision.get(),
+                changed: Vec::new(),
+            };
+            if output.is_structured() {
+                output.emit_result(ResultVerdict::Ok, &receipt)?;
+            }
+            return Ok(ExitCode::Success);
+        };
+        crate::mutation::narrate_serving(&output, &outcome.serving);
+        let revision = outcome
+            .results
+            .into_iter()
+            .find_map(|result| match result {
+                MutationOpResult::Mount(mount) => Some(mount.revision),
+                MutationOpResult::Credential(_) => None,
+            })
+            .context("mount update batch did not include a mount result")?;
+        emit_receipt(
+            &output,
+            &self.name,
+            current.revision.get(),
+            revision.get(),
+            changed,
+        )
+    }
+
+    /// Build the patch and the list of changed field names from a mount
+    /// record: pure so the pre-lease and under-lease reads share the exact
+    /// same diffing logic.
+    fn build_patch(
+        &self,
+        current: &omnifs_api::MountRecord,
+        manifest: &ProviderManifest,
+    ) -> anyhow::Result<(MountPatch, Vec<&'static str>)> {
+        let mut changed = Vec::new();
+        let mut patch = MountPatch::default();
+
+        if self.no_auth {
+            if current.definition.auth.is_some() {
+                patch.auth = MountField::Clear;
+                changed.push("auth");
+            }
+        } else if let Some(scheme) = self.scheme.as_deref() {
+            let account = current
+                .definition
+                .auth
+                .as_ref()
+                .map_or_else(|| "default".to_owned(), |auth| auth.account_label.clone());
+            let next = omnifs_api::MountCredential {
+                scheme: scheme.to_owned(),
+                account_label: account,
+            };
+            if current.definition.auth.as_ref() != Some(&next) {
+                patch.auth = MountField::Set(next);
+                changed.push("auth");
+            }
         }
 
         if let Some(raw) = self.config_json.as_deref() {
-            let config: serde_json::Value =
+            let value: serde_json::Value =
                 serde_json::from_str(raw).context("parse --config-json")?;
-            crate::commands::mount::spec_creation::validate_config(&manifest, &config)?;
-            set_if_changed(
-                &mut candidate.config_raw,
-                Some(config),
-                "config",
-                &mut changed,
-            );
-        } else if self.clear_config {
-            if let Some(metadata) = manifest.config.as_ref() {
-                crate::commands::mount::spec_creation::validate_config(
-                    &manifest,
-                    &metadata.defaults(),
-                )?;
+            crate::commands::mount::spec_creation::validate_config(manifest, &value)?;
+            let bytes = serde_json::to_vec(&value)?;
+            if current.definition.config != bytes {
+                patch.config = MountField::Set(bytes);
+                changed.push("config");
             }
-            set_if_changed(&mut candidate.config_raw, None, "config", &mut changed);
+        } else if self.clear_config && !current.definition.config.is_empty() {
+            patch.config = MountField::Clear;
+            changed.push("config");
         }
 
         if let Some(raw) = self.limits_json.as_deref() {
-            let limits: Limits = serde_json::from_str(raw).context("parse --limits-json")?;
-            set_if_changed(&mut candidate.limits, Some(limits), "limits", &mut changed);
-        } else if self.clear_limits {
-            set_if_changed(&mut candidate.limits, None, "limits", &mut changed);
+            let limits: MountLimits = serde_json::from_str(raw).context("parse --limits-json")?;
+            if current.definition.limits.as_ref() != Some(&limits) {
+                patch.limits = MountField::Set(limits);
+                changed.push("limits");
+            }
+        } else if self.clear_limits && current.definition.limits.is_some() {
+            patch.limits = MountField::Clear;
+            changed.push("limits");
         }
 
-        if changed.contains(&"auth") && candidate.auth.is_some() {
-            self.ensure_credential(&workspace, &candidate, &manifest, &output)
-                .await?;
-        }
-
-        let revision = workspace
-            .desired_state()
-            .replace_mount(&observation, &candidate)
-            .map_err(|error| {
-                if changed.contains(&"auth") {
-                    anyhow!(
-                        "{error}; a credential acquired before the failed commit may remain stored"
-                    )
-                } else {
-                    anyhow!(error)
-                }
-            })?;
-        let receipt = MountUpdateReceipt {
-            verdict: crate::commands::receipt::Verdict::Ok,
-            mount: name.to_string(),
-            previous_revision: previous_revision.to_string(),
-            revision: revision.to_string(),
-            changed,
-        };
-        if output.is_structured() {
-            output.emit_result(ResultVerdict::Ok, &receipt)?;
-        } else if receipt.changed.is_empty() {
-            output.outro(format!(
-                "Mount `{name}` already matches revision {}.",
-                short_revision(&revision)
-            ));
-        } else {
-            output.outro(format!(
-                "Updated `{name}` at revision {}. Apply it: `omnifs up`",
-                short_revision(&revision)
-            ));
-        }
-        Ok(ExitCode::Success)
+        Ok((patch, changed))
     }
 
-    async fn ensure_credential(
+    async fn collect_submission(
         &self,
-        workspace: &Workspace,
-        candidate: &Spec,
-        manifest: &omnifs_workspace::provider::ProviderManifest,
+        provider: omnifs_core::ProviderId,
+        manifest: &ProviderManifest,
+        auth: &Auth,
+        credential: &omnifs_api::MountCredential,
         output: &Output,
-    ) -> anyhow::Result<()> {
-        let auth_view = crate::auth::MountAuth::from_spec(workspace.catalog(), candidate.clone());
-        let Some(target) = auth_view.credential_id()? else {
-            return Ok(());
-        };
-        if workspace.credentials().get(&target)?.is_some() {
-            return Ok(());
-        }
-        let auth = candidate.auth.as_ref().expect("credential target has auth");
-        let prompt = PromptMode::from_flags(output.yes(), output.no_input());
+    ) -> anyhow::Result<CredentialSubmission> {
+        let prompt = output.prompt_mode();
         if auth.is_oauth() {
-            if !prompt.interactive {
+            if !prompt.interactive() {
                 return Err(anyhow!(
                     "scheme `{}` needs OAuth sign-in; rerun this command in a terminal",
-                    auth.scheme().unwrap_or("oauth")
+                    credential.scheme
                 ))
                 .with_exit_code(ExitCode::AuthRequired);
             }
-            crate::auth::login::login(
-                workspace.catalog(),
-                auth_view,
-                workspace.credentials(),
-                auth.account(),
+            return crate::auth::login::login_for_submission(
+                provider,
+                manifest,
+                auth,
+                &credential.account_label,
                 crate::auth::LoginInteractivity {
                     no_browser: self.no_browser,
-                    no_input: prompt.no_input,
-                    scopes: &self.scopes,
+                    no_input: prompt.no_input(),
+                    scopes: (!self.scopes.is_empty()).then_some(self.scopes.as_slice()),
                 },
                 output,
                 crate::auth::auth_receipt_key_width(),
             )
-            .await?;
-        } else {
-            let source = TokenSource::resolve(
-                self.token.as_deref(),
-                self.token_env.as_deref(),
-                prompt.interactive,
-            )?;
-            let token = source.read(output)?;
-            crate::commands::mount::run_static_token_init(
-                manifest,
-                auth,
-                token,
-                workspace.credentials(),
-                !self.no_validate,
-                output,
-                crate::auth::auth_receipt_key_width(),
-            )
-            .await?;
+            .await;
         }
-        Ok(())
+        let source = TokenSource::resolve(
+            self.token.as_deref(),
+            self.token_env.as_deref(),
+            prompt.interactive(),
+        )?;
+        let token = source.read(output)?;
+        if !self.no_validate {
+            let scheme = auth.static_token_scheme(manifest)?;
+            if let Some(validation) = scheme.validation.as_ref() {
+                super::token_validation::validate_static_token(
+                    validation,
+                    scheme.header_name.as_deref().unwrap_or("Authorization"),
+                    &scheme.value_prefix,
+                    token.expose_secret(),
+                    output,
+                )
+                .await?;
+            }
+        }
+        Ok(CredentialSubmission {
+            provider,
+            scheme: credential.scheme.clone(),
+            account_label: credential.account_label.clone(),
+            material: CredentialMaterial::StaticToken {
+                token: omnifs_api::SecretBytes::new(token.expose_secret().as_bytes().to_vec()),
+            },
+            overrides: omnifs_api::CredentialClientOverrides {
+                client_id: None,
+                client_secret: None,
+                redirect_uri: None,
+                scopes: None,
+            },
+        })
     }
 }
 
-fn set_if_changed<T: PartialEq>(
-    target: &mut T,
-    value: T,
-    field: &'static str,
-    changed: &mut Vec<&'static str>,
-) {
-    if target != &value {
-        *target = value;
-        changed.push(field);
+fn emit_receipt(
+    output: &Output,
+    name: &str,
+    previous_revision: u64,
+    revision: u64,
+    changed: Vec<&'static str>,
+) -> anyhow::Result<ExitCode> {
+    // Reaching this point already proves the daemon committed the patch:
+    // `run`'s only caller propagates a failed mutation via `?` before
+    // `emit_receipt` is ever called, so there is no outcome here for a
+    // verdict to be derived from.
+    let result = MountUpdateReceipt {
+        verdict: ResultVerdict::Ok,
+        mount: name.to_owned(),
+        previous_revision,
+        revision,
+        changed,
+    };
+    if output.is_structured() {
+        output.emit_result(ResultVerdict::Ok, &result)?;
+    } else {
+        output.outro(format!("Updated `{name}` at revision {revision}."));
     }
-}
-
-fn short_revision(revision: &omnifs_workspace::mounts::Revision) -> &str {
-    &revision.as_str()[..revision.as_str().len().min(8)]
+    Ok(ExitCode::Success)
 }

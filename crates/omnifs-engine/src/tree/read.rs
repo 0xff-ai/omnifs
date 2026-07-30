@@ -21,7 +21,7 @@ use tracing::warn;
 use super::MATERIALIZE_MAX_BYTES;
 use super::error::{Result, TreeError};
 use super::node::{Node, PaginationControl, SyntheticContent};
-use crate::{RequestCtx, TreeNamespace};
+use crate::{EngineNamespace, RequestCtx};
 use omnifs_api::events::CacheKind;
 
 /// Result of the internal read path. A host-tree node is read via
@@ -122,7 +122,7 @@ impl<'a> FileAttrStore<'a> {
     }
 }
 
-impl TreeNamespace {
+impl EngineNamespace {
     /// Whole-file read. Owns the shared read cache cascade (exact-0
     /// short-circuit, mem hit, durable view hit, backing-fs read), then on a
     /// view miss the cold provider render

@@ -4,14 +4,18 @@
 //! outcomes directly, so a receipt cannot claim the daemon was stopped when
 //! the cleanup only produced a warning.
 
-use crate::inventory::{DaemonProbe, Inventory};
+use crate::inventory::{DaemonHealth, Inventory};
 use crate::ui::consent::Outcome;
 use crate::ui::render::{self, Capabilities};
-use omnifs_workspace::Workspace;
+use omnifs_bootstrap::{Bootstrap, Client, Instance};
 use std::fmt::Write as _;
 use std::time::Duration;
 
-const SHUTDOWN_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
+// The daemon may spend ten seconds draining the final serving generation
+// after it acknowledges Shutdown, then still has to join the mutation manager
+// and close durable state. This deadline covers that bounded teardown without
+// reporting a healthy in-progress shutdown as failed.
+const SHUTDOWN_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// One observable teardown result. The variants retain enough context for a
@@ -94,21 +98,18 @@ impl TeardownOutcome {
 }
 
 pub(crate) struct DaemonTeardown {
-    client: crate::client::DaemonClient,
+    rpc: crate::rpc::RpcClient,
+    endpoint: Bootstrap<Client>,
+    initial_identity: Option<Instance>,
     initial: Option<Inventory>,
 }
 
 impl DaemonTeardown {
-    pub(crate) fn new(workspace: &Workspace) -> Self {
+    pub(crate) fn with_inventory(endpoint: Bootstrap<Client>, inventory: Inventory) -> Self {
         Self {
-            client: crate::client::DaemonClient::for_workspace(workspace),
-            initial: None,
-        }
-    }
-
-    pub(crate) fn with_inventory(workspace: &Workspace, inventory: Inventory) -> Self {
-        Self {
-            client: crate::client::DaemonClient::for_workspace(workspace),
+            rpc: crate::rpc::RpcClient::from_endpoint(endpoint.clone()),
+            initial_identity: endpoint.read_process_identity().ok().flatten(),
+            endpoint,
             initial: Some(inventory),
         }
     }
@@ -132,42 +133,18 @@ impl DaemonTeardown {
         Ok(())
     }
 
-    /// Stop only the namespace daemon, leaving every filesystem process in
-    /// place. Apply uses this path when switching desired mount revisions;
-    /// surviving filesystems reconnect when the daemon returns.
-    pub(crate) async fn stop_daemon(&self) -> anyhow::Result<()> {
-        let outcome = match self.client.status_optional().await {
-            Ok(Some(status)) => self.shutdown_and_wait(status.pid, false).await,
-            Ok(None) => self.remove_stale_record(),
-            Err(error) => anyhow::bail!(
-                "cannot stop the running daemon before applying desired state: {error:#}"
-            ),
-        };
-
-        match outcome {
-            TeardownOutcome::DaemonStopped { .. }
-            | TeardownOutcome::DaemonAlreadyStopped
-            | TeardownOutcome::StaleRecordRemoved
-            | TeardownOutcome::StaleRecordAbsent => {
-                self.client.remove_record()?;
-                Ok(())
-            },
-            failure => anyhow::bail!(failure.outcome().value),
-        }
-    }
-
     /// Run the daemon teardown workflow and return its typed outcomes without
     /// rendering. `down` renders these through Output; structured output settles
     /// them into a receipt.
     pub(crate) async fn down_collect(&self) -> anyhow::Result<Vec<TeardownOutcome>> {
         let mut outcomes = Vec::new();
-        match self.initial_or_status().await {
-            Ok(Some(status)) => {
-                let outcome = self.shutdown_and_wait(status.pid, true).await;
+        match self.initial_or_pid().await {
+            Ok(Some(pid)) => {
+                let outcome = self.shutdown_and_wait(pid, true).await;
                 if matches!(
                     outcome,
                     TeardownOutcome::DaemonStopped { .. } | TeardownOutcome::DaemonAlreadyStopped
-                ) && let Err(error) = self.client.remove_record()
+                ) && let Err(error) = self.remove_identity_for_expected_process(pid)
                 {
                     outcomes.push(TeardownOutcome::StaleRecordKept {
                         error: error.to_string(),
@@ -197,42 +174,69 @@ impl DaemonTeardown {
     /// The daemon acknowledges shutdown before its serving task exits, so a
     /// successful POST alone is not enough to report `DaemonStopped`.
     async fn shutdown_and_wait(&self, pid: u32, stop_filesystems: bool) -> TeardownOutcome {
-        match self.client.shutdown(stop_filesystems).await {
+        match self.rpc.shutdown(stop_filesystems).await {
             Ok(Some(shutdown)) => {
-                let deadline = tokio::time::Instant::now() + SHUTDOWN_SETTLE_TIMEOUT;
-                let mut last_error = None;
-                loop {
-                    match self.client.status_optional().await {
-                        Ok(None) if !crate::process::is_alive(pid) => {
-                            return TeardownOutcome::DaemonStopped {
-                                pid,
-                                detached: shutdown.detached,
-                                still_attached: shutdown.still_attached,
-                            };
-                        },
-                        Ok(Some(_) | None) => {},
-                        Err(error) => last_error = Some(format!("{error:#}")),
-                    }
-                    if tokio::time::Instant::now() >= deadline {
-                        let detail = last_error.map_or_else(
-                            || {
-                                if crate::process::is_alive(pid) {
-                                    "the control surface or daemon process remained alive"
-                                        .to_owned()
-                                } else {
-                                    "the control surface remained reachable".to_owned()
-                                }
-                            },
-                            |error| format!("the control surface could not be verified: {error}"),
-                        );
-                        return TeardownOutcome::DaemonShutdownFailed {
-                            error: format!(
-                                "shutdown acknowledged but daemon did not become unavailable within {}s; {detail}",
-                                SHUTDOWN_SETTLE_TIMEOUT.as_secs()
-                            ),
-                        };
-                    }
-                    tokio::time::sleep(SHUTDOWN_POLL_INTERVAL).await;
+                // Bundled so the check closure captures nothing from the
+                // enclosing scope and takes everything by explicit `&mut`
+                // argument instead: an `FnMut` closure cannot itself return a
+                // future that borrows its own captured environment, but a
+                // fresh reborrow of an argument can. `check` never returns
+                // `Err`: every failure is transient (retry until the
+                // deadline) or recorded in `last_error` for the timeout
+                // message below, rather than aborting the poll.
+                struct Wait<'a> {
+                    teardown: &'a DaemonTeardown,
+                    pid: u32,
+                    last_error: Option<String>,
+                }
+                let mut wait = Wait {
+                    teardown: self,
+                    pid,
+                    last_error: None,
+                };
+                let stopped = crate::process::poll_until_mut(
+                    SHUTDOWN_SETTLE_TIMEOUT,
+                    SHUTDOWN_POLL_INTERVAL,
+                    &mut wait,
+                    |wait| {
+                        Box::pin(async move {
+                            let status = wait.teardown.rpc.status_optional().await;
+                            let process_is_alive = wait.teardown.initial_process_is_alive(wait.pid);
+                            match status {
+                                Ok(None) | Err(_) if !process_is_alive => Ok(Some(())),
+                                Ok(Some(_) | None) => Ok(None),
+                                Err(error) => {
+                                    wait.last_error = Some(format!("{error:#}"));
+                                    Ok(None)
+                                },
+                            }
+                        })
+                    },
+                )
+                .await
+                .unwrap_or(None);
+                if stopped.is_some() {
+                    return TeardownOutcome::DaemonStopped {
+                        pid,
+                        detached: shutdown.detached,
+                        still_attached: shutdown.still_attached,
+                    };
+                }
+                let detail = wait.last_error.take().map_or_else(
+                    || {
+                        if self.initial_process_is_alive(pid) {
+                            "the control surface or daemon process remained alive".to_owned()
+                        } else {
+                            "the control surface remained reachable".to_owned()
+                        }
+                    },
+                    |error| format!("the control surface could not be verified: {error}"),
+                );
+                TeardownOutcome::DaemonShutdownFailed {
+                    error: format!(
+                        "shutdown acknowledged but daemon did not become unavailable within {}s; {detail}",
+                        SHUTDOWN_SETTLE_TIMEOUT.as_secs()
+                    ),
                 }
             },
             Ok(None) => TeardownOutcome::DaemonAlreadyStopped,
@@ -242,11 +246,21 @@ impl DaemonTeardown {
         }
     }
 
-    async fn initial_or_status(&self) -> anyhow::Result<Option<omnifs_api::DaemonStatus>> {
+    fn initial_process_is_alive(&self, pid: u32) -> bool {
+        self.initial_identity
+            .as_ref()
+            .filter(|identity| identity.pid() == pid)
+            .map_or_else(
+                || crate::process::is_alive(pid),
+                Instance::still_identifies_running_process,
+            )
+    }
+
+    async fn initial_or_pid(&self) -> anyhow::Result<Option<u32>> {
         match self.initial.as_ref().map(|inventory| &inventory.daemon) {
-            Some(daemon) if daemon.probe == DaemonProbe::Stopped => Ok(None),
-            Some(daemon) if daemon.probe == DaemonProbe::Responding => Ok(daemon.status.clone()),
-            _ => self.client.status_optional().await,
+            Some(daemon) if daemon.health() == DaemonHealth::Stopped => Ok(None),
+            Some(daemon) if daemon.health() != DaemonHealth::Unreachable => Ok(daemon.pid()),
+            _ => Ok(self.rpc.status_optional().await?.map(|status| status.pid)),
         }
     }
     fn remove_stale_record(&self) -> TeardownOutcome {
@@ -255,7 +269,7 @@ impl DaemonTeardown {
                 error: "the recorded daemon process is still alive; ownership cannot be verified"
                     .to_owned(),
             },
-            Ok(Some(false)) => match self.client.remove_record() {
+            Ok(Some(false)) => match self.remove_identity_for_expected_process(0) {
                 Ok(()) => TeardownOutcome::StaleRecordRemoved,
                 Err(error) => TeardownOutcome::StaleRecordKept {
                     error: error.to_string(),
@@ -268,12 +282,33 @@ impl DaemonTeardown {
         }
     }
 
+    fn remove_identity_for_expected_process(&self, pid: u32) -> anyhow::Result<()> {
+        let Some(expected) = &self.initial_identity else {
+            return Ok(());
+        };
+        if pid != 0 && expected.pid() != pid {
+            anyhow::bail!(
+                "process identity pid changed from {} to {pid}",
+                expected.pid()
+            );
+        }
+        if self.endpoint.remove_daemon_bootstrap_if(expected)? {
+            return Ok(());
+        }
+        match self.endpoint.read_process_identity()? {
+            None => Ok(()),
+            Some(current) if current == *expected => {
+                anyhow::bail!("process identity still exists after cleanup")
+            },
+            Some(_) => anyhow::bail!("process identity changed during teardown; refusing removal"),
+        }
+    }
+
     fn recorded_pid_liveness(&self) -> anyhow::Result<Option<bool>> {
-        let Some(record) = self.client.record()? else {
+        let Some(identity) = self.endpoint.read_process_identity()? else {
             return Ok(None);
         };
-        let pid = record.pid;
-        Ok(Some(crate::process::is_alive(pid)))
+        Ok(Some(identity.still_identifies_running_process()))
     }
 }
 
@@ -401,5 +436,18 @@ mod tests {
         let lines = transcript(&outcomes, caps(false));
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("shutdown failed"), "{lines:?}");
+    }
+
+    #[test]
+    fn successful_rpc_shutdown_needs_no_missing_identity_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let endpoint = Bootstrap::<Client>::under_root(root.path());
+        let teardown = DaemonTeardown {
+            rpc: crate::rpc::RpcClient::from_endpoint(endpoint.clone()),
+            endpoint,
+            initial_identity: None,
+            initial: None,
+        };
+        teardown.remove_identity_for_expected_process(42).unwrap();
     }
 }

@@ -2,6 +2,7 @@
 
 pub(crate) mod add;
 pub(crate) mod auth_import;
+pub(crate) mod create;
 pub(crate) mod detect;
 pub(crate) mod provider_selection;
 pub(crate) mod revoke;
@@ -13,19 +14,23 @@ pub(crate) use add::AddArgs;
 pub(crate) use add::{render_consent_block, run_static_token_init};
 pub(crate) use auth_import::AuthImportDecision;
 pub(crate) use auth_import::ImportOutcome;
+pub(crate) use create::{MountInitStatus, ReceiptStyle, configure_mount};
 pub(crate) use revoke::RevokeArgs;
 
 use anyhow::{Context, anyhow};
 use clap::{Args, Subcommand};
+use omnifs_api::{
+    CredentialKey, CredentialMaterial, CredentialSubmission, MountOpResult, MountRecord,
+    MutationOpResult,
+};
 use omnifs_core::MountName;
-use std::path::Path;
+use secrecy::ExposeSecret as _;
 
 use crate::error::{ExitCode, WithExitCode};
-use crate::stages::PromptMode;
+use crate::mutation::PlannedOp;
 use crate::token_source::TokenSource;
 use crate::ui::consent::{Decision, Outcome, Plan, Row};
-use crate::ui::output::{Output, ResultVerdict};
-use omnifs_workspace::Workspace;
+use crate::ui::output::{Output, PromptMode, ResultVerdict};
 
 #[derive(Args, Debug, Clone)]
 pub struct MountArgs {
@@ -50,7 +55,7 @@ pub enum MountCommand {
     /// Remove a mount config.
     Rm {
         name: String,
-        /// Print the removal plan without changing the workspace.
+        /// Print the removal plan without changing daemon state.
         #[arg(long)]
         dry_run: bool,
     },
@@ -85,6 +90,14 @@ pub struct ReauthArgs {
     pub scopes: Vec<String>,
 }
 
+fn effective_oauth_scopes(explicit: &[String], prior: &[String]) -> Vec<String> {
+    if explicit.is_empty() {
+        prior.to_vec()
+    } else {
+        explicit.to_vec()
+    }
+}
+
 impl MountArgs {
     pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         match self.command {
@@ -95,7 +108,7 @@ impl MountArgs {
             MountCommand::Reauth(args) => {
                 let receipt = args.run(output.clone()).await?;
                 if output.is_structured() {
-                    output.emit_result(ResultVerdict::Ok, receipt)?;
+                    output.emit_result(receipt.verdict, receipt)?;
                 }
                 Ok(ExitCode::Success)
             },
@@ -107,10 +120,9 @@ impl MountArgs {
                 Ok(ExitCode::Success)
             },
             MountCommand::Rm { name, dry_run } => {
-                let workspace = Workspace::resolve()?;
-                let receipt = rm_with_options(&workspace, &name, output.yes(), dry_run, &output)?;
+                let receipt = rm_with_options(&name, dry_run, &output).await?;
                 if output.is_structured() {
-                    output.emit_result(receipt.output_verdict(), &receipt)?;
+                    output.emit_result(receipt.verdict, &receipt)?;
                 }
                 Ok(ExitCode::Success)
             },
@@ -120,36 +132,21 @@ impl MountArgs {
 
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct MountsResult {
-    mounts: Vec<crate::inventory::MountStatus>,
-    verdict: crate::inventory::Verdict,
-    #[serde(skip)]
-    host_location: Option<std::path::PathBuf>,
-    #[serde(skip)]
-    next_action: Option<crate::inventory::NextAction>,
+    mounts: Vec<MountRecord>,
+    verdict: ResultVerdict,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct MountShowResult {
-    mount: crate::inventory::MountStatus,
-    filesystems: Vec<crate::inventory::FilesystemStatus>,
-    access_paths: Vec<crate::inventory::AccessPath>,
-    verdict: crate::inventory::Verdict,
-    /// Local desired-state spec path. Absent when the mount is only observed
-    /// through the daemon (no local spec, e.g. `observed_mount_rows`) or the
-    /// local registry itself failed to parse.
-    spec_path: Option<std::path::PathBuf>,
-    auth_kind: Option<omnifs_workspace::authn::AuthKind>,
-    /// Compact `key: value, ...` rendering of the provider config object, if
-    /// the mount configures one.
-    config_summary: Option<String>,
+    mount: MountRecord,
+    verdict: ResultVerdict,
 }
 
 async fn ls(output: Output) -> anyhow::Result<ExitCode> {
-    let workspace = Workspace::resolve()?;
-    let result = list_with_output(&workspace).await?;
+    let result = list_with_output().await?;
     let exit_code = match result.verdict {
-        crate::inventory::Verdict::Ok => ExitCode::Success,
-        crate::inventory::Verdict::Degraded => ExitCode::Degraded,
+        ResultVerdict::Ok => ExitCode::Success,
+        ResultVerdict::Degraded => ExitCode::Degraded,
     };
     if output.is_structured() {
         output.emit_result(result.verdict, &result)?;
@@ -160,78 +157,179 @@ async fn ls(output: Output) -> anyhow::Result<ExitCode> {
 }
 
 async fn show(args: &ShowArgs, output: Output) -> anyhow::Result<ExitCode> {
-    let workspace = Workspace::resolve()?;
-    let result = show_with_output(&workspace, &args.name).await?;
+    let result = show_with_output(&args.name).await?;
     if output.is_structured() {
         output.emit_result(result.verdict, &result)?;
     } else {
         crate::ui::print_raw(&render_mount_show(&result));
     }
     Ok(match result.verdict {
-        crate::inventory::Verdict::Ok => ExitCode::Success,
-        crate::inventory::Verdict::Degraded => ExitCode::Degraded,
+        ResultVerdict::Ok => ExitCode::Success,
+        ResultVerdict::Degraded => ExitCode::Degraded,
     })
 }
 
-pub(crate) async fn list_with_output(workspace: &Workspace) -> anyhow::Result<MountsResult> {
-    let inventory = crate::inventory::Inventory::collect(workspace).await?;
-    let verdict = inventory.verdict();
-    let host_location = crate::ui::access::primary_host_location(&inventory).map(ToOwned::to_owned);
-    let next_action = inventory.next_action();
-    Ok(MountsResult {
-        mounts: inventory.mounts,
-        verdict,
-        host_location,
-        next_action,
-    })
+pub(crate) async fn list_with_output() -> anyhow::Result<MountsResult> {
+    let mounts = crate::rpc::RpcClient::resolve()?.list_mounts().await?;
+    let verdict = mounts_verdict(&mounts);
+    Ok(MountsResult { mounts, verdict })
 }
 
-pub(crate) async fn show_with_output(
-    workspace: &Workspace,
-    name: &str,
-) -> anyhow::Result<MountShowResult> {
-    let inventory = crate::inventory::Inventory::collect(workspace).await?;
-    let mount = inventory
-        .mounts
-        .iter()
-        .find(|mount| mount.name == name)
-        .cloned()
+pub(crate) async fn show_with_output(name: &str) -> anyhow::Result<MountShowResult> {
+    let name = MountName::new(name.to_owned())?;
+    let mount = crate::rpc::RpcClient::resolve()?
+        .get_mount(name.clone())
+        .await?
         .ok_or_else(|| anyhow!("no mount named `{name}`"))?;
-    let mount_name = MountName::new(name.to_owned())?;
-    let access_paths = inventory.access_paths(&mount_name);
-    let verdict = inventory.verdict();
-    // A best-effort local-spec lookup: an observed-but-not-locally-configured
-    // mount, or a workspace whose registry has an unrelated parse failure,
-    // still gets a card, just without these locally-sourced facts.
-    let local = crate::mount_config::load_registry(workspace).ok();
-    let spec_path = local.as_ref().and_then(|registry| {
-        registry
-            .get(&mount_name)
-            .map(|_| registry.spec_path(&mount_name))
-    });
-    let local_spec = local
-        .as_ref()
-        .and_then(|registry| registry.get(&mount_name));
-    let auth_kind = local_spec
-        .and_then(|spec| spec.auth.as_ref())
-        .map(omnifs_workspace::mounts::Auth::kind);
-    let config_summary = local_spec
-        .and_then(|spec| spec.config_raw.as_ref())
-        .and_then(config_summary_line);
-    Ok(MountShowResult {
-        mount,
-        filesystems: inventory.filesystems,
-        access_paths,
-        verdict,
-        spec_path,
-        auth_kind,
-        config_summary,
-    })
+    let verdict = mount_health_verdict(&mount.health);
+    Ok(MountShowResult { mount, verdict })
 }
 
-/// `key: value, ...` for a provider config object, or `None` for an empty or
-/// non-object config value.
-fn config_summary_line(value: &serde_json::Value) -> Option<String> {
+fn render_mounts(result: &MountsResult) -> String {
+    use crate::ui::table::{
+        Block, Cell, Column, Priority, Report, ResourceRow, ResourceTable, WidthPolicy,
+    };
+    let mut table = ResourceTable::new(
+        "Mounts",
+        format!("{} configured", result.mounts.len()),
+        vec![
+            Column::new("Mount", Priority::Identity, WidthPolicy::Auto),
+            Column::new("Provider", Priority::Essential, WidthPolicy::Auto),
+            Column::new("Auth", Priority::Secondary, WidthPolicy::Auto),
+            Column::new("Revision", Priority::Secondary, WidthPolicy::Auto),
+            Column::new("Health", Priority::Essential, WidthPolicy::Auto),
+        ],
+    );
+    for mount in &result.mounts {
+        let state = health_state(&mount.health);
+        table.push(ResourceRow::new(
+            [
+                Cell::new(mount.definition.name.to_string()),
+                Cell::new(provider_label(&mount.provider)),
+                Cell::new(auth_label(mount.definition.auth.as_ref())),
+                Cell::new(mount.revision.get().to_string()),
+                Cell::state(state.clone()),
+            ],
+            state,
+        ));
+    }
+    let mut report = Report::new();
+    report.push(Block::Resources(table));
+    report.render()
+}
+
+/// `mount show` renders one daemon-owned mount as a detail card.
+fn render_mount_show(result: &MountShowResult) -> String {
+    use crate::ui::table::{Block, ContextStrip, Meta, Report};
+    let mount = &result.mount;
+    let mut report = Report::new();
+    report.push(Block::Context(
+        ContextStrip::new(
+            mount.definition.name.to_string(),
+            String::new(),
+            health_state(&mount.health),
+        )
+        .with_metadata([
+            Meta::new("provider", provider_label(&mount.provider)),
+            Meta::new("revision", mount.revision.get().to_string()),
+            Meta::new("version", mount.version.to_string()),
+        ]),
+    ));
+    let mut facts = vec![
+        ("provider", provider_label(&mount.provider)),
+        ("pin", mount.provider.id.to_string()),
+        ("revision", mount.revision.get().to_string()),
+        ("version", mount.version.to_string()),
+        ("auth", auth_label(mount.definition.auth.as_ref())),
+        ("health", health_label(&mount.health)),
+    ];
+    if let Some(limits) = mount.definition.limits.as_ref() {
+        facts.push(("limits", format_limits(limits)));
+    }
+    if let Some(config) = config_summary(&mount.definition.config) {
+        facts.push(("config", config));
+    }
+    let mut card = report.render();
+    card.push_str(&detail_rows(&facts));
+    card.push('\n');
+    card
+}
+
+/// Compute the overall verdict from daemon-reported mount health.
+fn mounts_verdict(mounts: &[MountRecord]) -> ResultVerdict {
+    if mounts
+        .iter()
+        .any(|mount| !matches!(&mount.health, omnifs_api::MountHealth::Active))
+    {
+        ResultVerdict::Degraded
+    } else {
+        ResultVerdict::Ok
+    }
+}
+
+fn mount_health_verdict(health: &omnifs_api::MountHealth) -> ResultVerdict {
+    if matches!(health, omnifs_api::MountHealth::Active) {
+        ResultVerdict::Ok
+    } else {
+        ResultVerdict::Degraded
+    }
+}
+
+fn provider_label(provider: &omnifs_api::ProviderReference) -> String {
+    provider.version.as_ref().map_or_else(
+        || provider.name.clone(),
+        |version| format!("{}@{version}", provider.name),
+    )
+}
+
+fn auth_label(auth: Option<&omnifs_api::MountCredential>) -> String {
+    auth.map_or_else(
+        || "none".to_owned(),
+        |auth| format!("{} ({})", auth.scheme, auth.account_label),
+    )
+}
+
+fn health_label(health: &omnifs_api::MountHealth) -> String {
+    match health {
+        omnifs_api::MountHealth::Active => "active".to_owned(),
+        omnifs_api::MountHealth::AuthRequired => "auth required".to_owned(),
+        omnifs_api::MountHealth::ProviderUnavailable { reason } => {
+            format!("provider unavailable: {reason}")
+        },
+        omnifs_api::MountHealth::Failed { reason } => format!("failed: {reason}"),
+    }
+}
+
+fn health_state(health: &omnifs_api::MountHealth) -> crate::ui::table::StateToken {
+    match health {
+        omnifs_api::MountHealth::Active => crate::ui::table::StateToken::positive("active"),
+        omnifs_api::MountHealth::AuthRequired => {
+            crate::ui::table::StateToken::attention("auth required")
+        },
+        omnifs_api::MountHealth::ProviderUnavailable { .. }
+        | omnifs_api::MountHealth::Failed { .. } => {
+            crate::ui::table::StateToken::failure(health_label(health))
+        },
+    }
+}
+
+fn format_limits(limits: &omnifs_api::MountLimits) -> String {
+    let mut values = Vec::new();
+    if let Some(value) = limits.max_memory_mb {
+        values.push(format!("memory={value}MB"));
+    }
+    if let Some(value) = limits.max_fetch_blob_bytes {
+        values.push(format!("fetch={value}B"));
+    }
+    if values.is_empty() {
+        "none".to_owned()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn config_summary(config: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(config).ok()?;
     let object = value.as_object()?;
     if object.is_empty() {
         return None;
@@ -245,109 +343,7 @@ fn config_summary_line(value: &serde_json::Value) -> Option<String> {
     )
 }
 
-fn render_mounts(result: &MountsResult) -> String {
-    let mut report = crate::ui::table::Report::new();
-    report.push(crate::ui::table::Block::Resources(
-        crate::status::mount_table(
-            &result.mounts,
-            result.host_location.as_deref(),
-            result.next_action.as_ref(),
-        ),
-    ));
-    report.render()
-}
-
-/// `mount show`'s detail card: a header line naming the mount with
-/// its headline state right-aligned (the same precedence `mount ls` uses,
-/// [`crate::status::mount_row_state`]), then an indented definition list of
-/// the facts a maintainer actually reaches for: provider pin, auth, spec
-/// path, access, and provider config. `mount ls` keeps owning the tabular
-/// summary; this is deliberately a different shape, not a one-row table.
-fn render_mount_show(result: &MountShowResult) -> String {
-    use crate::ui::table::{Block, ContextStrip, Report};
-
-    let state = crate::status::mount_row_state(&result.mount);
-    let mut report = Report::new();
-    report.push(Block::Context(ContextStrip::new(
-        result.mount.name.clone(),
-        String::new(),
-        state,
-    )));
-    let mut card = report.render();
-
-    card.push_str(&detail_rows(&detail_card_facts(result)));
-    card.push('\n');
-    card
-}
-
-/// The ordered `(key, value)` facts below a `mount show` card's header.
-/// `auth` and `config` are omitted, not shown empty, when the mount has
-/// neither. `access` always has at least one row: a fallback fact when nothing
-/// currently reaches the mount, never a silently missing key.
-fn detail_card_facts(result: &MountShowResult) -> Vec<(&'static str, String)> {
-    let mut facts = vec![("provider", provider_fact(&result.mount.provider))];
-    if let Some(fact) = auth_fact(result) {
-        facts.push(("auth", fact));
-    }
-    if let Some(path) = &result.spec_path {
-        facts.push(("spec", omnifs_workspace::display(path)));
-    }
-    let access_rows: Vec<String> = result
-        .access_paths
-        .iter()
-        .filter(|path| {
-            matches!(
-                path.state,
-                crate::inventory::AccessState::Available | crate::inventory::AccessState::Offline
-            )
-        })
-        .map(crate::ui::access::access_row)
-        .collect();
-    if access_rows.is_empty() {
-        facts.push(("access", "no filesystem attached yet".to_owned()));
-    } else {
-        facts.extend(access_rows.into_iter().map(|row| ("access", row)));
-    }
-    if let Some(config) = &result.config_summary {
-        facts.push(("config", config.clone()));
-    }
-    facts
-}
-
-/// `<name>@<version>  (pin <digest8>…)`, with the provider's own state
-/// parenthesized only when it is not the healthy default (the clean
-/// example never shows a healthy pin's state; a missing/corrupt pin still
-/// must not go silent on this card).
-fn provider_fact(pin: &crate::inventory::ProviderPin) -> String {
-    use std::fmt::Write as _;
-
-    let mut value = format!(
-        "{}@{}",
-        pin.name,
-        pin.version.as_deref().unwrap_or("unpinned")
-    );
-    if !matches!(pin.state, crate::inventory::ProviderPinState::Available) {
-        let _ = write!(value, " ({})", pin.state.label());
-    }
-    let short = &pin.artifact[..pin.artifact.len().min(8)];
-    let _ = write!(value, "  (pin {short}…)");
-    value
-}
-
-/// `<kind>, <state>` when a local spec resolved the auth kind (the
-/// `oauth, signed in as raulk`, minus the upstream identity: neither the
-/// OAuth flow nor the CLI-visible credential API surfaces one today, so this
-/// card states the kind and state it can actually observe rather than
-/// fabricating a username). `None` for a mount needing no auth at all, or one
-/// whose local spec could not be resolved.
-fn auth_fact(result: &MountShowResult) -> Option<String> {
-    let kind = result.auth_kind?;
-    Some(format!("{kind}, {}", result.mount.auth.label()))
-}
-
-/// One line per fact, two-space indented, no glyph column: a definition list
-/// reads differently from a settled-operation ledger, so this deliberately
-/// does not reuse `render.rs`'s glyph-led `LedgerRow` vocabulary.
+/// One line per fact, two-space indented, no glyph column.
 fn detail_rows(facts: &[(&'static str, String)]) -> String {
     use std::fmt::Write as _;
 
@@ -369,48 +365,65 @@ impl ReauthArgs {
         self,
         output: Output,
     ) -> anyhow::Result<crate::commands::receipt::MountReauthReceipt> {
-        let workspace = Workspace::resolve()?;
-        let prompt = PromptMode::from_flags(output.yes(), output.no_input());
-        let result = self.run_with_output(&workspace, &output, prompt).await;
+        crate::commands::daemon_start::start().await?;
+        let prompt = output.prompt_mode();
+        let result = self.run_with_output(&output, prompt).await;
         if result.is_ok() {
             output.outro(format!("Re-authenticated `{}`.", self.name));
         }
+        // `result?` propagates any reauthentication failure before this
+        // point, so reaching the constructor already proves success; there
+        // is no outcome here for a verdict to be derived from.
         result?;
         Ok(crate::commands::receipt::MountReauthReceipt {
-            verdict: crate::commands::receipt::Verdict::Ok,
+            verdict: ResultVerdict::Ok,
             mount: self.name.clone(),
         })
     }
 
+    #[allow(clippy::too_many_lines)] // one linear reauthentication flow
     pub(crate) async fn run_with_output(
         &self,
-        workspace: &Workspace,
         output: &crate::ui::output::Output,
         prompt: PromptMode,
     ) -> anyhow::Result<()> {
         let mount_name = self.name.as_str();
-        let mounts = crate::mount_config::load_registry(workspace)?;
+        let rpc = crate::rpc::RpcClient::resolve()?;
         let name = MountName::new(mount_name.to_owned())?;
-        let spec = mounts.get(&name).ok_or_else(|| {
+        let record = rpc.get_mount(name.clone()).await?.ok_or_else(|| {
             anyhow!("no mount named `{mount_name}`; run `omnifs mount add <provider>` to create it")
         })?;
-        let Some(auth) = spec.auth.as_ref() else {
+        let Some(auth) = record.definition.auth.as_ref() else {
             anyhow::bail!("mount `{mount_name}` needs no authentication");
         };
-
-        let provider = workspace.catalog().get(&spec.provider.id)?.ok_or_else(|| {
-            anyhow!(
-                "provider artifact `{}` for mount `{mount_name}` is missing",
-                spec.provider.id
-            )
-        })?;
-        let manifest = provider.manifest()?;
+        let key = CredentialKey {
+            provider_name: record.provider.name.clone(),
+            scheme: auth.scheme.clone(),
+            account_label: auth.account_label.clone(),
+        };
+        let state = crate::client_state::ClientState::resolve()?;
+        let status = rpc.credential_status(key.clone()).await?;
+        let metadata = rpc
+            .provider_metadata(record.definition.provider)
+            .await?
+            .ok_or_else(|| anyhow!("provider metadata is unavailable for `{mount_name}`"))?;
+        let manifest = omnifs_provider::ProviderManifest::from_bytes(&metadata.manifest)
+            .context("parse daemon provider metadata")?;
+        let auth_manifest = manifest
+            .auth
+            .as_ref()
+            .map(omnifs_provider::ProviderAuthManifest::wasm_auth_manifest);
+        let selected = crate::auth::Auth::from_scheme(
+            auth_manifest.as_ref(),
+            &auth.scheme,
+            Some(auth.account_label.clone()),
+        )?;
 
         // `--no-input` must never reach an OAuth browser handoff (it would hang
         // on the browser confirm or the manual-code paste). Mirror the add-side
         // guard: bail naming the interactive and static-token alternatives.
-        let interactive = prompt.interactive;
-        if !interactive && auth.is_oauth() {
+        let interactive = prompt.interactive();
+        if !interactive && selected.is_oauth() {
             return Err(anyhow!(
                 "`omnifs mount reauth {mount_name}` cannot complete OAuth without a terminal; run it interactively, or use a static-token scheme with --token - or --token-env VAR"
             ))
@@ -421,20 +434,24 @@ impl ReauthArgs {
         // add` uses for its completed-auth rows (`oauth`/`signed in`/
         // `credential`), since both flows route through the same
         // `login`/`run_static_token_init` primitives.
-        let auth_key_width = crate::auth::auth_receipt_key_width();
-        let target = if auth.is_oauth() {
+        let submission = if selected.is_oauth() {
+            let requested_scopes = effective_oauth_scopes(
+                &self.scopes,
+                status.as_ref().map_or(&[][..], |status| &status.scopes),
+            );
             output.narrate(format!("re-authenticating `{mount_name}` over OAuth"));
-            crate::auth::login_with_workspace(
-                workspace,
-                mount_name,
-                auth.account(),
+            crate::auth::login::login_for_submission(
+                record.definition.provider,
+                &manifest,
+                &selected,
+                &auth.account_label,
                 crate::auth::LoginInteractivity {
                     no_browser: self.no_browser,
-                    no_input: prompt.no_input,
-                    scopes: &self.scopes,
+                    no_input: prompt.no_input(),
+                    scopes: Some(&requested_scopes),
                 },
                 output,
-                auth_key_width,
+                crate::auth::auth_receipt_key_width(),
             )
             .await?
         } else {
@@ -444,106 +461,69 @@ impl ReauthArgs {
                 interactive,
             )?;
             let token = source.read(output)?;
-            run_static_token_init(
-                &manifest,
-                auth,
-                token,
-                workspace.credentials(),
-                !self.no_validate,
-                output,
-                auth_key_width,
-            )
-            .await?
+            if !self.no_validate {
+                let scheme = selected.static_token_scheme(&manifest)?;
+                if let Some(validation) = scheme.validation.as_ref() {
+                    token_validation::validate_static_token(
+                        validation,
+                        scheme.header_name.as_deref().unwrap_or("Authorization"),
+                        &scheme.value_prefix,
+                        token.expose_secret(),
+                        output,
+                    )
+                    .await?;
+                }
+            }
+            CredentialSubmission {
+                provider: record.definition.provider,
+                scheme: auth.scheme.clone(),
+                account_label: auth.account_label.clone(),
+                material: CredentialMaterial::StaticToken {
+                    token: omnifs_api::SecretBytes::new(token.expose_secret().as_bytes().to_vec()),
+                },
+                overrides: omnifs_api::CredentialClientOverrides {
+                    client_id: None,
+                    client_secret: None,
+                    redirect_uri: None,
+                    scopes: None,
+                },
+            }
         };
-        print_stored_credential_rows(output, &target);
-        crate::metrics::maybe_print_health_nudge(workspace, output.clone()).await;
+        if let Some(outcome) = crate::mutation::run(&rpc, &state, output, || async move {
+            Ok(vec![PlannedOp::submit_credential(&key, submission)])
+        })
+        .await?
+        {
+            crate::mutation::narrate_serving(output, &outcome.serving);
+        }
+        output.ledger_row(
+            &crate::ui::render::LedgerRow::new(
+                crate::ui::style::Glyph::Done,
+                format!("credential `{}/{}`", auth.scheme, auth.account_label),
+                "stored in daemon",
+            ),
+            crate::auth::auth_receipt_key_width(),
+        );
         Ok(())
     }
 }
 
-/// `reauth`'s second, independent ledger block: the exact credential key just
-/// stored. It sizes itself rather than reusing the auth-outcome block's width
-/// the caller already printed.
-fn print_stored_credential_rows(
-    output: &crate::ui::output::Output,
-    credential_id: &omnifs_workspace::authn::CredentialId,
-) {
-    let key = format!("credential `{credential_id}`");
-    let key_width = Output::ledger_block_width(&[&key]);
-    output.ledger_row(
-        &crate::ui::render::LedgerRow::new(
-            crate::ui::style::Glyph::Done,
-            key,
-            "stored; takes effect on the next `omnifs up` or `omnifs apply`",
-        ),
-        key_width,
-    );
-}
-
-#[allow(clippy::too_many_lines)] // plan, decision, and receipt stay linear
-fn rm_with_options(
-    workspace: &Workspace,
+async fn rm_with_options(
     name: &str,
-    yes: bool,
     dry_run: bool,
     output: &Output,
 ) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
     let output = output.clone();
-    let mounts = crate::mount_config::load_registry(workspace)?;
     let name =
         MountName::new(name.to_owned()).with_context(|| format!("invalid mount name `{name}`"))?;
-
-    if mounts.get(&name).is_none() {
-        // Removing an already-absent valid mount is an idempotent cleanup
-        // operation. Emit the same plan/receipt shape as other destructive
-        // commands, but never construct a credential service or touch the
-        // credential store when there is no spec to remove.
-        let mut plan = Plan::new(format!("Removing mount `{name}`"));
-        plan.push(Row::keep(
-            "spec",
-            "spec",
-            format!(
-                "{} (already absent)",
-                omnifs_workspace::display(&workspace.desired_state().spec_path(&name))
-            ),
-        ));
-        output.plan(&plan);
-        if let Some(suggestion) = mounts
-            .iter()
-            .map(|(mount, _)| mount.to_string())
-            .find(|candidate| candidate.starts_with(name.as_str()))
-        {
-            output.narrate(format!("Did you mean `{suggestion}`?"));
-        }
-        if dry_run {
-            output.outro("Dry run, nothing changed.");
-            return Ok(crate::commands::receipt::MountRemoveReceipt::dry_run(
-                name.to_string(),
-                plan,
-            ));
-        }
-        let receipt = plan.receipt([Outcome::skip("spec", "already absent")]);
-        output.receipt(&receipt);
-        output.outro(format!("Mount `{name}` already absent."));
-        return Ok(crate::commands::receipt::MountRemoveReceipt::applied(
-            name.to_string(),
-            plan,
-            receipt.rows,
-            None,
-        ));
-    }
-    let config_path = mounts.spec_path(&name);
-    // Build the plan without constructing an HTTP client or registering an
-    // OAuth revocation. A dry run must stop before any apply-only work.
-    let plan = mount_remove_plan(&name, &config_path);
+    let rpc = crate::rpc::RpcClient::resolve()?;
+    let mount = rpc.get_mount(name.clone()).await?;
+    let plan = mount_remove_plan(&name, mount.as_ref());
     output.plan(&plan);
-    match Decision::resolve(
-        PromptMode::from_flags(yes || output.yes(), output.no_input()),
-        dry_run,
-        "Remove?",
-        "-y",
-        &output,
-    )? {
+    if mount.is_none() {
+        return remove_absent_mount(&rpc, &name, plan, dry_run, &output).await;
+    }
+    match Decision::resolve(output.prompt_mode(), dry_run, "Remove?", "-y", &output)? {
         Decision::DryRun => {
             output.outro("Dry run, nothing changed.");
             return Ok(crate::commands::receipt::MountRemoveReceipt::dry_run(
@@ -553,150 +533,117 @@ fn rm_with_options(
         },
         Decision::Apply => {},
     }
+    let state = crate::client_state::ClientState::resolve()?;
+    let outcome = crate::mutation::run(&rpc, &state, &output, {
+        let name = name.clone();
+        || async move { Ok(vec![PlannedOp::mount_remove(name)]) }
+    })
+    .await?
+    .context("mount removal produced no result")?;
+    crate::mutation::narrate_serving(&output, &outcome.serving);
+    let mount_result = outcome
+        .results
+        .into_iter()
+        .find_map(|result| match result {
+            MutationOpResult::Mount(mount) => Some(mount),
+            MutationOpResult::Credential(_) => None,
+        })
+        .context("mount removal batch did not include a mount result")?;
+    Ok(finish_mount_removal(&output, plan, &mount_result))
+}
 
-    let spec_outcome = match workspace.desired_state().remove_uncommitted(&name) {
-        Ok(true) => Outcome::done("spec", "desired-state deletion recorded"),
-        Ok(false) => Outcome::skip("spec", "already absent"),
-        Err(error) => Outcome::fail("spec", format!("spec kept; local delete failed: {error:#}")),
-    };
-    let mut outcomes = vec![spec_outcome];
-    let mut revision = None;
-    if outcomes[0].state != crate::ui::consent::OutcomeState::Fail {
-        match workspace.desired_state().commit() {
-            Ok(committed) => revision = Some(committed.to_string()),
-            Err(error) => {
-                outcomes[0] = Outcome::fail(
-                    "spec",
-                    format!("deleted locally; desired-state commit failed: {error:#}"),
-                );
-            },
-        }
+async fn remove_absent_mount(
+    rpc: &crate::rpc::RpcClient,
+    name: &MountName,
+    plan: Plan,
+    dry_run: bool,
+    output: &Output,
+) -> anyhow::Result<crate::commands::receipt::MountRemoveReceipt> {
+    if dry_run {
+        output.outro("Dry run, nothing changed.");
+        return Ok(crate::commands::receipt::MountRemoveReceipt::dry_run(
+            name.to_string(),
+            plan,
+        ));
     }
-    let receipt = plan.receipt(outcomes);
+    // Settle whatever a prior interrupted command left in the journal: the
+    // read above already proved this mount absent, which is all a
+    // `mount.remove` batch's provenance check needs either way.
+    let state = crate::client_state::ClientState::resolve()?;
+    crate::mutation::settle(rpc, &state, output).await?;
+    let receipt = plan.receipt([Outcome::skip("mount", "already absent")]);
     output.receipt(&receipt);
-    output.outro(format!("Removed `{name}`. {}", plan.settled_summary()));
-    if receipt
-        .rows
-        .iter()
-        .any(|row| row.id == "spec" && row.state == crate::ui::consent::OutcomeState::Fail)
-    {
-        anyhow::bail!(
-            receipt
-                .rows
-                .iter()
-                .find(|row| row.id == "spec")
-                .map_or_else(
-                    || "mount spec removal failed".to_owned(),
-                    |row| row.value.clone()
-                )
-        );
-    }
+    output.outro(format!("Mount `{name}` already absent."));
     Ok(crate::commands::receipt::MountRemoveReceipt::applied(
         name.to_string(),
         plan,
         receipt.rows,
-        revision,
+        None,
     ))
 }
 
-fn mount_remove_plan(name: &MountName, config_path: &Path) -> Plan {
+fn mount_remove_plan(name: &MountName, mount: Option<&MountRecord>) -> Plan {
     let mut plan = Plan::new(format!("Removing mount `{name}`"));
-    plan.push(Row::remove(
-        "spec",
-        "spec",
-        omnifs_workspace::display(config_path).clone(),
-    ));
+    match mount {
+        Some(mount) => plan.push(Row::remove(
+            "mount",
+            "mount",
+            format!(
+                "{name} (revision {}, version {})",
+                mount.revision.get(),
+                mount.version
+            ),
+        )),
+        None => plan.push(Row::keep(
+            "mount",
+            "mount",
+            format!("{name} (already absent)"),
+        )),
+    }
     plan
+}
+
+fn finish_mount_removal(
+    output: &Output,
+    plan: Plan,
+    result: &MountOpResult,
+) -> crate::commands::receipt::MountRemoveReceipt {
+    let receipt = plan.receipt([Outcome::done("mount", "removed")]);
+    output.receipt(&receipt);
+    output.outro(format!(
+        "Removed `{}` at revision {}.",
+        result.name,
+        result.revision.get()
+    ));
+    crate::commands::receipt::MountRemoveReceipt::applied(
+        result.name.to_string(),
+        plan,
+        receipt.rows,
+        Some(result.revision.get()),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::fixture_workspace as base_fixture_workspace;
-    use tempfile::TempDir;
-
-    fn fixture_workspace(root: &Path) -> omnifs_workspace::Workspace {
-        let workspace = base_fixture_workspace(root);
-        std::fs::create_dir_all(root.join("mounts")).unwrap();
-        workspace
-    }
-
-    #[tokio::test]
-    async fn rejects_invalid_mount_name() {
-        let tmp = TempDir::new().unwrap();
-        let workspace = fixture_workspace(tmp.path());
-        let output = Output::new(crate::ui::output::OutputMode::Human, false);
-        let err = rm_with_options(&workspace, "../leak", true, false, &output).unwrap_err();
-        assert!(format!("{err:#}").contains("invalid mount name"));
-    }
-
-    #[tokio::test]
-    async fn removing_missing_valid_mount_is_a_noop_without_credentials() {
-        let tmp = TempDir::new().unwrap();
-        let workspace = fixture_workspace(tmp.path());
-        let output = Output::new(crate::ui::output::OutputMode::Human, false);
-        rm_with_options(&workspace, "missing", true, false, &output).unwrap();
-        assert!(!tmp.path().join("credentials.json").exists());
-    }
 
     #[test]
-    fn removal_plan_names_desired_state_row() {
-        let name = MountName::try_from("github").unwrap();
-        let path = Path::new("/tmp/omnifs/mounts/github.json");
-        let plan = mount_remove_plan(&name, path);
-        assert_eq!(plan.remove_count(), 1);
-        assert_eq!(plan.rows[0].id, "spec");
-        assert_eq!(plan.title, "Removing mount `github`");
-    }
-
-    #[tokio::test]
-    async fn removing_an_absent_mount_exits_zero_and_settles_a_skip_receipt() {
-        let tmp = TempDir::new().unwrap();
-        let workspace = fixture_workspace(tmp.path());
-        let output = Output::new(crate::ui::output::OutputMode::Human, false);
-        let receipt = rm_with_options(&workspace, "missing", true, false, &output).unwrap();
-        assert_eq!(receipt.mount, "missing");
-        assert!(
-            receipt
-                .rows
-                .iter()
-                .any(|row| row.id == "spec" && row.state == crate::ui::consent::OutcomeState::Skip)
+    fn reauth_keeps_granted_scopes_without_an_explicit_override() {
+        let prior = vec!["repo".to_owned(), "read:user".to_owned()];
+        assert_eq!(effective_oauth_scopes(&[], &prior), prior);
+        assert_eq!(
+            effective_oauth_scopes(&["gist".to_owned()], &prior),
+            vec!["gist"]
         );
     }
 
-    /// `--dry-run` prints the plan and settles nothing: the
-    /// desired-state directory is untouched.
-    #[tokio::test]
-    async fn dry_run_prints_the_plan_and_removes_nothing() {
-        let tmp = TempDir::new().unwrap();
-        let workspace = fixture_workspace(tmp.path());
-        AddArgs {
-            provider: Some("dns".to_string()),
-            name: None,
-            no_browser: true,
-            token: None,
-            token_env: None,
-            no_validate: false,
-            scopes: Vec::new(),
-            scheme: None,
-            no_auth: false,
-            config_json: None,
-            limits_json: None,
-        }
-        .run_in_workspace(
-            &workspace,
-            Output::new(crate::ui::output::OutputMode::Human, false),
-        )
-        .await
-        .unwrap();
-        let spec_path = tmp.path().join("mounts/dns.json");
-        assert!(spec_path.exists(), "fixture must create the spec first");
-
-        let output = Output::new(crate::ui::output::OutputMode::Human, false);
-        let receipt = rm_with_options(&workspace, "dns", true, true, &output).unwrap();
-        assert!(spec_path.exists(), "dry run must not remove the spec file");
-        assert_eq!(receipt.rows.len(), 0, "a dry run settles no receipt rows");
-        assert!(receipt.dry_run);
+    #[test]
+    fn removal_plan_names_the_daemon_mount_row() {
+        let name = MountName::try_from("github").unwrap();
+        let plan = mount_remove_plan(&name, None);
+        assert_eq!(plan.rows[0].id, "mount");
+        assert_eq!(plan.rows[0].value, "github (already absent)");
+        assert_eq!(plan.title, "Removing mount `github`");
     }
 
     /// `omnifs mount ls` renders exactly the Mounts section of the status
@@ -704,66 +651,52 @@ mod tests {
     /// the Filesystems table alongside it.
     #[test]
     fn render_mounts_is_exactly_the_status_mounts_section() {
-        let mounts = vec![crate::inventory::MountStatus {
-            name: "github".into(),
-            root: "/github".into(),
-            provider: crate::inventory::ProviderPin {
-                name: "github".into(),
-                version: Some("0.3.2".into()),
-                artifact: "a".repeat(64),
-                state: crate::inventory::ProviderPinState::Available,
-            },
-            auth: crate::inventory::AuthState::Ready,
-            serving: crate::inventory::ServingState::Live,
-            access_count: 1,
-            fix: None,
-        }];
+        let mounts = vec![daemon_mount(omnifs_api::MountHealth::Active)];
         let result = MountsResult {
             mounts: mounts.clone(),
-            verdict: crate::inventory::Verdict::Ok,
-            host_location: None,
-            next_action: None,
+            verdict: ResultVerdict::Ok,
         };
         let rendered = render_mounts(&result);
         assert!(rendered.contains("Mounts"));
         assert!(rendered.contains("github"));
-        assert!(!rendered.contains("omnifs  "), "{rendered:?}");
         assert!(!rendered.contains("Filesystems"), "{rendered:?}");
-
-        let mut expected = crate::ui::table::Report::new();
-        expected.push(crate::ui::table::Block::Resources(
-            crate::status::mount_table(&mounts, None, None),
-        ));
-        assert_eq!(rendered, expected.render());
+        assert!(rendered.contains("active"));
     }
 
-    fn show_result(mount: crate::inventory::MountStatus) -> MountShowResult {
+    fn daemon_mount(health: omnifs_api::MountHealth) -> MountRecord {
+        MountRecord {
+            definition: omnifs_api::MountDefinition {
+                name: MountName::try_from("github").unwrap(),
+                provider: omnifs_core::ProviderId::from_digest([0x12; 32]),
+                auth: Some(omnifs_api::MountCredential {
+                    scheme: "oauth".to_owned(),
+                    account_label: "work".to_owned(),
+                }),
+                limits: None,
+                config: br#"{"org":"raulk"}"#.to_vec(),
+            },
+            provider: omnifs_api::ProviderReference {
+                id: omnifs_core::ProviderId::from_digest([0x12; 32]),
+                name: "github".to_owned(),
+                version: Some("0.3.2".to_owned()),
+            },
+            version: omnifs_core::MountVersion::from_digest([0x34; 32]),
+            revision: omnifs_core::MountRevision::new(7),
+            health,
+            auth_health: Some(omnifs_api::CredentialHealth::Ready),
+            last_mutation_id: omnifs_core::MutationId::from_bytes([0x56; 16]),
+        }
+    }
+
+    fn show_result(mount: MountRecord) -> MountShowResult {
         MountShowResult {
             mount,
-            filesystems: Vec::new(),
-            access_paths: Vec::new(),
-            verdict: crate::inventory::Verdict::Ok,
-            spec_path: Some("/home/.omnifs/mounts/github.json".into()),
-            auth_kind: Some(omnifs_workspace::authn::AuthKind::OAuth),
-            config_summary: Some(r#"org_filter: "raulk""#.to_owned()),
+            verdict: ResultVerdict::Ok,
         }
     }
 
-    fn healthy_mount() -> crate::inventory::MountStatus {
-        crate::inventory::MountStatus {
-            name: "github".into(),
-            root: "/github".into(),
-            provider: crate::inventory::ProviderPin {
-                name: "github".into(),
-                version: Some("0.3.2".into()),
-                artifact: "a1b2c3d4".to_owned() + &"e".repeat(56),
-                state: crate::inventory::ProviderPinState::Available,
-            },
-            auth: crate::inventory::AuthState::Ready,
-            serving: crate::inventory::ServingState::Live,
-            access_count: 1,
-            fix: None,
-        }
+    fn healthy_mount() -> MountRecord {
+        daemon_mount(omnifs_api::MountHealth::Active)
     }
 
     /// `mount show` is a detail card, never the tabular
@@ -773,71 +706,23 @@ mod tests {
         let rendered = render_mount_show(&show_result(healthy_mount()));
         let lines = rendered.lines().collect::<Vec<_>>();
         assert!(lines[0].starts_with("github"), "{rendered:?}");
-        assert!(lines[0].trim_end().ends_with("live"), "{rendered:?}");
+        assert!(lines[0].contains("active"), "{rendered:?}");
         assert!(!rendered.contains("Mounts"), "{rendered:?}");
-        assert!(!rendered.contains("Access paths"), "{rendered:?}");
-
-        let provider_line = lines
-            .iter()
-            .find(|line| line.trim_start().starts_with("provider"))
-            .expect("provider row");
-        assert!(provider_line.contains("github@0.3.2"), "{rendered:?}");
-        assert!(provider_line.contains("(pin a1b2c3d4…)"), "{rendered:?}");
-
-        let auth_line = lines
-            .iter()
-            .find(|line| line.trim_start().starts_with("auth"))
-            .expect("auth row");
-        assert!(auth_line.contains("oauth"), "{rendered:?}");
-        assert!(auth_line.contains("ready"), "{rendered:?}");
-
-        let spec_line = lines
-            .iter()
-            .find(|line| line.trim_start().starts_with("spec"))
-            .expect("spec row");
-        assert!(spec_line.contains("mounts/github.json"), "{rendered:?}");
+        assert!(rendered.contains("oauth (work)"), "{rendered:?}");
+        assert!(rendered.contains("revision"), "{rendered:?}");
 
         let config_line = lines
             .iter()
             .find(|line| line.trim_start().starts_with("config"))
             .expect("config row");
-        assert!(
-            config_line.contains(r#"org_filter: "raulk""#),
-            "{rendered:?}"
+        assert!(config_line.contains(r#"org: "raulk""#), "{rendered:?}");
+    }
+
+    #[test]
+    fn degraded_mounts_degrade_verdict() {
+        assert_eq!(
+            mounts_verdict(&[daemon_mount(omnifs_api::MountHealth::AuthRequired)]),
+            ResultVerdict::Degraded
         );
-    }
-
-    /// `access` states "no filesystem attached yet" rather than silently
-    /// omitting the row when nothing currently reaches the mount.
-    #[test]
-    fn detail_card_access_row_falls_back_without_a_reachable_filesystem() {
-        let mut result = show_result(healthy_mount());
-        result.access_paths = Vec::new();
-        let facts = detail_card_facts(&result);
-        let access = facts
-            .iter()
-            .find(|(key, _)| *key == "access")
-            .expect("access fact");
-        assert_eq!(access.1, "no filesystem attached yet");
-    }
-
-    /// `auth` and `config` are omitted, not shown empty, when the mount has
-    /// neither (most providers have no config; a mount with no local spec has
-    /// no locally-resolvable auth kind).
-    #[test]
-    fn detail_card_omits_auth_and_config_when_absent() {
-        let mut result = show_result(healthy_mount());
-        result.auth_kind = None;
-        result.config_summary = None;
-        let facts = detail_card_facts(&result);
-        assert!(!facts.iter().any(|(key, _)| *key == "auth"), "{facts:?}");
-        assert!(!facts.iter().any(|(key, _)| *key == "config"), "{facts:?}");
-    }
-
-    #[test]
-    fn provider_fact_surfaces_a_degraded_pin_state() {
-        let mut pin = healthy_mount().provider;
-        pin.state = crate::inventory::ProviderPinState::Missing;
-        assert!(provider_fact(&pin).contains("(missing)"));
     }
 }

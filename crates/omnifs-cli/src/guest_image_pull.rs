@@ -103,7 +103,7 @@ struct TokenResponse {
 /// Ensure the release-channel guest image named by `image` is present as a
 /// decompressed local `.raw` file under `images_dir`, pulling and caching it
 /// on first use. Returns the immutable base path a launch copies into its
-/// workspace-owned writable root before handing it to libkrun.
+/// client-owned writable root before handing it to libkrun.
 pub(crate) async fn ensure_guest_image(
     image: &ImageRef,
     images_dir: &Path,

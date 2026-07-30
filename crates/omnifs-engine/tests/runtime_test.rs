@@ -1,7 +1,7 @@
 use omnifs_core::path::Path;
 use omnifs_engine::test_support::cache::publish_effects_for_test;
 use omnifs_engine::{
-    DirCursor, EntryKind, LookupAnswer, Namespace, NsError, ReadAnswer, TreeNamespace,
+    DirCursor, EngineNamespace, EntryKind, LookupAnswer, Namespace, NsError, ReadAnswer,
 };
 use omnifs_itest::{TEST_PROVIDER_CONFIG, make_initialized_runtime};
 
@@ -9,11 +9,11 @@ fn p(value: &str) -> Path {
     Path::parse(value).unwrap()
 }
 
-async fn resolve_namespace(ns: &TreeNamespace, path: &str) -> LookupAnswer {
+async fn resolve_namespace(ns: &EngineNamespace, path: &str) -> LookupAnswer {
     resolve_mount_namespace(ns, "test", path).await
 }
 
-async fn resolve_mount_namespace(ns: &TreeNamespace, mount: &str, path: &str) -> LookupAnswer {
+async fn resolve_mount_namespace(ns: &EngineNamespace, mount: &str, path: &str) -> LookupAnswer {
     let mut answer = ns.lookup(Path::root(), mount).await.unwrap();
     for segment in p(path).segments() {
         answer = ns.lookup(answer.path, segment).await.unwrap();
@@ -22,7 +22,7 @@ async fn resolve_mount_namespace(ns: &TreeNamespace, mount: &str, path: &str) ->
 }
 
 async fn list_mount_namespace(
-    ns: &TreeNamespace,
+    ns: &EngineNamespace,
     mount: &str,
     path: &str,
 ) -> Result<Vec<omnifs_engine::DirEntry>, NsError> {
@@ -40,7 +40,7 @@ async fn list_mount_namespace(
 }
 
 async fn list_namespace(
-    ns: &TreeNamespace,
+    ns: &EngineNamespace,
     path: &str,
 ) -> Result<Vec<omnifs_engine::DirEntry>, NsError> {
     let node = resolve_namespace(ns, path).await;
@@ -56,7 +56,7 @@ async fn list_namespace(
     }
 }
 
-async fn read_namespace(ns: &TreeNamespace, path: &str) -> Result<ReadAnswer, NsError> {
+async fn read_namespace(ns: &EngineNamespace, path: &str) -> Result<ReadAnswer, NsError> {
     let node = resolve_namespace(ns, path).await;
     ns.read(node.path.clone(), 0, u32::MAX).await
 }

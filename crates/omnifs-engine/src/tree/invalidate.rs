@@ -3,7 +3,7 @@
 use omnifs_api::events::CacheKind;
 use omnifs_core::path::Path;
 
-use crate::TreeNamespace;
+use crate::EngineNamespace;
 
 /// Neutral half of the invalidation fan-out. `Tree` has already done its own mem
 /// eviction; the renderer consumes this to drive its kernel notifier (FUSE
@@ -22,7 +22,7 @@ impl InvalidationReport {
     }
 }
 
-impl TreeNamespace {
+impl EngineNamespace {
     /// SYNC drain of pending runtime invalidations for a mount. Does the
     /// Tree-owned mem eviction (`Runtime::mem_invalidate_entries_if`) and
     /// returns the neutral `InvalidationReport` so the renderer drives its own

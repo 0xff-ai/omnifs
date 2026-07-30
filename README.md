@@ -32,13 +32,13 @@ omnifs status
 
 ---
 
-For a direct, scriptable path, create mounts one at a time with `omnifs mount add <provider>`. Each command records a mount-spec commit in the Git repository at `~/.omnifs/mounts/`; `omnifs up` starts or restarts the daemon against that committed revision. `omnifs apply` is an exact alias of `omnifs up`.
+For a direct, scriptable path, create mounts one at a time with `omnifs mount add <provider>`. Mounts, credentials, and provider artifacts are daemon-owned state changed through local typed RPC. The CLI starts the daemon when a command needs it; there is no separate apply or offline mode.
 
 ```bash
 omnifs mount add github
 omnifs mount add dns
 omnifs mount update github --config-json '{"owner":"0xff-ai"}'
-omnifs up
+omnifs status
 omnifs fs create --name local --protocol fuse --runtime host --location "$HOME/omnifs"
 omnifs fs attach --name local
 omnifs status
@@ -71,7 +71,7 @@ omnifs fs shell --name guest -- ls -la /omnifs/github
 omnifs fs detach --name guest
 ```
 
-Every attached filesystem exposes every configured mount. `omnifs mount add` resolves and retains one exact content-addressed provider artifact, records that pin in desired state, and `omnifs up` applies the pin without installing or selecting another artifact.
+Every attached filesystem exposes every configured mount. `omnifs mount add` resolves and retains one exact content-addressed provider artifact through daemon RPC; the daemon validates the mount before serving it.
 
 `omnifs mount update NAME` changes only named auth, config, or limits fields and rejects a stale concurrent edit. Use `--no-auth`, `--clear-config`, or `--clear-limits` for explicit removal.
 
@@ -153,7 +153,7 @@ omnifs makes the path the interface:
 
 That gives existing tools a common substrate. `grep -r`, `find`, `jq`, `tar`, `diff`, `head`, `tail`, and editors can all operate without provider-specific clients. Agents get the same benefit: open a path and read bytes.
 
-The projected namespace is read-only. Mount commands change the local Git-backed desired state under `OMNIFS_HOME`, and `omnifs up` applies one complete committed revision; projected issue, PR, container, and DNS files are never direct mutation controls.
+The projected namespace is read-only. Mount commands change daemon-owned state through local RPC; projected issue, PR, container, and DNS files are never direct mutation controls.
 
 ## Providers
 
@@ -267,7 +267,7 @@ For runtime behavior, validate through the host daemon and attached filesystem:
 ```bash
 just dev -y
 omnifs status
-tail -n 80 ~/.omnifs-dev/cache/daemon.log
+tail -n 80 ~/.omnifs-dev/daemon-state/logs/daemon.log
 ```
 
 ## Current status
@@ -276,7 +276,7 @@ tail -n 80 ~/.omnifs-dev/cache/daemon.log
 - A host CLI on npm that handles mounts, auth, lifecycle, logs, status, and inspection.
 - Sandboxed Wasm providers that can only reach the network, Git, sockets, and files the host hands them.
 - Host-held credentials, layered caching, and `omnifs inspect` for a live view of what the runtime is doing.
-- Git-backed mount desired state, immutable daemon startup revisions, and cache-only browsing through `omnifs up --offline`.
+- Daemon-owned SQLite state and typed local RPC for mounts, credentials, providers, logs, and attachments.
 - Nine live providers: GitHub, DNS, arXiv, Docker, Linear, SQLite, Kubernetes, Web, and Oura.
 
 ## License

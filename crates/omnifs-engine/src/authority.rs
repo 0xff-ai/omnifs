@@ -9,8 +9,7 @@ use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use omnifs_workspace::mounts::Spec;
-use omnifs_workspace::provider::{
+use omnifs_provider::{
     AccessNeed, ConfigMetadata, HostResourceBinding, PreopenMode, PreopenedPath, ProviderManifest,
 };
 use reqwest::Url;
@@ -79,9 +78,8 @@ impl RuntimeAuthority {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn resolve(
         manifest: &ProviderManifest,
-        spec: &Spec,
+        config: Option<&serde_json::Value>,
     ) -> Result<Arc<Self>, AuthorityError> {
-        let config = spec.config_raw.as_ref();
         let metadata = manifest.config.as_ref();
         let mut domains = BTreeSet::new();
         let mut git_patterns = Vec::new();
@@ -205,7 +203,7 @@ impl RuntimeAuthority {
             domains,
             git_patterns,
             unix_sockets,
-            preopens: resolve_preopens(manifest, spec)?,
+            preopens: resolve_preopens(manifest, config)?,
         }))
     }
 
@@ -286,7 +284,7 @@ impl RuntimeAuthority {
 
 fn resolve_preopens(
     manifest: &ProviderManifest,
-    spec: &Spec,
+    config: Option<&serde_json::Value>,
 ) -> Result<Vec<PreopenedPath>, AuthorityError> {
     let Some(metadata) = manifest.config.as_ref() else {
         return Ok(Vec::new());
@@ -301,9 +299,7 @@ fn resolve_preopens(
     preopen_fields
         .into_iter()
         .map(|(field, mode)| {
-            let configured = spec
-                .config_raw
-                .as_ref()
+            let configured = config
                 .and_then(|value| value.get(field))
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| AuthorityError::Config {
@@ -525,30 +521,10 @@ fn is_private_or_link_local(ip: &IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{AuthorityError, RuntimeAuthority, decode_socket_endpoint};
-    use omnifs_core::ProviderId;
-    use omnifs_workspace::ids::{ProviderMeta, ProviderName, ProviderRef};
-    use omnifs_workspace::mounts::Spec;
-    use omnifs_workspace::provider::{
+    use omnifs_provider::{
         AccessNeed, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding,
         LimitDeclarations, PreopenMode, PreopenedPath, ProviderManifest,
     };
-
-    fn spec() -> Spec {
-        Spec {
-            provider: ProviderRef {
-                id: ProviderId::from_wasm_bytes(b"authority-test"),
-                meta: ProviderMeta {
-                    name: ProviderName::new("authority-test").unwrap(),
-                    version: None,
-                },
-            },
-            mount: "authority-test".to_owned(),
-            auth: None,
-            limits: None,
-            config_raw: None,
-        }
-    }
-
     fn manifest(capabilities: Vec<AccessNeed>, config: Option<ConfigMetadata>) -> ProviderManifest {
         ProviderManifest {
             id: "authority-test".to_owned(),
@@ -614,7 +590,7 @@ mod tests {
             None,
         );
         assert!(matches!(
-            RuntimeAuthority::resolve(&dynamic_preopen, &spec()),
+            RuntimeAuthority::resolve(&dynamic_preopen, None),
             Err(AuthorityError::Config {
                 kind: "preopenedPath",
                 ..
@@ -637,7 +613,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            RuntimeAuthority::resolve(&unpaired_file, &spec()),
+            RuntimeAuthority::resolve(&unpaired_file, None),
             Err(AuthorityError::Binding { kind: "preopenedPath", field, .. })
                 if field == "path"
         ));
@@ -653,11 +629,10 @@ mod tests {
             why: "test".to_owned(),
             dynamic: true,
         }];
-        let mut paired_spec = spec();
-        paired_spec.config_raw = Some(serde_json::json!({
+        let paired_config = serde_json::json!({
             "path": file.path().display().to_string()
-        }));
-        let authority = RuntimeAuthority::resolve(&paired_manifest, &paired_spec).unwrap();
+        });
+        let authority = RuntimeAuthority::resolve(&paired_manifest, Some(&paired_config)).unwrap();
         assert_eq!(authority.preopens().len(), 1);
         let preopen = &authority.preopens()[0];
         let parent = file.path().parent().unwrap();
@@ -667,9 +642,8 @@ mod tests {
             parent.canonicalize().unwrap()
         );
 
-        paired_spec.config_raw = None;
         assert!(matches!(
-            RuntimeAuthority::resolve(&paired_manifest, &paired_spec),
+            RuntimeAuthority::resolve(&paired_manifest, None),
             Err(AuthorityError::Config { kind: "preopenedPath", field, .. })
                 if field == "path"
         ));

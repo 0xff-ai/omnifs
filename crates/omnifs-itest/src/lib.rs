@@ -1,16 +1,19 @@
 pub mod live;
 pub mod matrix;
 
+use omnifs_core::ProviderRef;
 use omnifs_core::path::{Path, Segment};
 use omnifs_engine::test_support::TestOp;
-use omnifs_engine::{BuildError, Engine, EngineError, MountTable, TreeNamespace};
+use omnifs_engine::{
+    BuildError, Engine, EngineError, EngineNamespace, MountBuildInput, MountBuildState, MountTable,
+    ProviderBuildInput, RuntimeMountConfig,
+};
+use omnifs_provider::{Artifact, ProviderManifest};
 use omnifs_wit::provider::types::{
     ByteSource, Callout, Effects, HttpRequest, ListChildrenResult, LookupChildResult,
     ReadFileOutcome, ReadFileResult,
 };
-use omnifs_workspace::ids::ProviderRef;
-use omnifs_workspace::mounts::Spec;
-use omnifs_workspace::provider::{Artifact, Catalog, ProviderStore};
+use serde::Serialize;
 use std::path::{Path as StdPath, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
@@ -25,13 +28,9 @@ pub struct RuntimeHarness {
     pub registry: Arc<MountTable>,
     pub runtime: Arc<Engine>,
     /// The single namespace owner for this immutable startup snapshot.
-    pub namespace: Arc<TreeNamespace>,
+    pub namespace: Arc<EngineNamespace>,
     pub clone_dir: TempDir,
     pub cache_dir: TempDir,
-    pub config_dir: TempDir,
-    /// Per-harness content-addressed provider store the runtime resolves from.
-    pub providers_dir: TempDir,
-    pub mounts_dir: TempDir,
     /// An owned executor for synchronous fixtures that have no ambient Tokio
     /// runtime. It is declared last so the namespace, registry, and temporary
     /// directories drop before the executor.
@@ -67,9 +66,6 @@ impl RuntimeHarness {
         };
         let clone_dir = tempdir()?;
         let cache_dir = tempdir()?;
-        let config_dir = tempdir()?;
-        let providers_dir = tempdir()?;
-        let mounts_dir = tempdir()?;
         let (handle, owned_runtime) = if let Ok(handle) = tokio::runtime::Handle::try_current() {
             (handle, None)
         } else {
@@ -82,62 +78,34 @@ impl RuntimeHarness {
             (runtime.handle().clone(), Some(runtime))
         };
 
-        // Pin the named provider into this harness's provider store and rewrite
-        // the test config's `provider` field to the resulting `ProviderRef`, so
-        // resolution and serving go through the content-addressed path the host
-        // uses in production.
-        let mut specs = configs_json
+        // Validate each provider artifact once and pass its bytes and manifest
+        // directly to the same durable mount builder used by the daemon. The
+        // harness must not create a temporary Registry or mount-spec file just
+        // to exercise an in-process runtime.
+        let mounts = configs_json
             .iter()
-            .map(|config_json| pin_spec_from_json(config_json, providers_dir.path()))
+            .map(|config_json| mount_input_from_json(config_json))
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Mirror the CLI's creation-time inheritance: bake the pinned provider's
-        // manifest defaults into the spec before serving, so the harness exercises
-        // the same already-hydrated spec the daemon sees in production.
-        let catalog = Catalog::open(providers_dir.path());
-        for spec in &mut specs {
-            let provider = catalog
-                .get(&spec.provider.id)
-                .map_err(|error| BuildError::InvalidConfig(error.to_string()))?
-                .ok_or_else(|| BuildError::InvalidConfig("pinned provider missing".to_string()))?;
-            let manifest = provider
-                .manifest()
-                .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-            spec.apply_auth_default(&manifest);
-            spec.apply_config_defaults(&manifest);
-        }
-        let selected_mount = specs
+        let selected_mount = mounts
             .first()
             .expect("non-empty harness specs")
-            .mount
-            .clone();
-        let host = omnifs_engine::test_support::open_test_host(
-            cache_dir.path(),
-            providers_dir.path(),
-            config_dir.path().join("credentials.json"),
-            clone_dir.path(),
-        )
-        .map_err(|error| BuildError::Cache(error.to_string()))?;
-        let mut desired = omnifs_workspace::mounts::Registry::load(mounts_dir.path())
-            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-        for spec in &specs {
-            desired
-                .put(spec)
-                .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-        }
+            .config
+            .name
+            .to_string();
+        let host = omnifs_engine::test_support::open_test_host(cache_dir.path(), clone_dir.path())
+            .map_err(|error| BuildError::Cache(error.to_string()))?;
         let registry = if capture_test_callouts {
-            omnifs_engine::test_support::load_mount_table_for_callout_tests(
-                &host, &desired, &handle,
-            )
+            omnifs_engine::test_support::load_mount_table_for_callout_tests(&host, mounts)
         } else {
-            MountTable::load_online(&host, &desired, &handle)
+            MountTable::prepare_durable(&host, mounts)
         }
         .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
         let registry = Arc::new(registry);
         let runtime = registry
             .get(&selected_mount)
             .ok_or_else(|| BuildError::InvalidConfig("test mount did not load".to_string()))?;
-        let namespace = TreeNamespace::online(Arc::clone(&registry), handle);
+        let namespace = EngineNamespace::online(Arc::clone(&registry), handle);
 
         Ok(Self {
             registry,
@@ -145,9 +113,6 @@ impl RuntimeHarness {
             namespace,
             clone_dir,
             cache_dir,
-            config_dir,
-            providers_dir,
-            mounts_dir,
             _owned_runtime: owned_runtime,
         })
     }
@@ -334,40 +299,138 @@ pub fn make_initialized_runtime(config_json: &str) -> RuntimeHarness {
     RuntimeHarness::new(config_json).unwrap()
 }
 
-/// Pin the provider named in `config_json`'s `provider` field into the provider
-/// store under `providers_dir`, then return the config as a `Spec` whose
-/// `provider` is the resulting `ProviderRef`. This routes test resolution and
-/// serving through the content-addressed path the host uses in production.
-fn pin_spec_from_json(config_json: &str, providers_dir: &StdPath) -> Result<Spec, BuildError> {
-    let mut value: serde_json::Value = serde_json::from_str(config_json)
+/// Build the daemon-facing durable input for one JSON test mount.
+///
+/// This keeps the test helper's public JSON convenience while making the
+/// runtime boundary explicit: provider bytes, validated metadata, canonical
+/// mount bytes, and the state-neutral runtime config all travel together.
+pub fn mount_input_from_json(config_json: &str) -> Result<MountBuildInput, BuildError> {
+    let value: serde_json::Value = serde_json::from_str(config_json)
         .map_err(|error| BuildError::InvalidConfig(format!("parse test config: {error}")))?;
-    let provider_file = value
+    let object = value.as_object().ok_or_else(|| {
+        BuildError::InvalidConfig("test config must be a JSON object".to_string())
+    })?;
+    for key in object.keys() {
+        if !matches!(
+            key.as_str(),
+            "provider" | "mount" | "auth" | "limits" | "config"
+        ) {
+            return Err(BuildError::InvalidConfig(format!(
+                "test config has unknown field `{key}`"
+            )));
+        }
+    }
+    let provider_file = object
         .get("provider")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| BuildError::InvalidConfig("test config has no string `provider`".into()))?
-        .to_string();
-    let reference = pin_provider(providers_dir, &provider_file)?;
-    value["provider"] = serde_json::to_value(&reference)
-        .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-    serde_json::from_value(value)
-        .map_err(|error| BuildError::InvalidConfig(format!("build test spec: {error}")))
+        .ok_or_else(|| BuildError::InvalidConfig("test config has no string `provider`".into()))?;
+    let mount = object
+        .get("mount")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| BuildError::InvalidConfig("test config has no string `mount`".into()))?;
+    let name = omnifs_core::MountName::new(mount.to_owned())
+        .map_err(|error| BuildError::InvalidConfig(format!("invalid mount `{mount}`: {error}")))?;
+
+    let (reference, bytes, manifest) = pin_provider(provider_file)?;
+    let config = object
+        .get("config")
+        .cloned()
+        .or_else(|| {
+            manifest
+                .config
+                .as_ref()
+                .map(omnifs_provider::ConfigMetadata::defaults)
+        })
+        .unwrap_or_else(|| serde_json::json!({}));
+    let max_fetch_blob_bytes = object
+        .get("limits")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|limits| limits.get("max_fetch_blob_bytes"))
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                BuildError::InvalidConfig(
+                    "limits.max_fetch_blob_bytes must be an unsigned integer".to_string(),
+                )
+            })
+        })
+        .transpose()?;
+    let canonical = canonical_mount_bytes(
+        &reference,
+        mount,
+        object.get("auth").cloned(),
+        object.get("limits").cloned(),
+        object.get("config").cloned().or_else(|| {
+            manifest
+                .config
+                .as_ref()
+                .map(omnifs_provider::ConfigMetadata::defaults)
+        }),
+    )?;
+
+    Ok(MountBuildInput {
+        config: RuntimeMountConfig {
+            name,
+            provider: reference,
+            config,
+            max_fetch_blob_bytes,
+        },
+        canonical,
+        provider: Some(ProviderBuildInput { bytes, manifest }),
+        state: MountBuildState::Active {
+            // Auth bindings are daemon-owned. These provider integration tests
+            // use canned callouts and do not inject credentials.
+            auth: None,
+            credential_generation: None,
+        },
+    })
 }
 
-/// Lay the built `provider_file` WASM into the provider store and return its pinned
-/// reference, named from the artifact's embedded manifest id (which can differ
-/// from the file stem, e.g. `test_provider.wasm` -> `test-provider`).
-fn pin_provider(providers_dir: &StdPath, provider_file: &str) -> Result<ProviderRef, BuildError> {
+/// Read and validate a built provider artifact. The returned bytes remain in
+/// the harness so the engine can build directly from this validated input.
+fn pin_provider(
+    provider_file: &str,
+) -> Result<(ProviderRef, Arc<[u8]>, ProviderManifest), BuildError> {
     let src = provider_wasm_path(provider_file);
     let bytes = std::fs::read(&src)
         .map_err(|error| BuildError::InvalidConfig(format!("read {}: {error}", src.display())))?;
-    let artifact = Artifact::from_bytes(provider_file, bytes)
+    let (artifact, manifest) = Artifact::from_bytes_with_manifest(provider_file, bytes.clone())
         .map_err(|error| BuildError::InvalidConfig(format!("{provider_file}: {error}")))?;
-    let reference = artifact.reference();
-    let store = ProviderStore::new(providers_dir);
-    store
-        .retain(&artifact)
-        .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
-    Ok(reference)
+    Ok((
+        artifact.reference(),
+        Arc::from(bytes.into_boxed_slice()),
+        manifest,
+    ))
+}
+
+#[derive(Serialize)]
+struct CanonicalMount<'a> {
+    provider: ProviderRef,
+    mount: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limits: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<serde_json::Value>,
+}
+
+fn canonical_mount_bytes(
+    provider: &ProviderRef,
+    mount: &str,
+    auth: Option<serde_json::Value>,
+    limits: Option<serde_json::Value>,
+    config: Option<serde_json::Value>,
+) -> Result<Arc<[u8]>, BuildError> {
+    let mut bytes = serde_json::to_vec_pretty(&CanonicalMount {
+        provider: provider.clone(),
+        mount,
+        auth,
+        limits,
+        config,
+    })
+    .map_err(|error| BuildError::InvalidConfig(format!("serialize test mount: {error}")))?;
+    bytes.push(b'\n');
+    Ok(Arc::from(bytes.into_boxed_slice()))
 }
 
 pub fn project_paths(effects: &Effects) -> Vec<&str> {

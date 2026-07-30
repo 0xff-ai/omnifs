@@ -8,7 +8,7 @@ The `omnifs` command-line tool and host-native daemon. It mounts [omnifs](https:
 npm install -g @0xff-ai/omnifs
 ```
 
-The npm package installs the native `omnifs` binary for Linux and macOS. `omnifs up` starts the hidden host-native daemon; named filesystems are independent runners managed with `omnifs fs`. Providers, credentials, and caching never run in a container.
+The npm package installs the native `omnifs` binary for Linux and macOS. Commands start the hidden host-native daemon through its local control socket; named filesystems are independent runners managed with `omnifs fs`. Providers, credentials, and caching never run in a container.
 
 Host filesystems run through the full binary's hidden `omnifs run-fs` command. Docker and libkrun guests use the slim `omnifs-thin` runner. The Docker FUSE filesystem uses the version-matched `ghcr.io/0xff-ai/omnifs-filesystem:<version>` image. Local development uses `omnifs-filesystem:dev` and never pulls it.
 
@@ -27,7 +27,7 @@ omnifs setup --providers github
 omnifs fs ls
 ```
 
-`omnifs setup` is a thin first-run composition: it configures exact embedded providers, starts the daemon, creates named platform filesystems, and attaches them. `--no-up` configures mounts without launching lifecycle actions. The CLI stores credentials, mount specs, and filesystem specs under `OMNIFS_HOME`.
+`omnifs setup` is a thin first-run composition: it configures exact embedded providers through daemon RPC, starts the daemon, creates named platform filesystems, and attaches them. `--no-up` configures mounts without launching lifecycle actions. The CLI stores profile config at `OMNIFS_HOME/config.toml` and filesystem state under `OMNIFS_HOME/client`; the daemon stores credentials, mounts, providers, cache, and logs under `OMNIFS_HOME/daemon-state`.
 
 ## Platform
 

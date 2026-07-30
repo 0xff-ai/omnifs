@@ -17,7 +17,7 @@ target/debug/omnifs fs detach --name dev-host   # stop the host filesystem proce
 target/debug/omnifs down                       # stop the daemon
 ```
 
-`scripts/dev.ts` is contributor-only and requires a source checkout. It resolves a dedicated dev home at `~/.omnifs-dev`, compiles the CLI with the provider-store bundle embedded, invokes `mount add` so selected artifacts are retained and pinned under `~/.omnifs-dev`, writes host credentials through the normal CLI path, and pins `[filesystem].docker_image` in `~/.omnifs-dev/config.toml` at an image tagged `omnifs-filesystem:<short-sha>-dev`. The daemon itself is host-native, not containerized: no home bind mount, no daemon container. Dev auth uses host tokens: set `GITHUB_TOKEN` or `LINEAR_API_KEY`, or allow the script to read `gh auth token` for GitHub when prompted. Authenticated mounts without a token are skipped rather than started broken.
+`scripts/dev.ts` is contributor-only and requires a source checkout. It resolves a dedicated profile at `~/.omnifs-dev`, compiles the CLI with the provider-store bundle embedded, invokes `mount add` over local RPC so selected artifacts are retained by the daemon, writes host credentials through the normal CLI path, and pins `[filesystem].docker_image` in `~/.omnifs-dev/config.toml` at an image tagged `omnifs-filesystem:<short-sha>-dev`. The daemon itself is host-native, not containerized: no home bind mount, no daemon container. Dev auth uses host tokens: set `GITHUB_TOKEN` or `LINEAR_API_KEY`, or allow the script to read `gh auth token` for GitHub when prompted. Authenticated mounts without a token are skipped rather than started broken.
 
 A locally built `omnifs` binary targets the `omnifs-filesystem:dev` image by default and never pulls; produce that image with `just dev --build-only`, which builds providers, the CLI, and the filesystem image, tags it `omnifs-filesystem:dev`, and exits without starting a session.
 
@@ -56,7 +56,7 @@ target/debug/omnifs status
 target/debug/omnifs --output json status | jq '.result | {filesystems, mounts, providers}'
 FILESYSTEM=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
 docker exec "$FILESYSTEM" sh -c 'ls /omnifs/github/0xff-ai/omnifs/issues/open'
-tail -n 80 ~/.omnifs-dev/cache/daemon.log
+tail -n 80 ~/.omnifs-dev/daemon-state/logs/daemon.log
 ```
 
 `scripts/ci/smoke-native-filesystem.sh` is the standalone equivalent CI's `smoke-amd64`/`smoke-arm64` jobs run: it starts its own throwaway dev home (not `~/.omnifs-dev`), reads real GitHub data through both the host mount path and a `docker exec` into the filesystem container, and tears everything down again. Run it directly with `FILESYSTEM_IMAGE=omnifs-filesystem:dev GITHUB_TOKEN=$(gh auth token) scripts/ci/smoke-native-filesystem.sh` instead of the block above when you want a scripted pass/fail rather than a session to poke at.
@@ -65,7 +65,7 @@ For provider path-surface changes, test the whole shell traversal, not only the 
 
 ## Runtime debugging
 
-- The daemon is host-native: its log is `~/.omnifs-dev/cache/daemon.log` on the host, not inside any container.
+- The daemon is host-native: its raw log is `~/.omnifs-dev/daemon-state/logs/daemon.log` on the host, not inside any container.
 - `docker logs "$FILESYSTEM"` shows the filesystem container's own stdout/stderr; it only ever runs `omnifs-thin --protocol fuse`, so a mount-serving failure is almost always in the daemon log instead.
 - Clone failures should surface in the daemon log with `git clone` stderr.
 - FUSE `access(...)` warnings are expected noise unless they correlate with a real failure.
@@ -75,15 +75,15 @@ For provider path-surface changes, test the whole shell traversal, not only the 
 
 When a repo path returns `Input/output error`, check:
 
-1. `tail -n 80 ~/.omnifs-dev/cache/daemon.log`
+1. `tail -n 80 ~/.omnifs-dev/daemon-state/logs/daemon.log`
 2. SSH auth on the host (the daemon runs host-native, not in a container)
-3. whether the mount is still present (`mount | grep omnifs` on Linux; the daemon's own daemon record on macOS)
+3. whether the mount is still present (`mount | grep omnifs` on Linux; `target/debug/omnifs status` on macOS)
 
 When debugging hangs or slow paths, start with user-visible probes before theory:
 
 1. `cd /github/<owner>`
 2. `cat /dns/@google/<domain>/MX`
-3. `tail -n 80 ~/.omnifs-dev/cache/daemon.log`
+3. `tail -n 80 ~/.omnifs-dev/daemon-state/logs/daemon.log`
 
 The filesystem image is a minimal `debian:trixie-slim` (GNU coreutils/findutils, fuse3, jq, rsync, tar, xxd; `Dockerfile`'s `filesystem-base`), deliberately without zsh, gum, or any shell rc customization: it only ever runs `omnifs-thin --protocol fuse`, and an interactive session there is `/bin/sh`. Do not add interactive-shell tooling to it; that belongs to the host shell the contributor already has.
 
@@ -95,7 +95,7 @@ Prefer `From` and `TryFrom` at type boundaries instead of `foo_to_bar` free func
 
 Keep free functions when:
 
-- orphan rules block a cross-crate impl, for example `credential_entry_from_token` from an oauth2 token to `omnifs_workspace::creds::CredentialEntry`
+- orphan rules block a cross-crate impl, for example `credential_entry_from_token` from an oauth2 token to `omnifs_auth::CredentialEntry`
 - extra context is required, for example `io_context_into(context, error)` or `push_projected_file_content(records, path, file)`
 - the helper is callout-specific extraction for `CalloutFuture`, meaning `fn(CalloutResult) -> Result<T>`. Do not use `TryFrom<CalloutResult>` for single-variant unwraps.
 - the mapping is conditional or formatting-only, for example HTTP `status_error` with 429 and `retry-after` handling

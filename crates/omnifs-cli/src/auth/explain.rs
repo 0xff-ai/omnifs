@@ -6,7 +6,7 @@
 //! token to create, which app to register); that guidance is paired with this
 //! canned copy at the point of display by `omnifs mount add`'s auth step.
 
-use omnifs_workspace::authn::OAuthFlow;
+use omnifs_auth::OAuthFlow;
 
 /// What the user actually does, a sentence or two.
 pub(crate) fn experience(flow: &OAuthFlow) -> &'static str {

@@ -23,11 +23,11 @@ Provider component validation must enable the component-model async validation f
 
 ### Generated schemas
 
-The provider manifest schema is generated from provider model types. The local control protocol is handwritten typed wire code in `omnifs-api`, so it has no generated control-plane artifact. Keep the provider schema synchronized with its source model.
+The provider manifest schema is generated from provider model types. The local control protocol uses the checked-in `crates/omnifs-api/proto/control/v1/control.proto`; `crates/omnifs-api/build.rs` invokes vendored `protoc` and emits tonic/protobuf Rust into Cargo's build output. Generated control Rust is not checked in. Keep the provider schema synchronized with its source model.
 
 Run `just schema` after provider manifest schema changes. Keep the generated provider schema checked in when its source model changes.
 
-The control protocol has one current version in every request and reply envelope. `DaemonStatus` retains operational nested types consumed by Inventory, and `FilesystemInfo.mount_point` remains the per-filesystem wire field. Protocol tests exercise the typed request/reply shapes directly.
+The control protocol has one current protobuf package, `omnifs.control.v1`; it does not use a postcard frame or a separate version prefix. Unary messages and stream items are bounded to 1 MiB, and log tails to 10,000 lines. `DaemonStatus` retains operational nested types consumed by Inventory, and `FilesystemInfo.mount_point` remains the per-filesystem wire field. Protocol tests exercise the generated service boundary and typed domain conversions directly.
 
 ### Live runtime validation
 
@@ -43,7 +43,7 @@ Run `just check` before a push or PR handoff; it composes formatting, justfile a
 
 ### Cross-language facts on the container boundary
 
-The daemon always runs host-native, so `OMNIFS_HOME` resolves from the host environment on every platform. `omnifs_workspace::Workspace` owns that resolution and all derived paths. Guest runtimes use the fixed location `/omnifs`; `fs::Spec` stores it, launchers pass it through `--location`, and `scripts/dev.ts` uses the same value. The image entrypoint contains only `/usr/local/bin/omnifs-thin`; the launcher supplies the flat ID, protocol, runtime, and location arguments.
+The daemon always runs host-native, so `OMNIFS_HOME` resolves from the host environment on every platform. `omnifs-bootstrap::Bootstrap<Client>` owns client-side profile resolution and spawn or stale-record cleanup; `Bootstrap<Daemon>` owns daemon-side control-socket binding and process-identity publication. Client filesystem state lives under `<profile>/client`; daemon SQLx state, cache, and logs live under `<profile>/daemon-state`. Guest runtimes use the fixed location `/omnifs`; `fs::Spec` stores it, launchers pass it through `--location`, and `scripts/dev.ts` uses the same value. The image entrypoint contains only `/usr/local/bin/omnifs-thin`; the launcher supplies the flat ID, protocol, runtime, and location arguments.
 
 ### Filesystem image artifact
 
@@ -110,7 +110,9 @@ This lane can **never** run in GitHub-hosted CI: libkrun boots a libkrun microVM
 - `scripts/ci/check-doc-links.sh`
 - `scripts/ci/check-doc-contracts.sh`
 - `crates/omnifs-api/src/control.rs`
-- `crates/omnifs-workspace/schema/omnifs.provider.schema.json`
+- `crates/omnifs-bootstrap/src/lib.rs`
+- `crates/omnifs-state/src/lib.rs`
+- `crates/omnifs-provider/schema/omnifs.provider.schema.json`
 - `crates/omnifs-itest/src/lib.rs`
 - `crates/omnifs-itest/src/matrix.rs`
 - `crates/omnifs-itest/tests/filesystem_libkrun/main.rs`
@@ -157,7 +159,7 @@ just dev -y
 target/debug/omnifs status
 FILESYSTEM=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
 docker exec -it -w /omnifs "$FILESYSTEM" /bin/sh
-tail -n 80 ~/.omnifs-dev/cache/daemon.log
+tail -n 80 ~/.omnifs-dev/daemon-state/logs/daemon.log
 ```
 
 Filesystem image, built standalone (no daemon, no attach):

@@ -22,9 +22,10 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+omnifs-provider = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
 omnifs-wit = { workspace = true, features = ["host-bindings"] }
-omnifs-workspace = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

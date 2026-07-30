@@ -1,16 +1,14 @@
-//! Top-level error formatter with structured `Try:` recovery hints.
+//! Error classification: exit codes, the `HintedError` wrapper, and the
+//! typed structured-output envelope.
 //!
 //! Hints are accumulated on a `HintedError` wrapper that sits at the head of
 //! the anyhow error chain. `with_hint` either appends to an existing
-//! `HintedError` or creates a new one. The human renderer walks
-//! the chain, collects hints from the wrapper, and turns them into the
-//! `render.rs` error block: a headline, an optional detail (a daemon log
-//! tail when the failure is daemon-shaped, otherwise the cause chain), and
-//! `Fix:`/`Log:`/`Try:` action lines.
+//! `HintedError` or creates a new one. Turning a classified error chain into
+//! rendered bytes (the human error block) is `ui::render`'s job, not this
+//! module's; it calls back into [`message_chain`] and [`hints`] to read the
+//! chain this module owns.
 
 use std::borrow::Cow;
-
-use crate::ui::render;
 
 pub(crate) use crate::ui::output::{ErrorEnvelope, ErrorPayload, ErrorVerdict};
 
@@ -73,23 +71,6 @@ struct HintedError {
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("{source}")]
-struct DaemonLaunchFailure {
-    #[source]
-    source: anyhow::Error,
-}
-
-pub(crate) fn daemon_launch_failure(error: anyhow::Error) -> anyhow::Error {
-    anyhow::Error::new(DaemonLaunchFailure { source: error })
-}
-
-fn includes_daemon_launch(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(<dyn std::error::Error + 'static>::is::<DaemonLaunchFailure>)
-}
-
 impl HintedError {
     /// Find the wrapper anywhere in the cause chain so hints and exit codes
     /// survive callers adding context above it.
@@ -106,28 +87,32 @@ pub trait WithExitCode<T> {
     fn with_exit_code(self, exit_code: ExitCode) -> anyhow::Result<T>;
 }
 
+/// Find-or-create the `HintedError` at the head of `err`, then apply `mutate`
+/// to it: to the wrapper already there if `err` is already one, or to a
+/// freshly built one (no hints, the generic exit code) otherwise. Shared by
+/// `with_hint` (which appends a hint) and `with_exit_code` (which overwrites
+/// the exit code) so the downcast-or-wrap dance, needed so a hint attached at
+/// a low-level call site survives `.context()` wrapping above it, has one
+/// owner instead of two copies that must be kept in sync by hand.
+fn ensure_hinted(err: anyhow::Error, mutate: impl FnOnce(&mut HintedError)) -> anyhow::Error {
+    let mut hinted = match err.downcast::<HintedError>() {
+        Ok(hinted) => hinted,
+        Err(err) => HintedError {
+            hints: Vec::new(),
+            exit_code: ExitCode::GenericFailure,
+            source: err.into(),
+        },
+    };
+    mutate(&mut hinted);
+    anyhow::Error::new(hinted)
+}
+
 impl<T, E> WithHint<T> for Result<T, E>
 where
     E: Into<anyhow::Error>,
 {
     fn with_hint(self, hint: impl Into<Cow<'static, str>>) -> anyhow::Result<T> {
-        match self {
-            Ok(value) => Ok(value),
-            Err(error) => {
-                let mut err: anyhow::Error = error.into();
-                // If a HintedError is already at the head, downcast and append
-                // rather than stacking another wrapper.
-                if let Some(hinted) = err.downcast_mut::<HintedError>() {
-                    hinted.hints.push(hint.into());
-                    return Err(err);
-                }
-                Err(anyhow::Error::new(HintedError {
-                    hints: vec![hint.into()],
-                    exit_code: ExitCode::GenericFailure,
-                    source: err.into(),
-                }))
-            },
-        }
+        self.map_err(|error| ensure_hinted(error.into(), |hinted| hinted.hints.push(hint.into())))
     }
 }
 
@@ -136,21 +121,7 @@ where
     E: Into<anyhow::Error>,
 {
     fn with_exit_code(self, exit_code: ExitCode) -> anyhow::Result<T> {
-        match self {
-            Ok(value) => Ok(value),
-            Err(error) => {
-                let mut err: anyhow::Error = error.into();
-                if let Some(hinted) = err.downcast_mut::<HintedError>() {
-                    hinted.exit_code = exit_code;
-                    return Err(err);
-                }
-                Err(anyhow::Error::new(HintedError {
-                    hints: Vec::new(),
-                    exit_code,
-                    source: err.into(),
-                }))
-            },
-        }
+        self.map_err(|error| ensure_hinted(error.into(), |hinted| hinted.exit_code = exit_code))
     }
 }
 
@@ -160,7 +131,7 @@ pub(crate) fn exit_code(error: &anyhow::Error) -> ExitCode {
 
 /// Collect the deduplicated message chain, most-specific first, dropping the
 /// empty display strings the `HintedError` wrapper delegates away.
-fn message_chain(error: &anyhow::Error) -> Vec<String> {
+pub(crate) fn message_chain(error: &anyhow::Error) -> Vec<String> {
     error
         .chain()
         .map(ToString::to_string)
@@ -173,15 +144,21 @@ fn message_chain(error: &anyhow::Error) -> Vec<String> {
         })
 }
 
+/// The `Try:` hints accumulated on the `HintedError` wrapper, most-recently
+/// attached last, or empty when the chain never picked one up.
+pub(crate) fn hints(error: &anyhow::Error) -> Vec<String> {
+    HintedError::find(error)
+        .map(|hinted| hinted.hints.iter().map(ToString::to_string).collect())
+        .unwrap_or_default()
+}
+
 /// Build the structured terminal envelope without writing to a stream. The
 /// command name is supplied by the invocation owner because errors can happen
 /// before a command-specific receipt exists.
 pub(crate) fn envelope(error: &anyhow::Error, command: impl Into<String>) -> ErrorEnvelope {
     let code = exit_code(error);
     let messages = message_chain(error);
-    let hints: Vec<String> = HintedError::find(error)
-        .map(|hinted| hinted.hints.iter().map(ToString::to_string).collect())
-        .unwrap_or_default();
+    let hints = hints(error);
     let mut messages = messages.into_iter();
     ErrorEnvelope::new(
         command,
@@ -219,116 +196,6 @@ pub(crate) fn canceled_envelope(
     )
 }
 
-/// The tail of the daemon log quoted inline under a daemon-shaped failure
-/// plus the display path used for the accompanying `Log:`
-/// action. Read once at the top-level error boundary; never constructed
-/// speculatively for a non-daemon failure.
-struct DaemonLogTail {
-    lines: Vec<String>,
-    display_path: String,
-}
-
-/// Filter a daemon log to the final error and its immediate context, capped
-/// at 5 lines: the quoted block is a diagnosis, not a dump. Pure
-/// so the filtering itself is testable without a real log file.
-const DAEMON_LOG_TAIL_MAX_LINES: usize = 5;
-
-fn tail_log_lines(contents: &str) -> Vec<String> {
-    let lines: Vec<&str> = contents
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    if lines.is_empty() {
-        return Vec::new();
-    }
-    let start = lines
-        .iter()
-        .rposition(|line| line.contains("ERROR"))
-        .unwrap_or_else(|| lines.len().saturating_sub(DAEMON_LOG_TAIL_MAX_LINES));
-    let end = lines.len().min(start + DAEMON_LOG_TAIL_MAX_LINES);
-    lines[start..end]
-        .iter()
-        .map(|line| (*line).to_owned())
-        .collect()
-}
-
-/// Best-effort read of the current workspace's daemon log tail. Any I/O or
-/// workspace-resolution failure degrades to `None`.
-fn read_daemon_log_tail() -> Option<DaemonLogTail> {
-    let workspace = omnifs_workspace::Workspace::resolve().ok()?;
-    let log_path = workspace.daemon().log_file();
-    let contents = std::fs::read_to_string(&log_path).ok()?;
-    let lines = tail_log_lines(&contents);
-    if lines.is_empty() {
-        return None;
-    }
-    Some(DaemonLogTail {
-        lines,
-        display_path: omnifs_workspace::display(&log_path),
-    })
-}
-
-/// Assemble the human error block from an error chain and an
-/// optional daemon log tail. Pure: the caller decides whether the failure is
-/// daemon-shaped and does the (real or injected) log read, so this function
-/// stays testable without touching a filesystem.
-fn build_error_block(
-    error: &anyhow::Error,
-    daemon_log: Option<&DaemonLogTail>,
-) -> render::ErrorBlock {
-    let code = exit_code(error);
-    let messages = message_chain(error);
-    let hints: Vec<String> = HintedError::find(error)
-        .map(|hinted| hinted.hints.iter().map(ToString::to_string).collect())
-        .unwrap_or_default();
-
-    let headline = messages
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "omnifs failed.".to_owned());
-
-    let detail = if let Some(tail) = daemon_log {
-        Some(render::ErrorDetail {
-            heading: "Last daemon log lines:".to_owned(),
-            lines: tail.lines.clone(),
-        })
-    } else if messages.len() > 1 {
-        Some(render::ErrorDetail {
-            heading: "Caused by:".to_owned(),
-            lines: messages[1..].to_vec(),
-        })
-    } else {
-        None
-    };
-
-    let mut actions = Vec::new();
-    if let Some(fix) = hints.into_iter().next() {
-        actions.push(render::ErrorAction::fix(fix));
-    } else if let Some(tail) = daemon_log {
-        actions.push(render::ErrorAction::log(tail.display_path.clone()));
-    }
-
-    render::ErrorBlock {
-        headline,
-        detail,
-        actions,
-        id: Some(code.slug().to_owned()),
-    }
-}
-
-/// Renders the top-level human error block. A daemon-shaped
-/// daemon launch failure quotes the daemon log tail inline
-/// instead of only pointing at `omnifs logs`; every other failure falls back
-/// to the plain cause chain.
-pub fn render(error: &anyhow::Error) -> String {
-    let daemon_log = includes_daemon_launch(error)
-        .then(read_daemon_log_tail)
-        .flatten();
-    let block = build_error_block(error, daemon_log.as_ref());
-    let caps = crate::ui::output::stderr_capabilities(false);
-    render::error_block(&block, caps)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,15 +213,15 @@ mod tests {
     }
 
     #[test]
-    fn human_block_shows_the_stable_slug() {
+    fn human_block_omits_the_machine_slug() {
         let base = anyhow::anyhow!("boom").context("outer");
         let error = WithExitCode::with_exit_code(
             Err::<(), anyhow::Error>(base),
             ExitCode::DaemonUnavailable,
         )
         .unwrap_err();
-        let rendered = strip_ansi(&render(&error));
-        assert!(rendered.contains("(id: daemon-unavailable)"), "{rendered}");
+        let rendered = strip_ansi(&crate::ui::render::render_error(&error));
+        assert!(!rendered.contains("daemon-unavailable"), "{rendered}");
     }
 
     #[test]
@@ -390,110 +257,5 @@ mod tests {
                 }
             })
         );
-    }
-
-    fn daemon_unreachable_error(message: &str, fix: &str) -> anyhow::Error {
-        WithHint::with_hint(
-            WithExitCode::with_exit_code(
-                Err::<(), anyhow::Error>(anyhow::anyhow!(message.to_owned())),
-                ExitCode::DaemonUnavailable,
-            ),
-            fix.to_owned(),
-        )
-        .unwrap_err()
-    }
-
-    #[test]
-    fn human_error_block_matches_the_documented_shape_with_a_daemon_log_tail() {
-        // the worked example, exercised through error.rs's own
-        // construction (not just render.rs's primitive test) to prove the
-        // wiring: headline, bounded detail, and one best action.
-        let error = daemon_unreachable_error(
-            "The daemon exited before your mounts came ready.",
-            "omnifs mount add github",
-        );
-        let tail = DaemonLogTail {
-            lines: vec!["ERROR provider github: pinned artifact missing from store".to_owned()],
-            display_path: "~/.omnifs/cache/daemon.log".to_owned(),
-        };
-        let block = build_error_block(&error, Some(&tail));
-        let caps = crate::ui::render::Capabilities {
-            width: 120,
-            is_tty: false,
-            color: false,
-            quiet: false,
-        };
-        let rendered = crate::ui::render::error_block(&block, caps);
-        assert_eq!(
-            rendered,
-            "✗ The daemon exited before your mounts came ready.\n\
-             \n\
-             \x20\x20Last daemon log lines:\n\
-             \x20\x20\x20\x20ERROR provider github: pinned artifact missing from store\n\
-             \n\
-             Fix:  omnifs mount add github\n\
-             \n\
-             (id: daemon-unavailable)\n"
-        );
-    }
-
-    #[test]
-    fn only_explicit_launch_failures_request_a_daemon_tail() {
-        let ordinary = daemon_unreachable_error("status failed", "omnifs doctor");
-        assert!(!includes_daemon_launch(&ordinary));
-        let launch = daemon_launch_failure(ordinary);
-        assert!(includes_daemon_launch(&launch));
-    }
-
-    #[test]
-    fn human_error_block_falls_back_to_the_cause_chain_without_a_daemon_log() {
-        let error = anyhow::anyhow!("boom").context("outer");
-        let block = build_error_block(&error, None);
-        assert_eq!(block.headline, "outer");
-        let detail = block.detail.expect("cause chain becomes the detail");
-        assert_eq!(detail.heading, "Caused by:");
-        assert_eq!(detail.lines, vec!["boom".to_owned()]);
-    }
-
-    #[test]
-    fn human_error_block_never_duplicates_a_nested_id_trailer() {
-        // A cause that already carries a rendered `(id: ...)` trailer (e.g. a
-        // pre-rendered nested error folded into the message chain) must not
-        // duplicate it once the outer block adds its own trailer.
-        let error =
-            anyhow::anyhow!("upstream failed (id: mount-degraded)").context("Mount degraded.");
-        let block = build_error_block(&error, None);
-        let caps = crate::ui::render::Capabilities {
-            width: 120,
-            is_tty: false,
-            color: false,
-            quiet: false,
-        };
-        let rendered = crate::ui::render::error_block(&block, caps);
-        assert_eq!(rendered.matches("(id: ").count(), 1, "{rendered}");
-    }
-
-    #[test]
-    fn tail_log_lines_finds_the_final_error_and_caps_at_five_lines() {
-        let contents = (0..10)
-            .map(|i| format!("INFO line {i}"))
-            .chain(std::iter::once("ERROR boom".to_owned()))
-            .chain((0..10).map(|i| format!("INFO after {i}")))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let tail = tail_log_lines(&contents);
-        assert_eq!(tail.len(), 5);
-        assert_eq!(tail[0], "ERROR boom");
-
-        let no_error = (0..20)
-            .map(|i| format!("INFO line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let tail = tail_log_lines(&no_error);
-        assert_eq!(tail.len(), 5);
-        assert_eq!(tail[4], "INFO line 19");
-
-        assert!(tail_log_lines("").is_empty());
-        assert!(tail_log_lines("\n\n  \n").is_empty());
     }
 }

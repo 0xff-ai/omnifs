@@ -257,6 +257,16 @@ pub(crate) fn heading(text: &str, caps: Capabilities) -> String {
     style::bold(text, caps.color)
 }
 
+/// One human narration line: inline command spans (`` `cmd` ``) accent-color
+/// and drop their backticks, everything else plain, terminated with a
+/// newline. Shared by `Output::narrate` (the whole line is caller text) and
+/// `Output::answer` (the durable prompt echo, built by backtick-quoting the
+/// answer before calling this, which reproduces the same accent-only-the-answer
+/// shape without a second styling path).
+pub(crate) fn narration_line(text: &str, caps: Capabilities) -> String {
+    format!("{}\n", style::accentuate(text, caps.color))
+}
+
 /// The indented "Last daemon log lines:"-style detail under an error
 /// headline.
 #[derive(Debug, Clone)]
@@ -279,13 +289,6 @@ impl ErrorAction {
             value: command.into(),
         }
     }
-
-    pub(crate) fn log(path: impl Into<String>) -> Self {
-        Self {
-            label: "Log",
-            value: path.into(),
-        }
-    }
 }
 
 /// The error block shape. Wiring a live error into this shape belongs to the
@@ -295,21 +298,6 @@ pub(crate) struct ErrorBlock {
     pub(crate) headline: String,
     pub(crate) detail: Option<ErrorDetail>,
     pub(crate) actions: Vec<ErrorAction>,
-    pub(crate) id: Option<String>,
-}
-
-/// Strip an embedded `(id: <slug>)` trailer from a pre-rendered nested error
-/// message. A cause folded into an [`ErrorDetail`] may already carry the
-/// trailer from when it was rendered standalone; the outer block adds its own
-/// trailer once at the end, so a nested one would duplicate it.
-pub(crate) fn strip_id_trailer(text: &str) -> String {
-    let trimmed = text.trim_end();
-    if trimmed.ends_with(')')
-        && let Some(start) = trimmed.rfind("(id: ")
-    {
-        return trimmed[..start].trim_end().to_owned();
-    }
-    text.to_owned()
 }
 
 pub(crate) fn error_block(block: &ErrorBlock, caps: Capabilities) -> String {
@@ -326,7 +314,7 @@ pub(crate) fn error_block(block: &ErrorBlock, caps: Capabilities) -> String {
         out.push('\n');
         for line in &detail.lines {
             out.push_str("    ");
-            out.push_str(&strip_id_trailer(line));
+            out.push_str(line);
             out.push('\n');
         }
     }
@@ -341,13 +329,48 @@ pub(crate) fn error_block(block: &ErrorBlock, caps: Capabilities) -> String {
         }
     }
 
-    if let Some(id) = &block.id {
-        out.push('\n');
-        out.push_str(&style::dim(format!("(id: {id})"), caps.color));
-        out.push('\n');
+    out
+}
+
+/// Assemble the human error block from an error's message chain and `Try:`
+/// hints. Pure given those two extracted inputs, so it stays testable
+/// without touching a filesystem or a real terminal; `crate::error` owns
+/// walking the anyhow chain to produce them.
+fn build_error_block(messages: &[String], hints: &[String]) -> ErrorBlock {
+    let headline = messages
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "omnifs failed.".to_owned());
+
+    let detail = if messages.len() > 1 {
+        Some(ErrorDetail {
+            heading: "Caused by:".to_owned(),
+            lines: messages[1..].to_vec(),
+        })
+    } else {
+        None
+    };
+
+    let mut actions = Vec::new();
+    if let Some(fix) = hints.first() {
+        actions.push(ErrorAction::fix(fix.clone()));
     }
 
-    out
+    ErrorBlock {
+        headline,
+        detail,
+        actions,
+    }
+}
+
+/// Renders the top-level human error block for an anyhow error chain. Daemon
+/// logs stay behind the live control stream and are never opened by this
+/// error path.
+pub(crate) fn render_error(error: &anyhow::Error) -> String {
+    let messages = crate::error::message_chain(error);
+    let hints = crate::error::hints(error);
+    let caps = super::output::stderr_capabilities(false);
+    error_block(&build_error_block(&messages, &hints), caps)
 }
 
 #[cfg(test)]
@@ -516,12 +539,15 @@ mod tests {
 
     #[test]
     fn sentence_accentuates_backticks_per_color_mode() {
-        let text = "Run `omnifs up` to start.";
+        let text = "Run `omnifs setup` to start.";
         assert_eq!(
             sentence(text, caps(120, true)),
-            format!("Run {} to start.", style::accent("omnifs up", true))
+            format!("Run {} to start.", style::accent("omnifs setup", true))
         );
-        assert_eq!(sentence(text, caps(120, false)), "Run omnifs up to start.");
+        assert_eq!(
+            sentence(text, caps(120, false)),
+            "Run omnifs setup to start."
+        );
     }
 
     #[test]
@@ -541,11 +567,7 @@ mod tests {
                 heading: "Last daemon log lines:".to_owned(),
                 lines: vec!["ERROR provider github: pinned artifact missing from store".to_owned()],
             }),
-            actions: vec![
-                ErrorAction::fix("omnifs mount add github"),
-                ErrorAction::log("~/.omnifs/cache/daemon.log"),
-            ],
-            id: Some("daemon-unreachable".to_owned()),
+            actions: vec![ErrorAction::fix("omnifs mount add github")],
         };
         let rendered = error_block(&block, caps(120, false));
         assert_eq!(
@@ -555,32 +577,29 @@ mod tests {
              \x20\x20Last daemon log lines:\n\
              \x20\x20\x20\x20ERROR provider github: pinned artifact missing from store\n\
              \n\
-             Fix:  omnifs mount add github\n\
-             Log:  ~/.omnifs/cache/daemon.log\n\
-             \n\
-             (id: daemon-unreachable)\n"
+             Fix:  omnifs mount add github\n"
         );
     }
 
     #[test]
-    fn error_block_strips_a_duplicate_id_trailer_from_detail_lines() {
-        assert_eq!(
-            strip_id_trailer("pinned artifact missing (id: mount-degraded)"),
-            "pinned artifact missing"
-        );
-        assert_eq!(strip_id_trailer("no trailer here"), "no trailer here");
+    fn built_error_block_falls_back_to_the_cause_chain_without_a_fix_hint() {
+        let messages = vec!["outer".to_owned(), "boom".to_owned()];
+        let block = build_error_block(&messages, &[]);
+        assert_eq!(block.headline, "outer");
+        let detail = block.detail.expect("cause chain becomes the detail");
+        assert_eq!(detail.heading, "Caused by:");
+        assert_eq!(detail.lines, vec!["boom".to_owned()]);
+        assert!(block.actions.is_empty());
+    }
 
-        let block = ErrorBlock {
-            headline: "Mount degraded.".to_owned(),
-            detail: Some(ErrorDetail {
-                heading: "Caused by:".to_owned(),
-                lines: vec!["upstream failed (id: mount-degraded)".to_owned()],
-            }),
-            actions: Vec::new(),
-            id: Some("mount-degraded".to_owned()),
-        };
-        let rendered = error_block(&block, caps(120, false));
-        assert_eq!(rendered.matches("(id: mount-degraded)").count(), 1);
+    #[test]
+    fn built_error_block_takes_the_first_hint_as_its_one_fix_action() {
+        let messages = vec!["daemon not running".to_owned()];
+        let hints = vec!["omnifs daemon start".to_owned()];
+        let block = build_error_block(&messages, &hints);
+        assert!(block.detail.is_none());
+        assert_eq!(block.actions.len(), 1);
+        assert_eq!(block.actions[0].value, "omnifs daemon start");
     }
 
     #[test]

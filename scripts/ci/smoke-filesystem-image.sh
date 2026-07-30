@@ -19,6 +19,7 @@ echo "== fails loudly without an attach target =="
 set +e
 output="$(
   docker run --rm "$IMAGE" \
+    --client-owner 00000000000000000000000000000000 \
     --name smoke \
     --protocol fuse \
     --runtime docker \

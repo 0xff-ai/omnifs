@@ -1,12 +1,12 @@
 //! Host filesystem launch, runner probing, and control.
 
+use crate::client_fs_state::ClientFilesystemState;
 use anyhow::{Context as _, Result, ensure};
 use omnifs_core::fs;
 use omnifs_mtab::{RunnerClaim, RunnerRecord};
 use omnifs_thin::host_control::{
     RunnerControlClient, RunnerPhase, StopOutcome, control_socket_for,
 };
-use omnifs_workspace::FilesystemState;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -36,40 +36,117 @@ pub(crate) fn probe(protocol: fs::Protocol) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn phase(
-    filesystem: &FilesystemState,
-    spec: &fs::Spec,
-) -> Result<Option<RunnerPhase>> {
-    let mount_point = spec.location();
-    let state_dir = filesystem.state_dir(spec.id());
-    let Some(record) = RunnerRecord::read(&state_dir)? else {
-        if omnifs_nfs::mount_is_active_checked(mount_point)? {
-            anyhow::bail!(
-                "active host filesystem mount {} has no runner record; run `omnifs doctor`",
-                mount_point.display()
-            );
-        }
-        return Ok(None);
-    };
-    validate_record(&record, spec)?;
-    let state = RunnerControlClient::new(&record)
-        .ping()
-        .await
-        .with_context(|| {
-            format!(
-                "host filesystem at {} could not confirm runner {}; run `omnifs doctor`",
-                mount_point.display(),
-                record.instance_id
-            )
-        })?;
-    Ok(Some(state.phase))
+/// The host filesystem runner: a durable per-filesystem state directory
+/// holding the runner record and control socket. Unlike Docker or libkrun,
+/// the host runner is a bare directory with no owned process handle between
+/// calls, so every method rediscovers the runner process through its record.
+pub(crate) struct HostDriver {
+    state_dir: PathBuf,
 }
 
-pub(crate) async fn launch(filesystem: &FilesystemState, spec: &fs::Spec) -> Result<()> {
-    probe(spec.protocol())?;
-    PendingHostFilesystem::spawn(filesystem, spec)?
-        .wait_until_mounted(spec)
+impl HostDriver {
+    pub(crate) fn new(state_dir: PathBuf) -> Self {
+        Self { state_dir }
+    }
+
+    /// Prove a live, identity-matched runner, returning its confirmed record
+    /// and phase together so a caller that needs to act on the identity (for
+    /// example, stop it) does not have to re-read the record from disk.
+    pub(crate) async fn confirmed(
+        &self,
+        spec: &fs::Spec,
+    ) -> Result<Option<(RunnerRecord, RunnerPhase)>> {
+        let mount_point = spec.location();
+        let Some(record) = RunnerRecord::read(&self.state_dir)? else {
+            if omnifs_nfs::mount_is_active_checked(mount_point)? {
+                anyhow::bail!(
+                    "active host filesystem mount {} has no runner record; run `omnifs doctor`",
+                    mount_point.display()
+                );
+            }
+            return Ok(None);
+        };
+        validate_record(&record, spec)?;
+        let state = RunnerControlClient::new(&record)
+            .ping()
+            .await
+            .with_context(|| {
+                format!(
+                    "host filesystem at {} could not confirm runner {}; run `omnifs doctor`",
+                    mount_point.display(),
+                    record.instance_id
+                )
+            })?;
+        Ok(Some((record, state.phase)))
+    }
+
+    pub(crate) async fn launch(
+        &self,
+        ctx: &crate::filesystem_driver::LaunchContext<'_>,
+    ) -> Result<()> {
+        probe(ctx.spec.protocol())?;
+        PendingHostFilesystem::spawn(
+            &self.state_dir,
+            ctx.client_state,
+            ctx.client_owner,
+            ctx.spec,
+            ctx.attach_unix()?,
+        )?
+        .wait_until_mounted(ctx.spec)
         .await
+    }
+
+    /// The one teardown entry point for a proven identity: reconfirm the
+    /// runner still matches `expected`, then request its stop and wait for
+    /// cleanup. Callers without an already-confirmed record obtain one from
+    /// [`Self::confirmed`] first; an identity that has already disappeared is a
+    /// no-op there, not an error here.
+    pub(crate) async fn stop_confirmed(&self, expected: &RunnerRecord) -> Result<()> {
+        let record = RunnerRecord::read(&self.state_dir)?
+            .context("runner record disappeared before confirmed stop")?;
+        ensure!(
+            record == *expected,
+            "runner identity changed before confirmed stop"
+        );
+        let client = RunnerControlClient::new(&record);
+        client.ping().await.context("reconfirm host filesystem")?;
+        let (_, outcome) = client.stop().await?;
+        wait_for_cleanup(&self.state_dir, record.spec.location(), outcome).await
+    }
+
+    pub(crate) async fn cleanup_stale(&self, expected: &RunnerRecord) -> Result<()> {
+        let _claim = RunnerClaim::acquire(&self.state_dir)?;
+        let record = RunnerRecord::read(&self.state_dir)?
+            .context("runner record disappeared before stale cleanup")?;
+        ensure!(
+            record == *expected,
+            "runner identity changed before stale cleanup"
+        );
+        ensure!(
+            RunnerControlClient::new(&record).ping().await.is_err(),
+            "runner became reachable before stale cleanup"
+        );
+        ensure!(
+            !omnifs_nfs::mount_is_active_checked(record.spec.location())?,
+            "mount became active before stale cleanup"
+        );
+        ensure!(
+            !omnifs_mtab::process_group_exists(record.process_group)?,
+            "recorded process group {} still exists; refusing stale cleanup",
+            record.process_group
+        );
+        match std::fs::remove_file(self.state_dir.join("runner.json")) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+        match std::fs::remove_file(&record.control_socket) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
 }
 
 struct PendingHostFilesystem {
@@ -80,9 +157,15 @@ struct PendingHostFilesystem {
 }
 
 impl PendingHostFilesystem {
-    fn spawn(filesystem: &FilesystemState, spec: &fs::Spec) -> Result<Self> {
-        let state_dir = filesystem.state_dir(spec.id());
-        let instance_id = new_instance_id()?;
+    fn spawn(
+        state_dir: &Path,
+        filesystem: &ClientFilesystemState,
+        client_owner: omnifs_core::ClientOwnerId,
+        spec: &fs::Spec,
+        attach_socket: &Path,
+    ) -> Result<Self> {
+        let state_dir = state_dir.to_path_buf();
+        let instance_id = crate::process::new_instance_id("host filesystem")?;
         let control_socket = control_socket_for(&state_dir, &instance_id);
         let executable = std::env::current_exe().context("resolve the omnifs executable")?;
         let log_path = filesystem.host_log(spec.id());
@@ -103,6 +186,8 @@ impl PendingHostFilesystem {
         let mut command = Command::new(&executable);
         command
             .arg("run-fs")
+            .arg("--client-owner")
+            .arg(client_owner.to_string())
             .arg("--name")
             .arg(spec.id().as_str())
             .arg("--protocol")
@@ -114,7 +199,7 @@ impl PendingHostFilesystem {
             .arg("--state-dir")
             .arg(&state_dir)
             .arg("--attach")
-            .arg(filesystem.attach_socket())
+            .arg(attach_socket)
             .arg("--runner-instance")
             .arg(&instance_id)
             .arg("--runner-control")
@@ -142,83 +227,88 @@ impl PendingHostFilesystem {
         })
     }
 
-    async fn wait_until_mounted(mut self, spec: &fs::Spec) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
-        let mut last_phase = None;
-        loop {
-            if let Some(status) = self
-                .child
-                .try_wait()
-                .context("inspect host filesystem process")?
-            {
-                anyhow::bail!(
-                    "host filesystem `{}` exited with {status}; see {}",
-                    spec.id(),
-                    self.log_path.display()
-                );
-            }
-            match RunnerRecord::read(&self.state_dir) {
-                Ok(Some(record)) if record.instance_id == self.instance_id => {
-                    validate_record(&record, spec)?;
-                    if let Ok(state) = RunnerControlClient::new(&record).ping().await {
-                        last_phase = Some(state.phase.clone());
-                        match state.phase {
-                            RunnerPhase::Mounted => return Ok(()),
-                            RunnerPhase::Failed { message } => anyhow::bail!(
-                                "host filesystem `{}` failed: {message}; see {}",
-                                spec.id(),
-                                self.log_path.display()
-                            ),
-                            RunnerPhase::Preflight
-                            | RunnerPhase::Attaching
-                            | RunnerPhase::Mounting
-                            | RunnerPhase::Stopping
-                            | RunnerPhase::Busy => {},
-                        }
+    async fn wait_until_mounted(self, spec: &fs::Spec) -> Result<()> {
+        // Bundled (including `spec`) so the check closure captures nothing
+        // from the enclosing scope and takes everything by explicit `&mut`
+        // argument instead: an `FnMut` closure cannot itself return a future
+        // that borrows its own captured environment, but a fresh reborrow of
+        // an argument can.
+        struct Wait<'a> {
+            pending: PendingHostFilesystem,
+            spec: &'a fs::Spec,
+            last_phase: Option<RunnerPhase>,
+        }
+        let mut wait = Wait {
+            pending: self,
+            spec,
+            last_phase: None,
+        };
+        let ready =
+            crate::process::poll_until_mut(STARTUP_TIMEOUT, POLL_INTERVAL, &mut wait, |wait| {
+                Box::pin(async move {
+                    if let Some(status) = wait
+                        .pending
+                        .child
+                        .try_wait()
+                        .context("inspect host filesystem process")?
+                    {
+                        anyhow::bail!(
+                            "host filesystem `{}` exited with {status}; see {}",
+                            wait.spec.id(),
+                            wait.pending.log_path.display()
+                        );
                     }
-                },
-                Ok(Some(record)) => anyhow::bail!(
-                    "host filesystem state at {} belongs to runner {}; run `omnifs doctor`",
-                    self.state_dir.display(),
-                    record.instance_id
-                ),
-                Ok(None) => {},
-                Err(error) => return Err(error.into()),
-            }
-            if tokio::time::Instant::now() >= deadline {
-                let phase = phase_label(last_phase);
+                    match RunnerRecord::read(&wait.pending.state_dir) {
+                        Ok(Some(record)) if record.instance_id == wait.pending.instance_id => {
+                            validate_record(&record, wait.spec)?;
+                            if let Ok(state) = RunnerControlClient::new(&record).ping().await {
+                                wait.last_phase = Some(state.phase.clone());
+                                match state.phase {
+                                    RunnerPhase::Mounted => return Ok(Some(())),
+                                    RunnerPhase::Failed { message } => anyhow::bail!(
+                                        "host filesystem `{}` failed: {message}; see {}",
+                                        wait.spec.id(),
+                                        wait.pending.log_path.display()
+                                    ),
+                                    RunnerPhase::Preflight
+                                    | RunnerPhase::Attaching
+                                    | RunnerPhase::Mounting
+                                    | RunnerPhase::Stopping
+                                    | RunnerPhase::Busy => {},
+                                }
+                            }
+                        },
+                        Ok(Some(record)) => anyhow::bail!(
+                            "host filesystem state at {} belongs to runner {}; run `omnifs doctor`",
+                            wait.pending.state_dir.display(),
+                            record.instance_id
+                        ),
+                        Ok(None) => {},
+                        Err(error) => return Err(error.into()),
+                    }
+                    Ok(None)
+                })
+            })
+            .await?;
+        ready.map_or_else(
+            || {
+                let phase = phase_label(wait.last_phase.clone());
                 anyhow::bail!(
                     "host filesystem `{}` did not confirm mount startup within {}s; \
                      last proved phase was {phase}; runner {} was left alive for safe cleanup; see {}",
                     spec.id(),
                     STARTUP_TIMEOUT.as_secs(),
-                    self.instance_id,
-                    self.log_path.display()
-                );
-            }
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
+                    wait.pending.instance_id,
+                    wait.pending.log_path.display()
+                )
+            },
+            Ok,
+        )
     }
 }
 
 fn phase_label(phase: Option<RunnerPhase>) -> String {
     phase.map_or_else(|| "unconfirmed".to_owned(), |phase| format!("{phase:?}"))
-}
-
-pub(crate) async fn stop(filesystem: &FilesystemState, spec: &fs::Spec) -> Result<()> {
-    let mount_point = spec.location();
-    let state_dir = filesystem.state_dir(spec.id());
-    let Some(record) = RunnerRecord::read(&state_dir)? else {
-        ensure!(
-            !omnifs_nfs::mount_is_active_checked(mount_point)?,
-            "active host filesystem mount {} has no runner record; run `omnifs doctor`",
-            mount_point.display()
-        );
-        return Ok(());
-    };
-    validate_record(&record, spec)?;
-    let (_, outcome) = RunnerControlClient::new(&record).stop().await?;
-    wait_for_cleanup(&state_dir, mount_point, outcome).await
 }
 
 async fn wait_for_cleanup(
@@ -231,15 +321,15 @@ async fn wait_for_cleanup(
         StopOutcome::Busy { message } => Some(message),
         StopOutcome::Failed { message } => anyhow::bail!("{message}"),
     };
-    let deadline = tokio::time::Instant::now() + STOP_TIMEOUT;
-    loop {
+    crate::process::poll_until(STOP_TIMEOUT, POLL_INTERVAL, || async {
         let record_gone = RunnerRecord::read(state_dir)?.is_none();
         let mount_gone = !omnifs_nfs::mount_is_active(mount_point);
-        if record_gone && mount_gone {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            if let Some(message) = busy_message {
+        Ok((record_gone && mount_gone).then_some(()))
+    })
+    .await?
+    .map_or_else(
+        || {
+            if let Some(message) = &busy_message {
                 anyhow::bail!(
                     "{message}; cleanup did not finish within {}s",
                     STOP_TIMEOUT.as_secs()
@@ -250,12 +340,12 @@ async fn wait_for_cleanup(
                 mount_point.display(),
                 STOP_TIMEOUT.as_secs()
             );
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
+        },
+        Ok,
+    )
 }
 
-pub(crate) async fn probe_all(filesystem: &FilesystemState) -> Result<Vec<RunnerProbe>> {
+pub(crate) async fn owned(filesystem: &ClientFilesystemState) -> Result<Vec<RunnerProbe>> {
     let mut probes = Vec::new();
     let entries = match std::fs::read_dir(filesystem.state_root()) {
         Ok(entries) => entries,
@@ -267,7 +357,7 @@ pub(crate) async fn probe_all(filesystem: &FilesystemState) -> Result<Vec<Runner
             Ok(entry) => entry.path(),
             Err(error) => {
                 probes.push(RunnerProbe::Invalid {
-                    state_dir: filesystem.state_root().to_path_buf(),
+                    state_dir: filesystem.state_root().clone(),
                     error: error.to_string(),
                 });
                 continue;
@@ -298,53 +388,6 @@ pub(crate) async fn probe_all(filesystem: &FilesystemState) -> Result<Vec<Runner
     Ok(probes)
 }
 
-pub(crate) async fn stop_confirmed(state_dir: &Path, expected: &RunnerRecord) -> Result<()> {
-    let record = RunnerRecord::read(state_dir)?
-        .context("runner record disappeared before confirmed stop")?;
-    ensure!(
-        record == *expected,
-        "runner identity changed before confirmed stop"
-    );
-    let client = RunnerControlClient::new(&record);
-    client.ping().await.context("reconfirm host filesystem")?;
-    let (_, outcome) = client.stop().await?;
-    wait_for_cleanup(state_dir, record.spec.location(), outcome).await
-}
-
-pub(crate) async fn cleanup_stale(state_dir: &Path, expected: &RunnerRecord) -> Result<()> {
-    let _claim = RunnerClaim::acquire(state_dir)?;
-    let record =
-        RunnerRecord::read(state_dir)?.context("runner record disappeared before stale cleanup")?;
-    ensure!(
-        record == *expected,
-        "runner identity changed before stale cleanup"
-    );
-    ensure!(
-        RunnerControlClient::new(&record).ping().await.is_err(),
-        "runner became reachable before stale cleanup"
-    );
-    ensure!(
-        !omnifs_nfs::mount_is_active_checked(record.spec.location())?,
-        "mount became active before stale cleanup"
-    );
-    ensure!(
-        !omnifs_mtab::process_group_exists(record.process_group)?,
-        "recorded process group {} still exists; refusing stale cleanup",
-        record.process_group
-    );
-    match std::fs::remove_file(state_dir.join("runner.json")) {
-        Ok(()) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-        Err(error) => return Err(error.into()),
-    }
-    match std::fs::remove_file(&record.control_socket) {
-        Ok(()) => {},
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-        Err(error) => return Err(error.into()),
-    }
-    Ok(())
-}
-
 fn validate_record(record: &RunnerRecord, spec: &fs::Spec) -> Result<()> {
     ensure!(
         record.spec == *spec,
@@ -354,17 +397,9 @@ fn validate_record(record: &RunnerRecord, spec: &fs::Spec) -> Result<()> {
     Ok(())
 }
 
-fn new_instance_id() -> Result<String> {
-    let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes).context("generate host filesystem instance id")?;
-    Ok(hex::encode(bytes))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_workspace::Workspace;
-
     #[tokio::test]
     async fn busy_stop_waits_for_runner_cleanup() {
         let temp = tempfile::tempdir().unwrap();
@@ -410,8 +445,7 @@ mod tests {
     #[tokio::test]
     async fn corrupt_runner_leaf_does_not_hide_a_valid_sibling() {
         let temp = tempfile::tempdir().unwrap();
-        let workspace = Workspace::under_root(temp.path());
-        let filesystem = workspace.filesystem_state();
+        let filesystem = ClientFilesystemState::under_root(&temp.path().join("client"));
         let valid_id = fs::Id::new("valid").unwrap();
         let invalid_id = fs::Id::new("invalid").unwrap();
         let valid_dir = filesystem.state_dir(&valid_id);
@@ -439,7 +473,7 @@ mod tests {
         .unwrap();
         std::fs::write(invalid_dir.join("runner.json"), b"{broken").unwrap();
 
-        let probes = probe_all(filesystem).await.unwrap();
+        let probes = owned(&filesystem).await.unwrap();
         assert_eq!(probes.len(), 2);
         assert!(probes.iter().any(|probe| matches!(
             probe,

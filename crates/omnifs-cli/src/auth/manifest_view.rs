@@ -1,5 +1,4 @@
-use anyhow::anyhow;
-use omnifs_workspace::authn::{AuthManifest, OauthScheme};
+use omnifs_auth::AuthManifest;
 
 const DEFAULT_STATIC_SCHEME: &str = "static-token";
 
@@ -10,15 +9,6 @@ pub(crate) struct AuthManifestView<'a> {
 impl<'a> AuthManifestView<'a> {
     pub(crate) fn new(manifest: Option<&'a AuthManifest>) -> Self {
         Self { manifest }
-    }
-
-    pub(crate) fn oauth_scheme(&self, requested: Option<&str>) -> anyhow::Result<&'a OauthScheme> {
-        let manifest = self
-            .manifest
-            .ok_or_else(|| anyhow!("provider has no auth manifest"))?;
-        manifest
-            .resolve_oauth_scheme(requested)
-            .map_err(anyhow::Error::from)
     }
 
     pub(crate) fn static_token_scheme_key(
@@ -41,34 +31,6 @@ impl<'a> AuthManifestView<'a> {
             anyhow::bail!("multiple static-token schemes are declared; pass --scheme");
         }
         Ok(first)
-    }
-
-    pub(super) fn configured_scheme_key(
-        &self,
-        auth: &omnifs_workspace::mounts::Auth,
-    ) -> anyhow::Result<String> {
-        let Some(manifest) = self.manifest else {
-            return match auth {
-                omnifs_workspace::mounts::Auth::StaticToken(_) => {
-                    Ok(auth.scheme().unwrap_or(DEFAULT_STATIC_SCHEME).to_owned())
-                },
-                omnifs_workspace::mounts::Auth::OAuth(_) => auth
-                    .scheme()
-                    .map(str::to_owned)
-                    .ok_or_else(|| anyhow!("missing auth.scheme")),
-            };
-        };
-
-        match auth {
-            omnifs_workspace::mounts::Auth::StaticToken(_) => manifest
-                .resolve_static_scheme(auth.scheme())
-                .map(|scheme| scheme.key.clone())
-                .map_err(anyhow::Error::from),
-            omnifs_workspace::mounts::Auth::OAuth(_) => manifest
-                .resolve_oauth_scheme(auth.scheme())
-                .map(|scheme| scheme.key.clone())
-                .map_err(anyhow::Error::from),
-        }
     }
 
     pub(crate) fn first_static_token_scheme_key(&self) -> Option<String> {

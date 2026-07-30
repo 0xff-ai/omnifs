@@ -1,7 +1,7 @@
 use crate::callback::LoopbackCallback;
 use crate::client::BoxFuture;
 use crate::{AuthError, ManualCode, UrlOpener};
-use omnifs_workspace::authn::{
+use crate::{
     ClientSideTokenConfig, DeviceCodeConfig, DevicePollCompat, KeyValue, OAuthFlow, OauthScheme,
     PkceLoopbackConfig, PkceManualCodeConfig, TokenEndpointAuthMethod,
 };

@@ -5,6 +5,7 @@ use crate::inventory::{
     ActionTarget, DaemonHealth, FilesystemState, FilesystemStatus, Inventory, MountStatus,
     NextAction, ServingState, Severity,
 };
+use crate::ui::output::ResultVerdict;
 use crate::ui::render::count;
 use crate::ui::table::{
     Action as TableAction, Block as TableBlock, Cell as TableCell, Column as TableColumn,
@@ -22,9 +23,9 @@ pub(crate) struct InventoryReport {
 }
 
 impl InventoryReport {
-    pub(crate) async fn collect(workspace: &omnifs_workspace::Workspace) -> anyhow::Result<Self> {
+    pub(crate) async fn collect() -> anyhow::Result<Self> {
         Ok(Self {
-            inventory: Inventory::collect(workspace).await?,
+            inventory: Inventory::collect_rpc().await?,
         })
     }
 
@@ -33,8 +34,8 @@ impl InventoryReport {
             ExitCode::DaemonUnavailable
         } else {
             match self.inventory.verdict() {
-                crate::inventory::Verdict::Ok => ExitCode::Success,
-                crate::inventory::Verdict::Degraded => ExitCode::Degraded,
+                ResultVerdict::Ok => ExitCode::Success,
+                ResultVerdict::Degraded => ExitCode::Degraded,
             }
         }
     }
@@ -45,8 +46,8 @@ impl InventoryReport {
         let next_action = self.inventory.next_action();
         let context_state = match daemon_health {
             DaemonHealth::Running => match self.inventory.verdict() {
-                crate::inventory::Verdict::Ok => TableState::positive("healthy"),
-                crate::inventory::Verdict::Degraded => TableState::attention("degraded"),
+                ResultVerdict::Ok => TableState::positive("healthy"),
+                ResultVerdict::Degraded => TableState::attention("degraded"),
             },
             DaemonHealth::Starting => TableState::attention("starting"),
             DaemonHealth::Degraded => TableState::attention("degraded"),
@@ -60,7 +61,7 @@ impl InventoryReport {
                 TableMeta::new("serving", count(self.inventory.mounts.len(), "mount")),
                 TableMeta::new(
                     "",
-                    count(attached_filesystem_count(&self.inventory), "filesystem"),
+                    count(self.inventory.attached_filesystem_count(), "filesystem"),
                 ),
             ],
             None => vec![TableMeta::new(
@@ -68,32 +69,28 @@ impl InventoryReport {
                 format!("{} configured", count(self.inventory.mounts.len(), "mount")),
             )],
         };
-        if let Some(warmup) = &self.inventory.warmup
-            && !warmup.is_complete()
-        {
-            metadata.push(TableMeta::new("provider warmup", warmup.summary()));
+        if let Some(active) = &self.inventory.active_mutation {
+            metadata.push(active_mutation_meta(active));
         }
         let mut context = TableContext::new(
             "omnifs",
-            omnifs_workspace::display(&self.inventory.home),
+            self.inventory.home.display().to_string(),
             context_state,
         )
         .with_metadata(metadata);
         if matches!(
             next_action,
             Some(NextAction::Doctor {
-                target: ActionTarget::Workspace
+                target: ActionTarget::Profile
             })
         ) {
             context = context.with_action(TableAction::fix("omnifs doctor"));
-        } else if matches!(next_action, Some(NextAction::StartDaemon)) {
-            context = context.with_action(TableAction::fix("omnifs up"));
         }
         report.push(TableBlock::Context(context));
 
         report.push(TableBlock::Resources(mount_table(
             &self.inventory.mounts,
-            crate::ui::access::primary_host_location(&self.inventory),
+            self.inventory.primary_host_location(),
             next_action.as_ref(),
         )));
 
@@ -126,26 +123,6 @@ impl InventoryReport {
     }
 }
 
-fn attached_filesystem_count(inventory: &Inventory) -> usize {
-    inventory
-        .filesystems
-        .iter()
-        .filter(|filesystem| filesystem.state.provides_access())
-        .count()
-}
-
-fn provider_label(mount: &MountStatus) -> String {
-    let identity = mount.provider.version.as_ref().map_or_else(
-        || mount.provider.name.clone(),
-        |version| format!("{}@{}", mount.provider.name, version),
-    );
-    if mount.provider.state.severity() >= Severity::Attention {
-        format!("{identity} ({})", mount.provider.state.label())
-    } else {
-        identity
-    }
-}
-
 /// Shared table builders for list/show consumers. The report delegates to
 /// these concrete schema owners, so callers cannot drift from status output.
 pub(crate) fn filesystem_table(
@@ -172,12 +149,12 @@ pub(crate) fn filesystem_table(
                 TableCell::new(filesystem.spec.runtime().as_str()),
                 TableCell::new(filesystem.spec.location().display().to_string()),
                 TableCell::new(format!("all {}", count(filesystem.mount_count, "mount"))),
-                TableCell::state(table_state(
-                    filesystem.state.severity(),
+                TableCell::state(TableState::new(
+                    filesystem.state.severity().into(),
                     filesystem.state.label(),
                 )),
             ],
-            table_state(filesystem.state.severity(), filesystem.state.label()),
+            TableState::new(filesystem.state.severity().into(), filesystem.state.label()),
         );
         if matches!(
             next_action,
@@ -212,10 +189,16 @@ pub(crate) fn mount_table(
         let mut row = TableRow::new(
             [
                 TableCell::new(format!("/{}", mount.name.trim_start_matches('/'))),
-                TableCell::new(provider_label(mount)),
-                TableCell::state(table_state(mount.auth.severity(), mount.auth.label())),
-                TableCell::state(table_state(mount.serving.severity(), mount.serving.label())),
-                TableCell::new(host_access_path(host_location, mount)),
+                TableCell::new(mount.provider.to_string()),
+                TableCell::state(TableState::new(
+                    mount.auth.severity().into(),
+                    mount.auth.label(),
+                )),
+                TableCell::state(TableState::new(
+                    mount.serving.severity().into(),
+                    mount.serving.label(),
+                )),
+                TableCell::new(mount.access_path(host_location)),
             ],
             mount_row_state(mount),
         );
@@ -236,15 +219,18 @@ pub(crate) fn mount_table(
     table
 }
 
-fn host_access_path(host_location: Option<&std::path::Path>, mount: &MountStatus) -> String {
-    if !matches!(mount.serving, ServingState::Live | ServingState::Offline) {
-        return String::new();
-    }
-    host_location.map_or_else(String::new, |location| {
-        omnifs_workspace::display(
-            &location.join(mount.root.strip_prefix("/").unwrap_or(mount.root.as_path())),
-        )
-    })
+/// The context strip's `mutation` row: a short-hex id plus the seconds left
+/// on its lease, so a busy daemon's status output names what is holding it
+/// without dumping the full 32-hex-character id.
+fn active_mutation_meta(active: &omnifs_api::ActiveMutation) -> TableMeta {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        });
+    let remaining_secs = active.lease_deadline_unix_ms.saturating_sub(now_ms) / 1000;
+    let short_id: String = active.mutation_id.to_string().chars().take(8).collect();
+    TableMeta::new("mutation", format!("{short_id} ({remaining_secs}s left)"))
 }
 
 fn filesystem_summary(filesystems: &[FilesystemStatus]) -> String {
@@ -258,12 +244,13 @@ fn filesystem_summary(filesystems: &[FilesystemStatus]) -> String {
             .count()
     };
     let parts = [
-        (count_state(FilesystemState::Attached), "attached"),
-        (count_state(FilesystemState::Detached), "detached"),
-        (count_state(FilesystemState::Unknown), "unknown"),
-        (count_state(FilesystemState::Failed), "failed"),
+        FilesystemState::Attached,
+        FilesystemState::Detached,
+        FilesystemState::Unknown,
+        FilesystemState::Failed,
     ]
     .into_iter()
+    .map(|state| (count_state(state), state.label()))
     .filter(|(count, _)| *count > 0)
     .map(|(count, label)| format!("{count} {label}"))
     .collect::<Vec<_>>();
@@ -282,34 +269,20 @@ fn mount_summary(mounts: &[MountStatus]) -> String {
         .iter()
         .filter(|mount| mount.serving == ServingState::Live)
         .count();
-    let offline = mounts
-        .iter()
-        .filter(|mount| mount.serving == ServingState::Offline)
-        .count();
     let needs_attention = mounts
         .iter()
-        .filter(|mount| {
-            mount.provider.state.severity() >= Severity::Attention
-                || mount.auth.severity() >= Severity::Attention
-                || mount.serving.severity() >= Severity::Attention
-        })
+        .filter(|mount| mount.needs_attention())
         .count();
     if needs_attention > 0 {
         let mut parts = Vec::new();
         if live > 0 {
             parts.push(format!("{live} live"));
         }
-        if offline > 0 {
-            parts.push(format!("{offline} offline"));
-        }
         parts.push(format!("{needs_attention} needs attention"));
         return format!("{} configured, {}", mounts.len(), parts.join(", "));
     }
     if live == mounts.len() {
         return format!("{live} live");
-    }
-    if offline == mounts.len() {
-        return format!("{offline} offline");
     }
     if mounts
         .iter()
@@ -320,32 +293,22 @@ fn mount_summary(mounts: &[MountStatus]) -> String {
     format!("{} configured", mounts.len())
 }
 
-/// One honest headline label per explicit precedence: a provider pin
-/// needing attention or failing outranks an auth needing attention, which
-/// outranks the serving state itself (healthy or not). This is a fixed
-/// priority order, never a generic "most severe of three" tie-break: a
-/// merely-informational `Severity` (auth `not needed` is `Neutral`, the
-/// same rank as `stopped`) must never beat a genuinely live mount's serving
-/// state just because it sorts alongside a higher-severity row elsewhere.
+/// The row's headline state: `MountStatus::headline` owns the precedence
+/// (provider pin outranks auth, which outranks serving), this just converts
+/// it to the table's own severity vocabulary.
 pub(crate) fn mount_row_state(mount: &MountStatus) -> TableState {
-    if mount.provider.state.severity() >= Severity::Attention {
-        return table_state(
-            mount.provider.state.severity(),
-            mount.provider.state.label(),
-        );
-    }
-    if mount.auth.severity() >= Severity::Attention {
-        return table_state(mount.auth.severity(), mount.auth.label());
-    }
-    table_state(mount.serving.severity(), mount.serving.label())
+    let (severity, label) = mount.headline();
+    TableState::new(severity.into(), label)
 }
 
-fn table_state(severity: Severity, label: impl Into<String>) -> TableState {
-    match severity {
-        Severity::Positive => TableState::positive(label),
-        Severity::Neutral => TableState::neutral(label),
-        Severity::Attention => TableState::attention(label),
-        Severity::Error => TableState::failure(label),
+impl From<Severity> for crate::ui::table::Severity {
+    fn from(severity: Severity) -> Self {
+        match severity {
+            Severity::Positive => Self::Positive,
+            Severity::Neutral => Self::Neutral,
+            Severity::Attention => Self::Attention,
+            Severity::Failure => Self::Failure,
+        }
     }
 }
 
@@ -356,6 +319,26 @@ mod tests {
     fn report(daemon: DaemonHealth) -> InventoryReport {
         let inventory = Inventory::test(daemon, Vec::new(), Vec::new());
         InventoryReport { inventory }
+    }
+
+    #[test]
+    fn status_shows_the_active_mutation_lease_when_held() {
+        let inventory = Inventory {
+            active_mutation: Some(omnifs_api::ActiveMutation {
+                mutation_id: omnifs_core::MutationId::from_bytes([0xab; 16]),
+                lease_deadline_unix_ms: u64::MAX,
+            }),
+            ..Inventory::test(DaemonHealth::Running, Vec::new(), Vec::new())
+        };
+        let rendered =
+            InventoryReport { inventory }
+                .render()
+                .render_with(crate::ui::table::RenderOptions {
+                    width: 120,
+                    color: false,
+                });
+        assert!(rendered.contains("mutation"), "{rendered}");
+        assert!(rendered.contains("abababab"), "{rendered}");
     }
 
     #[test]
@@ -446,7 +429,6 @@ mod tests {
                     auth: crate::inventory::AuthState::Ready,
                     serving: crate::inventory::ServingState::Live,
                     access_count: 1,
-                    fix: None,
                 },
                 MountStatus {
                     name: "linear".into(),
@@ -462,7 +444,6 @@ mod tests {
                     },
                     serving: crate::inventory::ServingState::Live,
                     access_count: 1,
-                    fix: Some("omnifs mount reauth linear".into()),
                 },
             ],
         );
@@ -574,7 +555,6 @@ mod tests {
             auth: crate::inventory::AuthState::NotNeeded,
             serving: crate::inventory::ServingState::Live,
             access_count: 0,
-            fix: None,
         };
         let state = mount_row_state(&mount);
         let rendered = format!("{state:?}");
@@ -598,7 +578,6 @@ mod tests {
             auth: crate::inventory::AuthState::Ready,
             serving: crate::inventory::ServingState::Live,
             access_count: 0,
-            fix: None,
         };
         let rendered = format!("{:?}", mount_row_state(&mount));
         assert!(rendered.contains("corrupt"), "{rendered}");
@@ -620,7 +599,6 @@ mod tests {
             },
             serving: crate::inventory::ServingState::Stopped,
             access_count: 0,
-            fix: None,
         };
         let rendered = format!("{:?}", mount_row_state(&mount));
         assert!(rendered.contains("expired"), "{rendered}");

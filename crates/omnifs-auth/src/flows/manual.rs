@@ -1,9 +1,9 @@
+use crate::CredentialEntry;
 use crate::client::OAuthClient;
 use crate::error::AuthError;
 use crate::flows::{authorization_url, exchange_code};
 use crate::request::ManualCodeLoginRequest;
 use oauth2::{AuthorizationCode, CsrfToken, PkceCodeChallenge, RedirectUrl};
-use omnifs_workspace::creds::CredentialEntry;
 use std::future::Future;
 use url::Url;
 

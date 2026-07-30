@@ -5,39 +5,35 @@
 //! verdict decisions below are pure.
 
 use anyhow::Result;
-use omnifs_api::{DaemonStatus, HealthState};
-use omnifs_core::{MountName, fs};
-use omnifs_workspace::creds::FileStore;
-use omnifs_workspace::daemon_record::DaemonRecord;
-use omnifs_workspace::mounts::{Registry, Revision};
-use omnifs_workspace::provider::Catalog;
+#[cfg(test)]
+use omnifs_api::DaemonPhase;
+use omnifs_api::{CredentialHealth, DaemonInventory, HealthState, MountHealth};
+use omnifs_core::MountRevision;
+use omnifs_core::fs;
 use serde::Serialize;
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::auth::{AuthReadiness, MountAuth};
-use crate::provider_warmup::WarmupStatus;
-use omnifs_workspace::Workspace;
+use crate::client_fs_state::ClientFilesystemState;
+use crate::ui::output::ResultVerdict;
+use omnifs_bootstrap::{Bootstrap, Client};
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Inventory {
     pub(crate) home: PathBuf,
-    pub(crate) mount_revision: Option<Revision>,
-    pub(crate) applied_revision: Option<Revision>,
+    pub(crate) durable_revision: Option<MountRevision>,
+    pub(crate) serving_revision: Option<MountRevision>,
+    /// The daemon's single mutation lease, when a batch currently holds it.
+    pub(crate) active_mutation: Option<omnifs_api::ActiveMutation>,
     pub(crate) daemon: DaemonFacts,
     pub(crate) filesystems: Vec<FilesystemStatus>,
     pub(crate) mounts: Vec<MountStatus>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) warmup: Option<WarmupStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct DaemonFacts {
-    pub(crate) status: Option<DaemonStatus>,
+    pub(crate) status: Option<DaemonInventory>,
     pub(crate) probe: DaemonProbe,
-    #[serde(skip_serializing)]
-    pub(crate) runtime: Option<DaemonRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -62,12 +58,8 @@ impl DaemonFacts {
     pub(crate) fn health(&self) -> DaemonHealth {
         match (&self.probe, self.status.as_ref()) {
             (DaemonProbe::Stopped, _) => DaemonHealth::Stopped,
-            (DaemonProbe::Unreachable { .. }, _) => {
-                if self.runtime.is_some() {
-                    DaemonHealth::Unreachable
-                } else {
-                    DaemonHealth::Stopped
-                }
+            (DaemonProbe::Unreachable { .. }, _) | (DaemonProbe::Responding, None) => {
+                DaemonHealth::Unreachable
             },
             (DaemonProbe::Responding, Some(status)) => match status.health.overall_state() {
                 HealthState::Healthy => DaemonHealth::Running,
@@ -75,15 +67,11 @@ impl DaemonFacts {
                 HealthState::Degraded => DaemonHealth::Degraded,
                 HealthState::Unhealthy => DaemonHealth::Failed,
             },
-            (DaemonProbe::Responding, None) => DaemonHealth::Unreachable,
         }
     }
 
     pub(crate) fn pid(&self) -> Option<u32> {
-        self.status
-            .as_ref()
-            .map(|status| status.pid)
-            .or_else(|| self.runtime.as_ref().map(|record| record.pid))
+        self.status.as_ref().map(|status| status.info.pid)
     }
 
     #[cfg(test)]
@@ -108,60 +96,48 @@ impl DaemonFacts {
         };
         let status = match state {
             DaemonHealth::Stopped | DaemonHealth::Unreachable => None,
-            _ => Some(DaemonStatus {
-                version: "test".to_owned(),
-                pid: 1,
-                instance_id: "test-instance".to_owned(),
-                executable: "/bin/omnifs".into(),
-                config_dir: "/tmp/omnifs".into(),
-                cache_dir: "/tmp/omnifs/cache".into(),
-                attach_tcp: None,
-                filesystems: Vec::new(),
-                mounts: Vec::new(),
-                offline: false,
-                health: Box::new(omnifs_api::DaemonHealth::new(
+            _ => Some(DaemonInventory {
+                info: omnifs_api::DaemonInfo {
+                    version: "test".to_owned(),
+                    pid: 1,
+                    instance_id: "test-instance".to_owned(),
+                    executable: "/bin/omnifs".into(),
+                    attach_unix: None,
+                    attach_tcp: None,
+                },
+                phase: DaemonPhase::Ready,
+                durable_revision: None,
+                serving_revision: None,
+                health: omnifs_api::DaemonHealth::new(
                     omnifs_api::HealthReport::new(health, "test"),
                     omnifs_api::HealthReport::new(HealthState::Healthy, "test"),
                     omnifs_api::HealthReport::new(HealthState::Healthy, "test"),
-                )),
+                ),
+                mounts: Vec::new(),
+                credentials: Vec::new(),
+                attachments: Vec::new(),
             }),
         };
-        let runtime = (state == DaemonHealth::Unreachable).then(|| {
-            DaemonRecord::new(
-                Revision::new("a".repeat(40)).expect("test revision"),
-                "/tmp/omnifs/control.sock".into(),
-                1,
-                "test-instance".to_owned(),
-                false,
-            )
-        });
-        Self {
-            status,
-            probe,
-            runtime,
-        }
+        Self { status, probe }
     }
 }
 
-impl From<Result<Option<DaemonStatus>, anyhow::Error>> for DaemonFacts {
-    fn from(probe: Result<Option<DaemonStatus>, anyhow::Error>) -> Self {
+impl From<Result<Option<DaemonInventory>, anyhow::Error>> for DaemonFacts {
+    fn from(probe: Result<Option<DaemonInventory>, anyhow::Error>) -> Self {
         match probe {
             Ok(Some(status)) => Self {
                 status: Some(status),
                 probe: DaemonProbe::Responding,
-                runtime: None,
             },
             Ok(None) => Self {
                 status: None,
                 probe: DaemonProbe::Stopped,
-                runtime: None,
             },
             Err(error) => Self {
                 status: None,
                 probe: DaemonProbe::Unreachable {
                     message: format!("{error:#}"),
                 },
-                runtime: None,
             },
         }
     }
@@ -172,14 +148,19 @@ impl From<Result<Option<DaemonStatus>, anyhow::Error>> for DaemonFacts {
 /// never a "most severe of several fields" tie-break on its own (a merely
 /// informational `Neutral`, such as auth `not needed`, must not outrank a
 /// genuinely live serving state just because it sorts alongside a real
-/// `Attention`/`Error` elsewhere on the same row).
+/// `Attention`/`Failure` elsewhere on the same row).
+///
+/// The exact same 4-variant shape as [`crate::ui::table::Severity`], and
+/// deliberately kept as a separate type: that one is presentation-only and
+/// holds no domain knowledge (see its own doc). [`From`] bridges the two at
+/// `status.rs`.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Severity {
     Positive,
     Neutral,
     Attention,
-    Error,
+    Failure,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -189,6 +170,27 @@ pub(crate) struct FilesystemStatus {
     pub(crate) state: FilesystemState,
     pub(crate) mount_count: usize,
     pub(crate) fix: Option<String>,
+}
+
+impl PartialOrd for FilesystemStatus {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FilesystemStatus {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.spec
+            .runtime()
+            .cmp(&other.spec.runtime())
+            .then_with(|| {
+                self.spec
+                    .protocol()
+                    .as_str()
+                    .cmp(other.spec.protocol().as_str())
+            })
+            .then_with(|| self.spec.location().cmp(other.spec.location()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -215,7 +217,7 @@ impl FilesystemState {
             Self::Attached => Severity::Positive,
             Self::Detached => Severity::Neutral,
             Self::Unknown => Severity::Attention,
-            Self::Failed => Severity::Error,
+            Self::Failed => Severity::Failure,
         }
     }
 
@@ -243,7 +245,110 @@ pub(crate) struct MountStatus {
     pub(crate) auth: AuthState,
     pub(crate) serving: ServingState,
     pub(crate) access_count: usize,
-    pub(crate) fix: Option<String>,
+}
+
+impl MountStatus {
+    /// Which subsystem should headline this mount's row, in fixed
+    /// precedence: a provider pin problem outranks an auth problem, which
+    /// outranks the serving state itself. Never a "most severe of three"
+    /// tie-break (see `Severity`'s own doc): a merely informational
+    /// `Neutral` (auth `not needed`) must not outrank a genuinely live
+    /// serving state just because it sorts alongside a real `Attention` or
+    /// `Failure` elsewhere on the same row.
+    pub(crate) fn headline(&self) -> (Severity, &'static str) {
+        if self.provider.state.severity() >= Severity::Attention {
+            return (self.provider.state.severity(), self.provider.state.label());
+        }
+        if self.auth.severity() >= Severity::Attention {
+            return (self.auth.severity(), self.auth.label());
+        }
+        (self.serving.severity(), self.serving.label())
+    }
+
+    /// Whether any subsystem (provider pin, auth, or serving) needs
+    /// attention. Equivalent to `headline().0 >= Severity::Attention`
+    /// because the precedence chain always surfaces a real `Attention` or
+    /// worse severity whenever any of the three carries one.
+    pub(crate) fn needs_attention(&self) -> bool {
+        self.headline().0 >= Severity::Attention
+    }
+
+    /// Whether this mount's own state is the daemon's next actionable
+    /// Doctor target: a provider pin problem, or a serving state that has
+    /// actually failed. Auth is deliberately excluded here: an auth problem
+    /// gets its own `Reauthenticate` action further down
+    /// `Inventory::next_action`'s priority order, so folding it into this
+    /// predicate would make both actions fire for the same mount.
+    pub(crate) fn needs_doctor(&self) -> bool {
+        self.provider.state.severity() >= Severity::Attention
+            || matches!(self.serving, ServingState::Failed { .. })
+    }
+
+    /// The host filesystem path this mount's files are reachable at, or
+    /// empty when the mount isn't live or no host filesystem is attached.
+    pub(crate) fn access_path(&self, host_location: Option<&Path>) -> String {
+        if self.serving != ServingState::Live {
+            return String::new();
+        }
+        host_location.map_or_else(String::new, |location| {
+            location
+                .join(self.root.strip_prefix("/").unwrap_or(self.root.as_path()))
+                .display()
+                .to_string()
+        })
+    }
+
+    /// Build canonical mount rows from the daemon's reported inventory,
+    /// sorted by root then name. Not a `From` impl: the sort is part of
+    /// this constructor's contract, and a `From` would hide it.
+    fn all_observed(inventory: &DaemonInventory) -> Vec<Self> {
+        let mut mounts = inventory
+            .mounts
+            .iter()
+            .map(|mount| {
+                let name = mount.definition.name.to_string();
+                let (provider_state, serving) = match &mount.health {
+                    MountHealth::Active | MountHealth::AuthRequired => {
+                        (ProviderPinState::Available, ServingState::Live)
+                    },
+                    MountHealth::ProviderUnavailable { reason } => (
+                        ProviderPinState::Missing,
+                        ServingState::Failed {
+                            message: reason.clone(),
+                        },
+                    ),
+                    MountHealth::Failed { reason } => (
+                        ProviderPinState::Corrupt {
+                            message: reason.clone(),
+                        },
+                        ServingState::Failed {
+                            message: reason.clone(),
+                        },
+                    ),
+                };
+                let auth = AuthState::from_mount(mount, &name);
+                Self {
+                    root: PathBuf::from(format!("/{name}")),
+                    provider: ProviderPin {
+                        name: mount.provider.name.clone(),
+                        version: mount.provider.version.clone(),
+                        artifact: mount.provider.id.to_string(),
+                        state: provider_state,
+                    },
+                    name,
+                    auth,
+                    serving,
+                    access_count: 0,
+                }
+            })
+            .collect::<Vec<_>>();
+        mounts.sort_by(|left, right| {
+            left.root
+                .cmp(&right.root)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        mounts
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -254,11 +359,24 @@ pub(crate) struct ProviderPin {
     pub(crate) state: ProviderPinState,
 }
 
+impl std::fmt::Display for ProviderPin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let identity = self.version.as_ref().map_or_else(
+            || self.name.clone(),
+            |version| format!("{}@{version}", self.name),
+        );
+        if self.state.severity() >= Severity::Attention {
+            write!(f, "{identity} ({})", self.state.label())
+        } else {
+            write!(f, "{identity}")
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum ProviderPinState {
     Available,
-    NotRequired,
     Missing,
     Corrupt { message: String },
 }
@@ -267,16 +385,14 @@ impl ProviderPinState {
     pub(crate) const fn severity(&self) -> Severity {
         match self {
             Self::Available => Severity::Positive,
-            Self::NotRequired => Severity::Neutral,
             Self::Missing => Severity::Attention,
-            Self::Corrupt { .. } => Severity::Error,
+            Self::Corrupt { .. } => Severity::Failure,
         }
     }
 
     pub(crate) const fn label(&self) -> &'static str {
         match self {
             Self::Available => "available",
-            Self::NotRequired => "not required",
             Self::Missing => "missing",
             Self::Corrupt { .. } => "corrupt",
         }
@@ -294,52 +410,12 @@ pub(crate) enum AuthState {
 }
 
 impl AuthState {
-    pub(crate) fn from_readiness(readiness: &AuthReadiness, mount: &str) -> Self {
-        let command = format!("omnifs mount reauth {mount}");
-        match readiness {
-            AuthReadiness::None => Self::NotNeeded,
-            AuthReadiness::Missing { .. } => Self::Missing { command },
-            AuthReadiness::Error { message } => Self::Error {
-                message: message.clone(),
-                command,
-            },
-            AuthReadiness::Ready { notices, .. }
-                if notices.iter().any(|notice| notice.starts_with("expired")) =>
-            {
-                Self::Expired { command }
-            },
-            AuthReadiness::Ready { .. } => Self::Ready,
-        }
-    }
-
-    fn from_observed(observed: &omnifs_api::MountInfo) -> Self {
-        let command = format!("omnifs mount reauth {}", observed.mount);
-        match observed.auth_health {
-            None => Self::NotNeeded,
-            Some(
-                omnifs_api::CredentialHealth::Ready
-                | omnifs_api::CredentialHealth::ExpiringSoon
-                | omnifs_api::CredentialHealth::StaticUnvalidated,
-            ) => Self::Ready,
-            Some(omnifs_api::CredentialHealth::Missing) => Self::Missing { command },
-            Some(omnifs_api::CredentialHealth::Expired) => Self::Expired { command },
-            Some(omnifs_api::CredentialHealth::RefreshFailed) => Self::Error {
-                message: "credential refresh failed".into(),
-                command,
-            },
-            Some(omnifs_api::CredentialHealth::NeedsConsent) => Self::Error {
-                message: "credential needs consent".into(),
-                command,
-            },
-        }
-    }
-
     pub(crate) const fn severity(&self) -> Severity {
         match self {
             Self::NotNeeded => Severity::Neutral,
             Self::Ready => Severity::Positive,
             Self::Missing { .. } | Self::Expired { .. } => Severity::Attention,
-            Self::Error { .. } => Severity::Error,
+            Self::Error { .. } => Severity::Failure,
         }
     }
 
@@ -361,64 +437,65 @@ impl AuthState {
             Self::NotNeeded | Self::Ready => None,
         }
     }
+
+    fn from_mount(mount: &omnifs_api::MountRecord, name: &str) -> Self {
+        if mount.definition.auth.is_none() {
+            return Self::NotNeeded;
+        }
+        let command = || format!("omnifs mount reauth {name}");
+        match mount.auth_health {
+            Some(CredentialHealth::Missing) | None if mount.health == MountHealth::AuthRequired => {
+                Self::Missing { command: command() }
+            },
+            Some(CredentialHealth::Expired) => Self::Expired { command: command() },
+            Some(CredentialHealth::RefreshFailed) => Self::Error {
+                message: "credential refresh failed".to_owned(),
+                command: command(),
+            },
+            Some(CredentialHealth::NeedsConsent) => Self::Error {
+                message: "credential needs consent".to_owned(),
+                command: command(),
+            },
+            Some(
+                CredentialHealth::Ready
+                | CredentialHealth::ExpiringSoon
+                | CredentialHealth::StaticUnvalidated
+                | CredentialHealth::Missing,
+            )
+            | None => Self::Ready,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum ServingState {
     Live,
-    Offline,
     Stopped,
     Failed { message: String },
-    NotLoaded,
 }
 
 impl ServingState {
     pub(crate) const fn label(&self) -> &'static str {
         match self {
             Self::Live => "live",
-            Self::Offline => "offline",
             Self::Stopped => "stopped",
             Self::Failed { .. } => "failed",
-            Self::NotLoaded => "not loaded",
         }
     }
 
     pub(crate) const fn severity(&self) -> Severity {
         match self {
             Self::Live => Severity::Positive,
-            Self::Offline | Self::Stopped => Severity::Neutral,
-            Self::Failed { .. } | Self::NotLoaded => Severity::Error,
+            Self::Stopped => Severity::Neutral,
+            Self::Failed { .. } => Severity::Failure,
         }
     }
-
-    pub(crate) const fn fix(&self) -> Option<&'static str> {
-        match self {
-            Self::Failed { .. } => Some("omnifs logs"),
-            Self::Live | Self::Offline | Self::Stopped | Self::NotLoaded => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct AccessPath {
-    pub(crate) protocol: fs::Protocol,
-    pub(crate) runtime: fs::Runtime,
-    pub(crate) path: PathBuf,
-    pub(crate) state: AccessState,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AccessState {
-    Available,
-    Offline,
-    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ActionTarget {
-    Workspace,
+    Profile,
     Mount(String),
     Filesystem(fs::Id),
 }
@@ -427,7 +504,6 @@ pub(crate) enum ActionTarget {
 pub(crate) enum NextAction {
     Doctor { target: ActionTarget },
     Reauthenticate { mount: String },
-    StartDaemon,
     AttachFilesystem { id: fs::Id },
     CreateFilesystem,
     Browse { path: PathBuf },
@@ -435,115 +511,121 @@ pub(crate) enum NextAction {
 }
 
 impl Inventory {
-    pub(crate) async fn collect(workspace: &Workspace) -> Result<Self> {
-        let repository = workspace.desired_state().observe_repository()?;
-        let registry = repository.registry();
-        let mount_revision = repository.head_revision()?;
-        let applied_revision = repository.applied()?;
-        let client = crate::client::DaemonClient::for_workspace(workspace);
-        // Capture process identity before a refused control connection can
-        // clean the stale record. Doctor must distinguish an unexpected dead
-        // daemon from a cleanly stopped workspace.
-        let runtime = client.record().ok().flatten();
-        let daemon_probe = client.status_optional_checked().await;
-        let daemon_status = daemon_probe.as_ref().ok().and_then(Option::as_ref);
-        let mut mounts = if let Some(status) = daemon_status.filter(|status| status.offline) {
-            offline_mount_statuses(registry, status)
-        } else {
-            let catalog = workspace.catalog();
-            online_mount_statuses(registry, catalog, workspace.credentials(), daemon_status)
-        };
+    pub(crate) async fn collect_rpc() -> Result<Self> {
+        let endpoint = Bootstrap::<Client>::for_client()?;
+        let configured_filesystems = ClientFilesystemState::resolve()?.registry().list()?;
+        let rpc = crate::rpc::RpcClient::resolve()?;
+        let (daemon, mounts, daemon_status, daemon_known, active_mutation) =
+            match rpc.inventory().await {
+                Ok(inventory) => {
+                    let mounts = MountStatus::all_observed(&inventory);
+                    let daemon = DaemonFacts {
+                        status: Some(inventory.clone()),
+                        probe: DaemonProbe::Responding,
+                    };
+                    // The daemon just answered `GetInventory`, so a second
+                    // round trip for the mutation lease it does not carry is
+                    // cheap and expected to succeed alongside it; a failure
+                    // here degrades to "no active mutation known" rather than
+                    // failing the whole status report.
+                    let active_mutation = rpc
+                        .status_optional()
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|status| status.active_mutation);
+                    (daemon, mounts, Some(inventory), true, active_mutation)
+                },
+                Err(error) => {
+                    let probe = match endpoint.read_process_identity() {
+                        Ok(Some(_)) => DaemonProbe::Unreachable {
+                            message: format!("{error:#}"),
+                        },
+                        Ok(None) => DaemonProbe::Stopped,
+                        Err(identity_error) => DaemonProbe::Unreachable {
+                            message: format!(
+                                "{error:#}; cannot read process identity: {identity_error}"
+                            ),
+                        },
+                    };
+                    let daemon_known = probe == DaemonProbe::Stopped;
+                    (
+                        DaemonFacts {
+                            status: None,
+                            probe,
+                        },
+                        Vec::new(),
+                        None,
+                        daemon_known,
+                        None,
+                    )
+                },
+            };
         let mount_count = mounts.len();
-        let configured_filesystems = workspace.filesystems().list()?;
         let filesystems = filesystem_statuses(
             &configured_filesystems,
-            daemon_status,
-            daemon_probe.is_ok(),
+            daemon_status.as_ref(),
+            daemon_known,
             mount_count,
         );
-        let warmup = crate::provider_warmup::ProviderWarmup::new(
-            workspace.warmup().clone(),
-            workspace.catalog().clone(),
-        )
-        .status();
-        let access_count = filesystems
-            .iter()
-            .filter(|filesystem| filesystem.state.provides_access())
-            .count();
-        for mount in &mut mounts {
-            mount.access_count = access_count;
-        }
-        let mut daemon = DaemonFacts::from(daemon_probe);
-        daemon.runtime = runtime;
-        Ok(Self {
-            home: workspace.identity().output_home(),
-            mount_revision,
-            applied_revision,
+        let mut inventory = Self {
+            home: endpoint.bootstrap_dir().to_path_buf(),
+            durable_revision: daemon_status
+                .as_ref()
+                .and_then(|status| status.durable_revision),
+            serving_revision: daemon_status
+                .as_ref()
+                .and_then(|status| status.serving_revision),
+            active_mutation,
             daemon,
             filesystems,
             mounts,
-            warmup,
-        })
+        };
+        let access_count = inventory.attached_filesystem_count();
+        for mount in &mut inventory.mounts {
+            mount.access_count = access_count;
+        }
+        Ok(inventory)
     }
 
-    pub(crate) fn access_paths(&self, mount: &MountName) -> Vec<AccessPath> {
-        let Some(mount_status) = self
-            .mounts
-            .iter()
-            .find(|entry| entry.name == mount.to_string())
-        else {
-            return Vec::new();
-        };
+    /// Filesystem rows that provide live access, in inventory order.
+    pub(crate) fn attached_filesystems(&self) -> impl Iterator<Item = &FilesystemStatus> {
         self.filesystems
             .iter()
-            .map(|filesystem| {
-                let path = filesystem.spec.location().join(
-                    mount_status
-                        .root
-                        .strip_prefix("/")
-                        .unwrap_or(&mount_status.root),
-                );
-                let state = match filesystem.state {
-                    FilesystemState::Attached => match mount_status.serving {
-                        ServingState::Live => AccessState::Available,
-                        ServingState::Failed { .. } => AccessState::Failed,
-                        ServingState::Offline | ServingState::Stopped | ServingState::NotLoaded => {
-                            AccessState::Offline
-                        },
-                    },
-                    FilesystemState::Detached | FilesystemState::Unknown => AccessState::Offline,
-                    FilesystemState::Failed => AccessState::Failed,
-                };
-                AccessPath {
-                    protocol: filesystem.spec.protocol(),
-                    runtime: filesystem.spec.runtime(),
-                    path,
-                    state,
-                }
-            })
-            .collect()
+            .filter(|filesystem| filesystem.state.provides_access())
     }
 
-    pub(crate) fn verdict(&self) -> Verdict {
+    /// Count of filesystem rows that provide live access. The one owner
+    /// `collect_rpc` uses to seed every mount's `access_count`, so counting
+    /// again from a rendered `Inventory` can never drift from what was
+    /// recorded at collection time.
+    pub(crate) fn attached_filesystem_count(&self) -> usize {
+        self.attached_filesystems().count()
+    }
+
+    /// The first attached host filesystem's location, if any.
+    pub(crate) fn primary_host_location(&self) -> Option<&Path> {
+        self.attached_filesystems()
+            .find(|filesystem| filesystem.spec.runtime() == fs::Runtime::Host)
+            .map(|filesystem| filesystem.spec.location())
+    }
+
+    pub(crate) fn verdict(&self) -> ResultVerdict {
         let degraded = self.filesystems.iter().any(|entry| {
             entry.state.severity() >= Severity::Attention
                 && matches!(
                     self.daemon.health(),
                     DaemonHealth::Running | DaemonHealth::Starting | DaemonHealth::Degraded
                 )
-        }) || self.mounts.iter().any(|entry| {
-            entry.fix.is_some()
-                || entry.provider.state.severity() >= Severity::Attention
-                || entry.auth.severity() >= Severity::Attention
-                || entry.serving.severity() >= Severity::Attention
-        }) || matches!(
-            self.daemon.health(),
-            DaemonHealth::Failed | DaemonHealth::Unreachable
-        );
+        }) || self.mounts.iter().any(MountStatus::needs_attention)
+            || matches!(
+                self.daemon.health(),
+                DaemonHealth::Failed | DaemonHealth::Unreachable
+            );
         if degraded {
-            Verdict::Degraded
+            ResultVerdict::Degraded
         } else {
-            Verdict::Ok
+            ResultVerdict::Ok
         }
     }
 
@@ -557,14 +639,10 @@ impl Inventory {
             DaemonHealth::Degraded | DaemonHealth::Failed | DaemonHealth::Unreachable
         ) {
             return Some(NextAction::Doctor {
-                target: ActionTarget::Workspace,
+                target: ActionTarget::Profile,
             });
         }
-        if let Some(mount) = self.mounts.iter().find(|mount| {
-            mount.provider.state.severity() >= Severity::Attention
-                || matches!(mount.serving, ServingState::Failed { .. })
-                || mount.fix.as_deref() == Some("omnifs doctor")
-        }) {
+        if let Some(mount) = self.mounts.iter().find(|mount| mount.needs_doctor()) {
             return Some(NextAction::Doctor {
                 target: ActionTarget::Mount(mount.name.clone()),
             });
@@ -588,17 +666,6 @@ impl Inventory {
                 mount: mount.name.clone(),
             });
         }
-        if !self.mounts.is_empty()
-            && (self.daemon_health() == DaemonHealth::Stopped
-                || self.mounts.iter().any(|mount| {
-                    matches!(
-                        mount.serving,
-                        ServingState::Stopped | ServingState::NotLoaded
-                    )
-                }))
-        {
-            return Some(NextAction::StartDaemon);
-        }
         if let Some(filesystem) = self
             .filesystems
             .iter()
@@ -614,7 +681,7 @@ impl Inventory {
         let first_mount = self
             .mounts
             .iter()
-            .find(|mount| matches!(mount.serving, ServingState::Live | ServingState::Offline))
+            .find(|mount| mount.serving == ServingState::Live)
             .or_else(|| self.mounts.first());
         if let Some(filesystem) = self.filesystems.iter().find(|filesystem| {
             filesystem.state.provides_access() && filesystem.spec.runtime() == fs::Runtime::Host
@@ -648,27 +715,20 @@ impl Inventory {
     ) -> Self {
         Self {
             home: PathBuf::from("/tmp/omnifs"),
-            mount_revision: None,
-            applied_revision: None,
+            durable_revision: None,
+            serving_revision: None,
+            active_mutation: None,
             daemon: DaemonFacts::test(state),
             filesystems,
             mounts,
-            warmup: None,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Verdict {
-    Ok,
-    Degraded,
 }
 
 /// Build canonical filesystem rows from the daemon's live attachments.
 pub(crate) fn filesystem_statuses(
     configured: &[fs::Spec],
-    daemon: Option<&DaemonStatus>,
+    daemon: Option<&DaemonInventory>,
     daemon_known: bool,
     mount_count: usize,
 ) -> Vec<FilesystemStatus> {
@@ -677,7 +737,7 @@ pub(crate) fn filesystem_statuses(
         .map(|spec| {
             let observed = daemon.and_then(|status| {
                 status
-                    .filesystems
+                    .attachments
                     .iter()
                     .find(|observed| observed.id() == spec.id())
             });
@@ -713,7 +773,7 @@ pub(crate) fn filesystem_statuses(
     if let Some(daemon) = daemon {
         rows.extend(
             daemon
-                .filesystems
+                .attachments
                 .iter()
                 .filter(|observed| !configured.iter().any(|spec| spec.id() == observed.id()))
                 .map(|observed| FilesystemStatus {
@@ -725,296 +785,8 @@ pub(crate) fn filesystem_statuses(
         );
     }
 
-    rows.sort_by(filesystem_cmp);
+    rows.sort();
     rows
-}
-
-fn online_mount_statuses(
-    registry: &Registry,
-    catalog: &Catalog,
-    credentials: &FileStore,
-    daemon: Option<&DaemonStatus>,
-) -> Vec<MountStatus> {
-    let desired = registry
-        .iter()
-        .map(|(name, _)| name.to_string())
-        .collect::<BTreeSet<_>>();
-    let loaded = daemon
-        .map(|status| {
-            status
-                .mounts
-                .iter()
-                .map(|mount| mount.mount.as_str())
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let mut rows = desired_mount_rows(registry, catalog, credentials, daemon, &loaded);
-    rows.extend(invalid_mount_rows(registry));
-    if let Some(status) = daemon {
-        rows.extend(observed_mount_rows(status, &desired));
-    }
-    rows.sort_by(|left, right| {
-        left.root
-            .cmp(&right.root)
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    rows
-}
-
-fn desired_mount_rows(
-    registry: &Registry,
-    catalog: &Catalog,
-    credentials: &FileStore,
-    daemon: Option<&DaemonStatus>,
-    loaded: &BTreeSet<&str>,
-) -> Vec<MountStatus> {
-    let daemon_failed =
-        daemon.is_some_and(|status| status.health.overall_state() == HealthState::Unhealthy);
-    registry
-        .iter()
-        .map(|(name, spec)| {
-            let name_string = name.to_string();
-            let artifact = spec.provider.id.to_string();
-            let provider = ProviderPin {
-                name: spec.provider.meta.name.to_string(),
-                version: spec.provider.meta.version.as_ref().map(ToString::to_string),
-                artifact: artifact.clone(),
-                state: match catalog.get(&spec.provider.id) {
-                    Ok(Some(_)) => ProviderPinState::Available,
-                    Ok(None) => ProviderPinState::Missing,
-                    Err(error) => ProviderPinState::Corrupt {
-                        message: error.to_string(),
-                    },
-                },
-            };
-            let local_auth = AuthState::from_readiness(
-                &MountAuth::from_spec(catalog, spec.clone()).readiness(credentials),
-                &name_string,
-            );
-            let auth = mount_auth_state(&name_string, local_auth, daemon);
-            let provider_present = matches!(provider.state, ProviderPinState::Available);
-            let serving = derive_serving_state(MountFacts {
-                provider: if provider_present {
-                    Presence::Present
-                } else {
-                    Presence::Absent
-                },
-                daemon: if daemon.is_some() {
-                    Presence::Present
-                } else {
-                    Presence::Absent
-                },
-                loaded: if loaded.contains(name_string.as_str()) {
-                    Presence::Present
-                } else {
-                    Presence::Absent
-                },
-                health: if daemon_failed {
-                    Health::Unhealthy
-                } else {
-                    Health::Healthy
-                },
-            });
-            // Fixes follow the same precedence as the observed facts: an
-            // unreadable spec is emitted below, then artifact retention, auth,
-            // daemon failure, and finally the absence of a loaded mount.
-            let fix = if let Some(command) = auth.command() {
-                Some(command.to_owned())
-            } else {
-                serving.fix().map(str::to_owned)
-            };
-            MountStatus {
-                name: name_string,
-                root: PathBuf::from(format!("/{name}")),
-                provider,
-                auth,
-                serving,
-                access_count: 0,
-                fix,
-            }
-        })
-        .collect::<Vec<_>>()
-}
-
-fn offline_mount_rows(registry: &Registry, loaded: &BTreeSet<&str>) -> Vec<MountStatus> {
-    registry
-        .iter()
-        .map(|(name, spec)| {
-            let name = name.to_string();
-            let serving = if loaded.contains(name.as_str()) {
-                ServingState::Offline
-            } else {
-                ServingState::NotLoaded
-            };
-            MountStatus {
-                name: name.clone(),
-                root: PathBuf::from(format!("/{name}")),
-                provider: ProviderPin {
-                    name: spec.provider.meta.name.to_string(),
-                    version: spec.provider.meta.version.as_ref().map(ToString::to_string),
-                    artifact: spec.provider.id.to_string(),
-                    state: ProviderPinState::NotRequired,
-                },
-                auth: AuthState::NotNeeded,
-                serving,
-                access_count: 0,
-                fix: None,
-            }
-        })
-        .collect()
-}
-
-fn offline_mount_statuses(registry: &Registry, status: &DaemonStatus) -> Vec<MountStatus> {
-    let loaded = status
-        .mounts
-        .iter()
-        .map(|mount| mount.mount.as_str())
-        .collect::<BTreeSet<_>>();
-    let desired = registry
-        .iter()
-        .map(|(name, _)| name.to_string())
-        .collect::<BTreeSet<_>>();
-    let mut rows = offline_mount_rows(registry, &loaded);
-    rows.extend(observed_mount_rows(status, &desired));
-    rows.extend(invalid_mount_rows(registry));
-    rows.sort_by(|left, right| {
-        left.root
-            .cmp(&right.root)
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    rows
-}
-
-fn mount_auth_state(mount: &str, local: AuthState, daemon: Option<&DaemonStatus>) -> AuthState {
-    let Some(observed) =
-        daemon.and_then(|status| status.mounts.iter().find(|entry| entry.mount == mount))
-    else {
-        return local;
-    };
-
-    AuthState::from_observed(observed)
-}
-
-fn invalid_mount_rows(registry: &Registry) -> Vec<MountStatus> {
-    registry
-        .failures()
-        .iter()
-        .map(|failure| MountStatus {
-            name: failure
-                .path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("<invalid>")
-                .to_string(),
-            root: PathBuf::from("/"),
-            provider: ProviderPin {
-                name: "<invalid>".into(),
-                version: None,
-                artifact: String::new(),
-                state: ProviderPinState::Corrupt {
-                    message: failure.error.to_string(),
-                },
-            },
-            auth: AuthState::Error {
-                message: failure.error.to_string(),
-                command: "omnifs doctor".into(),
-            },
-            serving: ServingState::Failed {
-                message: failure.error.to_string(),
-            },
-            access_count: 0,
-            fix: Some("omnifs doctor".into()),
-        })
-        .collect()
-}
-
-fn observed_mount_rows(status: &DaemonStatus, desired: &BTreeSet<String>) -> Vec<MountStatus> {
-    status
-        .mounts
-        .iter()
-        .filter(|mount| !desired.contains(&mount.mount))
-        .map(|mount| {
-            let auth = AuthState::from_observed(mount);
-            let fix = auth.command().map(str::to_owned);
-            MountStatus {
-                name: mount.mount.clone(),
-                root: PathBuf::from(format!("/{}", mount.mount.trim_start_matches('/'))),
-                provider: ProviderPin {
-                    name: mount.provider_name.clone(),
-                    version: None,
-                    artifact: mount.provider_id.clone(),
-                    state: if status.offline {
-                        ProviderPinState::NotRequired
-                    } else {
-                        ProviderPinState::Available
-                    },
-                },
-                auth,
-                serving: if status.offline {
-                    ServingState::Offline
-                } else {
-                    ServingState::Live
-                },
-                access_count: 0,
-                fix,
-            }
-        })
-        .collect()
-}
-
-/// Join one desired mount with daemon observations. A reachable daemon is not
-/// evidence that every spec converged: only the explicit loaded mount list is
-/// authoritative.
-#[derive(Clone, Copy)]
-enum Presence {
-    Present,
-    Absent,
-}
-
-#[derive(Clone, Copy)]
-enum Health {
-    Healthy,
-    Unhealthy,
-}
-
-#[derive(Clone, Copy)]
-struct MountFacts {
-    provider: Presence,
-    daemon: Presence,
-    loaded: Presence,
-    health: Health,
-}
-
-fn derive_serving_state(facts: MountFacts) -> ServingState {
-    if matches!(facts.daemon, Presence::Absent) {
-        return ServingState::Stopped;
-    }
-    if matches!(facts.provider, Presence::Absent) {
-        return ServingState::NotLoaded;
-    }
-    if matches!(facts.health, Health::Unhealthy) {
-        return ServingState::Failed {
-            message: "daemon health is unhealthy".into(),
-        };
-    }
-    if matches!(facts.loaded, Presence::Present) {
-        ServingState::Live
-    } else {
-        ServingState::NotLoaded
-    }
-}
-
-fn filesystem_cmp(left: &FilesystemStatus, right: &FilesystemStatus) -> Ordering {
-    left.spec
-        .runtime()
-        .cmp(&right.spec.runtime())
-        .then_with(|| {
-            left.spec
-                .protocol()
-                .as_str()
-                .cmp(right.spec.protocol().as_str())
-        })
-        .then_with(|| left.spec.location().cmp(right.spec.location()))
 }
 
 #[cfg(test)]
@@ -1025,66 +797,15 @@ mod tests {
     fn human_state_labels_are_readable_without_changing_wire_names() {
         assert_eq!(AuthState::NotNeeded.severity(), Severity::Neutral);
         assert_eq!(AuthState::NotNeeded.label(), "not needed");
-        assert_eq!(ServingState::NotLoaded.label(), "not loaded");
 
         assert_eq!(
             serde_json::to_value(AuthState::NotNeeded).unwrap()["state"],
             "not_needed"
         );
-        assert_eq!(
-            serde_json::to_value(ServingState::NotLoaded).unwrap()["state"],
-            "not_loaded"
-        );
     }
 
     #[test]
-    fn live_daemon_auth_health_overrides_fresh_local_store_readiness() {
-        let mut daemon = DaemonFacts::test(DaemonHealth::Running);
-        daemon.status.as_mut().unwrap().mounts = vec![
-            omnifs_api::MountInfo {
-                mount: "consent".into(),
-                provider_name: "test".into(),
-                provider_id: "a".repeat(64),
-                auth_health: Some(omnifs_api::CredentialHealth::NeedsConsent),
-            },
-            omnifs_api::MountInfo {
-                mount: "refresh".into(),
-                provider_name: "test".into(),
-                provider_id: "b".repeat(64),
-                auth_health: Some(omnifs_api::CredentialHealth::RefreshFailed),
-            },
-        ];
-        let daemon = daemon.status.as_ref();
-
-        let consent = mount_auth_state("consent", AuthState::Ready, daemon);
-        assert!(matches!(consent, AuthState::Error { .. }));
-        assert_eq!(consent.command(), Some("omnifs mount reauth consent"));
-
-        let refresh = mount_auth_state("refresh", AuthState::Ready, daemon);
-        assert!(matches!(refresh, AuthState::Error { .. }));
-        assert_eq!(refresh.command(), Some("omnifs mount reauth refresh"));
-
-        assert_eq!(
-            mount_auth_state("unobserved", AuthState::Ready, daemon),
-            AuthState::Ready,
-            "local readiness is only a fallback when the daemon has no row"
-        );
-
-        let rows = observed_mount_rows(daemon.unwrap(), &BTreeSet::new());
-        assert_eq!(rows.len(), 2);
-        assert!(
-            rows.iter()
-                .all(|row| matches!(row.auth, AuthState::Error { .. }))
-        );
-        assert!(rows.iter().all(|row| {
-            row.fix
-                .as_deref()
-                .is_some_and(|fix| fix.starts_with("omnifs mount reauth "))
-        }));
-    }
-
-    #[test]
-    fn auth_and_serving_precedence_preserves_fixes() {
+    fn expired_auth_degrades_verdict_and_keeps_its_reauth_command() {
         let auth = AuthState::Expired {
             command: "omnifs mount reauth x".into(),
         };
@@ -1100,10 +821,9 @@ mod tests {
             auth: auth.clone(),
             serving: ServingState::Stopped,
             access_count: 0,
-            fix: auth.command().map(ToOwned::to_owned),
         };
         let inventory = Inventory::test(DaemonHealth::Stopped, vec![], vec![mount]);
-        assert_eq!(inventory.verdict(), Verdict::Degraded);
+        assert_eq!(inventory.verdict(), ResultVerdict::Degraded);
         assert_eq!(
             inventory.mounts[0].auth.command(),
             Some("omnifs mount reauth x")
@@ -1111,112 +831,10 @@ mod tests {
     }
 
     #[test]
-    fn access_paths_are_derived_on_request() {
-        let inventory = Inventory::test(
-            DaemonHealth::Running,
-            vec![FilesystemStatus {
-                spec: fs::Spec::new(
-                    "test".parse().unwrap(),
-                    fs::Protocol::Fuse,
-                    fs::Runtime::Host,
-                    "/mnt".into(),
-                )
-                .unwrap(),
-                state: FilesystemState::Attached,
-                mount_count: 1,
-                fix: None,
-            }],
-            vec![MountStatus {
-                name: "github".into(),
-                root: "/github".into(),
-                provider: ProviderPin {
-                    name: "github".into(),
-                    version: Some("1".into()),
-                    artifact: "a".repeat(64),
-                    state: ProviderPinState::Available,
-                },
-                auth: AuthState::Ready,
-                serving: ServingState::Live,
-                access_count: 1,
-                fix: None,
-            }],
-        );
-        let name = MountName::new("github").unwrap();
-        assert_eq!(
-            inventory.access_paths(&name)[0].path,
-            PathBuf::from("/mnt/github")
-        );
-    }
-
-    #[test]
-    fn serving_state_matrix_joins_loaded_mounts() {
-        assert_eq!(
-            derive_serving_state(MountFacts {
-                provider: Presence::Absent,
-                daemon: Presence::Present,
-                loaded: Presence::Absent,
-                health: Health::Unhealthy,
-            }),
-            ServingState::NotLoaded,
-            "missing artifact outranks daemon failure"
-        );
-        assert_eq!(
-            derive_serving_state(MountFacts {
-                provider: Presence::Present,
-                daemon: Presence::Present,
-                loaded: Presence::Absent,
-                health: Health::Unhealthy,
-            }),
-            ServingState::Failed {
-                message: "daemon health is unhealthy".into()
-            }
-        );
-        assert_eq!(
-            derive_serving_state(MountFacts {
-                provider: Presence::Present,
-                daemon: Presence::Present,
-                loaded: Presence::Absent,
-                health: Health::Healthy,
-            }),
-            ServingState::NotLoaded,
-            "a reachable daemon does not imply every spec converged"
-        );
-        assert_eq!(
-            derive_serving_state(MountFacts {
-                provider: Presence::Present,
-                daemon: Presence::Present,
-                loaded: Presence::Present,
-                health: Health::Healthy,
-            }),
-            ServingState::Live
-        );
-        assert_eq!(
-            derive_serving_state(MountFacts {
-                provider: Presence::Present,
-                daemon: Presence::Absent,
-                loaded: Presence::Absent,
-                health: Health::Healthy,
-            }),
-            ServingState::Stopped
-        );
-    }
-
-    #[test]
-    fn probe_failure_is_unreachable_only_when_runtime_expected() {
-        let probe = Err(anyhow::anyhow!("connection refused"));
-        let expected = DaemonRecord::new(
-            omnifs_workspace::mounts::Revision::new("a".repeat(40)).unwrap(),
-            PathBuf::from("/home/.omnifs/filesystems/runtime/local.sock"),
-            42,
-            "instance".into(),
-            false,
-        );
-        let mut unreachable = DaemonFacts::from(probe);
-        unreachable.runtime = Some(expected);
-        assert_eq!(unreachable.health(), DaemonHealth::Unreachable);
+    fn probe_failure_is_unreachable() {
         assert_eq!(
             DaemonFacts::from(Err(anyhow::anyhow!("connection refused"))).health(),
-            DaemonHealth::Stopped
+            DaemonHealth::Unreachable
         );
     }
 
@@ -1228,78 +846,29 @@ mod tests {
             (HealthState::Degraded, DaemonHealth::Degraded),
             (HealthState::Unhealthy, DaemonHealth::Failed),
         ] {
-            let status = DaemonStatus {
-                version: "test".into(),
-                pid: 1,
-                instance_id: "instance".into(),
-                executable: "/bin/omnifs".into(),
-                config_dir: "/home/.omnifs".into(),
-                cache_dir: "/home/.omnifs/cache".into(),
-                attach_tcp: None,
-                filesystems: Vec::new(),
-                mounts: Vec::new(),
-                offline: false,
-                health: Box::new(omnifs_api::DaemonHealth::new(
+            let status = DaemonInventory {
+                info: omnifs_api::DaemonInfo {
+                    version: "test".into(),
+                    pid: 1,
+                    instance_id: "instance".into(),
+                    executable: "/bin/omnifs".into(),
+                    attach_unix: None,
+                    attach_tcp: None,
+                },
+                phase: DaemonPhase::Ready,
+                durable_revision: None,
+                serving_revision: None,
+                health: omnifs_api::DaemonHealth::new(
                     omnifs_api::HealthReport::new(health, "test"),
                     omnifs_api::HealthReport::new(HealthState::Healthy, "test"),
                     omnifs_api::HealthReport::new(HealthState::Healthy, "test"),
-                )),
+                ),
+                mounts: Vec::new(),
+                credentials: Vec::new(),
+                attachments: Vec::new(),
             };
             assert_eq!(DaemonFacts::from(Ok(Some(status))).health(), expected);
         }
-    }
-
-    #[test]
-    fn access_paths_cover_every_filesystem_and_mount_state() {
-        let inventory = Inventory::test(
-            DaemonHealth::Running,
-            vec![
-                FilesystemStatus {
-                    spec: fs::Spec::new(
-                        "host".parse().unwrap(),
-                        fs::Protocol::Fuse,
-                        fs::Runtime::Host,
-                        "/host".into(),
-                    )
-                    .unwrap(),
-                    state: FilesystemState::Attached,
-                    mount_count: 1,
-                    fix: None,
-                },
-                FilesystemStatus {
-                    spec: fs::Spec::new(
-                        "docker".parse().unwrap(),
-                        fs::Protocol::Fuse,
-                        fs::Runtime::Docker,
-                        "/omnifs".into(),
-                    )
-                    .unwrap(),
-                    state: FilesystemState::Attached,
-                    mount_count: 1,
-                    fix: None,
-                },
-            ],
-            vec![MountStatus {
-                name: "github".into(),
-                root: "/github".into(),
-                provider: ProviderPin {
-                    name: "github".into(),
-                    version: None,
-                    artifact: "a".repeat(64),
-                    state: ProviderPinState::Available,
-                },
-                auth: AuthState::Ready,
-                serving: ServingState::Live,
-                access_count: 1,
-                fix: None,
-            }],
-        );
-        let paths = inventory.access_paths(&MountName::new("github").unwrap());
-        assert_eq!(paths.len(), 2);
-        assert_eq!(paths[0].path, PathBuf::from("/host/github"));
-        assert_eq!(paths[0].state, AccessState::Available);
-        assert_eq!(paths[1].path, PathBuf::from("/omnifs/github"));
-        assert_eq!(paths[1].state, AccessState::Available);
     }
 
     #[test]
@@ -1333,7 +902,7 @@ mod tests {
         )
         .unwrap();
         let mut daemon = DaemonFacts::test(DaemonHealth::Running).status.unwrap();
-        daemon.filesystems.push(
+        daemon.attachments.push(
             fs::Spec::new(
                 spec.id().clone(),
                 fs::Protocol::Fuse,
@@ -1366,19 +935,18 @@ mod tests {
                 auth: AuthState::Ready,
                 serving: ServingState::Stopped,
                 access_count: 0,
-                fix: None,
             }],
         );
         assert_eq!(
             base.verdict(),
-            Verdict::Ok,
+            ResultVerdict::Ok,
             "deliberately stopped is neutral"
         );
         let mut expired = base.clone();
         expired.mounts[0].auth = AuthState::Expired {
             command: "omnifs mount reauth x".into(),
         };
-        assert_eq!(expired.verdict(), Verdict::Degraded);
+        assert_eq!(expired.verdict(), ResultVerdict::Degraded);
         let mut unmanaged = base.clone();
         unmanaged.daemon = DaemonFacts::test(DaemonHealth::Running);
         unmanaged.filesystems.push(FilesystemStatus {
@@ -1393,10 +961,10 @@ mod tests {
             mount_count: 1,
             fix: Some("omnifs fs detach --name test".into()),
         });
-        assert_eq!(unmanaged.verdict(), Verdict::Degraded);
+        assert_eq!(unmanaged.verdict(), ResultVerdict::Degraded);
         let mut unreachable = base;
         unreachable.daemon = DaemonFacts::test(DaemonHealth::Unreachable);
-        assert_eq!(unreachable.verdict(), Verdict::Degraded);
+        assert_eq!(unreachable.verdict(), ResultVerdict::Degraded);
     }
 
     #[test]
@@ -1413,7 +981,6 @@ mod tests {
             auth: AuthState::Ready,
             serving: ServingState::Live,
             access_count: 1,
-            fix: None,
         };
         let filesystem = FilesystemStatus {
             spec: fs::Spec::new(
@@ -1479,7 +1046,7 @@ mod tests {
         assert_eq!(
             broken.next_action(),
             Some(NextAction::Doctor {
-                target: ActionTarget::Workspace
+                target: ActionTarget::Profile
             })
         );
     }
@@ -1501,7 +1068,6 @@ mod tests {
                 auth: AuthState::NotNeeded,
                 serving: ServingState::Stopped,
                 access_count: 0,
-                fix: None,
             }],
         );
         let json = serde_json::to_value(inventory).unwrap();

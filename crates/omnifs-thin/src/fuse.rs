@@ -13,6 +13,7 @@ use tracing::info;
 pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     crate::init_tracing();
     let crate::RunnerArgs {
+        client_owner,
         spec,
         state_dir,
         attach,
@@ -49,6 +50,7 @@ pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     let namespace = rt
         .block_on(WireNamespace::attach_with_teardown(
             target,
+            client_owner,
             spec.clone(),
             handle.clone(),
             lifecycle.wire_teardown_tx.clone(),

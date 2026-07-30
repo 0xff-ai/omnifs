@@ -12,6 +12,7 @@ use tabled::builder::Builder;
 use tabled::settings::{Alignment, Padding, Span, Style, Width};
 
 use super::render::display_width;
+use super::style;
 
 /// A complete human report made up of context strips and resource tables.
 #[derive(Debug, Clone, Default)]
@@ -462,6 +463,23 @@ impl Severity {
             Self::Failure => '×',
         }
     }
+
+    /// Paint an already-assembled token through `style.rs`'s shared
+    /// green/yellow/red/dim color roles: the same trio `style::Glyph` (the
+    /// flat ledger register's own severity marker) renders through, so this
+    /// module never hand-writes an SGR escape of its own. The symbol
+    /// vocabulary stays this module's own (`●○▲×`, distinct from `Glyph`'s
+    /// `✓!✗•-=`): a dense multi-column status table and a narrative one-line
+    /// verdict are different registers, and only the color plumbing is
+    /// shared between them.
+    fn paint(self, token: &str, color: bool) -> String {
+        match self {
+            Self::Positive => style::success(token, color),
+            Self::Neutral => style::dim(token, color),
+            Self::Attention => style::warn(token, color),
+            Self::Failure => style::error(token, color),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -500,16 +518,7 @@ impl StateToken {
 
     pub(crate) fn render(&self, color: bool) -> String {
         let token = format!("{} {}", self.symbol(), self.label);
-        if !color {
-            return token;
-        }
-        let ansi = match self.severity {
-            Severity::Positive => "\u{1b}[32m",
-            Severity::Neutral => "\u{1b}[2m",
-            Severity::Attention => "\u{1b}[33m",
-            Severity::Failure => "\u{1b}[31m",
-        };
-        format!("{ansi}{token}\u{1b}[0m")
+        self.severity.paint(&token, color)
     }
 }
 
@@ -632,9 +641,9 @@ mod tests {
 
     #[test]
     fn context_strip_has_two_line_core_and_optional_action() {
-        let context = ContextStrip::new("Workspace", "~/.omnifs", StateToken::positive("ready"))
+        let context = ContextStrip::new("Profile", "~/.omnifs", StateToken::positive("ready"))
             .with_metadata([Meta::new("daemon", "running"), Meta::new("mounts", "2")])
-            .with_action(Action::fix("omnifs up"));
+            .with_action(Action::fix("omnifs doctor"));
         let mut report = Report::new();
         report.push(Block::Context(context));
         let output = report.render_with(RenderOptions {
@@ -649,7 +658,13 @@ mod tests {
                 .unwrap()
                 .contains("daemon running, mounts 2")
         );
-        assert!(output.lines().nth(2).unwrap().contains("fix:  omnifs up"));
+        assert!(
+            output
+                .lines()
+                .nth(2)
+                .unwrap()
+                .contains("fix:  omnifs doctor")
+        );
     }
 
     #[test]

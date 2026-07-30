@@ -4,8 +4,8 @@
 //! renders a manifest's needs and limits through these helpers, so the wording
 //! stays consistent.
 
-use omnifs_workspace::authn::AuthScheme;
-use omnifs_workspace::provider::{
+use omnifs_auth::AuthScheme;
+use omnifs_provider::{
     AccessNeed, LimitDeclarations, PreopenMode, PreopenedPath, ProviderManifest,
 };
 
@@ -179,7 +179,7 @@ pub(crate) fn limit_lines(limits: &LimitDeclarations) -> Vec<LimitLine> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_workspace::provider::AccessNeed;
+    use omnifs_provider::AccessNeed;
 
     fn manifest_with_needs(needs: Vec<AccessNeed>) -> ProviderManifest {
         ProviderManifest {

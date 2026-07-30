@@ -27,7 +27,7 @@ sha2 = { workspace = true }
 # WASI_SYSROOT (or CFLAGS_wasm32_wasip2=--sysroot=...) so that
 # libsqlite3-sys can find `stdio.h` and friends. The Docker build
 # fetches wasi-sdk and sets WASI_SYSROOT for the providers stage.
-rusqlite = { version = "0.36", default-features = false, features = ["bundled"] }
+rusqlite = { workspace = true }
 thiserror = { workspace = true }
 [lints.rust]
 unsafe_code = "allow"

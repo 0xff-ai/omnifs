@@ -1,0 +1,33 @@
+---
+source: crates/omnifs-inspector/src/ui.rs
+assertion_line: 704
+expression: streaming_screen
+---
+┌ inspect · activity · replay fixture 1× · 25.0/s · drop 0 ────────────────────────────────────────┐
+│                                                                                                  │
+└ q quit  ? help  v view  tab focus  ↑/↓ navigate  ↵ collapse  space pause  e errors  l latency  y ┘
+┌ mounts ──────────────────────────────────────────────────────────────────────────────────────────┐
+│  linear      █▁▁▁▁▁▁▁▁▁▁▁   evt/s  0.0   err 100%   cache   0%   p95 220.0ms                     │
+│  github      █▁▁▁▁▁▁▁▁▁▁▁   evt/s  3.3   err   0%   cache  50%   p95 40.0ms                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ recent paths ───────────────────────────────────────┐┌ operations · recent (2 / 4096) ───────────┐
+│  ▣ linear  1 failed paths                           ││  12:00:00.100 linear read …/ENG-42  220.0m│
+│    ▣ issues  1 failed paths                         ││› 12:00:00.000 github lookup …/omnifs  40.0│
+│      ✗ ENG-42  220.0ms                              ││                                           │
+│  ▣ github                                           ││                                           │
+│    ▣ repos                                          ││                                           │
+│      ▣ omnifs  40.0ms                               ││                                           │
+│                                                     ││                                           │
+│                                                     ││                                           │
+│                                                     ││                                           │
+│                                                     ││                                           │
+│                                                     ││                                           │
+└─────────────────────────────────────────────────────┘└───────────────────────────────────────────┘
+┌ github · lookup /repos/omnifs · trace 1 ─────────────────────────────────────────────────────────┐
+│  · fuse.lookup                                                                          40.0ms ok│
+│  ▸ lookup_child                                                                         20.0ms ok│
+│  ◐ cache.hit /repos/omnifs                                                               150µs ok│
+│  ok  40.0ms                                                                                      │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘

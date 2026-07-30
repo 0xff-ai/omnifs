@@ -9,9 +9,9 @@ use omnifs_core::path::Path;
 use super::error::{Result, TreeError};
 use super::node::{Node, NodeBody};
 use super::synthetic;
-use crate::{RequestCtx, TreeNamespace};
+use crate::{EngineNamespace, RequestCtx};
 
-impl TreeNamespace {
+impl EngineNamespace {
     /// Resolve a full protocol path to a `Node`. Splits the path into
     /// (mount, mount-relative path); the mount root resolves to a directory
     /// without a provider round trip, and any deeper path resolves its leaf via
@@ -211,7 +211,9 @@ impl TreeNamespace {
 
     fn mount_root_node(&self, mount: String) -> Result<Node> {
         let rel = Path::root();
-        let entry = self.entry_for(&mount)?;
+        let entry = self
+            .configured_entry(&mount)
+            .ok_or_else(|| TreeError::not_found(format!("no such mount: {mount}")))?;
         let resources = entry.resources();
         let offline = entry.runtime().is_none();
         let expired = !offline

@@ -15,10 +15,12 @@ The host owns trust. Providers are untrusted WASM components. Filesystems expose
 
 Keep credential storage, credential injection, callout execution, cache storage, namespace state, and I/O in the host. Keep provider meaning in the provider: path meaning, object identity, canonical assembly, render, versioning, preload, and revalidation.
 
-Host-owned Git and blob storage identities come only from validated mount-scoped
+Host-owned blob and projection identities come only from validated mount-scoped
 request facts. Providers may request a remote, reference, or HTTP payload, but
 they never choose a filesystem/cache entry name, and injected credentials are
-excluded from those identities.
+excluded from those identities. Mount definitions, credentials, provider
+artifacts, SQLite state, and cache storage belong to the daemon; the CLI reaches
+them only through typed local RPC.
 
 ### Byte boundary
 
@@ -38,11 +40,14 @@ Dynamic domain needs resolve from a provider config field named `domains`, whose
 
 ### Auth and credentials
 
-Credentials live host-side. Startup resolves each immutable mount auth declaration into one mount-owned binding before namespace publication; that binding loads the store entry, refreshes OAuth credentials during use, and injects them after a callout crosses the WASM boundary.
+Credentials live host-side in daemon-owned SQLite state. Startup resolves each
+mount auth declaration into one mount-owned binding before namespace publication;
+that binding loads the store entry, refreshes OAuth credentials during use, and
+injects them after a callout crosses the WASM boundary.
 
-Keep credentials out of WIT payloads and daemon control payloads. Route provider auth declarations through provider metadata and mount auth/config resolution. Keep human auth UX in `omnifs-cli`.
+Credential material stays out of WIT payloads. It may cross the daemon control boundary only in request-side protobuf messages on the local Unix socket; it never crosses filesystem attach/TCP or appears in responses, status, inventory, logs, Debug, or Inspector output. Route provider auth declarations through provider metadata and mount auth/config resolution. Keep human auth UX in `omnifs-cli`.
 
-OAuth client ids in provider declarations are public application identifiers, not secrets. User access tokens, refresh tokens, and client secrets remain sensitive host-side values. `omnifs mount add` owns first-run OAuth mount generation; `omnifs mount reauth <mount>` owns repair and re-authentication, and both write the store for the next startup. Credentials live only in the host credential store: a mount's auth declares identity (scheme, account) and never a sourcing mechanism, so there is no read-from-env or read-from-file path at serve time.
+OAuth client ids in provider declarations are public application identifiers, not secrets. User access tokens, refresh tokens, and client secrets remain sensitive host-side values. `omnifs mount add` owns first-run OAuth mount generation; `omnifs mount reauth <mount>` owns repair and re-authentication; both submit the collected credential as one op in a lease-scoped mutation batch to the daemon. Credentials live only in the daemon credential store: a mount's auth declares identity (scheme, account) and never a sourcing mechanism, so there is no read-from-env or read-from-file path at serve time.
 
 Credential values must never appear in CLI output, errors, tracing, metrics, or structured envelopes. Source identifiers such as environment-variable names may appear when they make an error actionable.
 
@@ -58,7 +63,7 @@ The libkrun filesystem guest also receives no credentials or network device. Its
 - Claim the sandbox prevents all exfiltration. Allowed network destinations can still be abused by a hostile provider.
 - Add provider authority as a side effect of a convenience change.
 - Hide a new capability behind a macro argument, manifest field, or config field that is not enforced.
-- Transmit credentials through the daemon API.
+- Transmit credentials through filesystem attach/TCP or expose them in daemon responses, status, inventory, logs, Debug, or Inspector output. Request-side submission on the local Unix control socket is the only allowed crossing.
 - Let providers read the credential store directly.
 - Build a provider-specific credential bypass in host runtime code.
 - Treat WIT async imports as provider-owned I/O.
@@ -70,11 +75,10 @@ The libkrun filesystem guest also receives no credentials or network device. Its
 - `crates/omnifs-engine/src/callouts/mod.rs`
 - `crates/omnifs-engine/src/callouts/http.rs`
 - `crates/omnifs-auth`
-- `crates/omnifs-workspace/src/creds`
-- `crates/omnifs-workspace/src/provider/manifest.rs`
-- `crates/omnifs-workspace/src/provider/config.rs`
-- `crates/omnifs-workspace/src/authn/resolve.rs`
-- `crates/omnifs-workspace/src/mounts/mod.rs`
+- `crates/omnifs-state/src/credential.rs`
+- `crates/omnifs-provider/src/manifest.rs`
+- `crates/omnifs-cli/src/commands/mount/`
+- `crates/omnifs-daemon/src/generation_builder.rs`
 - `crates/omnifs-cli/src/commands/mount/`
 - `providers/*/README.md`
 

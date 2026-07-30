@@ -1,5 +1,5 @@
 use anyhow::{Context, anyhow};
-use omnifs_workspace::provider::{
+use omnifs_provider::{
     ConfigField, ConfigMetadata, HostResourceBinding, ProviderManifest, is_hostname_only,
 };
 use serde_json::Value;
@@ -153,7 +153,7 @@ fn prompt_host_file(name: &str, field: &ConfigField, output: &Output) -> anyhow:
 #[cfg(test)]
 mod tests {
     use super::{parse_domain_list, validate_config};
-    use omnifs_workspace::provider::ProviderManifest;
+    use omnifs_provider::ProviderManifest;
 
     #[test]
     fn parses_and_validates_a_domain_list() {

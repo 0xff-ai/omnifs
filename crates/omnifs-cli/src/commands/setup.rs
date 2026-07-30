@@ -11,20 +11,17 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use clap::Args;
 
+use crate::commands::daemon_start;
 use crate::commands::fs::{available_filesystems, default_runtime};
-use crate::commands::mount::AddArgs;
-use crate::commands::up::UpArgs;
+use crate::commands::mount::{AddArgs, ReceiptStyle};
 use crate::error::ExitCode;
 use crate::inventory::Inventory;
-use crate::provider_bundle::EmbeddedProviders;
 use crate::provider_resolver::{provider_options, safe_for_setup};
-use crate::stages::{PromptMode, ReceiptStyle};
 use crate::ui::live::LiveRegion;
-use crate::ui::output::Output;
+use crate::ui::output::{Output, PromptMode};
 use crate::ui::render::{self, Capabilities};
 use crate::ui::style::{self, Glyph};
 use omnifs_core::fs;
-use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone, Default)]
 #[command(
@@ -34,7 +31,7 @@ pub struct SetupArgs {
     /// Configure these exact embedded provider names. Repeat or comma-separate.
     #[arg(long, value_name = "PROVIDER", value_delimiter = ',')]
     pub providers: Vec<String>,
-    /// Configure mounts without starting the daemon or attaching filesystems.
+    /// Configure mounts without attaching filesystems.
     #[arg(long)]
     pub no_up: bool,
     /// Print OAuth URLs instead of opening a browser.
@@ -44,14 +41,16 @@ pub struct SetupArgs {
 
 impl SetupArgs {
     pub async fn run(self, output: Output) -> Result<ExitCode> {
-        let workspace = Workspace::resolve()?;
-        self.run_in_workspace(&workspace, output).await
+        Box::pin(self.run_in_workspace(output)).await
     }
 
-    async fn run_in_workspace(self, workspace: &Workspace, output: Output) -> Result<ExitCode> {
+    async fn run_in_workspace(self, output: Output) -> Result<ExitCode> {
+        // Setup always configures mounts through the daemon. `--no-up` only
+        // skips the client-owned filesystem attachment step below.
+        daemon_start::start().await?;
+        let rpc = crate::rpc::RpcClient::resolve()?;
         let started = Instant::now();
-        let prompt =
-            PromptMode::from_flags(output.yes(), output.no_input() || output.is_structured());
+        let prompt = output.prompt_mode();
         let caps = crate::ui::output::stderr_capabilities(output.quiet());
 
         crate::ui::splash::show(caps, output.no_input(), output.is_structured())?;
@@ -59,13 +58,13 @@ impl SetupArgs {
         output.narrate("Welcome. Three steps: pick services, sign in, choose how files appear.");
         output.narrate("");
         output.heading("1. Services");
-        let selected = self.select_providers(workspace, &output, prompt)?;
+        let selected = self.select_providers(&rpc, &output, prompt).await?;
         let configure_prompt = Self::configure_prompt(&output, prompt);
 
         output.narrate("");
         output.heading("2. Sign in");
         for provider in selected {
-            crate::stages::configure_mount(
+            crate::commands::mount::configure_mount(
                 AddArgs {
                     provider: Some(provider),
                     name: None,
@@ -79,7 +78,6 @@ impl SetupArgs {
                     config_json: None,
                     limits_json: None,
                 },
-                workspace,
                 &output,
                 configure_prompt,
                 ReceiptStyle::Compact,
@@ -87,12 +85,7 @@ impl SetupArgs {
             .await?;
         }
 
-        if !self.no_up
-            && crate::mount_config::load_registry(workspace)?
-                .iter()
-                .next()
-                .is_some()
-        {
+        if !self.no_up && !rpc.list_mounts().await?.is_empty() {
             output.narrate("");
             output.heading("3. Your files");
             output
@@ -100,19 +93,15 @@ impl SetupArgs {
             let filesystems = select_filesystems(&output, prompt)?;
             output.narrate("");
 
-            UpArgs::default()
-                .start_in_workspace(workspace, output.clone())
-                .await?;
-
             if !filesystems.is_empty() {
-                Self::attach_filesystems(workspace, &output, &filesystems).await?;
+                Box::pin(Self::attach_filesystems(&output, &filesystems)).await?;
             }
         }
 
-        let inventory = Inventory::collect(workspace).await?;
+        let inventory = Inventory::collect_rpc().await?;
         let exit_code = match inventory.verdict() {
-            crate::inventory::Verdict::Ok => ExitCode::Success,
-            crate::inventory::Verdict::Degraded => ExitCode::Degraded,
+            crate::ui::output::ResultVerdict::Ok => ExitCode::Success,
+            crate::ui::output::ResultVerdict::Degraded => ExitCode::Degraded,
         };
         if output.is_structured() {
             output.emit_result(inventory.verdict(), inventory)?;
@@ -122,26 +111,34 @@ impl SetupArgs {
         Ok(exit_code)
     }
 
-    fn select_providers(
+    async fn select_providers(
         &self,
-        workspace: &Workspace,
+        rpc: &crate::rpc::RpcClient,
         output: &Output,
         prompt: PromptMode,
     ) -> Result<Vec<String>> {
-        let embedded = EmbeddedProviders::load()?;
-        let mounts = crate::mount_config::load_registry(workspace)?;
+        let embedded = rpc.list_embedded_providers().await?;
+        let mounts = rpc.list_mounts().await?;
         let configured_names = mounts
             .iter()
-            .map(|(_, spec)| spec.provider.meta.name.to_string())
+            .map(|mount| mount.provider.name.clone())
             .collect::<BTreeSet<_>>();
 
         if !self.providers.is_empty() {
             let mut seen = BTreeSet::new();
             for provider in &self.providers {
-                if seen.insert(provider) && embedded.by_name(provider).is_none() {
+                if seen.insert(provider)
+                    && !embedded
+                        .iter()
+                        .any(|entry| entry.reference.name == *provider)
+                {
                     bail!(
                         "provider `{provider}` is not an exact embedded provider name; pass one of: {}",
-                        embedded.names().collect::<Vec<_>>().join(", ")
+                        embedded
+                            .iter()
+                            .map(|entry| entry.reference.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     );
                 }
             }
@@ -175,15 +172,19 @@ impl SetupArgs {
                 .into_iter()
                 .filter(|option| {
                     embedded
-                        .by_name(&option.name)
-                        .is_some_and(|provider| safe_for_setup(provider.manifest()))
+                        .iter()
+                        .find(|provider| provider.reference.name == option.name)
+                        .and_then(|provider| {
+                            omnifs_provider::ProviderManifest::from_bytes(&provider.manifest).ok()
+                        })
+                        .is_some_and(|manifest| safe_for_setup(&manifest))
                 })
                 .map(|option| option.name)
                 .collect();
             return Ok(selected);
         }
 
-        if prompt.no_input || !prompt.interactive {
+        if prompt.no_input() || !prompt.interactive() {
             bail!("setup needs --providers <NAME>, or pass --yes to select safe providers");
         }
 
@@ -193,8 +194,12 @@ impl SetupArgs {
         }
         let choices = options.into_iter().map(|option| {
             let detail = embedded
-                .by_name(&option.name)
-                .map(|entry| crate::capability::consent_detail(entry.manifest()))
+                .iter()
+                .find(|entry| entry.reference.name == option.name)
+                .and_then(|entry| {
+                    omnifs_provider::ProviderManifest::from_bytes(&entry.manifest).ok()
+                })
+                .map(|manifest| crate::capability::consent_detail(&manifest))
                 .unwrap_or_default();
             let checked = option.default_selected;
             (option.name.clone(), option.name, detail, checked)
@@ -206,11 +211,7 @@ impl SetupArgs {
 
     fn configure_prompt(output: &Output, prompt: PromptMode) -> PromptMode {
         if output.yes() {
-            PromptMode {
-                interactive: false,
-                yes: true,
-                no_input: true,
-            }
+            PromptMode::forced_yes()
         } else {
             prompt
         }
@@ -236,7 +237,6 @@ impl SetupArgs {
     /// need to drive it: the closure updates it live while attach runs,
     /// and the loop updates it between calls as each result lands.
     async fn attach_filesystems(
-        workspace: &Workspace,
         output: &Output,
         filesystems: &[(fs::Protocol, fs::Runtime)],
     ) -> Result<()> {
@@ -254,12 +254,11 @@ impl SetupArgs {
                     format!("{attached_so_far}/{total} attaching… {line}"),
                 );
             });
-            crate::commands::fs::ensure_setup_filesystem(
-                workspace,
+            Box::pin(crate::commands::fs::ensure_setup_filesystem(
                 *protocol,
                 *runtime,
                 attach_output,
-            )
+            ))
             .await?;
             attached += 1;
             update_region(&region, format!("{attached}/{total} attaching…"));
@@ -320,7 +319,7 @@ fn update_region(region: &Arc<Mutex<LiveRegion>>, text: String) {
 /// Split `requested` provider names (the explicit `--providers` path) into
 /// ones not yet configured and ones already present in `configured`,
 /// preserving `requested`'s order. Pure so the skip-vs-select split is
-/// testable without a real workspace: `configured` is exactly the set
+/// testable without a real profile: `configured` is exactly the set
 /// `select_providers` derives from the existing mount registry.
 fn split_requested_providers(
     requested: &[String],
@@ -351,7 +350,7 @@ fn select_filesystems(
     prompt: PromptMode,
 ) -> Result<Vec<(fs::Protocol, fs::Runtime)>> {
     let available = available_filesystems();
-    if output.yes() || prompt.no_input || !prompt.interactive {
+    if output.yes() || prompt.no_input() || !prompt.interactive() {
         return Ok(available
             .into_iter()
             .filter(|&(protocol, runtime)| default_runtime(protocol) == Some(runtime))
@@ -423,8 +422,10 @@ fn filesystem_detail(protocol: fs::Protocol, runtime: fs::Runtime) -> &'static s
 /// location when one exists, else the guest wire mount point (display-only,
 /// but still the right label when only a guest attach is live).
 fn tree_root_label(inventory: &Inventory) -> String {
-    crate::ui::access::primary_host_location(inventory)
-        .map_or_else(|| fs::GUEST_LOCATION.to_owned(), omnifs_workspace::display)
+    inventory.primary_host_location().map_or_else(
+        || fs::GUEST_LOCATION.to_owned(),
+        |path| path.display().to_string(),
+    )
 }
 
 /// One mount's tree-reveal annotation: the first few entry names at its
@@ -451,7 +452,7 @@ fn mount_annotation(host_root: Option<&Path>, mount_name: &str) -> Option<String
 /// label plus per-mount listing via [`mount_annotation`].
 fn tree_lines(inventory: &Inventory, caps: Capabilities) -> Vec<String> {
     let root = tree_root_label(inventory);
-    let host_root = crate::ui::access::primary_host_location(inventory);
+    let host_root = inventory.primary_host_location();
     let rows: Vec<(String, Option<String>)> = inventory
         .mounts
         .iter()
@@ -514,7 +515,7 @@ fn closing_block(inventory: &Inventory, tree: Vec<String>, elapsed: Duration) ->
     body.extend(tree);
     let action = inventory
         .next_action()
-        .map(|action| crate::ui::access::action_line(&action).render());
+        .map(|action| crate::ui::access::ActionLine::from(&action).render());
     ClosingBlock {
         body,
         closing_sentence: action.map_or_else(
@@ -567,11 +568,7 @@ mod tests {
     // -- select_filesystems: --yes/--no-input/non-interactive all default -----
 
     fn prompt(interactive: bool, yes: bool, no_input: bool) -> PromptMode {
-        PromptMode {
-            interactive,
-            yes,
-            no_input,
-        }
+        PromptMode::for_test(interactive, yes, no_input)
     }
 
     fn expected_default_filesystems() -> Vec<(fs::Protocol, fs::Runtime)> {
@@ -666,7 +663,6 @@ mod tests {
             auth: AuthState::NotNeeded,
             serving: ServingState::Live,
             access_count: 1,
-            fix: None,
         }
     }
 

@@ -15,7 +15,7 @@ Vendor knowledge lives in provider metadata and provider docs. A new service sho
 
 ## Credential ownership
 
-Providers never hold stored tokens. The host reads and writes credentials under `OMNIFS_HOME`, prepares auth material for host-run callouts, and injects headers only after the callout crosses the WASM boundary.
+Providers never hold stored tokens. The daemon stores credentials in its SQLite state under the active profile, prepares auth material for host-run callouts, and injects headers only after the callout crosses the WASM boundary. The CLI owns OAuth and static-token UX, collected before any mutation lease is acquired, then submits the credential as one op inside a lease-scoped mutation batch over local RPC (often alongside the mount op that needs it).
 
 The provider receives responses or callout-denied errors, not raw credential store access.
 
@@ -25,7 +25,7 @@ Credential file protection is a local desktop trust boundary. It protects agains
 
 Provider metadata declares auth schemes, injection domains, header shape, flow type, scopes, and setup guidance. Metadata is generated from `#[omnifs_sdk::provider]` annotations and emitted by the provider macro as `omnifs.provider-metadata.v1` in the compiled Wasm.
 
-The host extracts that metadata and binds each mount's credential while building the immutable startup namespace, before publishing any runtime. Each mount owns its injection facts and loaded entry, while a shared credential service owns only durable storage, OAuth transport, and refresh single-flight. Generic auth behavior remains provider-agnostic, and it does not branch on provider names.
+The daemon extracts that metadata and binds each mount's credential while building the startup namespace, before publishing any runtime. Each mount owns its injection facts and loaded entry, while a shared credential service owns only durable storage, OAuth transport, and refresh single-flight. Generic auth behavior remains provider-agnostic, and it does not branch on provider names.
 
 Provider-specific OAuth details belong next to the provider, usually in `providers/<name>/README.md`, when they help a user understand setup or scope consequences.
 
@@ -45,7 +45,7 @@ Refresh and retry are host protocol behavior. Providers should model permission 
 
 ## Runtime trust boundary
 
-The CLI and host-native daemon are trusted local control-plane code. Provider WASM is untrusted. A filesystem runner is deliberately credential-free, whatever its driver: it receives only the authority to attach through the daemon's Omnifs VFS wire protocol.
+The CLI and host-native daemon are trusted local control-plane code. Provider WASM is untrusted. A filesystem runner is deliberately credential-free, whatever its driver: it receives only the authority to attach through the daemon's Omnifs VFS wire protocol. The CLI cannot read daemon SQLite tables; the daemon cannot read client filesystem config.
 
 Do not design credential boundaries around hiding `OMNIFS_HOME` from the trusted daemon, which owns that state. Do prevent provider WASM and optional filesystem guests from reading secrets or escalating host resources.
 

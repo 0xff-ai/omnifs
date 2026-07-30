@@ -1,10 +1,9 @@
-use crate::provider_bundle::EmbeddedProviders;
 use anyhow::anyhow;
+use omnifs_api::{MountRecord, ProviderMetadata};
 use omnifs_core::MountName;
-use omnifs_workspace::mounts::Registry;
 
 pub(crate) fn select(
-    embedded: &EmbeddedProviders,
+    embedded: &[ProviderMetadata],
     provider_arg: Option<&str>,
     interactive: bool,
     output: &crate::ui::output::Output,
@@ -15,7 +14,10 @@ pub(crate) fn select(
     if !interactive {
         anyhow::bail!("non-interactive mode requires a provider path, digest, or embedded name");
     }
-    let mut providers = embedded.names().map(str::to_owned).collect::<Vec<_>>();
+    let mut providers = embedded
+        .iter()
+        .map(|provider| provider.reference.name.clone())
+        .collect::<Vec<_>>();
     providers.sort();
     if providers.is_empty() {
         anyhow::bail!("the embedded provider bundle contains no providers");
@@ -26,7 +28,7 @@ pub(crate) fn select(
 }
 
 pub(crate) fn mount_name(
-    mounts: &Registry,
+    mounts: &[MountRecord],
     default_mount: &str,
     explicit_name: Option<&str>,
     interactive: bool,
@@ -50,14 +52,14 @@ pub(crate) fn mount_name(
 }
 
 fn ensure_unique_name(
-    mounts: &Registry,
+    mounts: &[MountRecord],
     proposed: MountName,
     interactive: bool,
     yes: bool,
     output: &crate::ui::output::Output,
     key_width: usize,
 ) -> anyhow::Result<MountName> {
-    if mounts.get(&proposed).is_none() {
+    if !mounts.iter().any(|mount| mount.definition.name == proposed) {
         return Ok(proposed);
     }
     let suggestion = next_available(mounts, &proposed)?;
@@ -85,9 +87,13 @@ fn ensure_unique_name(
     Ok(MountName::new(name)?)
 }
 
-fn next_available(mounts: &Registry, base: &MountName) -> anyhow::Result<MountName> {
+fn next_available(mounts: &[MountRecord], base: &MountName) -> anyhow::Result<MountName> {
     (2..1000)
         .filter_map(|n| MountName::new(format!("{base}-{n}")).ok())
-        .find(|candidate| mounts.get(candidate).is_none())
+        .find(|candidate| {
+            !mounts
+                .iter()
+                .any(|mount| mount.definition.name == *candidate)
+        })
         .ok_or_else(|| anyhow!("could not find an available mount name derived from `{base}`"))
 }

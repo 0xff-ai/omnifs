@@ -9,7 +9,7 @@
 use std::ffi::OsStr;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::Mutex;
 
 // Guard for env-mutating tests: env is process-global, so all tests that touch
@@ -74,6 +74,51 @@ pub fn omnifs_bin() -> PathBuf {
         )
 }
 
+pub struct CliFixture {
+    home: tempfile::TempDir,
+}
+
+impl CliFixture {
+    pub fn new() -> Self {
+        Self {
+            // Transcript snapshots normalize this path after rendering. Keep
+            // its pre-normalization length stable so table padding does not
+            // depend on the host's temporary-directory path.
+            home: tempfile::Builder::new()
+                .prefix("omnifs-cli-transcripts-")
+                .tempdir_in("/tmp")
+                .expect("home tempdir"),
+        }
+    }
+
+    pub fn home_path(&self) -> &Path {
+        self.home.path()
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(omnifs_bin());
+        command
+            .env("OMNIFS_HOME", self.home_path())
+            .env("NO_COLOR", "1")
+            .env("RUST_LOG", "warn");
+        command
+    }
+
+    pub fn run(&self, args: &[&str]) -> Output {
+        self.command()
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
+    }
+
+    pub fn run_owned(&self, args: &[String]) -> Output {
+        self.command()
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
+    }
+}
+
 pub fn live_acceptance_enabled() -> bool {
     std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_some()
 }
@@ -96,13 +141,6 @@ pub fn platform_can_mount() -> bool {
 /// conformance matrix so both binaries serialize against the same port.
 pub fn nfs_serial_lock() -> TcpListener {
     omnifs_itest::live::nfs_serial_lock()
-}
-
-/// The native daemon pid recorded in `<home>/daemon.json`, if present.
-pub fn recorded_pid(home: &Path) -> Option<u32> {
-    let bytes = std::fs::read_to_string(home.join("daemon.json")).ok()?;
-    let record = serde_json::from_str::<serde_json::Value>(&bytes).ok()?;
-    u32::try_from(record["pid"].as_u64()?).ok()
 }
 
 /// Best-effort force-unmount for a test mount. Safe during panic cleanup and
@@ -137,76 +175,6 @@ pub fn force_unmount(mount_point: &Path) {
     {
         if omnifs_nfs::mount_is_active(mount_point) {
             let _ = Command::new("umount").arg("-f").arg(mount_point).output();
-        }
-    }
-}
-
-/// Install the test provider into the provider store under `providers_dir` and
-/// return its content id.
-pub fn install_test_provider(providers_dir: &Path) -> omnifs_core::ProviderId {
-    let artifact = omnifs_workspace::provider::Artifact::from_file(
-        release_wasm_dir().join("test_provider.wasm"),
-    )
-    .expect("parse test provider wasm");
-    let id = artifact.id();
-    let store = omnifs_workspace::provider::ProviderStore::new(providers_dir);
-    store.retain(&artifact).expect("retain test provider");
-    id
-}
-
-/// No-auth mount spec for the test provider, pinning `id`. Serves
-/// `test/hello/message`.
-pub fn test_mount_spec(id: &omnifs_core::ProviderId) -> String {
-    format!(r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"test"}}"#)
-}
-
-/// Install a synthetic fixture provider carrying only a
-/// `omnifs.provider-metadata.v1` custom section built from `manifest` (no
-/// real wasm component), returning its content id. `mount add` resolves auth
-/// and config from this section alone, so a fixture never needs a real
-/// provider crate to exercise auth-flow behavior. Duplicated from
-/// `omnifs-cli`'s own private `test_support::wasm_with_provider_metadata`:
-/// integration tests build as a separate crate and cannot reach `#[cfg(test)]`
-/// items inside the library.
-pub fn install_fixture_provider(
-    providers_dir: &Path,
-    manifest: &serde_json::Value,
-) -> omnifs_core::ProviderId {
-    let id = manifest["id"].as_str().expect("manifest carries an id");
-    let file = format!("omnifs_provider_{id}.wasm");
-    let wasm = wasm_with_provider_metadata(manifest);
-    let artifact = omnifs_workspace::provider::Artifact::from_bytes(file, wasm)
-        .expect("parse fixture provider");
-    let content_id = artifact.id();
-    let store = omnifs_workspace::provider::ProviderStore::new(providers_dir);
-    store.retain(&artifact).expect("retain fixture provider");
-    content_id
-}
-
-fn wasm_with_provider_metadata(manifest: &serde_json::Value) -> Vec<u8> {
-    let data = serde_json::to_vec(manifest).expect("serialize fixture manifest");
-    let mut wasm = b"\0asm\x01\0\0\0".to_vec();
-    let mut section = Vec::new();
-    let section_name = omnifs_workspace::provider::PROVIDER_METADATA_SECTION_NAME;
-    push_uleb(section_name.len(), &mut section);
-    section.extend_from_slice(section_name.as_bytes());
-    section.extend_from_slice(&data);
-    wasm.push(0);
-    push_uleb(section.len(), &mut wasm);
-    wasm.extend(section);
-    wasm
-}
-
-fn push_uleb(mut value: usize, out: &mut Vec<u8>) {
-    loop {
-        let mut byte = u8::try_from(value & 0x7f).unwrap();
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        out.push(byte);
-        if value == 0 {
-            break;
         }
     }
 }

@@ -25,8 +25,9 @@ use super::common::{DirSnapshot, ROOT_INO};
 use crate::new_notifier_handle;
 use omnifs_core::path::Path;
 use omnifs_engine::{
-    Attrs, DirCursor, DirPage, EntryKind, EventStream, LookupAnswer, MountTable, Namespace,
-    NsError, ReadAnswer, ReadStyle, Stability, TreeNamespace,
+    Attrs, DirCursor, DirPage, EngineNamespace, EntryKind, EventStream, LookupAnswer,
+    MountBuildInput, MountBuildState, MountTable, Namespace, NsError, ProviderBuildInput,
+    ReadAnswer, ReadStyle, RuntimeMountConfig, Stability,
 };
 use std::future::Future;
 use std::path::{Path as StdPath, PathBuf};
@@ -52,19 +53,15 @@ fn wasm_artifact_path(file_name: &str) -> PathBuf {
 
 struct FuseHarness {
     fs: FuseAdapter,
-    ns: Arc<TreeNamespace>,
+    ns: Arc<EngineNamespace>,
     _registry: Arc<MountTable>,
     _cache_dir: TempDir,
-    _config_dir: TempDir,
-    _providers_dir: TempDir,
 }
 
 /// Build a `FuseAdapter` over the production mount-enumeration namespace. Test
 /// provider paths are reached through `ROOT_INO -> test -> hello`.
 fn build_harness() -> FuseHarness {
     let cache_dir = tempfile::tempdir().expect("cache dir");
-    let config_dir = tempfile::tempdir().expect("config dir");
-    let providers_dir = tempfile::tempdir().expect("providers dir");
 
     let test_src = wasm_artifact_path("test_provider.wasm");
     assert!(
@@ -73,40 +70,42 @@ fn build_harness() -> FuseHarness {
         test_src.display()
     );
     let test_bytes = std::fs::read(&test_src).expect("read test provider");
-    let artifact =
-        omnifs_workspace::provider::Artifact::from_bytes("test_provider.wasm", test_bytes)
-            .expect("parse test provider artifact");
-    let id = artifact.id();
-    let store = omnifs_workspace::provider::ProviderStore::new(providers_dir.path());
-    store.retain(&artifact).expect("retain test provider");
-
-    let mount_config = format!(
-        r#"{{
-                "provider": {{ "id": "{id}", "meta": {{ "name": "test-provider" }} }},
-                "mount": "test",
-                "config": {{}}
-            }}"#
-    );
-
-    let mounts_dir = tempfile::tempdir().expect("mounts dir");
-    std::fs::write(mounts_dir.path().join("test.json"), mount_config.as_bytes())
-        .expect("write mount spec");
-    let desired =
-        omnifs_workspace::mounts::Registry::load(mounts_dir.path()).expect("load mount snapshot");
+    let (artifact, manifest) = omnifs_provider::Artifact::from_bytes_with_manifest(
+        "test_provider.wasm",
+        test_bytes.clone(),
+    )
+    .expect("parse test provider artifact");
     let host = omnifs_engine::test_support::open_test_host(
         cache_dir.path(),
-        providers_dir.path(),
-        config_dir.path().join("credentials.json"),
         cache_dir.path().join("clones"),
     )
     .expect("open test host");
     let registry = Arc::new(
-        MountTable::load_online(&host, &desired, &tokio::runtime::Handle::current())
-            .expect("registry init"),
+        MountTable::prepare_durable(
+            &host,
+            vec![MountBuildInput {
+                config: RuntimeMountConfig {
+                    name: omnifs_core::MountName::new("test").expect("mount name"),
+                    provider: artifact.reference(),
+                    config: serde_json::json!({}),
+                    max_fetch_blob_bytes: None,
+                },
+                canonical: Arc::from(br#"{"mount":"test","config":{}}"#.as_slice()),
+                provider: Some(ProviderBuildInput {
+                    bytes: Arc::from(test_bytes.into_boxed_slice()),
+                    manifest,
+                }),
+                state: MountBuildState::Active {
+                    auth: None,
+                    credential_generation: None,
+                },
+            }],
+        )
+        .expect("registry init"),
     );
 
     let rt = tokio::runtime::Handle::current();
-    let ns = TreeNamespace::online(Arc::clone(&registry), rt.clone());
+    let ns = EngineNamespace::online(Arc::clone(&registry), rt.clone());
     let fs = FuseAdapter::new(
         rt,
         Arc::clone(&ns) as Arc<dyn Namespace>,
@@ -118,8 +117,6 @@ fn build_harness() -> FuseHarness {
         ns,
         _registry: registry,
         _cache_dir: cache_dir,
-        _config_dir: config_dir,
-        _providers_dir: providers_dir,
     }
 }
 

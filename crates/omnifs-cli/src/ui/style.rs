@@ -234,12 +234,12 @@ mod tests {
     #[test]
     fn accentuate_strips_backticks_and_colors_only_with_forced_mode() {
         assert_eq!(
-            accentuate("run `omnifs up` now", true),
-            format!("run {} now", accent("omnifs up", true))
+            accentuate("run `omnifs status` now", true),
+            format!("run {} now", accent("omnifs status", true))
         );
         assert_eq!(
-            accentuate("run `omnifs up` now", false),
-            "run omnifs up now"
+            accentuate("run `omnifs status` now", false),
+            "run omnifs status now"
         );
         // Unbalanced backticks are left literal.
         assert_eq!(accentuate("a `b", false), "a `b");

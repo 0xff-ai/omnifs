@@ -1,8 +1,13 @@
 ---
 source: crates/omnifs-cli/tests/cli_transcripts.rs
+assertion_line: 92
 expression: "fixture.transcript(&fixture.run(&[\"logs\"]))"
 ---
-exit: 0
+exit: 3
 stdout:
 stderr:
-No daemon log yet. It's written on first omnifs up.
+✗ daemon not running
+
+  Caused by:
+    connect to daemon at $OMNIFS_HOME/control.sock
+    No such file or directory (os error 2)

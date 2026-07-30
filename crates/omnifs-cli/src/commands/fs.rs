@@ -1,26 +1,20 @@
 //! Named filesystem configuration and lifecycle.
 
-use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use clap::{Args, Subcommand};
-use omnifs_core::fs;
-use omnifs_workspace::Workspace;
+use omnifs_core::{ClientOwnerId, fs};
 use serde::Serialize;
 
-use crate::docker::{DockerClient, DockerTarget};
+use crate::client_fs_state::ClientFilesystemState;
 use crate::error::ExitCode;
-use crate::fs_container::{
-    FILESYSTEM_DEV_IMAGE, filesystem_container_name, resolve_filesystem_image,
-};
-use crate::libkrun_runner::{LibkrunLaunchRequest, LibkrunRunner};
+use crate::filesystem_driver::{Confirmed, FilesystemDriver};
+use crate::rpc::RpcClient;
 use crate::ui::output::{Output, ResultVerdict};
 
-const DOCKER_TIMEOUT: Duration = Duration::from_secs(5);
-const LIBKRUN_TIMEOUT: Duration = Duration::from_secs(90);
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(200);
 
@@ -112,9 +106,9 @@ impl FsArgs {
         match self.command {
             FsCommand::Create(args) => args.run(&output),
             FsCommand::Rm(args) => rm(args, output).await,
-            FsCommand::Attach(args) => attach(args, output).await,
+            FsCommand::Attach(args) => Box::pin(attach(args, output)).await,
             FsCommand::Detach(args) => detach(args, output).await,
-            FsCommand::Restart(args) => restart(args, output).await,
+            FsCommand::Restart(args) => Box::pin(restart(args, output)).await,
             FsCommand::Shell(args) => shell(args, output).await,
             FsCommand::Ls => list(output).await,
         }
@@ -123,14 +117,14 @@ impl FsArgs {
 
 impl CreateArgs {
     fn run(self, output: &Output) -> Result<ExitCode> {
-        let workspace = Workspace::resolve()?;
-        let spec = resolve_spec(&workspace, self)?;
-        workspace.filesystems().claim(spec.id())?.create(&spec)?;
+        let client_state = ClientFilesystemState::resolve()?;
+        let spec = resolve_spec(&client_state, self)?;
+        client_state.registry().claim(spec.id())?.create(&spec)?;
         finish_action(output, spec, "configured")
     }
 }
 
-fn resolve_spec(workspace: &Workspace, args: CreateArgs) -> Result<fs::Spec> {
+fn resolve_spec(client_state: &ClientFilesystemState, args: CreateArgs) -> Result<fs::Spec> {
     let (protocol, runtime) = resolve_pair(args.protocol, args.runtime)?;
     ensure!(
         supports(protocol, runtime),
@@ -139,11 +133,9 @@ fn resolve_spec(workspace: &Workspace, args: CreateArgs) -> Result<fs::Spec> {
         std::env::consts::ARCH
     );
     let location = match runtime {
-        fs::Runtime::Host => args.location.unwrap_or_else(|| {
-            workspace
-                .filesystem_state()
-                .default_host_location(&args.name)
-        }),
+        fs::Runtime::Host => args
+            .location
+            .unwrap_or_else(|| client_state.default_host_location(&args.name)),
         fs::Runtime::Docker | fs::Runtime::Libkrun => {
             ensure!(
                 args.location.is_none(),
@@ -236,13 +228,14 @@ pub(crate) fn default_runtime(protocol: fs::Protocol) -> Option<fs::Runtime> {
 }
 
 pub(crate) async fn ensure_setup_filesystem(
-    workspace: &Workspace,
     protocol: fs::Protocol,
     runtime: fs::Runtime,
     output: Output,
 ) -> Result<()> {
+    let client_state = ClientFilesystemState::resolve()?;
     let id = fs::Id::new(format!("{protocol}-{runtime}"))?;
-    let claim = workspace.filesystems().claim(&id)?;
+    let registry = client_state.registry();
+    let claim = registry.claim(&id)?;
     let spec = if let Some(spec) = claim.get()? {
         ensure!(
             spec.protocol() == protocol && spec.runtime() == runtime,
@@ -251,38 +244,40 @@ pub(crate) async fn ensure_setup_filesystem(
         spec
     } else {
         let location = match runtime {
-            fs::Runtime::Host => workspace.filesystem_state().default_host_location(&id),
+            fs::Runtime::Host => client_state.default_host_location(&id),
             fs::Runtime::Docker | fs::Runtime::Libkrun => PathBuf::from(fs::GUEST_LOCATION),
         };
         let spec = fs::Spec::new(id, protocol, runtime, location)?;
         claim.create(&spec)?;
         spec
     };
-    let attached = crate::client::DaemonClient::for_workspace(workspace)
-        .status_optional_checked()
+    let attached = RpcClient::resolve()?
+        .inventory()
         .await?
-        .is_some_and(|status| status.filesystems.contains(&spec));
+        .attachments
+        .contains(&spec);
     if attached {
         return Ok(());
     }
-    if runtime_running(workspace, &spec, output.clone()).await? {
+    if runtime_running(&client_state, &spec, output.clone()).await? {
         ensure!(
-            wait_for_attachment(workspace, &spec).await,
+            wait_for_attachment(&spec).await,
             "filesystem `{}` is running but did not attach to the daemon",
             spec.id()
         );
         return Ok(());
     }
-    launch_and_confirm(workspace, &spec, output).await
+    Box::pin(launch_and_confirm(&client_state, &spec, output)).await
 }
 
 async fn rm(args: NameArgs, output: Output) -> Result<ExitCode> {
-    let workspace = Workspace::resolve()?;
-    let claim = workspace.filesystems().claim(&args.name)?;
+    let client_state = ClientFilesystemState::resolve()?;
+    let registry = client_state.registry();
+    let claim = registry.claim(&args.name)?;
     let spec = required_spec(&claim, &args.name)?;
-    ensure_not_attached(&workspace, &spec).await?;
+    ensure_not_attached(&spec).await?;
     ensure!(
-        !runtime_running(&workspace, &spec, output.clone()).await?,
+        !runtime_running(&client_state, &spec, output.clone()).await?,
         "filesystem `{}` is still running; detach it first",
         spec.id()
     );
@@ -291,8 +286,9 @@ async fn rm(args: NameArgs, output: Output) -> Result<ExitCode> {
 }
 
 async fn attach(args: NameArgs, output: Output) -> Result<ExitCode> {
-    let workspace = Workspace::resolve()?;
-    let claim = workspace.filesystems().claim(&args.name)?;
+    let client_state = ClientFilesystemState::resolve()?;
+    let registry = client_state.registry();
+    let claim = registry.claim(&args.name)?;
     let spec = required_spec(&claim, &args.name)?;
     ensure!(
         supports(spec.protocol(), spec.runtime()),
@@ -300,11 +296,16 @@ async fn attach(args: NameArgs, output: Output) -> Result<ExitCode> {
         spec.protocol(),
         spec.runtime()
     );
-    let status = crate::client::DaemonClient::for_workspace(&workspace)
-        .status_optional()
-        .await?
-        .context("the daemon is stopped; run `omnifs up` before attaching a filesystem")?;
-    if let Some(attached) = status.filesystems.iter().find(|row| row.id() == spec.id()) {
+    crate::commands::daemon_start::start().await?;
+    let inventory = RpcClient::resolve()?
+        .inventory()
+        .await
+        .context("daemon did not become ready before attaching a filesystem")?;
+    if let Some(attached) = inventory
+        .attachments
+        .iter()
+        .find(|row| row.id() == spec.id())
+    {
         ensure!(
             attached == &spec,
             "filesystem `{}` is attached with different settings; run `omnifs doctor`",
@@ -313,22 +314,23 @@ async fn attach(args: NameArgs, output: Output) -> Result<ExitCode> {
         return finish_action(&output, spec, "already_attached");
     }
     ensure!(
-        !runtime_running(&workspace, &spec, output.clone()).await?,
+        !runtime_running(&client_state, &spec, output.clone()).await?,
         "filesystem `{}` already has a running {} instance",
         spec.id(),
         spec.runtime()
     );
-    launch_and_confirm(&workspace, &spec, output.clone()).await?;
+    Box::pin(launch_and_confirm(&client_state, &spec, output.clone())).await?;
     finish_action(&output, spec, "attached")
 }
 
 async fn detach(args: NameArgs, output: Output) -> Result<ExitCode> {
-    let workspace = Workspace::resolve()?;
-    let claim = workspace.filesystems().claim(&args.name)?;
+    let client_state = ClientFilesystemState::resolve()?;
+    let registry = client_state.registry();
+    let claim = registry.claim(&args.name)?;
     let spec = required_spec(&claim, &args.name)?;
-    stop_runtime(&workspace, &spec, output.clone()).await?;
+    stop_runtime(&client_state, &spec, output.clone()).await?;
     ensure!(
-        !runtime_running(&workspace, &spec, output.clone()).await?,
+        !runtime_running(&client_state, &spec, output.clone()).await?,
         "filesystem `{}` still has a running {} instance",
         spec.id(),
         spec.runtime()
@@ -337,8 +339,9 @@ async fn detach(args: NameArgs, output: Output) -> Result<ExitCode> {
 }
 
 async fn restart(args: NameArgs, output: Output) -> Result<ExitCode> {
-    let workspace = Workspace::resolve()?;
-    let claim = workspace.filesystems().claim(&args.name)?;
+    let client_state = ClientFilesystemState::resolve()?;
+    let registry = client_state.registry();
+    let claim = registry.claim(&args.name)?;
     let spec = required_spec(&claim, &args.name)?;
     ensure!(
         supports(spec.protocol(), spec.runtime()),
@@ -346,81 +349,68 @@ async fn restart(args: NameArgs, output: Output) -> Result<ExitCode> {
         spec.protocol(),
         spec.runtime()
     );
-    crate::client::DaemonClient::for_workspace(&workspace)
-        .status_optional()
-        .await?
-        .context("the daemon is stopped; run `omnifs up` before restarting a filesystem")?;
-    stop_runtime(&workspace, &spec, output.clone()).await?;
-    launch_and_confirm(&workspace, &spec, output.clone()).await?;
+    crate::commands::daemon_start::start().await?;
+    RpcClient::resolve()?
+        .inventory()
+        .await
+        .context("daemon did not become ready before restarting a filesystem")?;
+    stop_runtime(&client_state, &spec, output.clone()).await?;
+    Box::pin(launch_and_confirm(&client_state, &spec, output.clone())).await?;
     finish_action(&output, spec, "attached")
 }
 
-fn required_spec(
-    claim: &omnifs_workspace::filesystems::Claim<'_>,
-    id: &fs::Id,
-) -> Result<fs::Spec> {
+fn required_spec(claim: &crate::client_fs_state::Claim<'_>, id: &fs::Id) -> Result<fs::Spec> {
     claim
         .get()?
         .with_context(|| format!("filesystem `{id}` is not configured"))
 }
 
-async fn ensure_not_attached(workspace: &Workspace, spec: &fs::Spec) -> Result<()> {
-    let status = crate::client::DaemonClient::for_workspace(workspace)
-        .status_optional_checked()
+async fn ensure_not_attached(spec: &fs::Spec) -> Result<()> {
+    let inventory = RpcClient::resolve()?
+        .inventory()
         .await
         .context("cannot prove the daemon attachment state; run `omnifs doctor`")?;
-    if let Some(status) = status {
-        ensure!(
-            !status.filesystems.iter().any(|row| row.id() == spec.id()),
-            "filesystem `{}` is attached; detach it first",
-            spec.id()
-        );
-    }
+    ensure!(
+        !inventory
+            .attachments
+            .iter()
+            .any(|row| row.id() == spec.id()),
+        "filesystem `{}` is attached; detach it first",
+        spec.id()
+    );
     Ok(())
 }
 
-async fn runtime_running(workspace: &Workspace, spec: &fs::Spec, output: Output) -> Result<bool> {
-    match spec.runtime() {
-        fs::Runtime::Host => Ok(crate::host_fs::phase(workspace.filesystem_state(), spec)
-            .await?
-            .is_some()),
-        fs::Runtime::Docker => {
-            let client = docker_client(workspace, spec, output)?;
-            match client.is_running().await? {
-                None => Ok(false),
-                Some(false) => bail!(
-                    "filesystem `{}` has a stopped Docker container; run `omnifs doctor`",
-                    spec.id()
-                ),
-                Some(true) => client
-                    .confirmed_filesystem(workspace.identity().container_label(), spec)
-                    .await
-                    .map(|identity| identity.is_some()),
-            }
-        },
-        fs::Runtime::Libkrun => {
-            let runner = LibkrunRunner::new(workspace.filesystem_state().libkrun_root(spec.id()));
-            let record = runner.confirmed_record()?;
-            if let Some(record) = &record {
-                ensure!(
-                    record.spec == *spec,
-                    "libkrun helper spec `{}` does not match configured filesystem `{}`",
-                    record.spec,
-                    spec.id()
-                );
-            }
-            Ok(record.is_some())
-        },
+async fn runtime_running(
+    client_state: &ClientFilesystemState,
+    spec: &fs::Spec,
+    output: Output,
+) -> Result<bool> {
+    let driver = FilesystemDriver::for_spec(client_state, spec, output)?;
+    match driver
+        .confirmed(client_state, client_owner_id()?, spec)
+        .await?
+    {
+        None => Ok(false),
+        Some(Confirmed::Docker(_, false)) => bail!(
+            "filesystem `{}` has a stopped Docker container; run `omnifs doctor`",
+            spec.id()
+        ),
+        Some(_) => Ok(true),
     }
 }
 
-async fn launch_and_confirm(workspace: &Workspace, spec: &fs::Spec, output: Output) -> Result<()> {
-    match spec.runtime() {
-        fs::Runtime::Host => crate::host_fs::launch(workspace.filesystem_state(), spec).await?,
-        fs::Runtime::Docker => launch_docker(workspace, spec, output.clone()).await?,
-        fs::Runtime::Libkrun => launch_libkrun(workspace, spec, output.clone()).await?,
-    }
-    if wait_for_attachment(workspace, spec).await {
+async fn launch_and_confirm(
+    client_state: &ClientFilesystemState,
+    spec: &fs::Spec,
+    output: Output,
+) -> Result<()> {
+    let client_owner = client_owner_id()?;
+    let driver = FilesystemDriver::for_spec(client_state, spec, output.clone())?;
+    driver
+        .launch(client_state, client_owner, spec, output.clone())
+        .await?;
+    if wait_for_attachment(spec).await {
         return Ok(());
     }
 
@@ -428,7 +418,7 @@ async fn launch_and_confirm(workspace: &Workspace, spec: &fs::Spec, output: Outp
         "filesystem `{}` mounted but did not attach to the daemon",
         spec.id()
     );
-    match stop_runtime(workspace, spec, output).await {
+    match stop_runtime(client_state, spec, output).await {
         Ok(()) => Err(attach_error),
         Err(cleanup_error) => Err(attach_error.context(format!(
             "the failed filesystem also could not be detached safely: {cleanup_error:#}"
@@ -436,151 +426,42 @@ async fn launch_and_confirm(workspace: &Workspace, spec: &fs::Spec, output: Outp
     }
 }
 
-async fn stop_runtime(workspace: &Workspace, spec: &fs::Spec, output: Output) -> Result<()> {
-    match spec.runtime() {
-        fs::Runtime::Host => crate::host_fs::stop(workspace.filesystem_state(), spec).await,
-        fs::Runtime::Docker => {
-            let client = docker_client(workspace, spec, output)?;
-            let container = client
-                .confirmed_container_for_spec(workspace.identity().container_label(), spec)
-                .await?;
-            if let Some((identity, _running)) = container {
-                client
-                    .remove_confirmed(&identity, workspace.identity().container_label(), spec)
-                    .await?;
-            } else if client.is_running().await?.is_some() {
-                bail!(
-                    "filesystem `{}` has Docker state that cannot be proved safe; run `omnifs doctor`",
-                    spec.id()
-                );
-            }
-            Ok(())
-        },
-        fs::Runtime::Libkrun => {
-            let runner = LibkrunRunner::new(workspace.filesystem_state().libkrun_root(spec.id()));
-            let Some(record) = runner.confirmed_record()? else {
-                return Ok(());
-            };
-            ensure!(
-                record.spec == *spec,
-                "libkrun helper spec does not match filesystem `{}`",
-                spec.id()
-            );
-            runner.tear_down_confirmed(record).await
-        },
-    }
-}
-
-fn docker_client(workspace: &Workspace, spec: &fs::Spec, output: Output) -> Result<DockerClient> {
-    let config = workspace.config()?;
-    let image = resolve_filesystem_image(None, &config)?;
-    let name = filesystem_container_name(workspace.identity().container_label(), spec.id())?;
-    let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
-    DockerClient::connect_for(&target, output)
-}
-
-async fn launch_docker(workspace: &Workspace, spec: &fs::Spec, output: Output) -> Result<()> {
-    let config = workspace.config()?;
-    let image = resolve_filesystem_image(None, &config)?;
-    let name = filesystem_container_name(workspace.identity().container_label(), spec.id())?;
-    let target = DockerTarget::new(name.as_str().to_owned(), image.as_str().to_owned())?;
-    let runtime = DockerClient::connect_ready(&target, "omnifs fs attach", output).await?;
-    #[cfg(target_os = "linux")]
-    let expected_ip = runtime.filesystem_attach_bind_ip().await?;
-    #[cfg(not(target_os = "linux"))]
-    let expected_ip = std::net::Ipv4Addr::LOCALHOST;
-    let status = crate::client::DaemonClient::for_workspace(workspace)
-        .status()
-        .await?;
-    let addr = status
-        .attach_tcp
-        .context("daemon has no TCP filesystem attach listener")?;
-    let expected = SocketAddr::new(IpAddr::V4(expected_ip), workspace.attach_port()?.get());
-    ensure!(
-        addr == expected,
-        "daemon attach listener is bound to {addr}, expected {expected}; restart the daemon"
-    );
-    runtime
-        .launch(workspace.identity().container_label(), spec, addr.port())
-        .await?;
-    let identity = runtime
-        .confirmed_filesystem(workspace.identity().container_label(), spec)
-        .await?
-        .context("the launched filesystem container did not retain its exact identity")?;
-    if let Err(mount_error) = wait_for_docker_mount(&runtime).await {
-        return match runtime
-            .remove_confirmed(&identity, workspace.identity().container_label(), spec)
-            .await
-        {
-            Ok(()) => Err(mount_error),
-            Err(cleanup_error) => Err(mount_error.context(format!(
-                "the failed filesystem container also could not be removed: {cleanup_error:#}"
-            ))),
-        };
-    }
-    Ok(())
-}
-
-async fn wait_for_docker_mount(runtime: &DockerClient) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + DOCKER_TIMEOUT;
-    loop {
-        if runtime.mount_ready(fs::GUEST_LOCATION).await? {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!(
-                "{} did not appear inside the filesystem container within {}s",
-                fs::GUEST_LOCATION,
-                DOCKER_TIMEOUT.as_secs()
-            );
-        }
-        tokio::time::sleep(POLL).await;
-    }
-}
-
-async fn launch_libkrun(workspace: &Workspace, spec: &fs::Spec, output: Output) -> Result<()> {
-    let config = workspace.config()?;
-    let state = workspace.filesystem_state();
-    let attach_socket = state.attach_socket();
-    let guest_image_cache = state.guest_image_cache();
-    let runner = LibkrunRunner::new(state.libkrun_root(spec.id()));
-    let attached = async {
-        ensure!(
-            wait_for_attachment(workspace, spec).await,
-            "filesystem `{}` did not attach to the daemon",
-            spec.id()
-        );
-        Ok(())
+async fn stop_runtime(
+    client_state: &ClientFilesystemState,
+    spec: &fs::Spec,
+    output: Output,
+) -> Result<()> {
+    let client_owner = client_owner_id()?;
+    let driver = FilesystemDriver::for_spec(client_state, spec, output)?;
+    let Some(confirmed) = driver.confirmed(client_state, client_owner, spec).await? else {
+        return Ok(());
     };
-    runner
-        .launch(
-            LibkrunLaunchRequest {
-                spec,
-                daemon_attach_socket: &attach_socket,
-                config: &config,
-                guest_image_cache: &guest_image_cache,
-                output,
-                mount: None,
-                timeout: LIBKRUN_TIMEOUT,
-            },
-            attached,
-        )
+    driver
+        .stop_confirmed(client_state, client_owner, spec, confirmed)
         .await
 }
 
-async fn wait_for_attachment(workspace: &Workspace, spec: &fs::Spec) -> bool {
-    let deadline = tokio::time::Instant::now() + ATTACH_TIMEOUT;
-    while tokio::time::Instant::now() < deadline {
-        if let Ok(Some(status)) = crate::client::DaemonClient::for_workspace(workspace)
-            .status_optional_checked()
-            .await
-            && status.filesystems.contains(spec)
-        {
-            return true;
-        }
-        tokio::time::sleep(POLL).await;
-    }
-    false
+pub(crate) fn client_owner_id() -> Result<ClientOwnerId> {
+    crate::client_state::ClientState::resolve()?.owner_id()
+}
+
+pub(crate) async fn wait_for_attachment(spec: &fs::Spec) -> bool {
+    // Any resolve/inventory failure is transient and treated the same as
+    // "not attached yet": keep polling rather than aborting, so `check`
+    // never actually returns `Err`.
+    crate::process::poll_until(ATTACH_TIMEOUT, POLL, || async {
+        let attached = match RpcClient::resolve() {
+            Ok(rpc) => match rpc.inventory().await {
+                Ok(inventory) => inventory.attachments.contains(spec),
+                Err(_) => false,
+            },
+            Err(_) => false,
+        };
+        Ok(attached.then_some(()))
+    })
+    .await
+    .unwrap_or(None)
+    .is_some()
 }
 
 async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
@@ -588,77 +469,85 @@ async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
         !output.is_structured(),
         "fs shell is a passthrough command and only supports human output"
     );
-    let workspace = Workspace::resolve()?;
-    let claim = workspace.filesystems().claim(&args.name)?;
+    let client_state = ClientFilesystemState::resolve()?;
+    let registry = client_state.registry();
+    let claim = registry.claim(&args.name)?;
     let spec = required_spec(&claim, &args.name)?;
+    let client_owner = client_owner_id()?;
+    let driver = FilesystemDriver::for_spec(&client_state, &spec, output)?;
     ensure!(
-        runtime_running(&workspace, &spec, output.clone()).await?,
+        driver
+            .confirmed(&client_state, client_owner, &spec)
+            .await?
+            .is_some(),
         "filesystem `{}` is detached",
         spec.id()
     );
-    ensure_attached(&workspace, &spec).await?;
-    match spec.runtime() {
-        fs::Runtime::Host => {
-            let phase = crate::host_fs::phase(workspace.filesystem_state(), &spec)
-                .await?
-                .context("host filesystem runner disappeared")?;
-            ensure!(
-                phase == omnifs_thin::host_control::RunnerPhase::Mounted,
-                "filesystem `{}` is not mounted; runner phase is {phase:?}",
-                spec.id()
-            );
-            if let Some(program) = args.command.first() {
-                let mut command = Command::new(program);
-                command
-                    .args(&args.command[1..])
-                    .current_dir(spec.location());
-                propagate(
-                    command,
-                    format!("run command in filesystem `{}`", spec.id()),
-                )
-            } else if let Some(shell) = args.shell.as_deref() {
-                let mut command = Command::new(shell);
-                command.current_dir(spec.location());
-                propagate(command, format!("open shell in filesystem `{}`", spec.id()))
-            } else {
-                crate::ui::print_raw(&format!(
-                    "Filesystem `{}` is available at {}.\n",
-                    spec.id(),
-                    spec.location().display()
-                ));
-                Ok(ExitCode::Success)
-            }
-        },
-        fs::Runtime::Docker => {
-            let name =
-                filesystem_container_name(workspace.identity().container_label(), spec.id())?;
-            let target =
-                DockerTarget::new(name.as_str().to_owned(), FILESYSTEM_DEV_IMAGE.to_owned())?;
-            let client = DockerClient::connect_for(&target, output)?;
+    ensure_attached(&spec).await?;
+
+    // Entering a host filesystem is a `cd` into an already-visible mount, not
+    // a remote exec, so it stays outside the driver's `shell_command`, which
+    // returns `None` for host.
+    if let FilesystemDriver::Host(runner) = &driver {
+        let (_, phase) = runner
+            .confirmed(&spec)
+            .await?
+            .context("host filesystem runner disappeared")?;
+        ensure!(
+            phase == omnifs_thin::host_control::RunnerPhase::Mounted,
+            "filesystem `{}` is not mounted; runner phase is {phase:?}",
+            spec.id()
+        );
+        return if let Some(program) = args.command.first() {
+            let mut command = Command::new(program);
+            command
+                .args(&args.command[1..])
+                .current_dir(spec.location());
             propagate(
-                client.shell_command(args.shell.as_deref(), &args.command),
-                format!("open shell in filesystem container `{name}`"),
+                command,
+                format!("run command in filesystem `{}`", spec.id()),
             )
-        },
-        fs::Runtime::Libkrun => {
-            crate::libkrun_runner::ensure_socat_available()?;
-            let runner = LibkrunRunner::new(workspace.filesystem_state().libkrun_root(spec.id()));
-            propagate(
-                runner.shell_command(args.shell.as_deref(), &args.command),
-                format!("open shell in filesystem `{}`", spec.id()),
-            )
-        },
+        } else if let Some(shell) = args.shell.as_deref() {
+            let mut command = Command::new(shell);
+            command.current_dir(spec.location());
+            propagate(command, format!("open shell in filesystem `{}`", spec.id()))
+        } else {
+            crate::ui::print_raw(&format!(
+                "Filesystem `{}` is available at {}.\n",
+                spec.id(),
+                spec.location().display()
+            ));
+            Ok(ExitCode::Success)
+        };
     }
+
+    if matches!(driver, FilesystemDriver::Libkrun(_)) {
+        crate::libkrun_runner::ensure_socat_available()?;
+    }
+    let label = match &driver {
+        FilesystemDriver::Docker(client) => {
+            format!(
+                "open shell in filesystem container `{}`",
+                client.container_name()
+            )
+        },
+        FilesystemDriver::Host(_) | FilesystemDriver::Libkrun(_) => {
+            format!("open shell in filesystem `{}`", spec.id())
+        },
+    };
+    let command = driver
+        .shell_command(args.shell.as_deref(), &args.command)
+        .context("filesystem driver has no shell command")?;
+    propagate(command, label)
 }
 
-async fn ensure_attached(workspace: &Workspace, spec: &fs::Spec) -> Result<()> {
-    let status = crate::client::DaemonClient::for_workspace(workspace)
-        .status_optional_checked()
+async fn ensure_attached(spec: &fs::Spec) -> Result<()> {
+    let inventory = RpcClient::resolve()?
+        .inventory()
         .await
-        .context("cannot verify filesystem attachment state")?
-        .context("the daemon is stopped")?;
+        .context("cannot verify filesystem attachment state")?;
     ensure!(
-        status.filesystems.contains(spec),
+        inventory.attachments.contains(spec),
         "filesystem `{}` is detached",
         spec.id()
     );
@@ -675,31 +564,15 @@ fn propagate(mut command: Command, context: String) -> Result<ExitCode> {
 }
 
 async fn list(output: Output) -> Result<ExitCode> {
-    let workspace = Workspace::resolve()?;
-    let configured = workspace.filesystems().list()?;
-    let mount_count = workspace
-        .desired_state()
-        .observe_repository()?
-        .registry()
-        .iter()
-        .count();
-    let daemon_probe = crate::client::DaemonClient::for_workspace(&workspace)
-        .status_optional_checked()
-        .await;
-    let daemon = daemon_probe.as_ref().ok().and_then(Option::as_ref);
-    let filesystems = crate::inventory::filesystem_statuses(
-        &configured,
-        daemon,
-        daemon_probe.is_ok(),
-        mount_count,
-    );
+    let inventory = crate::inventory::Inventory::collect_rpc().await?;
+    let filesystems = inventory.filesystems;
     let verdict = if filesystems
         .iter()
         .any(|filesystem| filesystem.state.severity() >= crate::inventory::Severity::Attention)
     {
-        crate::inventory::Verdict::Degraded
+        crate::ui::output::ResultVerdict::Degraded
     } else {
-        crate::inventory::Verdict::Ok
+        crate::ui::output::ResultVerdict::Ok
     };
     let next_action = filesystems
         .iter()
@@ -727,8 +600,8 @@ async fn list(output: Output) -> Result<ExitCode> {
         crate::ui::print_raw(&report.render());
     }
     Ok(match verdict {
-        crate::inventory::Verdict::Ok => ExitCode::Success,
-        crate::inventory::Verdict::Degraded => ExitCode::Degraded,
+        crate::ui::output::ResultVerdict::Ok => ExitCode::Success,
+        crate::ui::output::ResultVerdict::Degraded => ExitCode::Degraded,
     })
 }
 
@@ -759,7 +632,7 @@ fn finish_action(output: &Output, spec: fs::Spec, state: &'static str) -> Result
             crate::ui::render::LedgerRow::new(
                 crate::ui::style::Glyph::Done,
                 "location",
-                omnifs_workspace::display(result.filesystem.location()),
+                result.filesystem.location().display().to_string(),
             ),
             crate::ui::render::LedgerRow::new(
                 crate::ui::style::Glyph::Done,
@@ -782,7 +655,7 @@ fn finish_action(output: &Output, spec: fs::Spec, state: &'static str) -> Result
             {
                 output.outro(format!(
                     "Files are at {}.",
-                    omnifs_workspace::display(result.filesystem.location())
+                    result.filesystem.location().display()
                 ));
             },
             "attached" | "already_attached" => output.outro(format!(

@@ -13,6 +13,7 @@ pub enum TreeErrorKind {
     OfflineMiss,
     NotDirectory,
     IsDirectory,
+    AuthRequired,
     PermissionDenied,
     InvalidInput,
     TooLarge,
@@ -80,6 +81,15 @@ impl TreeError {
     pub fn is_directory(message: impl Into<String>) -> Self {
         Self {
             kind: TreeErrorKind::IsDirectory,
+            message: message.into(),
+            retryable: false,
+            retry_after: None,
+        }
+    }
+
+    pub fn auth_required(message: impl Into<String>) -> Self {
+        Self {
+            kind: TreeErrorKind::AuthRequired,
             message: message.into(),
             retryable: false,
             retry_after: None,

@@ -866,7 +866,7 @@ impl Attr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_engine::{MountTable, TreeNamespace};
+    use omnifs_engine::{EngineNamespace, MountTable};
     use tempfile::TempDir;
     use tokio::runtime::Runtime as TokioRuntime;
 
@@ -874,8 +874,6 @@ mod tests {
         export: Export,
         _runtime: TokioRuntime,
         _cache_dir: TempDir,
-        _config_dir: TempDir,
-        _providers_dir: TempDir,
     }
 
     /// Build an `Export` over an empty registry: there are no mounts, so these
@@ -885,31 +883,18 @@ mod tests {
         let runtime = TokioRuntime::new().expect("tokio runtime");
         let handle = runtime.handle().clone();
         let cache_dir = tempfile::tempdir().expect("cache dir");
-        let config_dir = tempfile::tempdir().expect("config dir");
-        let providers_dir = tempfile::tempdir().expect("providers dir");
-        let credentials_file = config_dir.path().join("credentials.json");
-        let mounts_dir = tempfile::tempdir().expect("mounts dir");
-        let desired = omnifs_workspace::mounts::Registry::load(mounts_dir.path())
-            .expect("load mount snapshot");
-        let host = omnifs_engine::test_support::open_test_host(
-            cache_dir.path(),
-            providers_dir.path(),
-            &credentials_file,
-            cache_dir.path().join("clones"),
-        )
-        .expect("open test host");
-        let registry = Arc::new(
-            MountTable::load_online(&host, &desired, &handle).expect("load mount snapshot"),
-        );
+        let clone_dir = cache_dir.path().join("clones");
+        let host = omnifs_engine::test_support::open_test_host(cache_dir.path(), &clone_dir)
+            .expect("open test host");
+        let registry =
+            Arc::new(MountTable::prepare_durable(&host, Vec::new()).expect("load mount snapshot"));
 
-        let namespace = TreeNamespace::online(registry, handle.clone());
+        let namespace = EngineNamespace::online(registry, handle.clone());
         let export = Export::new(handle, namespace);
         TestExport {
             export,
             _runtime: runtime,
             _cache_dir: cache_dir,
-            _config_dir: config_dir,
-            _providers_dir: providers_dir,
         }
     }
 

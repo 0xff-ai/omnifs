@@ -1,4 +1,4 @@
-//! Read-policy regressions through the public `TreeNamespace` owner.
+//! Read-policy regressions through the public `EngineNamespace` owner.
 
 #![cfg(not(target_os = "wasi"))]
 

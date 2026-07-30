@@ -1,4 +1,4 @@
-//! Live-file growth through the production `TreeNamespace` surface.
+//! Live-file growth through the production `EngineNamespace` surface.
 
 #![cfg(not(target_os = "wasi"))]
 

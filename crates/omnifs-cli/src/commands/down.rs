@@ -10,13 +10,13 @@ use crate::daemon_teardown::DaemonTeardown;
 use crate::error::ExitCode;
 use crate::inventory::Inventory;
 use crate::ui::output::Output;
-use omnifs_workspace::Workspace;
+use omnifs_bootstrap::{Bootstrap, Client};
 
 pub async fn run(output: Output) -> anyhow::Result<ExitCode> {
-    let workspace = Workspace::resolve()?;
-    let inventory = Inventory::collect(&workspace).await?;
+    let endpoint = Bootstrap::<Client>::for_client()?;
+    let inventory = Inventory::collect_rpc().await?;
 
-    let teardown = DaemonTeardown::with_inventory(&workspace, inventory);
+    let teardown = DaemonTeardown::with_inventory(endpoint, inventory);
     let exit = if output.is_structured() {
         // The receipt is the whole story: a failed row already conveys the
         // failure, so this returns a non-zero exit code rather than an
@@ -39,12 +39,11 @@ pub async fn run(output: Output) -> anyhow::Result<ExitCode> {
             .collect();
         let receipt = TeardownReceipt::new(rows, detached, still_attached);
         let exit = receipt.exit_code();
-        output.emit_result(receipt.output_verdict(), receipt)?;
+        output.emit_result(receipt.verdict, receipt)?;
         exit
     } else {
         teardown.down().await?;
         ExitCode::Success
     };
-    crate::metrics::maybe_print_health_nudge(&workspace, output).await;
     Ok(exit)
 }
