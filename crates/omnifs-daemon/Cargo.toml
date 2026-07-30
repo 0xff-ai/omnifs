@@ -1,0 +1,56 @@
+[package]
+name = "omnifs-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Host-native daemon runtime for Omnifs"
+
+[dependencies]
+omnifs-api = { workspace = true }
+omnifs-auth = { workspace = true }
+omnifs-bootstrap = { workspace = true }
+omnifs-core = { workspace = true }
+omnifs-engine = { workspace = true, features = ["runtime"] }
+omnifs-provider = { workspace = true }
+omnifs-state = { workspace = true }
+omnifs-vfs = { workspace = true, features = ["wire"] }
+bytes = { workspace = true }
+tonic = { workspace = true }
+tokio-stream = { workspace = true }
+prost = { workspace = true }
+tower = { workspace = true }
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+postcard = { workspace = true }
+secrecy = "0.10"
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
+
+[build-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+hyper-util = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.30", features = ["net"] }

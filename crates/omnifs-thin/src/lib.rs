@@ -7,7 +7,7 @@ mod lifecycle;
 pub mod nfs;
 
 use clap::Args;
-use omnifs_core::fs;
+use omnifs_core::{ClientOwnerId, fs};
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]
@@ -35,6 +35,9 @@ impl HostControlArgs {
 
 #[derive(Debug, Args)]
 pub struct RunFsArgs {
+    /// Stable identity of the CLI installation that owns this filesystem.
+    #[arg(long)]
+    client_owner: ClientOwnerId,
     /// Stable configured filesystem name.
     #[arg(long)]
     name: fs::Id,
@@ -63,6 +66,7 @@ pub struct RunFsArgs {
 pub fn run(args: RunFsArgs) -> anyhow::Result<()> {
     let spec = fs::Spec::new(args.name, args.protocol, args.runtime, args.location)?;
     let args = RunnerArgs {
+        client_owner: args.client_owner,
         spec,
         state_dir: args.state_dir,
         attach: args.attach,
@@ -79,6 +83,7 @@ pub fn run(args: RunFsArgs) -> anyhow::Result<()> {
 }
 
 struct RunnerArgs {
+    client_owner: ClientOwnerId,
     spec: fs::Spec,
     state_dir: Option<PathBuf>,
     attach: Option<PathBuf>,

@@ -1,16 +1,13 @@
-//! `omnifs mount revoke` — explicitly remove one shared host credential.
+//! `omnifs mount revoke` revokes one daemon-owned credential upstream.
 
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use clap::Args;
-use omnifs_auth::{OAuthClient, OAuthRevokeOutcome};
-use omnifs_workspace::authn::AuthKind;
-use omnifs_workspace::creds::CredentialStore;
+use omnifs_api::{CredentialKey, CredentialStatusKind};
 
-use crate::auth::MountAuth;
-use crate::stages::PromptMode;
+use crate::client_state::ClientState;
+use crate::mutation::PlannedOp;
 use crate::ui::consent::{Decision, Outcome, Plan, Receipt, Row};
 use crate::ui::output::Output;
-use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
 pub struct RevokeArgs {
@@ -19,150 +16,87 @@ pub struct RevokeArgs {
 }
 
 impl RevokeArgs {
-    #[allow(clippy::too_many_lines)] // keep consent and upstream-before-local ordering linear
     pub(crate) async fn run(self, output: Output) -> anyhow::Result<Receipt> {
-        let workspace = Workspace::resolve()?;
-        let mounts = crate::mount_config::load_registry(&workspace)?;
-        let requested_name = omnifs_core::MountName::new(self.name.clone())?;
-        let requested = mounts
-            .get(&requested_name)
-            .ok_or_else(|| anyhow!("no mount config named `{}`", self.name))?;
-        let auth_config = requested
+        crate::commands::daemon_start::start().await?;
+        let rpc = crate::rpc::RpcClient::resolve()?;
+        let name = omnifs_core::MountName::new(self.name.clone())?;
+        let requested = rpc
+            .get_mount(name.clone())
+            .await?
+            .ok_or_else(|| anyhow!("no mount named `{}`", self.name))?;
+        let auth = requested
+            .definition
             .auth
             .as_ref()
             .ok_or_else(|| anyhow!("mount `{}` has no configured credential", self.name))?;
-        let requested_auth = MountAuth::from_spec(workspace.catalog(), requested.clone());
-        let credential_id = match auth_config.scheme() {
-            Some(_) => requested_auth.configured_credential_id(auth_config)?,
-            None => requested_auth
-                .credential_id()?
-                .ok_or_else(|| anyhow!("mount `{}` has no configured credential", self.name))?,
+        let key = CredentialKey {
+            provider_name: requested.provider.name.clone(),
+            scheme: auth.scheme.clone(),
+            account_label: auth.account_label.clone(),
         };
-
-        let store = workspace.credentials();
-        let entry = store
-            .get(&credential_id)
-            .with_context(|| format!("read credential `{credential_id}`"))?;
-        if let Some(entry) = entry.as_ref()
-            && entry.kind() != auth_config.kind()
-        {
-            anyhow::bail!(
-                "credential `{credential_id}` has kind {}, expected {}",
-                entry.kind(),
-                auth_config.kind()
-            );
-        }
-        let oauth_request = if entry.is_some() && auth_config.kind() == AuthKind::OAuth {
-            Some(requested_auth.oauth_request(auth_config.account(), &[])?.0)
-        } else {
-            None
-        };
-
-        let mut affected_mounts = Vec::new();
-        for (mount_name, mount) in mounts.iter() {
-            let Some(candidate_config) = mount.auth.as_ref() else {
-                continue;
-            };
-            let mount_name = mount_name.to_string();
-            let candidate_auth = MountAuth::from_spec(workspace.catalog(), mount.clone());
-            let candidate = match candidate_config.scheme() {
-                Some(_) => Some(candidate_auth.configured_credential_id(candidate_config)?),
-                None => candidate_auth.credential_id()?,
-            };
-            if candidate.as_ref() == Some(&credential_id) {
-                if candidate_config.kind() != auth_config.kind() {
-                    anyhow::bail!(
-                        "mounts `{}` and `{mount_name}` share credential `{credential_id}` but configure different auth kinds",
-                        self.name
-                    );
-                }
-                if let Some(request) = oauth_request.as_ref() {
-                    let candidate_request = candidate_auth
-                        .oauth_request(candidate_config.account(), &[])?
-                        .0;
-                    if !request.has_same_runtime_metadata(&candidate_request) {
-                        return Err(omnifs_auth::AuthError::CredentialBindingConflict {
-                            id: credential_id.clone(),
-                        }
-                        .into());
-                    }
-                }
-                affected_mounts.push(mount_name);
-            }
-        }
-        debug_assert!(affected_mounts.iter().any(|mount| mount == &self.name));
-        let affected_mounts = affected_mounts.join(", ");
-        let label = format!("{credential_id} (used by mounts: {affected_mounts})");
+        let status = rpc.credential_status(key.clone()).await?;
+        let mounts = rpc.list_mounts().await?;
+        let affected = mounts
+            .iter()
+            .filter_map(|mount| {
+                let candidate = mount.definition.auth.as_ref()?;
+                (mount.provider.name == requested.provider.name
+                    && candidate.scheme == auth.scheme
+                    && candidate.account_label == auth.account_label)
+                    .then(|| mount.definition.name.to_string())
+            })
+            .collect::<Vec<_>>();
+        let affected_label = affected.join(", ");
         let mut plan = Plan::new(format!("Revoking credential for `{}`", self.name));
-        plan.push(if entry.is_some() {
-            let action = oauth_request.as_ref().map_or("remove locally", |request| {
-                if request.scheme().revocation_endpoint.is_some() {
-                    "revoke upstream, then remove locally"
-                } else {
-                    "remove locally; provider declares no upstream revocation"
-                }
-            });
-            Row::remove("credential", "credential", format!("{label}; {action}"))
-        } else {
-            Row::keep(
+        if status
+            .as_ref()
+            .is_some_and(|status| status.status != CredentialStatusKind::Deleted)
+        {
+            plan.push(Row::remove(
                 "credential",
                 "credential",
-                format!("{label}; already absent"),
-            )
-        });
-        output.plan(&plan);
-
-        let Some(entry) = entry else {
-            let receipt = plan.receipt([Outcome::skip(
-                "credential",
-                format!("already absent; used by mounts: {affected_mounts}"),
-            )]);
-            output.receipt(&receipt);
-            output.outro(format!(
-                "Credential `{credential_id}` is already absent; the running daemon was not changed."
+                format!(
+                    "{}/{} (used by mounts: {affected_label})",
+                    auth.scheme, auth.account_label
+                ),
             ));
+        } else {
+            plan.push(Row::keep(
+                "credential",
+                "credential",
+                format!("{}/{} (already absent)", auth.scheme, auth.account_label),
+            ));
+        }
+        output.plan(&plan);
+        let Some(status) = status else {
+            let receipt = plan.receipt([Outcome::skip("credential", "already absent")]);
+            output.receipt(&receipt);
+            output.outro(format!("Credential for `{}` is already absent.", self.name));
             return Ok(receipt);
         };
+        if status.status == CredentialStatusKind::Deleted {
+            let receipt = plan.receipt([Outcome::skip("credential", "already absent")]);
+            output.receipt(&receipt);
+            output.outro(format!("Credential for `{}` is already absent.", self.name));
+            return Ok(receipt);
+        }
+        Decision::resolve(output.prompt_mode(), false, "Revoke?", "--yes", &output)?;
 
-        Decision::resolve(
-            PromptMode::from_flags(output.yes(), output.no_input() || output.is_structured()),
-            false,
-            "Revoke?",
-            "--yes",
-            &output,
-        )?;
+        let state = ClientState::resolve()?;
+        if let Some(outcome) = crate::mutation::run(&rpc, &state, &output, || async move {
+            Ok(vec![PlannedOp::revoke_credential(key)])
+        })
+        .await?
+        {
+            crate::mutation::narrate_serving(&output, &outcome.serving);
+        }
 
-        let removal = if let Some(request) = oauth_request {
-            if request.scheme().revocation_endpoint.is_none() {
-                "removed locally; provider declares no upstream revocation"
-            } else {
-                match OAuthClient::new()
-                    .context("create OAuth client for revocation")?
-                    .revoke_access_token(request, entry.access_token().clone())
-                    .await
-                    .with_context(|| format!("revoke credential `{credential_id}` upstream"))?
-                {
-                    OAuthRevokeOutcome::Revoked => "revoked upstream and removed locally",
-                    OAuthRevokeOutcome::Unsupported => {
-                        "removed locally; provider declares no upstream revocation"
-                    },
-                }
-            }
-        } else {
-            "removed locally"
-        };
-
-        store
-            .delete(&credential_id)
-            .with_context(|| format!("delete credential `{credential_id}`"))?;
         let receipt = plan.receipt([Outcome::done(
             "credential",
-            format!("{removal}; used by mounts: {affected_mounts}"),
+            format!("revoked; used by mounts: {affected_label}"),
         )]);
         output.receipt(&receipt);
-        output.outro(format!(
-            "Credential `{credential_id}` removed; it applies on the next `omnifs up` or `omnifs apply`. The running daemon was not changed."
-        ));
+        output.outro(format!("Credential for `{}` revoked.", self.name));
         Ok(receipt)
     }
 }

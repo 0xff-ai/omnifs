@@ -5,6 +5,7 @@
 //!
 //! No command should add another boolean cluster or process-global switch.
 
+use anyhow::Context as _;
 use serde::Serialize;
 use std::io::{self, IsTerminal, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -213,6 +214,17 @@ impl JsonlError {
 }
 
 impl Output {
+    /// Write daemon-owned passthrough bytes without text decoding or a line
+    /// terminator. This is reserved for byte streams such as `omnifs logs`.
+    pub(crate) fn write_raw_bytes(&self, bytes: &[u8]) -> anyhow::Result<()> {
+        let mut stdout = stdout(self);
+        stdout
+            .write_all(bytes)
+            .context("write passthrough output")?;
+        stdout.flush().context("flush passthrough output")?;
+        Ok(())
+    }
+
     /// Serialize the JSON terminal result envelope without touching stdout or
     /// process-global state. JSONL adds a `"type":"result"` discriminator
     /// around its terminal representation.
@@ -303,13 +315,124 @@ impl Output {
         Ok(())
     }
 
-    /// Structured modes and explicit no-input policy reject prompts before a
-    /// prompt renderer can print a question.
+    /// Structured modes, explicit no-input policy, and the absence of a real
+    /// terminal all reject prompts before a prompt renderer can print a
+    /// question. Every prompt site must route through this (or
+    /// [`Self::prompt_mode`], which consults the same predicate) rather than
+    /// drawing a prompt frame directly: that is the one thing standing
+    /// between a scripted `--output json` run and a hung terminal read.
     pub(crate) fn ensure_prompt_allowed(&self) -> anyhow::Result<()> {
-        if self.no_input || self.mode.is_structured() {
+        if !self.interactive() {
             anyhow::bail!("interactive input is unavailable in structured or no-input mode")
         }
         Ok(())
+    }
+
+    /// Whether this invocation may draw an interactive prompt at all: a real
+    /// terminal, without `--no-input`, and outside every structured output
+    /// mode. The one predicate every prompt-adjacent decision in this crate
+    /// derives from, so a structured run and a piped run fail the same way
+    /// regardless of which command reaches the check.
+    pub(crate) fn interactive(&self) -> bool {
+        self.interactive_on(crate::ui::prompt::is_terminal())
+    }
+
+    /// [`Self::interactive`]'s policy with the terminal probe supplied rather
+    /// than read from the process, so the whole matrix stays provable without
+    /// depending on whether the test runner happens to own a tty.
+    fn interactive_on(&self, terminal: bool) -> bool {
+        terminal && !self.no_input && !self.is_structured()
+    }
+
+    /// The prompt policy this invocation grants its guided flows: an explicit
+    /// value always wins, `--yes` take the default, otherwise
+    /// [`Self::interactive`] decides whether a flag hint or a real prompt
+    /// follows. Built fresh from live invocation state so it can never drift
+    /// from [`Self::ensure_prompt_allowed`]'s own predicate.
+    pub(crate) fn prompt_mode(&self) -> PromptMode {
+        PromptMode {
+            interactive: self.interactive(),
+            yes: self.yes,
+            no_input: self.no_input,
+        }
+    }
+}
+
+/// Prompt policy derived once per invocation from [`Output`] state
+/// ([`Output::prompt_mode`]), or forced by the one caller
+/// ([`Self::forced_yes`]) that must skip prompting outright regardless of the
+/// invocation's own terminal/no-input state. Fields are private so no other
+/// call site can hand-assemble a self-contradictory combination (such as
+/// `interactive: true` alongside `no_input: true`, which neither constructor
+/// can produce).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PromptMode {
+    interactive: bool,
+    yes: bool,
+    no_input: bool,
+}
+
+impl PromptMode {
+    /// The one legitimate hand-built case: a caller (setup's per-provider
+    /// configure step under `--yes`) that must behave exactly as if `--yes`
+    /// and `--no-input` were both passed, independent of whether the real
+    /// invocation happens to be interactive.
+    pub(crate) const fn forced_yes() -> Self {
+        Self {
+            interactive: false,
+            yes: true,
+            no_input: true,
+        }
+    }
+
+    pub(crate) const fn interactive(self) -> bool {
+        self.interactive
+    }
+
+    pub(crate) const fn yes(self) -> bool {
+        self.yes
+    }
+
+    pub(crate) const fn no_input(self) -> bool {
+        self.no_input
+    }
+
+    /// The single decision combinator for every guided prompt site: an explicit
+    /// value wins; `--yes` takes the default; `--no-input` and non-interactive
+    /// runs bail with a flag hint; otherwise prompt.
+    pub(crate) fn resolve<T>(
+        self,
+        explicit: Option<T>,
+        default: impl FnOnce() -> T,
+        flag_hint: &str,
+        prompt: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        if let Some(value) = explicit {
+            return Ok(value);
+        }
+        if self.yes {
+            return Ok(default());
+        }
+        if self.no_input {
+            anyhow::bail!("`--no-input` needs {flag_hint}, or pass --yes to accept the default");
+        }
+        if !self.interactive {
+            anyhow::bail!("this step needs a terminal; pass {flag_hint} or --yes");
+        }
+        prompt()
+    }
+
+    /// Build an arbitrary (possibly real-terminal-independent) prompt policy
+    /// for a unit test. Real code always derives [`PromptMode`] from
+    /// [`Output::prompt_mode`] or [`Self::forced_yes`]; this exists only so
+    /// tests can exercise [`Self::resolve`]'s branching without a PTY.
+    #[cfg(test)]
+    pub(crate) const fn for_test(interactive: bool, yes: bool, no_input: bool) -> Self {
+        Self {
+            interactive,
+            yes,
+            no_input,
+        }
     }
 }
 
@@ -439,10 +562,8 @@ impl Output {
             sink(&text);
             return;
         }
-        crate::ui::eprint_raw(&format!(
-            "{}\n",
-            crate::ui::style::accentuate(&text, crate::ui::style::Stream::Stderr)
-        ));
+        let caps = stderr_capabilities(self.quiet);
+        crate::ui::eprint_raw(&super::render::narration_line(&text, caps));
     }
 
     /// A bold section heading line: plain bold, never the accent color, so it reads as
@@ -460,9 +581,10 @@ impl Output {
     /// one-line fact, not a settled operation.
     pub(crate) fn answer(&self, question: &str, answer: impl std::fmt::Display) {
         if self.mode == OutputMode::Human && !self.quiet {
-            crate::ui::eprint_raw(&format!(
-                "{question} {}\n",
-                crate::ui::style::accent(answer, crate::ui::style::Stream::Stderr)
+            let caps = stderr_capabilities(self.quiet);
+            crate::ui::eprint_raw(&super::render::narration_line(
+                &format!("{question} `{answer}`"),
+                caps,
             ));
         }
     }
@@ -498,40 +620,26 @@ impl Output {
         ));
     }
 
-    /// The consent plan preview: a headline sentence naming the
-    /// operation (`plan.title`), then its rows indented two spaces under it
-    /// with the `-`/`=` glyph vocabulary, then a blank line so the confirm
-    /// prompt (or, for `--dry-run`, the closing sentence) reads as its own
-    /// block.
+    /// Print the consent plan preview. `Plan` owns the row-mapping and block
+    /// shape (`super::consent::Plan::render`); this method only owns the
+    /// mode/quiet gate every human-only print in this invocation shares.
     pub(crate) fn plan(&self, plan: &super::consent::Plan) {
         if self.mode != OutputMode::Human {
             return;
         }
         let caps = stderr_capabilities(self.quiet);
-        let rows = plan
-            .rows
-            .iter()
-            .map(super::consent::Row::ledger_row)
-            .collect::<Vec<_>>();
-        crate::ui::eprint_raw(&super::render::plan_block(&plan.title, &rows, caps));
-        crate::ui::eprint_raw("\n");
+        crate::ui::eprint_raw(&plan.render(caps));
     }
 
-    /// The consent receipt: settled rows at column 0 (never
-    /// indented under the plan's headline, since the operation already
-    /// happened), then a blank line before the caller's closing sentence.
+    /// Print the consent receipt. `Receipt` owns the row-mapping and block
+    /// shape (`super::consent::Receipt::render`); this method only owns the
+    /// mode/quiet gate every human-only print in this invocation shares.
     pub(crate) fn receipt(&self, receipt: &super::consent::Receipt) {
         if self.mode != OutputMode::Human {
             return;
         }
         let caps = stderr_capabilities(self.quiet);
-        let rows = receipt
-            .rows
-            .iter()
-            .map(super::consent::Outcome::ledger_row)
-            .collect::<Vec<_>>();
-        crate::ui::eprint_raw(&format!("{}\n", super::render::ledger_block(&rows, caps)));
-        crate::ui::eprint_raw("\n");
+        crate::ui::eprint_raw(&receipt.render(caps));
     }
 
     /// The v2 register never repeats the command the user just typed, so
@@ -677,15 +785,6 @@ impl Output {
     }
 }
 
-impl From<crate::inventory::Verdict> for ResultVerdict {
-    fn from(verdict: crate::inventory::Verdict) -> Self {
-        match verdict {
-            crate::inventory::Verdict::Ok => Self::Ok,
-            crate::inventory::Verdict::Degraded => Self::Degraded,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -793,11 +892,21 @@ mod tests {
                 .ensure_prompt_allowed()
                 .is_err()
         );
-        assert!(
-            Output::new(OutputMode::Human, false)
-                .ensure_prompt_allowed()
-                .is_ok()
-        );
+    }
+
+    #[test]
+    fn a_prompt_needs_a_terminal_no_no_input_and_an_unstructured_mode() {
+        // Asserted against a supplied terminal flag rather than the process's
+        // own tty, so the matrix proves the policy instead of proving what the
+        // test runner was attached to. The terminal term is the one this
+        // predicate gained: a caller that skips `PromptMode` and draws a
+        // widget directly can no longer bypass it.
+        let human = Output::new(OutputMode::Human, false);
+        assert!(human.interactive_on(true));
+        assert!(!human.interactive_on(false));
+        assert!(!human.clone().with_no_input(true).interactive_on(true));
+        assert!(!Output::new(OutputMode::Json, false).interactive_on(true));
+        assert!(!Output::new(OutputMode::Jsonl, false).interactive_on(true));
     }
 
     #[test]
@@ -987,5 +1096,78 @@ mod tests {
             lines[0]["type"].as_str(),
             Some("result" | "error")
         ));
+    }
+
+    // -- PromptMode::resolve: the shared prompt/yes/no-input precedence -----
+
+    #[test]
+    fn explicit_value_wins_without_touching_yes_no_input_or_the_prompt() {
+        let called = PromptMode::for_test(false, false, true).resolve(
+            Some("explicit"),
+            || "default",
+            "--name",
+            || panic!("explicit value must short-circuit before the prompt runs"),
+        );
+        assert_eq!(called.unwrap(), "explicit");
+    }
+
+    #[test]
+    fn yes_takes_the_default_without_prompting() {
+        let resolved = PromptMode::for_test(true, true, false).resolve(
+            None,
+            || "default",
+            "--name",
+            || panic!("--yes must short-circuit before the prompt runs"),
+        );
+        assert_eq!(resolved.unwrap(), "default");
+    }
+
+    #[test]
+    fn no_input_bails_naming_the_flag_hint_before_yes_or_the_prompt() {
+        let error = PromptMode::for_test(true, false, true)
+            .resolve(
+                None,
+                || "default",
+                "--name <name>",
+                || panic!("--no-input must bail before the prompt runs"),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("--name <name>"));
+        assert!(error.to_string().contains("--yes"));
+    }
+
+    #[test]
+    fn non_interactive_without_no_input_still_bails_naming_the_flag() {
+        // A piped stdin with neither --yes nor --no-input is still
+        // non-interactive: the bail message is the same shape as --no-input's.
+        let error = PromptMode::for_test(false, false, false)
+            .resolve(
+                None,
+                || "default",
+                "--name <name>",
+                || panic!("a non-interactive run must bail before the prompt runs"),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("--name <name>"));
+        assert!(error.to_string().contains("terminal"));
+    }
+
+    #[test]
+    fn interactive_without_yes_or_no_input_calls_the_prompt() {
+        let resolved = PromptMode::for_test(true, false, false).resolve(
+            None,
+            || "default",
+            "--name",
+            || Ok("typed"),
+        );
+        assert_eq!(resolved.unwrap(), "typed");
+    }
+
+    #[test]
+    fn forced_yes_is_non_interactive_and_takes_the_default() {
+        let mode = PromptMode::forced_yes();
+        assert!(!mode.interactive());
+        assert!(mode.yes());
+        assert!(mode.no_input());
     }
 }

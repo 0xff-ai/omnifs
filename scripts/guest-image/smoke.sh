@@ -51,6 +51,7 @@ fi
 
 "$root/scripts/guest-image/make-seed-iso.sh" \
   --out "$seed_iso" \
+  --client-owner "00000000000000000000000000000000" \
   --filesystem-id "smoke" \
   --attach-addr "vsock:1024" \
   || exit 1

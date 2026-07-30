@@ -1,7 +1,7 @@
 //! Server for the Omnifs VFS wire protocol.
 //!
-//! It adapts the engine-owned [`Namespace`] onto a byte stream without owning
-//! any VFS semantics.
+//! It adapts the engine-owned [`ServingNamespace`] onto a byte stream without
+//! owning any VFS semantics.
 //!
 //! [`VfsServer`] owns the attach listeners and every connection task. A listener
 //! binds before its accept task is spawned, and the task reports one exit event
@@ -22,8 +22,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::{Namespace, NsEvent};
-use omnifs_core::fs;
+use crate::{NamespaceEpoch, NamespaceLease, ServingNamespace};
+use omnifs_core::{ClientOwnerId, fs};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -33,9 +33,14 @@ use tokio::time::Instant;
 use crate::frame::{
     Frame, KIND_CONTROL, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame,
 };
-use crate::{Handshake, PROTOCOL, ServerControl, WireError, WireRequest, WireResponse};
+use crate::{Handshake, PROTOCOL, ServerControl, WireError, WireReply, WireRequest, WireResponse};
 
 const UDS_PATH_BYTE_LIMIT: usize = 100;
+const CONNECTION_QUEUE_CAPACITY: usize = 128;
+const MAX_ACTIVE_CONNECTIONS: usize = 128;
+const LISTENER_EXIT_QUEUE_CAPACITY: usize = 16;
+const OUTBOUND_QUEUE_CAPACITY: usize = 256;
+const MAX_IN_FLIGHT_REQUESTS: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Endpoint {
@@ -79,9 +84,15 @@ struct AttachmentEntry {
     connections: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AttachmentKey {
+    owner: ClientOwnerId,
+    filesystem: fs::Id,
+}
+
 struct AttachedConnection {
-    key: fs::Id,
-    control: mpsc::UnboundedSender<Frame>,
+    key: AttachmentKey,
+    control: watch::Sender<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +105,7 @@ enum AttachmentPhase {
 struct AttachmentState {
     next_attachment_id: u64,
     connections: BTreeMap<u64, AttachedConnection>,
-    entries: BTreeMap<fs::Id, AttachmentEntry>,
+    entries: BTreeMap<AttachmentKey, AttachmentEntry>,
     phase: AttachmentPhase,
 }
 
@@ -119,10 +130,14 @@ impl Attachments {
 
     fn attached(
         &self,
+        owner: ClientOwnerId,
         spec: &fs::Spec,
-        control: mpsc::UnboundedSender<Frame>,
+        control: watch::Sender<bool>,
     ) -> Result<u64, String> {
-        let key = spec.id().clone();
+        let key = AttachmentKey {
+            owner,
+            filesystem: spec.id().clone(),
+        };
         let mut state = self
             .state
             .lock()
@@ -136,7 +151,8 @@ impl Attachments {
             && existing.spec != *spec
         {
             return Err(format!(
-                "filesystem `{key}` is already attached with different resolved fields"
+                "filesystem `{}` for client owner `{}` is already attached with different resolved fields",
+                key.filesystem, key.owner
             ));
         }
         let id = state.next_attachment_id;
@@ -208,11 +224,8 @@ impl Attachments {
                 .map(|connection| connection.control.clone())
                 .collect::<Vec<_>>()
         };
-        let Ok(body) = postcard::to_allocvec(&ServerControl::Stop) else {
-            return;
-        };
         for control in controls {
-            let _ = control.send(Frame::new(0, KIND_CONTROL, body.clone()));
+            control.send_replace(true);
         }
     }
 
@@ -267,12 +280,12 @@ impl Attachments {
 /// Owns the namespace attach listeners, their connection tasks, live attachment
 /// snapshot, readiness, and shutdown.
 pub struct VfsServer {
-    namespace: Arc<dyn Namespace>,
+    namespace: Arc<dyn ServingNamespace>,
     attachments: Arc<Attachments>,
     state: Mutex<VfsState>,
-    connection_tx: mpsc::UnboundedSender<Connection>,
+    connection_tx: mpsc::Sender<Connection>,
     connection_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    exit_tx: mpsc::UnboundedSender<(Endpoint, Arc<()>)>,
+    exit_tx: mpsc::Sender<(Endpoint, Arc<()>)>,
     event_tx: broadcast::Sender<ListenerEvent>,
     reaper_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -280,9 +293,9 @@ pub struct VfsServer {
 impl VfsServer {
     /// Construct one invocation-scoped listener and attachment owner.
     #[must_use]
-    pub fn new(namespace: Arc<dyn Namespace>) -> Arc<Self> {
-        let (connection_tx, mut connection_rx) = mpsc::unbounded_channel();
-        let (exit_tx, mut exit_rx) = mpsc::unbounded_channel();
+    pub fn new(namespace: Arc<dyn ServingNamespace>) -> Arc<Self> {
+        let (connection_tx, mut connection_rx) = mpsc::channel(CONNECTION_QUEUE_CAPACITY);
+        let (exit_tx, mut exit_rx) = mpsc::channel(LISTENER_EXIT_QUEUE_CAPACITY);
         let (event_tx, _) = broadcast::channel(16);
         let server = Arc::new(Self {
             namespace,
@@ -305,7 +318,7 @@ impl VfsServer {
             let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
-                    connection = connection_rx.recv() => match connection {
+                    connection = connection_rx.recv(), if connections.len() < MAX_ACTIVE_CONNECTIONS => match connection {
                         Some(connection) => { connections.spawn(connection); },
                         None => break,
                     },
@@ -565,7 +578,7 @@ impl VfsServer {
                 }
             }
             accept_loop(listener, namespace, attachments, connection_tx).await;
-            let _ = exit_tx.send((endpoint_for_task, task_identity));
+            let _ = exit_tx.send((endpoint_for_task, task_identity)).await;
         });
         let mut state = self
             .state
@@ -619,9 +632,9 @@ fn unlink_socket(path: &Path) {
 
 async fn accept_loop(
     listener: Listener,
-    namespace: Arc<dyn Namespace>,
+    namespace: Arc<dyn ServingNamespace>,
     attachments: Arc<Attachments>,
-    connection_tx: mpsc::UnboundedSender<Connection>,
+    connection_tx: mpsc::Sender<Connection>,
 ) {
     match listener {
         Listener::Unix(listener) => loop {
@@ -641,6 +654,7 @@ async fn accept_loop(
                                 tracing::debug!(%error, "wire: connection ended with a protocol error");
                             }
                         }))
+                        .await
                         .is_err()
                     {
                         break;
@@ -669,6 +683,7 @@ async fn accept_loop(
                                 tracing::debug!(%error, "wire: tcp connection ended with a protocol error");
                             }
                         }))
+                        .await
                         .is_err()
                     {
                         break;
@@ -740,7 +755,10 @@ fn bind_unix(path: &Path, description: &str) -> io::Result<UnixListener> {
 /// Returns `Ok(())` on an orderly client disconnect and a [`WireError`] on a
 /// protocol fault (an oversized frame, a malformed handshake, or a version
 /// mismatch); a fault drops the connection.
-pub async fn serve_connection<S>(namespace: Arc<dyn Namespace>, stream: S) -> Result<(), WireError>
+pub async fn serve_connection<S>(
+    namespace: Arc<dyn ServingNamespace>,
+    stream: S,
+) -> Result<(), WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
@@ -748,7 +766,7 @@ where
 }
 
 async fn serve_connection_with_registry<S>(
-    namespace: Arc<dyn Namespace>,
+    namespace: Arc<dyn ServingNamespace>,
     stream: S,
     attachments: Option<Arc<Attachments>>,
 ) -> Result<(), WireError>
@@ -757,32 +775,46 @@ where
 {
     let (mut reader, mut writer) = tokio::io::split(stream);
 
-    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Frame>();
-    let spec = read_hello(&mut reader, &mut writer).await?;
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<Frame>(OUTBOUND_QUEUE_CAPACITY);
+    let (control_tx, mut control_rx) = watch::channel(false);
+    let hello = read_hello(&mut reader, &mut writer).await?;
+    let mut events = namespace.subscribe();
     let attach_guard = if let Some(attachments) = attachments {
-        let id = match attachments.attached(&spec, outbound_tx.clone()) {
-            Ok(id) => id,
-            Err(reason) => {
-                send_rejected(&mut writer, reason.clone()).await?;
-                return Err(WireError::Rejected(reason));
-            },
-        };
+        let id =
+            match attachments.attached(hello.client_owner, &hello.filesystem, control_tx.clone()) {
+                Ok(id) => id,
+                Err(reason) => {
+                    send_rejected(&mut writer, reason.clone()).await?;
+                    return Err(WireError::Rejected(reason));
+                },
+            };
         Some(AttachGuard { attachments, id })
     } else {
         None
     };
-    send_welcome(&mut writer).await?;
+    send_welcome(&mut writer, events.initial_epoch()).await?;
 
     // A single writer task owns the write half; responses (from per-request
     // tasks), events, and server controls are serialized through its channel,
     // so frames never interleave on the wire. Registration and Welcome occur
     // before the task starts, preserving handshake ordering.
-    let mut events = namespace.subscribe();
     let writer_task = tokio::spawn(async move {
         let mut writer = writer;
         loop {
             tokio::select! {
                 biased;
+                changed = control_rx.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    if !*control_rx.borrow_and_update() {
+                        continue;
+                    }
+                    let Ok(body) = postcard::to_allocvec(&ServerControl::Stop) else { return; };
+                    if write_frame(&mut writer, &Frame::new(0, KIND_CONTROL, body)).await.is_err() {
+                        return;
+                    }
+                }
                 frame = outbound_rx.recv() => {
                     let Some(frame) = frame else { break; };
                     let mut drained = 0;
@@ -791,9 +823,6 @@ where
                         if write_frame(&mut writer, &Frame::new(0, KIND_EVENT, body)).await.is_err() { return; }
                         drained += 1;
                         if drained >= 1024 {
-                            let root = NsEvent::reset();
-                            let Ok(body) = postcard::to_allocvec(&root) else { return; };
-                            if write_frame(&mut writer, &Frame::new(0, KIND_EVENT, body)).await.is_err() { return; }
                             break;
                         }
                     }
@@ -822,7 +851,12 @@ where
 
 /// Read the client's `Hello` and check the protocol. The caller performs
 /// attachment admission before sending `Welcome`.
-async fn read_hello<R, W>(reader: &mut R, writer: &mut W) -> Result<fs::Spec, WireError>
+struct AttachHello {
+    client_owner: ClientOwnerId,
+    filesystem: fs::Spec,
+}
+
+async fn read_hello<R, W>(reader: &mut R, writer: &mut W) -> Result<AttachHello, WireError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -836,6 +870,7 @@ where
     let hello: Handshake = postcard::from_bytes(&frame.body)?;
     let Handshake::Hello {
         protocol,
+        client_owner,
         filesystem,
     } = hello
     else {
@@ -849,14 +884,20 @@ where
         send_rejected(writer, error.to_string()).await?;
         return Err(error);
     }
-    Ok(filesystem)
+    Ok(AttachHello {
+        client_owner,
+        filesystem,
+    })
 }
 
-async fn send_welcome<W>(writer: &mut W) -> Result<(), WireError>
+async fn send_welcome<W>(writer: &mut W, epoch: NamespaceEpoch) -> Result<(), WireError>
 where
     W: AsyncWrite + Unpin,
 {
-    let welcome = Handshake::Welcome { protocol: PROTOCOL };
+    let welcome = Handshake::Welcome {
+        protocol: PROTOCOL,
+        epoch,
+    };
     let body = postcard::to_allocvec(&welcome)?;
     write_frame(writer, &Frame::new(0, KIND_RESPONSE, body)).await?;
     Ok(())
@@ -891,14 +932,19 @@ where
 /// sends a malformed/oversized frame (`Err`).
 async fn read_loop<R>(
     reader: &mut R,
-    namespace: &Arc<dyn Namespace>,
-    outbound_tx: &mpsc::UnboundedSender<Frame>,
+    namespace: &Arc<dyn ServingNamespace>,
+    outbound_tx: &mpsc::Sender<Frame>,
 ) -> Result<(), WireError>
 where
     R: AsyncRead + Unpin,
 {
     let mut requests = JoinSet::new();
     loop {
+        while requests.try_join_next().is_some() {}
+        if requests.len() >= MAX_IN_FLIGHT_REQUESTS {
+            let _ = requests.join_next().await;
+            continue;
+        }
         let Some(frame) = read_frame(reader).await? else {
             return Ok(());
         };
@@ -913,10 +959,21 @@ where
         let namespace = Arc::clone(namespace);
         let outbound_tx = outbound_tx.clone();
         requests.spawn(async move {
-            let response = dispatch(namespace.as_ref(), request).await;
-            match postcard::to_allocvec(&response) {
+            let body = match namespace.acquire() {
+                Ok(lease) => {
+                    let reply = dispatch(&lease, request).await;
+                    postcard::to_allocvec(&reply)
+                },
+                Err(error) => postcard::to_allocvec(&WireReply {
+                    epoch: namespace.current_epoch(),
+                    response: request.error_response(error),
+                }),
+            };
+            match body {
                 Ok(body) => {
-                    let _ = outbound_tx.send(Frame::new(request_id, KIND_RESPONSE, body));
+                    let _ = outbound_tx
+                        .send(Frame::new(request_id, KIND_RESPONSE, body))
+                        .await;
                 },
                 Err(error) => {
                     tracing::warn!(%error, "wire: failed to encode namespace response");
@@ -928,27 +985,34 @@ where
 
 /// Run one request against the namespace, wrapping the answer in its
 /// [`WireResponse`] variant.
-async fn dispatch(namespace: &dyn Namespace, request: WireRequest) -> WireResponse {
-    match request {
+async fn dispatch(lease: &NamespaceLease, request: WireRequest) -> WireReply {
+    let epoch = lease.epoch();
+    let namespace = lease.namespace();
+    let response = match request {
         WireRequest::Lookup { parent, name } => {
-            WireResponse::Lookup(namespace.lookup(parent, &name).await)
+            WireResponse::Lookup(lease.run(namespace.lookup(parent, &name)).await)
         },
-        WireRequest::Getattr { path } => WireResponse::Getattr(namespace.getattr(path).await),
+        WireRequest::Getattr { path } => {
+            WireResponse::Getattr(lease.run(namespace.getattr(path)).await)
+        },
         WireRequest::GetattrExact { path } => {
-            WireResponse::GetattrExact(namespace.getattr_exact(path).await)
+            WireResponse::GetattrExact(lease.run(namespace.getattr_exact(path)).await)
         },
         WireRequest::Readdir {
             path,
             cursor,
             budget,
         } => WireResponse::Readdir(
-            namespace
-                .readdir(path, cursor, usize::try_from(budget).unwrap_or(usize::MAX))
+            lease
+                .run(namespace.readdir(path, cursor, usize::try_from(budget).unwrap_or(usize::MAX)))
                 .await,
         ),
         WireRequest::Read { path, offset, len } => {
-            WireResponse::Read(namespace.read(path, offset, len).await)
+            WireResponse::Read(lease.run(namespace.read(path, offset, len)).await)
         },
-        WireRequest::Readlink { path } => WireResponse::Readlink(namespace.readlink(path).await),
-    }
+        WireRequest::Readlink { path } => {
+            WireResponse::Readlink(lease.run(namespace.readlink(path)).await)
+        },
+    };
+    WireReply { epoch, response }
 }

@@ -7,7 +7,9 @@
 
 mod facade;
 pub use facade::*;
+mod serving;
 pub use omnifs_core::Stability;
+pub use serving::*;
 
 #[cfg(feature = "wire")]
 mod beacon;
@@ -43,7 +45,7 @@ pub use server::{Endpoint, ListenerEvent, VfsServer, serve_connection};
 
 /// The Omnifs VFS wire protocol version. Peers that disagree refuse to serve.
 #[cfg(feature = "wire")]
-pub const PROTOCOL: u32 = 9;
+pub const PROTOCOL: u32 = 10;
 
 #[cfg(feature = "wire")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +82,20 @@ pub(crate) enum WireRequest {
 }
 
 #[cfg(feature = "wire")]
+impl WireRequest {
+    fn error_response(&self, error: NsError) -> WireResponse {
+        match self {
+            Self::Lookup { .. } => WireResponse::Lookup(Err(error)),
+            Self::Getattr { .. } => WireResponse::Getattr(Err(error)),
+            Self::GetattrExact { .. } => WireResponse::GetattrExact(Err(error)),
+            Self::Readdir { .. } => WireResponse::Readdir(Err(error)),
+            Self::Read { .. } => WireResponse::Read(Err(error)),
+            Self::Readlink { .. } => WireResponse::Readlink(Err(error)),
+        }
+    }
+}
+
+#[cfg(feature = "wire")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum WireResponse {
     Lookup(Result<LookupAnswer, NsError>),
@@ -92,13 +108,22 @@ pub(crate) enum WireResponse {
 
 #[cfg(feature = "wire")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct WireReply {
+    pub epoch: NamespaceEpoch,
+    pub response: WireResponse,
+}
+
+#[cfg(feature = "wire")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum Handshake {
     Hello {
         protocol: u32,
+        client_owner: omnifs_core::ClientOwnerId,
         filesystem: omnifs_core::fs::Spec,
     },
     Welcome {
         protocol: u32,
+        epoch: NamespaceEpoch,
     },
     Rejected {
         reason: String,

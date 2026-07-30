@@ -1,4 +1,6 @@
 pub mod completions;
+pub mod credential;
+pub(crate) mod daemon_start;
 pub mod doctor;
 pub mod down;
 pub mod fs;
@@ -9,5 +11,4 @@ pub mod receipt;
 pub mod setup;
 pub mod skill;
 pub mod status;
-pub mod up;
 pub mod version;

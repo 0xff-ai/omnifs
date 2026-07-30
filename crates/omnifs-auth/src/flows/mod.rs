@@ -3,13 +3,13 @@ pub(crate) mod implicit;
 pub(crate) mod loopback;
 pub(crate) mod manual;
 
+use crate::CredentialEntry;
+use crate::OauthScheme;
 use crate::error::AuthError;
 use crate::request::ConfiguredClient;
 use oauth2::{
     AuthorizationCode, CsrfToken, PkceCodeChallenge, PkceCodeVerifier, Scope, TokenResponse,
 };
-use omnifs_workspace::authn::OauthScheme;
-use omnifs_workspace::creds::CredentialEntry;
 use secrecy::SecretString;
 use time::OffsetDateTime;
 use url::Url;
@@ -75,6 +75,33 @@ pub(crate) fn credential_entry_from_token(
         expires_at,
         token_type,
         scopes,
-        now,
+    )
+}
+
+pub(crate) fn credential_entry_from_refresh_token(
+    token: &oauth2::StandardTokenResponse<
+        oauth2::EmptyExtraTokenFields,
+        oauth2::basic::BasicTokenType,
+    >,
+    current: &CredentialEntry,
+) -> CredentialEntry {
+    let now = OffsetDateTime::now_utc();
+    let expires_at = token.expires_in().map(|expires_in| now + expires_in);
+    let refresh_token = token
+        .refresh_token()
+        .map(|token| SecretString::from(token.secret().to_owned()));
+    let scopes = token.scopes().map(|scopes| {
+        scopes
+            .iter()
+            .map(|scope| scope.as_ref().to_owned())
+            .filter(|scope| !scope.is_empty())
+            .collect()
+    });
+    current.merge_oauth_refresh(
+        SecretString::from(token.access_token().secret().to_owned()),
+        refresh_token,
+        expires_at,
+        token.token_type().as_ref(),
+        scopes,
     )
 }

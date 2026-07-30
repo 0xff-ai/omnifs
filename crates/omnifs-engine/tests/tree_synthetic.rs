@@ -1,4 +1,4 @@
-//! Synthetic pagination and mount-root controls through `TreeNamespace`.
+//! Synthetic pagination and mount-root controls through `EngineNamespace`.
 
 #![cfg(not(target_os = "wasi"))]
 

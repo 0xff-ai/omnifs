@@ -1,9 +1,9 @@
 //! NFS-local proactive deferral of provider-backed directory listings.
 //!
-//! `TreeNamespace` computes the truthful projection result and may block on cold provider
+//! `EngineNamespace` computes the truthful projection result and may block on cold provider
 //! work for as long as it takes. The NFS filesystem decides how long an individual
 //! RPC handler may wait for that truth before replying `NFS4ERR_DELAY` and
-//! letting the client retry. That wait budget is filesystem policy; `TreeNamespace`
+//! letting the client retry. That wait budget is filesystem policy; `EngineNamespace`
 //! deliberately does not own it.
 //!
 //! Concurrent RPC dispatch already keeps one slow op from head-of-line blocking

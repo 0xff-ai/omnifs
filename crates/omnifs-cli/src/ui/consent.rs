@@ -9,10 +9,9 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use super::output::Output;
-use super::render::LedgerRow;
+use super::output::{Output, PromptMode};
+use super::render::{self, LedgerRow};
 use super::style::Glyph;
-use crate::stages::PromptMode;
 
 /// One planned operation. `id` is stable for the lifetime of a command and is
 /// carried into the settled [`Outcome`]. It is never shown in the human rail,
@@ -84,24 +83,13 @@ impl Plan {
         self.rows.push(row);
     }
 
-    pub(crate) fn remove_count(&self) -> usize {
-        self.rows.iter().filter(|row| row.remove).count()
-    }
-
-    pub(crate) fn keep_count(&self) -> usize {
-        self.rows.len().saturating_sub(self.remove_count())
-    }
-
-    /// Past-tense counts for the closing sentence once a plan has settled
-    /// Kept rows are stated
-    /// here rather than in the plan preview, since a plan preview already
-    /// marks each row `-`/`=` individually.
-    pub(crate) fn settled_summary(&self) -> String {
-        format!(
-            "{} removed, {} kept",
-            self.remove_count(),
-            self.keep_count()
-        )
+    /// The consent plan preview block: a headline sentence naming the
+    /// operation, then its rows indented two spaces under it with the
+    /// `-`/`=` glyph vocabulary, then a blank line so the confirm prompt (or,
+    /// for `--dry-run`, the closing sentence) reads as its own block.
+    pub(crate) fn render(&self, caps: render::Capabilities) -> String {
+        let rows = self.rows.iter().map(Row::ledger_row).collect::<Vec<_>>();
+        format!("{}\n", render::plan_block(&self.title, &rows, caps))
     }
 
     /// Settle outcomes in plan order. An operation that did not produce a
@@ -281,19 +269,30 @@ pub(crate) struct Receipt {
     pub(crate) rows: Vec<Outcome>,
 }
 
+impl Receipt {
+    /// The consent receipt: settled rows at column 0 (never indented under
+    /// the plan's headline, since the operation already happened), then a
+    /// blank line before the caller's closing sentence.
+    pub(crate) fn render(&self, caps: render::Capabilities) -> String {
+        let rows = self
+            .rows
+            .iter()
+            .map(Outcome::ledger_row)
+            .collect::<Vec<_>>();
+        format!("{}\n\n", render::ledger_block(&rows, caps))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn plan_counts_and_receipt_keep_stable_ids() {
+    fn receipt_keeps_stable_plan_ids() {
         let mut plan = Plan::new("reset");
         plan.push(Row::remove("daemon", "daemon", "stop"));
         plan.push(Row::remove("mount:a", "mount a", "delete"));
         plan.push(Row::keep("provider-store", "provider store", "keep"));
-
-        assert_eq!(plan.remove_count(), 2);
-        assert_eq!(plan.keep_count(), 1);
 
         let receipt = plan.receipt([
             Outcome::done("mount:a", "deleted"),
@@ -312,11 +311,7 @@ mod tests {
 
     #[test]
     fn dry_run_decision_never_resolves_a_prompt() {
-        let mode = PromptMode {
-            interactive: false,
-            yes: false,
-            no_input: false,
-        };
+        let mode = PromptMode::for_test(false, false, false);
         assert_eq!(
             Decision::resolve(
                 mode,
@@ -356,15 +351,6 @@ mod tests {
         assert_eq!(remove.glyph, Glyph::Plan);
         let keep = Row::keep("provider", "provider", "artifact kept in store").ledger_row();
         assert_eq!(keep.glyph, Glyph::Keep);
-    }
-
-    #[test]
-    fn settled_summary_reports_removed_and_kept_counts() {
-        let mut plan = Plan::new("Removing mount `github`");
-        plan.push(Row::remove("mount", "mount", "/github"));
-        plan.push(Row::remove("credential", "credential", "github oauth"));
-        plan.push(Row::keep("provider", "provider", "artifact kept in store"));
-        assert_eq!(plan.settled_summary(), "2 removed, 1 kept");
     }
 
     #[test]

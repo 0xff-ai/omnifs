@@ -5,7 +5,7 @@
 //! workloads; the only difference is the filesystem's attach transport:
 //!
 //! - **Lane 1 (Unix).** A flat `omnifs-thin --protocol nfs` runner attaches to
-//!   `filesystems/runtime/local.sock`.
+//!   `daemon-state/local.sock`.
 //! - **Lane 2 (TCP).** The same runner attaches to the token-guarded loopback
 //!   listener used by Docker-delivered filesystems.
 //!

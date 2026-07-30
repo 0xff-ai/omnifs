@@ -1,8 +1,8 @@
+use crate::CredentialEntry;
 use crate::error::AuthError;
-use crate::flows::credential_entry_from_token;
+use crate::flows::credential_entry_from_refresh_token;
 use crate::request::OAuthRequest;
 use oauth2::{AccessToken, RefreshToken, StandardRevocableToken};
-use omnifs_workspace::creds::CredentialEntry;
 use secrecy::{ExposeSecret, SecretString};
 use std::future::Future;
 use std::pin::Pin;
@@ -49,9 +49,12 @@ impl OAuthClient {
     pub async fn refresh(
         &self,
         request: OAuthRequest,
-        refresh_token: SecretString,
+        current: &CredentialEntry,
     ) -> Result<CredentialEntry, AuthError> {
         let client = request.token_client()?;
+        let refresh_token = current.refresh_token().ok_or_else(|| {
+            AuthError::RequestConfig("OAuth credential has no refresh token".to_owned())
+        })?;
         let refresh_token = RefreshToken::new(refresh_token.expose_secret().to_owned());
         let mut exchange = client.exchange_refresh_token(&refresh_token);
         for param in &request.scheme.extra_token_params {
@@ -59,7 +62,7 @@ impl OAuthClient {
         }
 
         let token = exchange.request_async(&self.http).await?;
-        Ok(credential_entry_from_token(&token))
+        Ok(credential_entry_from_refresh_token(&token, current))
     }
 
     pub async fn revoke_access_token(

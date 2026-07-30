@@ -6,52 +6,56 @@
 //! artifacts by recency.
 
 use anyhow::{Context as _, anyhow, bail};
-use omnifs_core::ProviderId;
-use omnifs_workspace::ids::ProviderRef;
-use omnifs_workspace::provider::{Catalog, ProviderManifest};
+use omnifs_api::ProviderMetadata;
+use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef, ProviderVersion};
+use omnifs_provider::ProviderManifest;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::provider_bundle::EmbeddedProviders;
+use crate::rpc::RpcClient;
 
 pub(crate) struct ResolvedProvider {
     pub(crate) reference: ProviderRef,
     pub(crate) manifest: ProviderManifest,
-    pub(crate) newly_retained: bool,
 }
 
 pub(crate) struct ProviderResolver<'a> {
-    catalog: &'a Catalog,
-    embedded: &'a EmbeddedProviders,
+    rpc: &'a RpcClient,
 }
 
 impl<'a> ProviderResolver<'a> {
-    pub(crate) fn new(catalog: &'a Catalog, embedded: &'a EmbeddedProviders) -> Self {
-        Self { catalog, embedded }
+    pub(crate) fn new(rpc: &'a RpcClient) -> Self {
+        Self { rpc }
     }
 
-    pub(crate) fn resolve(&self, selector: &str) -> anyhow::Result<ResolvedProvider> {
+    pub(crate) async fn resolve(&self, selector: &str) -> anyhow::Result<ResolvedProvider> {
         let path = Path::new(selector);
         match fs::symlink_metadata(path) {
-            Ok(metadata) => return self.resolve_path(path, &metadata),
+            Ok(metadata) => return self.resolve_path(path, &metadata).await,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {},
             Err(error) => return Err(error).with_context(|| format!("stat provider `{selector}`")),
         }
 
-        if let Some(provider) = self.embedded.by_name(selector) {
-            return self.resolve_artifact(provider.artifact());
+        if let Some(metadata) = self
+            .rpc
+            .list_embedded_providers()
+            .await?
+            .into_iter()
+            .find(|metadata| metadata.reference.name == selector)
+        {
+            return self.resolve_embedded(metadata).await;
         }
         if is_digest_prefix(selector) {
-            return self.resolve_digest(selector);
+            return self.resolve_digest(selector).await;
         }
         bail!(
             "provider selector `{selector}` is not an existing WASM path, embedded provider name, or lowercase digest prefix"
         )
     }
 
-    fn resolve_path(
+    async fn resolve_path(
         &self,
         path: &Path,
         metadata: &fs::Metadata,
@@ -79,7 +83,7 @@ impl<'a> ProviderResolver<'a> {
                     path.display()
                 );
             };
-            return self.resolve_file(wasm);
+            return self.resolve_file(wasm).await;
         }
         if !metadata.file_type().is_file() {
             bail!(
@@ -87,72 +91,131 @@ impl<'a> ProviderResolver<'a> {
                 path.display()
             );
         }
-        self.resolve_file(path)
+        self.resolve_file(path).await
     }
 
-    fn resolve_file(&self, path: &Path) -> anyhow::Result<ResolvedProvider> {
-        let artifact = omnifs_workspace::provider::Artifact::from_file(path)
+    async fn resolve_file(&self, path: &Path) -> anyhow::Result<ResolvedProvider> {
+        let artifact = omnifs_provider::Artifact::from_file(path)
             .with_context(|| format!("validate provider artifact {}", path.display()))?;
-        self.resolve_artifact(&artifact)
+        self.resolve_artifact(&artifact).await
     }
 
-    fn resolve_digest(&self, selector: &str) -> anyhow::Result<ResolvedProvider> {
-        let index = self.catalog.store().read_index()?;
+    async fn resolve_digest(&self, selector: &str) -> anyhow::Result<ResolvedProvider> {
         let mut ids = BTreeMap::<String, ProviderId>::new();
-        for entry in &index.providers {
-            let id = entry.id.to_string();
-            if id.starts_with(selector) {
-                ids.insert(id, entry.id);
-            }
-        }
-        for entry in self.embedded.entries() {
-            let id = entry.artifact().id().to_string();
-            if id.starts_with(selector) {
-                ids.insert(id, entry.artifact().id());
+        for provider in self.rpc.list_providers().await? {
+            let id = provider.reference.id;
+            if id.to_string().starts_with(selector) {
+                ids.insert(id.to_string(), id);
             }
         }
         let matches = ids.into_values().collect::<Vec<_>>();
         let id = match matches.as_slice() {
             [id] => *id,
             [] => bail!(
-                "provider digest prefix `{selector}` did not match a retained or embedded artifact"
+                "provider digest prefix `{selector}` did not match a retained daemon provider"
             ),
             _ => bail!("provider digest prefix `{selector}` is ambiguous"),
         };
-        if index.providers.iter().any(|entry| entry.id == id) {
-            return self.resolve_id(&id, false);
+        self.resolve_id(id).await
+    }
+
+    async fn resolve_artifact(
+        &self,
+        artifact: &omnifs_provider::Artifact,
+    ) -> anyhow::Result<ResolvedProvider> {
+        let id = artifact.id();
+        if self.rpc.provider_metadata(id).await?.is_some() {
+            return self.resolve_id(id).await;
         }
-        let embedded = self
-            .embedded
-            .by_id(&id)
-            .ok_or_else(|| anyhow!("embedded provider `{id}` disappeared during resolution"))?;
-        self.resolve_artifact(embedded.artifact())
+        let receipt = self.import_artifact(artifact).await?;
+        anyhow::ensure!(
+            receipt.provider.id == id,
+            "daemon imported provider `{}` for requested artifact `{id}`",
+            receipt.provider.id
+        );
+        self.resolve_id(id).await
     }
 
-    fn resolve_artifact(
+    async fn resolve_embedded(
         &self,
-        artifact: &omnifs_workspace::provider::Artifact,
+        metadata: ProviderMetadata,
     ) -> anyhow::Result<ResolvedProvider> {
-        let newly_retained = self.catalog.store().retain(artifact)?;
-        self.resolve_id(&artifact.id(), newly_retained)
-    }
-
-    fn resolve_id(
-        &self,
-        id: &ProviderId,
-        newly_retained: bool,
-    ) -> anyhow::Result<ResolvedProvider> {
-        let provider = self
-            .catalog
-            .get(id)?
-            .ok_or_else(|| anyhow!("provider artifact `{id}` is missing from the store"))?;
-        let manifest = provider.manifest()?;
+        let id = metadata.reference.id;
+        if self.rpc.provider_metadata(id).await?.is_none() {
+            let receipt = self.import_embedded(&metadata.reference.name).await?;
+            anyhow::ensure!(
+                receipt.provider.id == id,
+                "daemon imported a different embedded provider"
+            );
+        }
+        let manifest = ProviderManifest::from_bytes(&metadata.manifest)
+            .context("validate embedded provider metadata")?;
+        anyhow::ensure!(
+            manifest.id == metadata.reference.name,
+            "embedded provider metadata name `{}` does not match manifest `{}`",
+            metadata.reference.name,
+            manifest.id
+        );
+        let reference = provider_reference(&metadata)?;
+        anyhow::ensure!(reference.id == id, "embedded provider metadata id mismatch");
         Ok(ResolvedProvider {
-            reference: provider.reference(),
+            reference,
             manifest,
-            newly_retained,
         })
     }
+
+    async fn resolve_id(&self, id: ProviderId) -> anyhow::Result<ResolvedProvider> {
+        let metadata = self
+            .rpc
+            .provider_metadata(id)
+            .await?
+            .ok_or_else(|| anyhow!("provider artifact `{id}` is not retained by the daemon"))?;
+        let manifest = ProviderManifest::from_bytes(&metadata.manifest)
+            .with_context(|| format!("validate daemon metadata for provider `{id}`"))?;
+        anyhow::ensure!(
+            manifest.id == metadata.reference.name,
+            "daemon metadata name `{}` does not match manifest `{}`",
+            metadata.reference.name,
+            manifest.id
+        );
+        anyhow::ensure!(
+            metadata.reference.id == id,
+            "daemon metadata returned provider `{}` for requested `{id}`",
+            metadata.reference.id
+        );
+        let reference = provider_reference(&metadata)?;
+        Ok(ResolvedProvider {
+            reference,
+            manifest,
+        })
+    }
+
+    async fn import_artifact(
+        &self,
+        artifact: &omnifs_provider::Artifact,
+    ) -> anyhow::Result<omnifs_api::ProviderImportReceipt> {
+        self.rpc
+            .import_provider(artifact.file().to_owned(), artifact.bytes())
+            .await
+    }
+
+    async fn import_embedded(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<omnifs_api::ProviderImportReceipt> {
+        self.rpc.import_embedded_provider(name.to_owned()).await
+    }
+}
+
+fn provider_reference(metadata: &ProviderMetadata) -> anyhow::Result<ProviderRef> {
+    Ok(ProviderRef {
+        id: metadata.reference.id,
+        meta: ProviderMeta {
+            name: ProviderName::new(metadata.reference.name.clone())
+                .context("daemon returned invalid provider name")?,
+            version: metadata.reference.version.clone().map(ProviderVersion::new),
+        },
+    })
 }
 
 fn is_digest_prefix(value: &str) -> bool {
@@ -173,21 +236,21 @@ pub(crate) struct ProviderOption {
 }
 
 pub(crate) fn provider_options(
-    embedded: &EmbeddedProviders,
+    embedded: &[ProviderMetadata],
     configured: &BTreeMap<String, String>,
 ) -> Vec<ProviderOption> {
     let mut options = embedded
-        .entries()
         .iter()
-        .filter(|entry| !configured.contains_key(&entry.manifest().id))
-        .map(|entry| ProviderOption {
-            name: entry.manifest().id.clone(),
-            hint: entry
-                .manifest()
-                .description
-                .clone()
-                .unwrap_or_else(|| entry.manifest().display_name.clone()),
-            default_selected: default_selected(entry.manifest()),
+        .filter_map(|entry| {
+            let manifest = ProviderManifest::from_bytes(&entry.manifest).ok()?;
+            (!configured.contains_key(&manifest.id)).then(|| ProviderOption {
+                name: manifest.id.clone(),
+                hint: manifest
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| manifest.display_name.clone()),
+                default_selected: default_selected(&manifest),
+            })
         })
         .collect::<Vec<_>>();
     options.sort_by(|left, right| {
@@ -215,14 +278,14 @@ fn default_selected(manifest: &ProviderManifest) -> bool {
             .auth
             .as_ref()
             .and_then(|auth| auth.default_scheme()),
-        Some((_, omnifs_workspace::authn::AuthScheme::Oauth(_)))
+        Some((_, omnifs_auth::AuthScheme::Oauth(_)))
     ) {
         return true;
     }
     let auth_manifest = manifest
         .auth
         .as_ref()
-        .map(omnifs_workspace::provider::ProviderAuthManifest::wasm_auth_manifest);
+        .map(omnifs_provider::ProviderAuthManifest::wasm_auth_manifest);
     !crate::commands::mount::detect::detect(auth_manifest.as_ref()).is_empty()
 }
 
@@ -238,7 +301,7 @@ pub(crate) fn safe_for_setup(manifest: &ProviderManifest) -> bool {
     let auth_manifest = manifest
         .auth
         .as_ref()
-        .map(omnifs_workspace::provider::ProviderAuthManifest::wasm_auth_manifest);
+        .map(omnifs_provider::ProviderAuthManifest::wasm_auth_manifest);
     !crate::commands::mount::detect::detect(auth_manifest.as_ref()).is_empty()
 }
 
@@ -256,14 +319,22 @@ mod tests {
     }
 
     #[test]
-    fn artifact_resolution_reports_only_the_first_retention_as_new() {
-        let home = tempfile::tempdir().unwrap();
-        let embedded = EmbeddedProviders::load().unwrap();
-        let catalog = Catalog::open(home.path());
-        let resolver = ProviderResolver::new(&catalog, &embedded);
-        let artifact = embedded.entries()[0].artifact();
-
-        assert!(resolver.resolve_artifact(artifact).unwrap().newly_retained);
-        assert!(!resolver.resolve_artifact(artifact).unwrap().newly_retained);
+    fn daemon_reference_becomes_core_reference_without_local_store() {
+        let id = ProviderId::from_digest([7; 32]);
+        let metadata = ProviderMetadata {
+            reference: omnifs_api::ProviderReference {
+                id,
+                name: "demo".to_owned(),
+                version: Some("1.2.3".to_owned()),
+            },
+            manifest: Vec::new(),
+        };
+        let reference = provider_reference(&metadata).unwrap();
+        assert_eq!(reference.id, id);
+        assert_eq!(reference.meta.name.as_str(), "demo");
+        assert_eq!(
+            reference.meta.version.as_ref().map(ProviderVersion::as_str),
+            Some("1.2.3")
+        );
     }
 }

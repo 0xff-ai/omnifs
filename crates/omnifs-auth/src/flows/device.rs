@@ -1,9 +1,9 @@
+use crate::CredentialEntry;
+use crate::DevicePollCompat;
 use crate::client::OAuthClient;
 use crate::error::AuthError;
 use crate::flows::{credential_entry_from_token, scopes};
 use crate::request::DeviceCodeLoginRequest;
-use omnifs_workspace::authn::DevicePollCompat;
-use omnifs_workspace::creds::CredentialEntry;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;

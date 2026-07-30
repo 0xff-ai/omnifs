@@ -6,22 +6,44 @@
 //! CLI lifecycle suite share this lock owner and daemon contract.
 
 use std::ffi::OsString;
-use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use hyper_util::rt::TokioIo;
+use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
-    CONTROL_MAX_LINE_BYTES, CONTROL_PROTOCOL_VERSION, ControlOperation, ControlOutcome,
-    ControlReply, ControlRequest,
+    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInfo, DaemonStatus,
+    MountDefinition, MountOpResult, ProviderImportReceipt,
 };
-use omnifs_core::ProviderId;
-use omnifs_workspace::mounts::Repository;
-use omnifs_workspace::provider::{Artifact, ProviderStore};
+use omnifs_core::{MountName, ProviderId};
 use tempfile::TempDir;
+use tokio::net::UnixStream;
+use tokio::runtime::{Builder, Runtime};
+use tonic::Request;
+use tonic::transport::{Channel, Endpoint};
+use tower::service_fn;
+
+type ControlClient = wire::control_client::ControlClient<Channel>;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
+const MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
+const PROVIDER_CHUNK_BYTES: usize = CONTROL_STREAM_PAYLOAD_MAX_BYTES;
+
+/// A unique-enough mutation id for a test fixture: a live daemon only needs
+/// ids that never collide within one hermetic home's lifetime, not
+/// cryptographic randomness, so an incrementing counter avoids pulling in a
+/// random-bytes dependency for test-only code.
+fn next_mutation_id() -> Vec<u8> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut bytes = [0_u8; 16];
+    bytes[8..].copy_from_slice(&counter.to_be_bytes());
+    bytes.to_vec()
+}
 
 /// Fixed, non-ephemeral port used purely as a cross-process lock for live NFS
 /// mounts. Below the OS ephemeral range, so it does not collide with any
@@ -187,90 +209,26 @@ fn ensure_thin_runner_built() {
     });
 }
 
-/// Install the test provider into the provider store under `providers_dir` and
-/// return its content id. The daemon serves by content id, so the provider must
-/// be present in the store before a mount spec pinning it can resolve.
-pub fn install_test_provider(providers_dir: &Path) -> ProviderId {
-    let bytes = std::fs::read(crate::provider_wasm_path("test_provider.wasm"))
-        .expect("read test provider wasm");
-    let artifact =
-        Artifact::from_bytes("test_provider.wasm", bytes).expect("parse test provider artifact");
-    let id = artifact.id();
-    let store = ProviderStore::new(providers_dir);
-    store.retain(&artifact).expect("retain test provider");
-    id
-}
-
-/// No-auth mount spec for the test provider, pinning `id`. Serves the projected
-/// tree under `test/`.
-#[must_use]
-pub fn test_mount_spec(id: &ProviderId) -> String {
-    test_mount_spec_at(id, "test")
-}
-
-/// No-auth mount spec for the test provider under an arbitrary namespace root.
-/// Live shared-namespace fixtures install two copies (`test` and `test2`) so
-/// every filesystem must expose the same known bytes from both roots.
-#[must_use]
-pub fn test_mount_spec_at(id: &ProviderId, mount: &str) -> String {
-    format!(r#"{{"provider":{{"id":"{id}","meta":{{"name":"test-provider"}}}},"mount":"{mount}"}}"#)
-}
-
-/// A hermetic `OMNIFS_HOME` with the test provider installed, its mount specs
-/// committed as desired state, an immutable daemon snapshot, and an empty
-/// mount point.
+/// A hermetic profile root and empty filesystem mount point.
 pub struct HermeticHome {
     pub home: TempDir,
     pub mount_point: PathBuf,
 }
 
-/// Build a hermetic home: install the test provider into `providers/`, write
-/// two pinned specs (`test` and `test2`), and create the filesystem mount point.
+/// Build a hermetic profile root and create the filesystem mount point.
 #[must_use]
 pub fn hermetic_home() -> HermeticHome {
     let home = tempfile::tempdir().expect("home tempdir");
-    let providers = home.path().join("providers");
-    std::fs::create_dir_all(&providers).expect("providers dir");
-    let test_id = install_test_provider(&providers);
-
-    let mounts_dir = home.path().join("mounts");
-    std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
-    std::fs::write(mounts_dir.join("test.json"), test_mount_spec(&test_id))
-        .expect("write test mount spec");
-    std::fs::write(
-        mounts_dir.join("test2.json"),
-        test_mount_spec_at(&test_id, "test2"),
-    )
-    .expect("write second test mount spec");
-    let _ = daemon_args(home.path());
-
     let mount_point = home.path().join("mnt");
     std::fs::create_dir_all(&mount_point).expect("mount point");
 
     HermeticHome { home, mount_point }
 }
 
-/// Build the immutable desired-state arguments for a direct hidden-daemon
-/// test launch. This is the sole test helper that initializes and snapshots a
-/// mount repository, so direct launches cannot accidentally read mutable
-/// `mounts/` state.
+/// Build the hidden-daemon arguments for a direct test launch.
 #[must_use]
-pub fn daemon_args(home: &Path) -> Vec<OsString> {
-    let repository = Repository::open(home.join("mounts")).expect("open mount repository");
-    let revision = repository
-        .head_revision()
-        .expect("read mount revision")
-        .expect("initialized mount repository has HEAD");
-    let (snapshot, _) = repository
-        .snapshot(&revision, home.join("cache"))
-        .expect("snapshot mount revision");
-    vec![
-        OsString::from("daemon"),
-        OsString::from("--mount-revision"),
-        OsString::from(revision.as_str()),
-        OsString::from("--mount-snapshot"),
-        snapshot.into_os_string(),
-    ]
+pub fn daemon_args(_home: &Path) -> Vec<OsString> {
+    vec![OsString::from("daemon")]
 }
 
 /// A running `omnifs daemon` and explicit local filesystem runner with the test
@@ -364,24 +322,10 @@ impl Drop for MultiFilesystemDaemon {
 }
 
 impl MultiFilesystemDaemon {
-    /// The daemon-owned daemon record for this hermetic home.
-    #[must_use]
-    pub fn record_path(&self) -> PathBuf {
-        self.home.path().join("daemon.json")
-    }
-
-    /// Live daemon observations for this hermetic home.
+    /// Live daemon status for this hermetic home.
     #[must_use]
     pub fn status(&self) -> omnifs_api::DaemonStatus {
-        let reply = control_request(
-            &self.home.path().join("control.sock"),
-            ControlOperation::Status,
-        )
-        .expect("query daemon status");
-        match reply.outcome {
-            ControlOutcome::Status(status) => status,
-            other => panic!("unexpected status reply: {other:?}"),
-        }
+        control_status(&self.home.path().join("control.sock"))
     }
 
     /// The projected test-provider root under the filesystem at `index`.
@@ -476,12 +420,13 @@ pub fn start_multi_filesystem_daemon(kinds: &[&str]) -> Option<MultiFilesystemDa
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+    seed_test_namespace(&control_socket);
 
-    let attach_socket = home.path().join("filesystems/runtime/local.sock");
+    let attach_socket = home.path().join("daemon-state/local.sock");
     let mut filesystems = Vec::with_capacity(kinds.len());
     for ((index, kind), mount_point) in kinds.iter().enumerate().zip(&mount_points) {
         let id = format!("live-{index}");
-        let state_dir = home.path().join(format!("cache/filesystems/{id}"));
+        let state_dir = home.path().join(format!("client/filesystems/state/{id}"));
         let mut command = match *kind {
             "fuse" | "nfs" => {
                 thin_host_runner_command(&id, kind, mount_point, &state_dir, Some(&attach_socket))
@@ -514,17 +459,16 @@ pub fn start_multi_filesystem_daemon(kinds: &[&str]) -> Option<MultiFilesystemDa
         _nfs_lock: nfs_lock,
     };
 
-    // Wait for the record to appear and every filesystem to serve the projected
-    // tree. A non-zero exit before serving is a hard failure (bad CLI parse or
-    // bind collision); a clean exit is a skip.
-    let record = daemon.record_path();
+    // Wait for every filesystem to serve the projected tree. A non-zero exit
+    // before serving is a hard failure (bad CLI parse or bind collision); a
+    // clean exit is a skip.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let all_serving = daemon
             .mount_points
             .iter()
             .all(|mp| mp.join("test/hello/message").is_file());
-        if record.exists() && all_serving {
+        if all_serving {
             return Some(daemon);
         }
         match daemon.daemon.try_wait() {
@@ -732,14 +676,15 @@ fn wire_filesystem(
             control_socket.display()
         );
     }
+    seed_test_namespace(&control_socket);
 
     let mount_point = home_path.join("mnt-wire");
     std::fs::create_dir_all(&mount_point).expect("filesystem mount point");
 
     // The out-of-process renderer attaches over the requested transport and
     // mounts the tree: `--attach <socket>` for Unix, or the VFS TCP env pair.
-    let state_dir = home_path.join("cache/filesystems/wire");
-    let attach_socket = home_path.join("filesystems/runtime/local.sock");
+    let state_dir = home_path.join("client/filesystems/state/wire");
+    let attach_socket = home_path.join("daemon-state/local.sock");
     let mut filesystem_cmd = thin_host_runner_command(
         "wire",
         "nfs",
@@ -759,11 +704,7 @@ fn wire_filesystem(
             );
         },
         AttachTransport::Tcp => {
-            let reply = control_request(&control_socket, ControlOperation::Status)
-                .expect("query daemon status");
-            let ControlOutcome::Status(status) = reply.outcome else {
-                panic!("unexpected daemon status reply")
-            };
+            let status = control_status(&control_socket);
             let attach = status
                 .attach_tcp
                 .expect("daemon status must publish its TCP attach endpoint");
@@ -825,40 +766,204 @@ fn wire_filesystem(
     }
 }
 
-pub fn control_request(socket: &Path, operation: ControlOperation) -> Option<ControlReply> {
-    let mut stream = UnixStream::connect(socket).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .ok()?;
-    let request = ControlRequest {
-        version: CONTROL_PROTOCOL_VERSION,
-        operation,
-    };
-    let mut line = serde_json::to_vec(&request).ok()?;
-    line.push(b'\n');
-    stream.write_all(&line).ok()?;
-    let mut reply = Vec::with_capacity(256);
-    loop {
-        let mut byte = [0_u8; 1];
-        let read = stream.read(&mut byte).ok()?;
-        if read == 0 || reply.len() >= CONTROL_MAX_LINE_BYTES {
-            return None;
-        }
-        reply.push(byte[0]);
-        if byte[0] == b'\n' {
-            return serde_json::from_slice(&reply).ok();
-        }
+/// Import the test provider and create the two mounts used by live conformance
+/// fixtures through the same daemon RPCs as the CLI.
+pub fn seed_test_namespace(socket: &Path) -> ProviderId {
+    let bytes = std::fs::read(crate::provider_wasm_path("test_provider.wasm"))
+        .expect("read test provider wasm");
+    let provider = ProviderId::from_wasm_bytes(&bytes);
+    let receipt = import_provider(socket, bytes);
+    assert_eq!(receipt.provider.id, provider);
+
+    for name in ["test", "test2"] {
+        let definition = MountDefinition {
+            name: MountName::new(name).expect("valid test mount name"),
+            provider,
+            auth: None,
+            limits: None,
+            config: br"{}".to_vec(),
+        };
+        let result = create_mount(socket, &definition);
+        assert_eq!(result.name.as_str(), name);
     }
+    provider
 }
 
 pub fn control_ready(socket: &Path) -> bool {
-    control_request(socket, ControlOperation::Ready)
-        .is_some_and(|reply| matches!(reply.outcome, ControlOutcome::Ready))
+    if !socket.exists() {
+        return false;
+    }
+    match block_on(ready_rpc(socket.to_path_buf())) {
+        Err(_) => false,
+        Ok(Ok(())) => true,
+        Ok(Err(status)) if status.code() == tonic::Code::FailedPrecondition => false,
+        Ok(Err(status)) => panic!("malformed daemon readiness reply: {status}"),
+    }
 }
 
 fn control_socket_ready(socket: &Path) -> bool {
     control_ready(socket)
+}
+
+pub fn control_status(socket: &Path) -> DaemonStatus {
+    block_on(status_rpc(socket.to_path_buf()))
+        .unwrap_or_else(|error| panic!("query daemon status over tonic control socket: {error}"))
+}
+
+pub fn control_daemon_info(socket: &Path) -> DaemonInfo {
+    block_on(daemon_info_rpc(socket.to_path_buf()))
+        .unwrap_or_else(|error| panic!("query daemon info over tonic control socket: {error}"))
+}
+
+fn runtime() -> &'static Runtime {
+    static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build tonic test runtime")
+    })
+}
+
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    runtime().block_on(future)
+}
+
+async fn connect(socket: PathBuf) -> Result<ControlClient, tonic::transport::Error> {
+    Endpoint::from_static("http://[::]:50051")
+        .connect_with_connector(service_fn(move |_| {
+            let socket = socket.clone();
+            async move { UnixStream::connect(socket).await.map(TokioIo::new) }
+        }))
+        .await
+        .map(ControlClient::new)
+}
+
+async fn ready_rpc(socket: PathBuf) -> Result<Result<(), tonic::Status>, tonic::transport::Error> {
+    let mut client = connect(socket).await?;
+    let mut request = Request::new(wire::Empty {});
+    request.set_timeout(REQUEST_TIMEOUT);
+    Ok(client.ready(request).await.map(|_| ()))
+}
+
+async fn status_rpc(socket: PathBuf) -> Result<DaemonStatus, String> {
+    let mut client = connect(socket).await.map_err(|error| error.to_string())?;
+    let mut request = Request::new(wire::Empty {});
+    request.set_timeout(REQUEST_TIMEOUT);
+    let response = client
+        .get_status(request)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_inner();
+    let status = response
+        .status
+        .as_ref()
+        .ok_or_else(|| "malformed status reply: missing status".to_owned())?;
+    grpc::daemon_status(status).map_err(|error| format!("malformed status reply: {error}"))
+}
+
+async fn daemon_info_rpc(socket: PathBuf) -> Result<DaemonInfo, String> {
+    let mut client = connect(socket).await.map_err(|error| error.to_string())?;
+    let mut request = Request::new(wire::Empty {});
+    request.set_timeout(REQUEST_TIMEOUT);
+    let response = client
+        .get_daemon_info(request)
+        .await
+        .map_err(|error| error.to_string())?
+        .into_inner();
+    let info = response
+        .info
+        .as_ref()
+        .ok_or_else(|| "malformed daemon info reply: missing info".to_owned())?;
+    grpc::daemon_info(info).map_err(|error| format!("malformed daemon info reply: {error}"))
+}
+
+/// Provider import carries no mutation identity: the daemon dedupes by
+/// content digest, so this is a plain streamed upload.
+fn import_provider(socket: &Path, bytes: Vec<u8>) -> ProviderImportReceipt {
+    block_on(async {
+        let mut client = connect(socket.to_path_buf())
+            .await
+            .expect("connect to daemon control socket");
+        let digest = ProviderId::from_wasm_bytes(&bytes);
+        let payload = Bytes::from(bytes);
+        let mut items = Vec::with_capacity(payload.len().div_ceil(PROVIDER_CHUNK_BYTES) + 1);
+        items.push(wire::ImportProviderRequest {
+            value: Some(wire::import_provider_request::Value::Start(
+                grpc::to_provider_upload_start("test_provider.wasm", payload.len() as u64, &digest),
+            )),
+        });
+        for start in (0..payload.len()).step_by(PROVIDER_CHUNK_BYTES) {
+            let end = (start + PROVIDER_CHUNK_BYTES).min(payload.len());
+            items.push(wire::ImportProviderRequest {
+                value: Some(wire::import_provider_request::Value::Chunk(
+                    payload.slice(start..end),
+                )),
+            });
+        }
+        let mut request = Request::new(tokio_stream::iter(items));
+        request.set_timeout(Duration::from_mins(3));
+        let response = client
+            .import_provider(request)
+            .await
+            .expect("provider import request");
+        response
+            .into_inner()
+            .receipt
+            .as_ref()
+            .map(grpc::provider_import_receipt)
+            .transpose()
+            .expect("decode provider import receipt")
+            .expect("provider import reply missing receipt")
+    })
+}
+
+/// Create one mount through a fresh single-op `BeginMutation`/`ApplyMutation`
+/// batch, the same lease-scoped path the CLI's mutation runner uses.
+fn create_mount(socket: &Path, definition: &MountDefinition) -> MountOpResult {
+    block_on(async {
+        let mut client = connect(socket.to_path_buf())
+            .await
+            .expect("connect to daemon control socket");
+        let mutation_id: Bytes = next_mutation_id().into();
+
+        let mut begin_request = Request::new(wire::BeginMutationRequest {
+            mutation_id: mutation_id.clone(),
+        });
+        begin_request.set_timeout(MUTATION_TIMEOUT);
+        client
+            .begin_mutation(begin_request)
+            .await
+            .expect("begin test mutation");
+
+        let mut apply_request = Request::new(wire::ApplyMutationRequest {
+            mutation_id,
+            ops: vec![wire::MutationOp {
+                op: Some(wire::mutation_op::Op::CreateMount(wire::CreateMountOp {
+                    definition: Some(grpc::to_mount_definition(definition)),
+                })),
+            }],
+        });
+        apply_request.set_timeout(MUTATION_TIMEOUT);
+        let response = client
+            .apply_mutation(apply_request)
+            .await
+            .expect("apply test mount creation")
+            .into_inner();
+        let result = response
+            .results
+            .into_iter()
+            .next()
+            .expect("mutation batch reply missing its one op result");
+        match result.result.expect("mutation op result missing its op") {
+            wire::mutation_op_result::Result::Mount(mount) => {
+                grpc::mount_op_result(&mount).expect("decode mount op result")
+            },
+            wire::mutation_op_result::Result::Credential(_) => {
+                panic!("expected a mount op result from a mount-create batch")
+            },
+        }
+    })
 }
 
 /// Bring up `omnifs daemon` with an explicit local filesystem runner and only the
@@ -948,14 +1053,15 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
             control_socket.display()
         );
     }
+    seed_test_namespace(&control_socket);
 
-    let attach_socket = hermetic.home.path().join("filesystems/runtime/local.sock");
+    let attach_socket = hermetic.home.path().join("daemon-state/local.sock");
     #[cfg(target_os = "linux")]
     let mut filesystem_command = thin_host_runner_command(
         "native",
         "fuse",
         &mount_point,
-        &hermetic.home.path().join("cache/filesystems/native"),
+        &hermetic.home.path().join("client/filesystems/state/native"),
         Some(&attach_socket),
     );
     #[cfg(not(target_os = "linux"))]
@@ -963,7 +1069,7 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
         "native",
         "nfs",
         &mount_point,
-        &hermetic.home.path().join("cache/filesystems/native"),
+        &hermetic.home.path().join("client/filesystems/state/native"),
         Some(&attach_socket),
     );
     let filesystem = filesystem_command

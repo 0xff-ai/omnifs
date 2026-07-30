@@ -1,8 +1,6 @@
 //! Trusted runtime, cache, and projection engine for omnifs.
 
 #[cfg(feature = "runtime")]
-pub(crate) mod auth_inject;
-#[cfg(feature = "runtime")]
 pub(crate) mod authority;
 #[cfg(feature = "runtime")]
 pub(crate) mod cache;
@@ -12,6 +10,8 @@ pub(crate) mod callouts;
 pub(crate) mod clock;
 #[cfg(feature = "runtime")]
 pub(crate) mod effects;
+#[cfg(feature = "runtime")]
+mod generation;
 #[cfg(feature = "runtime")]
 pub mod inspect;
 #[cfg(feature = "runtime")]
@@ -38,27 +38,33 @@ pub mod view;
 #[cfg(feature = "runtime")]
 pub use callouts::cloner::{CloneError, GitCloner};
 #[cfg(feature = "runtime")]
+pub use generation::{
+    CredentialProvenance, DrainOutcome, GenerationProvenance, MountProvenance, PreparedGeneration,
+    PublishReadyGeneration, RetiredGeneration, ServingCell, ServingMountStatus,
+};
+#[cfg(feature = "runtime")]
 pub use inspect::{Inspector, InspectorLayer, Subscription, init_global_from_env};
 #[cfg(feature = "runtime")]
-pub use namespace::TreeNamespace;
+pub use namespace::EngineNamespace;
 pub use namespace::{
     Attrs, DirCursor, DirEntry, DirPage, EntryKind, EventStream, LookupAnswer, LookupState,
     Namespace, NsError, NsEvent, NsRetryClass, ReadAnswer, ReadStyle, Stability,
 };
 #[cfg(feature = "runtime")]
-pub use runtime::registry::{MountTable, RegistryError};
+pub use runtime::registry::{
+    MountAvailability, MountBuildInput, MountBuildState, MountTable, ProviderBuildInput,
+    RegistryError,
+};
 #[cfg(feature = "runtime")]
-pub use runtime::wasm::{ComponentEngine, WarmOutcome};
+pub use runtime::wasm::ComponentEngine;
 #[cfg(feature = "runtime")]
 pub use runtime::{
-    BuildError, EngineError, Host, HostError, HostOffline, HostOfflineOpen, HostOnline, HostOpen,
-    Runtime as Engine,
+    BuildError, EngineError, HostError, HostOnline, HostRuntimeOpen, Runtime as Engine,
+    RuntimeMountConfig,
 };
 #[cfg(feature = "runtime")]
 pub(crate) use tree::{Cursor, Node, RequestCtx, TreeError, TreeErrorKind, spawn_live_follow_pump};
 
-#[cfg(feature = "runtime")]
-pub(crate) use auth_inject as auth;
 #[cfg(feature = "runtime")]
 pub(crate) use callouts::wit_convert as wit_protocol;
 #[cfg(feature = "runtime")]

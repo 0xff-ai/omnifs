@@ -13,7 +13,7 @@ use futures::future::{BoxFuture, FutureExt};
 use omnifs_api::events::InspectorOutcome;
 use omnifs_core::path::Path;
 use tokio::runtime::Handle;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tracing::Instrument;
 
 use super::{
@@ -126,6 +126,7 @@ impl From<TreeError> for NsError {
             TreeErrorKind::OfflineMiss => Self::OfflineMiss,
             TreeErrorKind::NotDirectory => Self::NotDirectory,
             TreeErrorKind::IsDirectory => Self::IsDirectory,
+            TreeErrorKind::AuthRequired => Self::AuthRequired,
             TreeErrorKind::PermissionDenied => Self::Permission,
             TreeErrorKind::InvalidInput => Self::Invalid,
             TreeErrorKind::TooLarge => Self::TooLarge,
@@ -153,6 +154,7 @@ impl From<NsError> for TreeError {
                 retry_after: None,
             },
             NsError::IsDirectory => TreeError::is_directory("host entry is a directory"),
+            NsError::AuthRequired => TreeError::auth_required("mount credential is unavailable"),
             NsError::Permission => TreeError {
                 kind: TreeErrorKind::PermissionDenied,
                 message: "host permission denied".to_string(),
@@ -219,7 +221,7 @@ impl Drop for HandleRecord {
 
 /// The engine-owned [`Namespace`] implementation. Owns node identity, the invalidation
 /// epoch and event fan-out, and the ranged-handle cache.
-pub struct TreeNamespace {
+pub struct EngineNamespace {
     registry: Arc<MountTable>,
     rt: Handle,
     ids: DashMap<Path, NodeRecord>,
@@ -231,31 +233,31 @@ pub struct TreeNamespace {
     /// Count of ranged opens that yielded a handle; a test hook for asserting
     /// handle reuse.
     open_count: AtomicU64,
-    tick: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    tick_shutdown: watch::Sender<bool>,
+    tick: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-impl TreeNamespace {
+impl EngineNamespace {
     /// Production constructor: build the namespace over the immutable mount registry and
     /// start the background invalidation drain. The returned value is the
     /// filesystem's complete `dyn Namespace` implementation.
     pub fn online(registry: Arc<MountTable>, rt: Handle) -> Arc<Self> {
-        assert!(
-            !registry.is_offline(),
-            "online namespace requires an online mount table"
-        );
+        registry.activate_resources();
+        registry.activate_timers(&rt);
         Self::construct(registry, rt, true)
     }
 
-    pub fn offline(registry: Arc<MountTable>, rt: Handle) -> Arc<Self> {
-        assert!(
-            registry.is_offline(),
-            "offline namespace requires an offline mount table"
-        );
+    pub(crate) fn prepared(registry: Arc<MountTable>, rt: Handle) -> Arc<Self> {
         Self::construct(registry, rt, false)
+    }
+
+    pub(crate) fn activate(self: &Arc<Self>) {
+        self.spawn_drain_tick();
     }
 
     fn construct(registry: Arc<MountTable>, rt: Handle, spawn_drain: bool) -> Arc<Self> {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let (tick_shutdown, _) = watch::channel(false);
         let this = Arc::new(Self {
             registry,
             rt,
@@ -265,6 +267,7 @@ impl TreeNamespace {
             events,
             handles: DashMap::new(),
             open_count: AtomicU64::new(0),
+            tick_shutdown,
             tick: std::sync::Mutex::new(None),
         });
         this.install_root();
@@ -281,9 +284,22 @@ impl TreeNamespace {
     }
 
     pub(crate) fn entry_for(&self, mount: &str) -> Result<&MountEntry, TreeError> {
-        self.registry
-            .entry(mount)
-            .ok_or_else(|| TreeError::not_found(format!("no such mount: {mount}")))
+        let entry = self
+            .configured_entry(mount)
+            .ok_or_else(|| TreeError::not_found(format!("no such mount: {mount}")))?;
+        match entry.availability() {
+            crate::MountAvailability::Active => Ok(entry),
+            crate::MountAvailability::AuthRequired => Err(TreeError::auth_required(format!(
+                "mount {mount} requires a compatible credential"
+            ))),
+            crate::MountAvailability::ProviderUnavailable => Err(TreeError::internal(format!(
+                "mount {mount} provider is unavailable"
+            ))),
+        }
+    }
+
+    pub(crate) fn configured_entry(&self, mount: &str) -> Option<&MountEntry> {
+        self.registry.entry(mount)
     }
 
     pub(crate) fn registry_runtime(&self, mount: &str) -> Option<Arc<Engine>> {
@@ -337,10 +353,22 @@ impl TreeNamespace {
     }
 
     fn spawn_drain_tick(self: &Arc<Self>) {
+        let mut tick = self.tick.lock().expect("tick lock");
+        if tick.is_some() {
+            return;
+        }
         let weak = Arc::downgrade(self);
+        let mut shutdown = self.tick_shutdown.subscribe();
         let handle = self.rt.spawn(async move {
             loop {
-                tokio::time::sleep(DRAIN_TICK).await;
+                tokio::select! {
+                    () = tokio::time::sleep(DRAIN_TICK) => {},
+                    changed = shutdown.changed() => {
+                        if changed.is_ok() {
+                            break;
+                        }
+                    },
+                }
                 let Some(this) = weak.upgrade() else {
                     break;
                 };
@@ -350,7 +378,28 @@ impl TreeNamespace {
                 this.sweep_idle_handles();
             }
         });
-        *self.tick.lock().expect("tick lock") = Some(handle.abort_handle());
+        *tick = Some(handle);
+    }
+
+    pub(crate) fn begin_retirement(&self) {
+        let _ = self.tick_shutdown.send(true);
+    }
+
+    pub(crate) async fn shutdown_background(&self, deadline: tokio::time::Instant) {
+        self.begin_retirement();
+        self.handles.clear();
+        let task = self.tick.lock().expect("tick lock").take();
+        if let Some(mut task) = task
+            && tokio::time::timeout_at(deadline, &mut task).await.is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn background_active(&self) -> bool {
+        self.tick.lock().expect("tick lock").is_some()
     }
 
     /// Test hook: the number of ranged opens that yielded a handle. Two reads of
@@ -373,7 +422,7 @@ impl TreeNamespace {
 
     // --- inspector tracing ---------------------------------------------------
     //
-    // `TreeNamespace` owns request spans because structural paths are opaque to
+    // `EngineNamespace` owns request spans because structural paths are opaque to
     // filesystems. Only this id table can map a node to the mount and path that
     // the inspector records; child provider and callout spans inherit the
     // request span through tracing.
@@ -401,7 +450,7 @@ impl TreeNamespace {
             NsError::NotDirectory | NsError::IsDirectory | NsError::Invalid => {
                 InspectorOutcome::InvalidInput
             },
-            NsError::Permission => InspectorOutcome::Denied,
+            NsError::AuthRequired | NsError::Permission => InspectorOutcome::Denied,
             NsError::TooLarge => InspectorOutcome::TooLarge,
             NsError::RateLimited { .. } | NsError::Timeout => InspectorOutcome::Timeout,
             NsError::Network => InspectorOutcome::Network,
@@ -818,12 +867,8 @@ impl TreeNamespace {
                 offline,
             } = cursor
             {
-                if offline != self.registry.is_offline() {
-                    return Err(if self.registry.is_offline() {
-                        NsError::OfflineMiss
-                    } else {
-                        NsError::Invalid
-                    });
+                if offline {
+                    return Err(NsError::OfflineMiss);
                 }
                 return Ok(dir_page_with_budget(entries, then, budget, offline));
             }
@@ -848,12 +893,7 @@ impl TreeNamespace {
                         })
                     })
                     .collect();
-                return Ok(dir_page_with_budget(
-                    entries,
-                    None,
-                    budget,
-                    self.registry.is_offline(),
-                ));
+                return Ok(dir_page_with_budget(entries, None, budget, false));
             }
             if !node.is_dir() {
                 return Err(NsError::NotDirectory);
@@ -880,12 +920,7 @@ impl TreeNamespace {
                 .map(|entry| self.dir_entry(&parent_full, &entry.name, &entry.meta))
                 .collect();
             let tree_next = listing.next_cursor.map(|c| c.0);
-            Ok(dir_page_with_budget(
-                entries,
-                tree_next,
-                budget,
-                self.registry.is_offline(),
-            ))
+            Ok(dir_page_with_budget(entries, tree_next, budget, false))
         }
         .instrument(span.clone())
         .await;
@@ -1306,7 +1341,7 @@ fn host_child(parent: &StdPath, name: &str) -> Result<PathBuf, TreeError> {
     Ok(child)
 }
 
-impl Namespace for TreeNamespace {
+impl Namespace for EngineNamespace {
     fn lookup<'a>(
         &'a self,
         parent: Path,
@@ -1399,8 +1434,9 @@ impl Namespace for TreeNamespace {
     }
 }
 
-impl Drop for TreeNamespace {
+impl Drop for EngineNamespace {
     fn drop(&mut self) {
+        let _ = self.tick_shutdown.send(true);
         if let Some(tick) = self.tick.lock().expect("tick lock").take() {
             tick.abort();
         }
@@ -1470,7 +1506,7 @@ fn hash_attr_facts(hasher: &mut DefaultHasher, attrs: Option<&FileAttrsCache>, e
 
 #[cfg(test)]
 mod tests {
-    use super::{EntryKind, INSPECTOR_SYNTHETIC_ROOT, TreeNamespace, inspector_identity};
+    use super::{EngineNamespace, EntryKind, INSPECTOR_SYNTHETIC_ROOT, inspector_identity};
     use crate::MountTable;
     use crate::namespace::Namespace;
     use omnifs_core::path::Path;
@@ -1478,15 +1514,10 @@ mod tests {
     use std::sync::Arc;
 
     fn fixture_registry(root: &StdPath) -> Arc<MountTable> {
-        use omnifs_workspace::mounts::{Registry, Spec};
-        use omnifs_workspace::provider::{Artifact, ProviderStore};
+        use crate::{MountBuildInput, MountBuildState, ProviderBuildInput, RuntimeMountConfig};
+        use omnifs_provider::Artifact;
 
         let cache = root.join("engine-cache");
-        let config = root.join("engine-config");
-        let mounts = root.join("engine-mounts");
-        let providers = root.join("engine-providers");
-        std::fs::create_dir_all(&mounts).expect("mount snapshot");
-        std::fs::create_dir_all(&providers).expect("provider store");
         let wasm = StdPath::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("crate parent")
@@ -1494,35 +1525,32 @@ mod tests {
             .expect("workspace root")
             .join("target/wasm32-wasip2/release/test_provider.wasm");
         assert!(wasm.exists(), "build providers before the host fixture");
-        let artifact = Artifact::from_bytes(
-            "test_provider.wasm",
-            std::fs::read(&wasm).expect("test provider"),
-        )
-        .expect("provider artifact");
-        let reference = artifact.reference();
-        ProviderStore::new(&providers)
-            .retain(&artifact)
-            .expect("retain provider");
-        let mut desired = Registry::load(&mounts).expect("load mount snapshot");
-        let spec: Spec = serde_json::from_value(serde_json::json!({
-            "provider": reference,
-            "mount": "test",
-            "config": {}
-        }))
-        .expect("test mount spec");
-        desired.put(&spec).expect("write test mount");
-        let host = crate::test_support::open_test_host(
-            &cache,
-            &providers,
-            config.join("credentials.json"),
-            root.join("engine-clones"),
-        )
-        .expect("open test host");
+        let bytes = std::fs::read(&wasm).expect("test provider");
+        let (artifact, manifest) =
+            Artifact::from_bytes_with_manifest("test_provider.wasm", bytes.clone())
+                .expect("provider artifact");
+        let host = crate::test_support::open_test_host(&cache, root.join("engine-clones"))
+            .expect("open test host");
         Arc::new(
             crate::test_support::load_mount_table_for_callout_tests(
                 &host,
-                &desired,
-                &tokio::runtime::Handle::current(),
+                vec![MountBuildInput {
+                    config: RuntimeMountConfig {
+                        name: omnifs_core::MountName::new("test").unwrap(),
+                        provider: artifact.reference(),
+                        config: serde_json::json!({}),
+                        max_fetch_blob_bytes: None,
+                    },
+                    canonical: Arc::from(b"canonical mount".as_slice()),
+                    provider: Some(ProviderBuildInput {
+                        bytes: Arc::from(bytes.into_boxed_slice()),
+                        manifest,
+                    }),
+                    state: MountBuildState::Active {
+                        auth: None,
+                        credential_generation: None,
+                    },
+                }],
             )
             .expect("load test mount"),
         )
@@ -1603,12 +1631,8 @@ mod tests {
         large.write_all(b"tail!").expect("large tail");
 
         let trees = Arc::new(TreeRefs::new());
-        let reopened_root = cloner
-            .open_cached("test", &git_id, "")
-            .expect("reopen repository root without Git");
-        let reopened_src = cloner
-            .open_cached("test", &git_id, "src")
-            .expect("reopen selected subtree without Git");
+        let reopened_root = clone_path.clone();
+        let reopened_src = clone_path.join("src");
         let root_ref = trees
             .open(git_id, "", &reopened_root)
             .expect("open root tree");
@@ -1643,7 +1667,7 @@ mod tests {
         };
         assert_eq!(info.repo, info.tree);
         let tree_ref = trees.resolve(info.tree).expect("registered tree ref");
-        let namespace = TreeNamespace::online(
+        let namespace = EngineNamespace::online(
             fixture_registry(temp.path()),
             tokio::runtime::Handle::current(),
         );

@@ -7,12 +7,10 @@ use crate::error::ExitCode;
 use crate::image::BUILD_CHANNEL;
 use crate::inventory::Inventory;
 use crate::ui::output::{Output, ResultVerdict};
-use omnifs_workspace::Workspace;
 
 pub async fn run(output: Output) -> Result<ExitCode> {
     if output.is_structured() {
-        let workspace = Workspace::resolve()?;
-        let payload = VersionJson::collect(&workspace).await?;
+        let payload = VersionJson::collect().await?;
         output.emit_result(ResultVerdict::Ok, payload)?;
         return Ok(ExitCode::Success);
     }
@@ -38,15 +36,15 @@ struct DaemonVersionJson {
 }
 
 impl VersionJson {
-    async fn collect(workspace: &Workspace) -> Result<Self> {
-        let inventory = Inventory::collect(workspace).await?;
+    async fn collect() -> Result<Self> {
+        let inventory = Inventory::collect_rpc().await?;
         let daemon = inventory
             .daemon
             .status
             .as_ref()
             .map(|status| DaemonVersionJson {
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-                pid: status.pid,
+                version: status.info.version.clone(),
+                pid: status.info.pid,
             });
         Ok(Self {
             cli: env!("CARGO_PKG_VERSION").to_string(),

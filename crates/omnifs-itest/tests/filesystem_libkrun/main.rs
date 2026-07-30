@@ -43,12 +43,11 @@
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use omnifs_itest::matrix::{self, Exec};
 use omnifs_itest::{live, provider_artifact_dir};
-use omnifs_workspace::daemon_record::DaemonRecord;
 use tempfile::TempDir;
 
 /// Scratch dir inside the libkrun guest for the matrix's copy/archive rows.
@@ -157,14 +156,15 @@ fn workspace_root() -> PathBuf {
 // ===========================================================================
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
-/// as a contributor would: `up`, named filesystem create and attach,
+/// as a contributor would: daemon start, named filesystem create and attach,
 /// `fs ls`, explicit detach, `down`. No test touches the user's real
 /// `~/.omnifs` or default ports.
 struct Fixture {
     home: TempDir,
     mount_point: PathBuf,
     guest_image: PathBuf,
-    daemon_pid: Option<u32>,
+    daemon: Option<Child>,
+    namespace_seeded: bool,
 }
 
 impl Fixture {
@@ -174,7 +174,8 @@ impl Fixture {
             home,
             mount_point,
             guest_image,
-            daemon_pid: None,
+            daemon: None,
+            namespace_seeded: false,
         }
     }
 
@@ -184,19 +185,51 @@ impl Fixture {
 
     fn libkrun_dir(&self) -> PathBuf {
         self.home_path()
-            .join("filesystems/runtime/itest-libkrun/libkrun")
+            .join("client/filesystems/runtime/itest-libkrun/libkrun")
     }
 
-    fn record_path(&self) -> PathBuf {
-        self.home_path().join("daemon.json")
+    fn control_socket(&self) -> PathBuf {
+        self.home_path().join("control.sock")
     }
 
-    fn record(&self) -> Option<DaemonRecord> {
-        DaemonRecord::read(&self.record_path()).ok().flatten()
+    fn daemon_pid(&self) -> Option<u32> {
+        self.daemon.as_ref().map(Child::id)
     }
 
-    fn daemon_pid_from_record(&self) -> Option<u32> {
-        Some(self.record()?.pid)
+    fn start_daemon(&mut self) {
+        if let Some(mut previous) = self.daemon.take() {
+            let _ = previous.wait();
+        }
+        let child = Command::new(live::omnifs_bin())
+            .args(live::daemon_args(self.home_path()))
+            .env("OMNIFS_HOME", self.home_path())
+            .env("RUST_LOG", "warn")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn omnifs daemon");
+        self.daemon = Some(child);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !live::control_ready(&self.control_socket()) {
+            assert!(
+                self.daemon
+                    .as_mut()
+                    .expect("daemon child")
+                    .try_wait()
+                    .expect("poll daemon")
+                    .is_none(),
+                "omnifs daemon exited before readiness"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "omnifs daemon never became ready"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if !self.namespace_seeded {
+            live::seed_test_namespace(&self.control_socket());
+            self.namespace_seeded = true;
+        }
     }
 
     /// The libkrun guest's own pid, read from its pidfile if present.
@@ -262,15 +295,7 @@ impl Fixture {
     /// environment gap (missing wasm, unmountable platform) was already
     /// checked by [`preconditions`] before the fixture was built.
     fn up_native(&mut self) {
-        let out = self.run(&["up"]);
-        assert!(
-            out.status.success(),
-            "omnifs up failed (exit {})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-        self.daemon_pid = self.daemon_pid_from_record();
+        self.start_daemon();
 
         let location = self.mount_point.to_str().expect("mount point utf8");
         let out = self.run(&[
@@ -323,7 +348,7 @@ impl Fixture {
         while !message.is_file() {
             assert!(
                 Instant::now() < deadline,
-                "{} never appeared within 30s after `omnifs up`",
+                "{} never appeared within 30s after daemon start",
                 message.display()
             );
             std::thread::sleep(Duration::from_millis(50));
@@ -447,8 +472,9 @@ impl Drop for Fixture {
         if let Some(pid) = self.libkrun_pid() {
             let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
         }
-        if let Some(pid) = self.daemon_pid.or_else(|| self.daemon_pid_from_record()) {
-            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+        if let Some(mut daemon) = self.daemon.take() {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
         }
         force_unmount(&self.mount_point);
     }
@@ -677,22 +703,16 @@ fn libkrun_lifecycle_and_matrix() {
 
     // Daemon replacement does not own runner lifetime. The live guest keeps
     // running, then reconnects through the restored vsock target.
-    let old_daemon_pid = fixture.daemon_pid_from_record().expect("live daemon pid");
+    let old_daemon_pid = fixture.daemon_pid().expect("live daemon pid");
     let stopped = fixture.down();
     assert!(
         stopped.status.success(),
         "omnifs down before reconnect check failed: {}",
         String::from_utf8_lossy(&stopped.stderr)
     );
-    let started = fixture.run(&["up"]);
-    assert!(
-        started.status.success(),
-        "omnifs up for reconnect check failed: {}",
-        String::from_utf8_lossy(&started.stderr)
-    );
-    fixture.daemon_pid = fixture.daemon_pid_from_record();
+    fixture.start_daemon();
     assert_ne!(
-        fixture.daemon_pid,
+        fixture.daemon_pid(),
         Some(old_daemon_pid),
         "daemon replacement must publish a new process"
     );

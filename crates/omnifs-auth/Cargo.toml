@@ -9,20 +9,23 @@ description = "Generic host-side OAuth protocol engine for omnifs."
 readme = "README.md"
 
 [dependencies]
-omnifs-workspace = { workspace = true }
+omnifs-core = { workspace = true }
 arc-swap = { workspace = true }
 async_singleflight = { workspace = true }
 http = { workspace = true }
 oauth2 = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-secrecy = "0.10"
+secrecy = { version = "0.10", features = ["serde"] }
+schemars = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 serde_urlencoded = "0.7"
 thiserror = { workspace = true }
-time = { workspace = true }
+time = { workspace = true, features = ["formatting", "serde"] }
 tokio = { workspace = true }
 url = { workspace = true }
 webbrowser = { workspace = true }
+strum = { workspace = true }
 
 [dev-dependencies]
 rcgen = "0.13"

@@ -160,7 +160,7 @@ fn wire_reattach_survives_filesystem_and_daemon_restart() {
     let home = hermetic.home.path().to_path_buf();
 
     let control_socket = home.join("control.sock");
-    let socket = home.join("filesystems/runtime/local.sock");
+    let socket = home.join("daemon-state/local.sock");
     let mount_point = home.join("mnt-reattach");
     std::fs::create_dir_all(&mount_point).expect("mount point");
     let state_dir = home.join("nfs-state");
@@ -202,6 +202,7 @@ fn wire_reattach_survives_filesystem_and_daemon_restart() {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+    live::seed_test_namespace(&control_socket);
     assert!(socket.exists(), "attach socket absent after daemon ready");
 
     guard.filesystem = Some(spawn_filesystem());

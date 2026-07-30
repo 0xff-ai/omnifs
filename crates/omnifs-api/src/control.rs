@@ -1,68 +1,29 @@
-//! Typed local control-plane wire types.
+//! Typed domain values and bounds for the local tonic/protobuf control API.
 
-use crate::DaemonStatus;
+use crate::{
+    CredentialKey, CredentialStatus, CredentialSubmission, MountDefinition, MountOpResult,
+    MountPatch,
+};
+use omnifs_core::{MountName, ProviderId};
 use serde::{Deserialize, Serialize};
-
-/// The only control protocol version understood by this build.
-pub const CONTROL_PROTOCOL_VERSION: u16 = 7;
-
-/// Maximum size of one request, reply, or inspector event line, including its
-/// trailing newline. The control plane is local and bounded, so oversized
-/// input is rejected before JSON parsing can allocate an unbounded value.
-pub const CONTROL_MAX_LINE_BYTES: usize = 1024 * 1024;
-
+/// Limit for one unary protobuf message.
+pub const CONTROL_MESSAGE_MAX_BYTES: usize = 1024 * 1024;
+/// Limit for each item on a control stream.
+pub const CONTROL_STREAM_ITEM_MAX_BYTES: usize = 1024 * 1024;
+/// Payload budget after reserving protobuf envelope overhead.
+pub const CONTROL_STREAM_PAYLOAD_MAX_BYTES: usize = CONTROL_STREAM_ITEM_MAX_BYTES - 32;
+/// Maximum number of log lines that one stream request may ask for.
+pub const CONTROL_LOG_TAIL_MAX_LINES: u32 = 10_000;
 /// Deadline for one finite request, covering connect, write, and reply body.
 pub const CONTROL_REQUEST_TIMEOUT_SECS: u64 = 5;
+/// Deadline for a mutation that may prepare and drain a serving generation.
+pub const CONTROL_MUTATION_TIMEOUT_SECS: u64 = 30;
+/// Bound for the daemon's filesystem drain during shutdown.
+pub const CONTROL_SHUTDOWN_DRAIN_SECS: u64 = 10;
+/// Deadline for shutdown, which includes the daemon's bounded filesystem drain.
+pub const CONTROL_SHUTDOWN_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ControlRequest {
-    pub version: u16,
-    #[serde(flatten)]
-    pub operation: ControlOperation,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "snake_case")]
-pub enum ControlOperation {
-    Ready,
-    Status,
-    Shutdown {
-        /// Stop attached filesystems for an explicit `omnifs down`. Daemon
-        /// replacement leaves them alive so they reconnect.
-        #[serde(default)]
-        stop_filesystems: bool,
-    },
-    ValidateOffline {
-        revision: String,
-    },
-    SubscribeInspector,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ControlReply {
-    pub version: u16,
-    #[serde(flatten)]
-    pub outcome: ControlOutcome,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "result", content = "value", rename_all = "snake_case")]
-pub enum ControlOutcome {
-    Ready,
-    Status(DaemonStatus),
-    Shutdown {
-        detached: usize,
-        still_attached: Vec<String>,
-    },
-    OfflineValidated,
-    InspectorReady {
-        instance_id: String,
-    },
-    Error(ControlError),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ControlError {
     pub code: ControlErrorCode,
     pub message: String,
@@ -79,97 +40,106 @@ impl ControlError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ControlErrorCode {
-    UnsupportedVersion,
-    MalformedJson,
-    UnknownOperation,
-    LineTooLarge,
+    Busy,
     NotReady,
+    RecoveryRequired,
     InvalidRequest,
-    OfflineValidationFailed,
+    /// Another mutation batch already holds the daemon's single lease.
+    /// The message carries the holder's id and lease deadline for now,
+    /// since the wire error envelope carries no structured detail channel.
+    MutationInProgress,
+    /// The caller's lease deadline passed before `ApplyMutation` reached the
+    /// daemon.
+    LeaseExpired,
+    /// `ApplyMutation` or `DropMutation` named a mutation id that is not the
+    /// current lease holder.
+    LeaseNotHeld,
+    NotFound,
+    AlreadyExists,
+    Conflict,
     Internal,
 }
 
-impl ControlReply {
-    #[must_use]
-    pub fn ready() -> Self {
-        Self {
-            version: CONTROL_PROTOCOL_VERSION,
-            outcome: ControlOutcome::Ready,
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderImportDisposition {
+    Inserted,
+    Unchanged,
+    Repaired,
+}
 
-    #[must_use]
-    pub fn inspector_ready(instance_id: impl Into<String>) -> Self {
-        Self {
-            version: CONTROL_PROTOCOL_VERSION,
-            outcome: ControlOutcome::InspectorReady {
-                instance_id: instance_id.into(),
-            },
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderImportReceipt {
+    pub provider: ProviderReference,
+    pub disposition: ProviderImportDisposition,
+}
 
-    #[must_use]
-    pub fn error(error: ControlError) -> Self {
-        Self {
-            version: CONTROL_PROTOCOL_VERSION,
-            outcome: ControlOutcome::Error(error),
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderReference {
+    pub id: ProviderId,
+    pub name: String,
+    pub version: Option<String>,
+}
+
+/// One typed op inside an `ApplyMutation` batch. `CredentialSubmission`
+/// carries secret material, so this enum gets a hand-redacted `Debug` and
+/// no `PartialEq`/`Eq` derive (mirrors `CredentialSubmission` itself).
+#[derive(Serialize, Deserialize)]
+pub enum MutationOp {
+    CreateMount(MountDefinition),
+    UpdateMount { name: MountName, patch: MountPatch },
+    RemoveMount { name: MountName },
+    SubmitCredential(CredentialSubmission),
+    DeleteCredential(CredentialKey),
+    RevokeCredential(CredentialKey),
+}
+
+impl std::fmt::Debug for MutationOp {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CreateMount(definition) => formatter
+                .debug_tuple("CreateMount")
+                .field(definition)
+                .finish(),
+            Self::UpdateMount { name, patch } => formatter
+                .debug_struct("UpdateMount")
+                .field("name", name)
+                .field("patch", patch)
+                .finish(),
+            Self::RemoveMount { name } => formatter
+                .debug_struct("RemoveMount")
+                .field("name", name)
+                .finish(),
+            Self::SubmitCredential(submission) => formatter
+                .debug_tuple("SubmitCredential")
+                .field(submission)
+                .finish(),
+            Self::DeleteCredential(key) => formatter
+                .debug_tuple("DeleteCredential")
+                .field(key)
+                .finish(),
+            Self::RevokeCredential(key) => formatter
+                .debug_tuple("RevokeCredential")
+                .field(key)
+                .finish(),
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Result of one op inside an applied mutation batch, in request order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MutationOpResult {
+    Mount(MountOpResult),
+    Credential(CredentialStatus),
+}
 
-    #[test]
-    fn request_and_reply_shapes_are_operation_specific() {
-        let request = ControlRequest {
-            version: CONTROL_PROTOCOL_VERSION,
-            operation: ControlOperation::Shutdown {
-                stop_filesystems: true,
-            },
-        };
-        assert_eq!(
-            serde_json::to_string(&request).unwrap(),
-            r#"{"version":7,"operation":"shutdown","stop_filesystems":true}"#
-        );
-
-        let validate = ControlRequest {
-            version: CONTROL_PROTOCOL_VERSION,
-            operation: ControlOperation::ValidateOffline {
-                revision: "a".repeat(40),
-            },
-        };
-        assert_eq!(
-            serde_json::to_string(&validate).unwrap(),
-            format!(
-                r#"{{"version":7,"operation":"validate_offline","revision":"{}"}}"#,
-                "a".repeat(40)
-            )
-        );
-
-        let reply = ControlReply::error(ControlError::new(
-            ControlErrorCode::NotReady,
-            "namespace listeners are not serving yet",
-        ));
-        assert_eq!(
-            serde_json::to_string(&reply).unwrap(),
-            r#"{"version":7,"result":"error","value":{"code":"not_ready","message":"namespace listeners are not serving yet"}}"#
-        );
-
-        assert_eq!(
-            serde_json::to_string(&ControlReply::inspector_ready("epoch-1")).unwrap(),
-            r#"{"version":7,"result":"inspector_ready","value":{"instance_id":"epoch-1"}}"#
-        );
-
-        assert!(
-            serde_json::from_value::<ControlRequest>(serde_json::json!({
-                "version": CONTROL_PROTOCOL_VERSION,
-                "operation": "shutdown"
-            }))
-            .is_ok()
-        );
-    }
+/// Whether the daemon's serving generation reflects the just-applied batch.
+/// Modeled on the recovery vocabulary in `DaemonRecovery`/`HealthReport`:
+/// a plain flag plus an optional human detail, since nothing richer than
+/// that exists yet for reporting serving state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServingOutcome {
+    pub serving: bool,
+    pub recovery_detail: Option<String>,
 }

@@ -1,8 +1,0 @@
----
-source: crates/omnifs-cli/tests/cli_transcripts.rs
-expression: "fixture.transcript(&fixture.run(&[\"--output\", \"json\", \"fs\", \"attach\"]))"
----
-exit: 2
-stdout:
-{"schema_version":1,"command":"fs.attach","verdict":"failed","error":{"id":"usage","exit_code":2,"message":"error: the following required arguments were not provided:\n  --name <NAME>\n\nUsage: omnifs fs attach --name <NAME>\n\nFor more information, try '--help'.\n"}}
-stderr:

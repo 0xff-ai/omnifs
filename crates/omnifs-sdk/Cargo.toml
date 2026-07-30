@@ -22,9 +22,10 @@ url = { workspace = true }
 
 # Provider metadata is constructed and serialized host-side by the build-time
 # harvester; the wasm guest never touches it. The metadata types live in
-# omnifs-workspace and are re-exported here for non-wasm targets only.
+# omnifs-provider and omnifs-auth and are re-exported here for non-wasm targets only.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-omnifs-workspace = { workspace = true }
+omnifs-auth = { workspace = true }
+omnifs-provider = { workspace = true }
 
 [dev-dependencies]
 trybuild = { workspace = true }

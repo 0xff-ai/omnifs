@@ -1,21 +1,22 @@
 //! `omnifs mount add` — interactive creation of a new mount.
 //!
 //! Walks the user through naming a mount, discovers provider defaults from
-//! the built-in catalog or provider wasm metadata, writes the resulting mount config to
-//! the resolved omnifs config file, and runs the provider's default auth flow
-//! when one is declared.
+//! the embedded bundle or daemon metadata, submits credentials locally, and
+//! asks the daemon to create the mount.
 
-use anyhow::Context;
+use crate::auth::Auth;
+use anyhow::Context as _;
 use clap::Args;
-use omnifs_workspace::authn::{AccountId, CredentialId};
-use omnifs_workspace::creds::{CredentialEntry, CredentialStore};
-use omnifs_workspace::mounts::Auth;
-use omnifs_workspace::provider::ProviderManifest;
+use omnifs_api::{
+    CredentialClientOverrides, CredentialMaterial, CredentialSubmission, SecretBytes,
+};
+use omnifs_core::ProviderId;
+use omnifs_provider::ProviderManifest;
 use secrecy::{ExposeSecret, SecretString};
-use time::OffsetDateTime;
+use serde_json::Value;
 
+use super::spec_creation::validate_config;
 use super::token_validation::validate_static_token;
-use omnifs_workspace::Workspace;
 
 #[derive(Args, Debug, Clone)]
 #[command(after_help = "Examples:\n  omnifs mount add\n  omnifs mount add github --name work")]
@@ -61,59 +62,80 @@ impl AddArgs {
         self,
         output: crate::ui::output::Output,
     ) -> anyhow::Result<crate::error::ExitCode> {
-        let workspace = Workspace::resolve()?;
-        self.run_in_workspace(&workspace, output).await
-    }
-
-    pub(crate) async fn run_in_workspace(
-        self,
-        workspace: &Workspace,
-        output: crate::ui::output::Output,
-    ) -> anyhow::Result<crate::error::ExitCode> {
-        let prompt = crate::stages::PromptMode::from_flags(
-            output.yes(),
-            output.no_input() || output.is_structured(),
-        );
-        let outcome = crate::stages::configure_mount(
-            self,
-            workspace,
-            &output,
-            prompt,
-            crate::stages::ReceiptStyle::Full,
-        )
-        .await?;
+        let prompt = output.prompt_mode();
+        let outcome =
+            super::configure_mount(self, &output, prompt, super::ReceiptStyle::Full).await?;
         match outcome.status {
-            crate::stages::MountInitStatus::Ready => {
-                // `mount add` only ever commits a new desired revision; a
-                // daemon (if one happens to be running) still serves whatever
-                // revision it applied at its own last start, so the mount
-                // just added is never already serving. The `omnifs up` hint
-                // is the only honest closing line here, exactly once,
-                // regardless of daemon liveness.
+            super::MountInitStatus::Ready => {
+                output.outro(format!("Mounted `{0}` at /{0}.", outcome.mount_name));
+            },
+            super::MountInitStatus::SignInDeclined => {
                 output.outro(format!(
-                    "Mounted `{0}` at /{0}. Serve it: `omnifs up`",
+                    "No mount created for `{}`; sign-in was declined.",
                     outcome.mount_name
                 ));
             },
-            crate::stages::MountInitStatus::SignInDeclined => {
-                output.outro(format!(
-                    "Saved `{}`. Run `omnifs mount reauth {}` to sign in later.",
-                    outcome.mount_name, outcome.mount_name
-                ));
-            },
         }
+        let verdict = outcome.status.verdict();
         if output.is_structured() {
             output.emit_result(
-                crate::ui::output::ResultVerdict::Ok,
+                verdict,
                 &crate::commands::receipt::MountAddReceipt {
-                    verdict: crate::commands::receipt::Verdict::Ok,
+                    verdict,
                     mount: outcome.mount_name,
                     status: outcome.status,
-                    revision: outcome.revision.to_string(),
+                    revision: outcome
+                        .revision
+                        .map_or_else(String::new, |revision| revision.get().to_string()),
                 },
             )?;
         }
-        Ok(crate::error::ExitCode::Success)
+        Ok(match verdict {
+            crate::ui::output::ResultVerdict::Ok => crate::error::ExitCode::Success,
+            crate::ui::output::ResultVerdict::Degraded => crate::error::ExitCode::Degraded,
+        })
+    }
+
+    /// This invocation's chosen auth, before any ambient-credential import
+    /// promotes it: `--no-auth` wins outright, an explicit token/token-env
+    /// pair selects the static-token scheme, an explicit `--scheme` resolves
+    /// against the manifest, and otherwise the provider's own default applies.
+    pub(crate) fn selected_auth(
+        &self,
+        manifest: &ProviderManifest,
+        auth_manifest: Option<&omnifs_auth::AuthManifest>,
+    ) -> anyhow::Result<Option<Auth>> {
+        if self.no_auth {
+            return Ok(None);
+        }
+        if self.token.is_some() || self.token_env.is_some() {
+            return Auth::static_token(auth_manifest, self.scheme.as_deref(), None).map(Some);
+        }
+        if let Some(scheme) = self.scheme.as_deref() {
+            return Auth::from_scheme(auth_manifest, scheme, None).map(Some);
+        }
+        Ok(Auth::from_provider_default(manifest))
+    }
+
+    /// Apply `--config-json`'s override onto an already-generated default
+    /// config, validating it against the manifest first.
+    pub(crate) fn apply_mount_overrides(
+        &self,
+        manifest: &ProviderManifest,
+        config: &mut Vec<u8>,
+    ) -> anyhow::Result<()> {
+        if let Some(raw) = self.config_json.as_deref() {
+            let parsed: Value = super::create::parse_json_flag("--config-json", raw)?;
+            if manifest.config.is_none() {
+                anyhow::bail!(
+                    "--config-json was passed, but provider `{}` takes no config",
+                    manifest.id
+                );
+            }
+            validate_config(manifest, &parsed)?;
+            *config = serde_json::to_vec(&parsed).context("encode provider config override")?;
+        }
+        Ok(())
     }
 }
 
@@ -144,15 +166,14 @@ pub(crate) fn render_consent_block(
 }
 
 pub(crate) async fn run_static_token_init(
+    provider: ProviderId,
     manifest: &ProviderManifest,
     auth: &Auth,
     token: SecretString,
-    store: &dyn CredentialStore,
     validate: bool,
     output: &crate::ui::output::Output,
-    key_width: usize,
-) -> anyhow::Result<CredentialId> {
-    let static_token_scheme = crate::auth::static_token_scheme(auth, manifest)?;
+) -> anyhow::Result<CredentialSubmission> {
+    let static_token_scheme = auth.static_token_scheme(manifest)?;
 
     let header_name = static_token_scheme
         .header_name
@@ -171,63 +192,41 @@ pub(crate) async fn run_static_token_init(
         },
         None => None,
     };
-    let identity = validation
-        .as_ref()
-        .and_then(|outcome| outcome.identity.clone());
-    output.ledger_row(
-        &crate::ui::render::LedgerRow::new(
-            crate::ui::style::Glyph::Done,
-            "signed in",
-            identity
-                .clone()
-                .unwrap_or_else(|| "token accepted".to_string()),
-        ),
-        key_width,
-    );
     if let Some(outcome) = &validation
         && let Some(workspace) = &outcome.workspace
     {
         output.narrate(workspace);
     }
 
-    let now = OffsetDateTime::now_utc();
-    let mut entry = CredentialEntry::static_token(token, now);
-    entry.set_last_validated(validation.as_ref().map(|_| now));
-    entry.set_upstream_identity(validation.as_ref().and_then(|o| o.identity.clone()));
-    entry.set_extras(
-        validation
-            .as_ref()
-            .map(|o| o.extras.clone())
-            .unwrap_or_default(),
-    );
     let auth_manifest = manifest
         .auth
         .as_ref()
-        .map(omnifs_workspace::provider::ProviderAuthManifest::wasm_auth_manifest);
+        .map(omnifs_provider::ProviderAuthManifest::wasm_auth_manifest);
     let scheme_key = crate::auth::AuthManifestView::new(auth_manifest.as_ref())
         .static_token_scheme_key(auth.scheme(), None)?;
-    let account = auth
-        .account()
-        .map_or_else(|| AccountId::default_account().to_string(), str::to_owned);
-    let credential_id = CredentialId::new(&manifest.id, &scheme_key, account)?;
-    store
-        .put(&credential_id, &entry)
-        .with_context(|| "failed to store credential")?;
-    output.ledger_row(
-        &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "credential", "stored"),
-        key_width,
-    );
-    Ok(credential_id)
+    let account = auth.account().unwrap_or("default").to_owned();
+    Ok(CredentialSubmission {
+        provider,
+        scheme: scheme_key,
+        account_label: account,
+        material: CredentialMaterial::StaticToken {
+            token: SecretBytes::new(token.expose_secret().as_bytes().to_vec()),
+        },
+        overrides: CredentialClientOverrides {
+            client_id: None,
+            client_secret: None,
+            redirect_uri: None,
+            scopes: None,
+        },
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::AddArgs;
     use crate::commands::mount::AuthImportDecision;
     use crate::commands::mount::spec_creation::{create_config, validate_config};
-    use omnifs_workspace::Workspace;
-    use omnifs_workspace::authn::{AuthManifest, AuthScheme};
-    use omnifs_workspace::provider::{
+    use omnifs_auth::{AuthManifest, AuthScheme};
+    use omnifs_provider::{
         AccessNeed, ConfigField, ConfigMetadata, ConfigType, HostResourceBinding,
         LimitDeclarations, PreopenMode, ProviderManifest, ResourceLimit,
     };
@@ -283,7 +282,7 @@ mod tests {
 
     #[test]
     fn provider_default_auth_uses_the_declared_scheme() {
-        let selection = crate::auth::auth_from_provider_default(&provider_manifest()).unwrap();
+        let selection = crate::auth::Auth::from_provider_default(&provider_manifest()).unwrap();
         assert!(selection.is_oauth());
         assert_eq!(selection.scheme(), Some("oauth"));
         assert_eq!(selection.account(), None);
@@ -309,45 +308,6 @@ mod tests {
     }
 
     #[test]
-    fn add_dns_writes_snapshot_spec() {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace = Workspace::under_root(dir.path());
-        let args = AddArgs {
-            provider: Some("dns".to_string()),
-            name: None,
-            no_browser: true,
-            token: None,
-            token_env: None,
-            no_validate: false,
-            scopes: Vec::new(),
-            scheme: None,
-            no_auth: false,
-            config_json: None,
-            limits_json: None,
-        };
-
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(args.run_in_workspace(
-                &workspace,
-                crate::ui::output::Output::new(crate::ui::output::OutputMode::Human, false),
-            ))
-            .unwrap();
-
-        let spec = std::fs::read_to_string(dir.path().join("mounts/dns.json")).unwrap();
-        // The provider content id hashes the built wasm, which differs across
-        // build environments; normalize it before the byte comparison.
-        let parsed: serde_json::Value = serde_json::from_str(&spec).unwrap();
-        let id = parsed["provider"]["id"].as_str().unwrap();
-        assert_eq!(id.len(), 64, "content id must be 64 hex chars: {id}");
-        assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
-        let normalized = spec.replace(id, "<PROVIDER_ID>");
-        assert_eq!(normalized, include_str!("snapshots/init_dns_spec.json"));
-    }
-
-    #[test]
     #[allow(unsafe_code)] // env::set_var/remove_var require unsafe; guarded by lock_env().
     fn import_outcome_promotes_oauth_default_to_static_when_token_imported() {
         // Simulate an OAuth-default mount (linear) where the user has
@@ -361,7 +321,7 @@ mod tests {
         }
         let auth_manifest = AuthManifest {
             schemes: vec![
-                AuthScheme::StaticToken(omnifs_workspace::authn::StaticTokenScheme {
+                AuthScheme::StaticToken(omnifs_auth::StaticTokenScheme {
                     key: "pat".to_string(),
                     header_name: Some("Authorization".to_string()),
                     value_prefix: String::new(),
@@ -369,14 +329,14 @@ mod tests {
                     inject_domains: vec![],
                     creation_url: None,
                     validation: None,
-                    ambient_sources: vec![omnifs_workspace::authn::AmbientSource {
-                        kind: omnifs_workspace::authn::AmbientKind::EnvVar {
+                    ambient_sources: vec![omnifs_auth::AmbientSource {
+                        kind: omnifs_auth::AmbientKind::EnvVar {
                             name: "LINEAR_API_KEY".into(),
                         },
                         note: String::new(),
                     }],
                 }),
-                AuthScheme::Oauth(omnifs_workspace::authn::OauthScheme {
+                AuthScheme::Oauth(omnifs_auth::OauthScheme {
                     key: "oauth".to_string(),
                     display_name: "Linear OAuth".to_string(),
                     authorization_endpoint: "https://example.com/authorize".to_string(),
@@ -384,12 +344,10 @@ mod tests {
                     revocation_endpoint: None,
                     default_client_id: None,
                     default_scopes: vec![],
-                    flow: omnifs_workspace::authn::OAuthFlow::PkceLoopback(
-                        omnifs_workspace::authn::PkceLoopbackConfig {
-                            redirect_uri_template: "http://127.0.0.1:{port}/cb".to_string(),
-                        },
-                    ),
-                    token_endpoint_auth: omnifs_workspace::authn::TokenEndpointAuthMethod::None,
+                    flow: omnifs_auth::OAuthFlow::PkceLoopback(omnifs_auth::PkceLoopbackConfig {
+                        redirect_uri_template: "http://127.0.0.1:{port}/cb".to_string(),
+                    }),
+                    token_endpoint_auth: omnifs_auth::TokenEndpointAuthMethod::None,
                     refresh_token_rotates: false,
                     extra_authorize_params: vec![],
                     extra_token_params: vec![],
@@ -399,11 +357,10 @@ mod tests {
                 }),
             ],
         };
-        let oauth_default =
-            omnifs_workspace::mounts::Auth::OAuth(omnifs_workspace::mounts::OAuth {
-                scheme: Some("oauth".to_string()),
-                ..Default::default()
-            });
+        let oauth_default = crate::auth::Auth::OAuth(crate::auth::OAuth {
+            scheme: Some("oauth".to_string()),
+            ..Default::default()
+        });
 
         let outcome = AuthImportDecision::new(
             Some(oauth_default),
@@ -419,10 +376,7 @@ mod tests {
         .unwrap();
 
         let promoted = outcome.auth.expect("auth");
-        assert_eq!(
-            promoted.kind(),
-            omnifs_workspace::authn::AuthKind::StaticToken
-        );
+        assert!(matches!(&promoted, crate::auth::Auth::StaticToken(_)));
         assert_eq!(promoted.scheme(), Some("pat"));
         assert!(outcome.token.is_some(), "imported token should be set");
 
@@ -443,29 +397,26 @@ mod tests {
             std::env::set_var("LINEAR_API_KEY", "lin_api_xxx");
         }
         let auth_manifest = AuthManifest {
-            schemes: vec![AuthScheme::StaticToken(
-                omnifs_workspace::authn::StaticTokenScheme {
-                    key: "pat".to_string(),
-                    header_name: Some("Authorization".to_string()),
-                    value_prefix: String::new(),
-                    description: "Linear API key".to_string(),
-                    inject_domains: vec![],
-                    creation_url: None,
-                    validation: None,
-                    ambient_sources: vec![omnifs_workspace::authn::AmbientSource {
-                        kind: omnifs_workspace::authn::AmbientKind::EnvVar {
-                            name: "LINEAR_API_KEY".into(),
-                        },
-                        note: String::new(),
-                    }],
-                },
-            )],
+            schemes: vec![AuthScheme::StaticToken(omnifs_auth::StaticTokenScheme {
+                key: "pat".to_string(),
+                header_name: Some("Authorization".to_string()),
+                value_prefix: String::new(),
+                description: "Linear API key".to_string(),
+                inject_domains: vec![],
+                creation_url: None,
+                validation: None,
+                ambient_sources: vec![omnifs_auth::AmbientSource {
+                    kind: omnifs_auth::AmbientKind::EnvVar {
+                        name: "LINEAR_API_KEY".into(),
+                    },
+                    note: String::new(),
+                }],
+            })],
         };
-        let static_default =
-            omnifs_workspace::mounts::Auth::StaticToken(omnifs_workspace::mounts::StaticToken {
-                scheme: Some("pat".to_string()),
-                account: None,
-            });
+        let static_default = crate::auth::Auth::StaticToken(crate::auth::StaticToken {
+            scheme: Some("pat".to_string()),
+            account: None,
+        });
 
         let outcome = AuthImportDecision::new(
             Some(static_default),
@@ -542,11 +493,11 @@ mod tests {
     }
 
     fn provider_manifest() -> ProviderManifest {
-        use omnifs_workspace::authn::{
+        use omnifs_auth::{
             AuthScheme, OAuthFlow, OauthScheme, PkceLoopbackConfig, StaticTokenScheme,
             TokenEndpointAuthMethod,
         };
-        use omnifs_workspace::provider::ProviderAuthManifest;
+        use omnifs_provider::ProviderAuthManifest;
         use std::collections::BTreeMap;
 
         let domains = vec!["api.linear.app".to_string()];

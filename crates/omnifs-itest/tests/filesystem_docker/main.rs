@@ -21,12 +21,12 @@
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use omnifs_api::DaemonInfo;
 use omnifs_itest::matrix::{self, Exec};
 use omnifs_itest::{live, provider_artifact_dir};
-use omnifs_workspace::daemon_record::DaemonRecord;
 use tempfile::TempDir;
 
 /// Scratch dir inside the filesystem container for the matrix's copy/archive
@@ -126,13 +126,14 @@ fn docker_output(args: &[&str]) -> Option<String> {
 // ===========================================================================
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
-/// as a contributor would: `up`, `fs create/attach/detach/ls`, `down`. No test
+/// as a contributor would: daemon start, `fs create/attach/detach/ls`, `down`. No test
 /// touches the user's real `~/.omnifs` or default ports.
 struct Fixture {
     home: TempDir,
     mount_point: PathBuf,
     filesystem_image: String,
-    daemon_pid: Option<u32>,
+    daemon: Option<Child>,
+    namespace_seeded: bool,
 }
 
 impl Fixture {
@@ -142,7 +143,8 @@ impl Fixture {
             home,
             mount_point,
             filesystem_image,
-            daemon_pid: None,
+            daemon: None,
+            namespace_seeded: false,
         }
     }
 
@@ -150,28 +152,59 @@ impl Fixture {
         self.home.path()
     }
 
-    fn record_path(&self) -> PathBuf {
-        self.home_path().join("daemon.json")
+    fn control_socket(&self) -> PathBuf {
+        self.home_path().join("control.sock")
     }
 
-    fn record(&self) -> Option<DaemonRecord> {
-        DaemonRecord::read(&self.record_path()).ok().flatten()
+    fn daemon_info(&self) -> DaemonInfo {
+        live::control_daemon_info(&self.control_socket())
     }
 
-    fn daemon_pid_from_record(&self) -> Option<u32> {
-        Some(self.record()?.pid)
+    fn daemon_pid(&self) -> Option<u32> {
+        self.daemon.as_ref().map(Child::id)
     }
 
     fn start_daemon(&mut self) {
-        let out = self.run(&["up"]);
-        assert!(
-            out.status.success(),
-            "omnifs up failed (exit {})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-        self.daemon_pid = self.daemon_pid_from_record();
+        if let Some(mut previous) = self.daemon.take() {
+            let _ = previous.wait();
+        }
+        let child = Command::new(live::omnifs_bin())
+            .args(live::daemon_args(self.home_path()))
+            .env("OMNIFS_HOME", self.home_path())
+            .env("RUST_LOG", "warn")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn omnifs daemon");
+        self.daemon = Some(child);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !live::control_ready(&self.control_socket()) {
+            assert!(
+                self.daemon
+                    .as_mut()
+                    .expect("daemon child")
+                    .try_wait()
+                    .expect("poll daemon")
+                    .is_none(),
+                "omnifs daemon exited before readiness"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "omnifs daemon never became ready"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if !self.namespace_seeded {
+            live::seed_test_namespace(&self.control_socket());
+            self.namespace_seeded = true;
+        }
+    }
+
+    fn kill_daemon(&mut self) {
+        if let Some(mut child) = self.daemon.take() {
+            child.kill().expect("kill omnifs daemon");
+            child.wait().expect("reap omnifs daemon");
+        }
     }
 
     /// Run a CLI subcommand with the hermetic env, including the filesystem
@@ -249,7 +282,7 @@ impl Fixture {
         while !message.is_file() {
             assert!(
                 Instant::now() < deadline,
-                "{} never appeared within 30s after `omnifs up`",
+                "{} never appeared within 30s after daemon start",
                 message.display()
             );
             std::thread::sleep(Duration::from_millis(50));
@@ -362,8 +395,9 @@ impl Drop for Fixture {
         for name in self.containers() {
             let _ = Command::new("docker").args(["rm", "-f", &name]).output();
         }
-        if let Some(pid) = self.daemon_pid.or_else(|| self.daemon_pid_from_record()) {
-            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+        if let Some(mut daemon) = self.daemon.take() {
+            let _ = daemon.kill();
+            let _ = daemon.wait();
         }
         force_unmount(&self.mount_point);
     }
@@ -855,16 +889,9 @@ fn kill_and_reattach_fuse_semantics() {
     assert_serves(&container);
 
     // Failure mode 2: SIGKILL the daemon, container untouched.
-    let old_pid = fixture
-        .daemon_pid
-        .expect("daemon pid recorded by up_native");
-    let old_instance = fixture
-        .record()
-        .expect("daemon record present while serving")
-        .instance_id;
-    let _ = Command::new("kill")
-        .args(["-9", &old_pid.to_string()])
-        .output();
+    let old_pid = fixture.daemon_pid().expect("live daemon pid");
+    let old_instance = fixture.daemon_info().instance_id;
+    fixture.kill_daemon();
     wait_for_pid_gone(old_pid, Duration::from_secs(10));
 
     // The container process survives: no crash just because the daemon it
@@ -881,7 +908,7 @@ fn kill_and_reattach_fuse_semantics() {
     // native mount a zombie: a dead-server NFS/FUSE mount at the same path
     // that blocks a fresh daemon from mounting there again. This is a
     // pre-existing rough edge independent of the Docker filesystem (observed
-    // manually against a plain `omnifs up` after a bare kill); the product's
+    // after a bare daemon kill); the product's
     // supported recovery is to detach the stale filesystem before stopping the
     // daemon, but calling it here would also tear down the very container this
     // test is keeping alive on purpose. So this test sweeps the host mount by
@@ -890,16 +917,13 @@ fn kill_and_reattach_fuse_semantics() {
     // stable for the surviving container.
     force_unmount(&fixture.mount_point);
     fixture.start_daemon();
-    let new_instance = fixture
-        .record()
-        .expect("daemon record present after restart")
-        .instance_id;
+    let new_instance = fixture.daemon_info().instance_id;
     assert_ne!(
         old_instance, new_instance,
         "a restarted daemon must mint a new instance id"
     );
 
-    // `up` publishes daemon readiness before surviving filesystems finish their
+    // Daemon readiness precedes surviving filesystems finishing their
     // independent reconnect backoff. The runner reattaches without another
     // lifecycle command or replacement.
     fixture.wait_for_filesystem_attachment("itest-docker", Duration::from_secs(15));

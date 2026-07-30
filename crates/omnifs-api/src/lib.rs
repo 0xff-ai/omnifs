@@ -1,14 +1,31 @@
 //! Shared control-plane domain and wire types for the `omnifs` CLI and daemon.
 
+use omnifs_core::{MountRevision, MutationId};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 mod control;
+mod credential;
+mod mount;
+
+/// Protobuf wire types and strict conversions for the local control API.
+pub mod grpc;
 
 pub use control::{
-    CONTROL_MAX_LINE_BYTES, CONTROL_PROTOCOL_VERSION, CONTROL_REQUEST_TIMEOUT_SECS, ControlError,
-    ControlErrorCode, ControlOperation, ControlOutcome, ControlReply, ControlRequest,
+    CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MESSAGE_MAX_BYTES, CONTROL_MUTATION_TIMEOUT_SECS,
+    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_SHUTDOWN_DRAIN_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS,
+    CONTROL_STREAM_ITEM_MAX_BYTES, CONTROL_STREAM_PAYLOAD_MAX_BYTES, ControlError,
+    ControlErrorCode, MutationOp, MutationOpResult, ProviderImportDisposition,
+    ProviderImportReceipt, ProviderReference, ServingOutcome,
+};
+pub use credential::{
+    CredentialClientOverrides, CredentialKey, CredentialKind, CredentialMaterial, CredentialStatus,
+    CredentialStatusKind, CredentialSubmission, SecretBytes,
+};
+pub use mount::{
+    MountCredential, MountDefinition, MountField, MountHealth, MountLimits, MountOpResult,
+    MountPatch, MountRecord,
 };
 
 /// JSONL activity-event schema and redaction for the inspector observability
@@ -32,6 +49,119 @@ pub const OMNIFS_ATTACH_ADDR_ENV: &str = "OMNIFS_ATTACH_ADDR";
 /// guest can dial vsock.
 pub const OMNIFS_READY_VSOCK_PORT_ENV: &str = "OMNIFS_READY_VSOCK_PORT";
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderMetadata {
+    pub reference: ProviderReference,
+    /// Validated provider manifest document in its native JSON wire format.
+    pub manifest: Vec<u8>,
+}
+
+/// The daemon's process and namespace attach endpoints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonInfo {
+    pub version: String,
+    pub pid: u32,
+    pub instance_id: String,
+    pub executable: PathBuf,
+    pub attach_unix: Option<PathBuf>,
+    pub attach_tcp: Option<SocketAddr>,
+}
+
+/// Opaque identity of one daemon recovery offer.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RecoveryId([u8; 16]);
+
+impl RecoveryId {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for RecoveryId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RecoveryId([REDACTED])")
+    }
+}
+
+/// One explicit repair the recovering daemon can perform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairAction {
+    RecreateControlStore,
+}
+
+/// Repairs currently offered for one exact recovery state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryOffer {
+    pub id: RecoveryId,
+    pub actions: Vec<RepairAction>,
+}
+
+/// Non-path result of recreating the control store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairDisposition {
+    FreshStoreCreated,
+    CorruptStoreArchived,
+}
+
+/// Receipt for one daemon-owned state repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepairReceipt {
+    pub instance_id: String,
+    pub recovery_id: RecoveryId,
+    pub action: RepairAction,
+    pub disposition: RepairDisposition,
+}
+
+/// Durable and serving state exposed while the daemon recovers its store or
+/// namespace. The revisions are independent because activation may fail after
+/// the durable mount transaction commits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonRecovery {
+    pub phase: DaemonPhase,
+    pub durable_revision: Option<MountRevision>,
+    pub serving_revision: Option<MountRevision>,
+    pub failed_mutation: Option<MutationId>,
+    pub store_health: HealthReport,
+    pub repair: Option<RecoveryOffer>,
+}
+
+/// Daemon-owned application facts returned without reading daemon state files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonInventory {
+    pub info: DaemonInfo,
+    pub phase: DaemonPhase,
+    pub durable_revision: Option<MountRevision>,
+    pub serving_revision: Option<MountRevision>,
+    pub health: DaemonHealth,
+    pub mounts: Vec<MountRecord>,
+    pub credentials: Vec<CredentialStatus>,
+    pub attachments: Vec<omnifs_core::fs::Spec>,
+}
+
+/// Current daemon lifecycle phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonPhase {
+    Starting,
+    Ready,
+    RecoveryRequired,
+}
+
 /// The daemon's runtime facts, loaded mounts, and non-secret operational health.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,19 +173,17 @@ pub struct DaemonStatus {
     /// restart mid-command is detected instead of silently trusted.
     pub instance_id: String,
     pub executable: PathBuf,
-    pub config_dir: PathBuf,
-    pub cache_dir: PathBuf,
     /// TCP namespace endpoint this daemon bound for guest filesystems.
     pub attach_tcp: Option<SocketAddr>,
     /// Every filesystem currently attached to the shared namespace.
     pub filesystems: Vec<omnifs_core::fs::Spec>,
     /// Provider mounts loaded in the registry.
     pub mounts: Vec<MountInfo>,
-    /// True when this daemon serves validated durable projections only.
-    pub offline: bool,
     /// Daemon-owned health for runtime subsystems. CLI status renders these
     /// entries instead of reconstructing daemon health from raw fields.
     pub health: Box<DaemonHealth>,
+    /// The daemon's single mutation lease, when one is currently held.
+    pub active_mutation: Option<ActiveMutation>,
 }
 
 impl DaemonStatus {
@@ -63,6 +191,14 @@ impl DaemonStatus {
     pub fn ready(&self) -> bool {
         self.health.filesystems.state == HealthState::Healthy
     }
+}
+
+/// The daemon's single mutation lease: who holds it and when it expires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveMutation {
+    pub mutation_id: MutationId,
+    pub lease_deadline_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,7 +310,13 @@ impl CredentialHealth {
 
 #[cfg(test)]
 mod tests {
-    use super::CredentialHealth;
+    use super::{
+        CredentialHealth, DaemonInfo, DaemonPhase, DaemonRecovery, HealthReport, HealthState,
+        RecoveryId, RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt,
+    };
+    use omnifs_core::{MountRevision, MutationId};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::path::PathBuf;
 
     #[test]
     fn steady_state_healths_do_not_need_attention() {
@@ -185,5 +327,95 @@ mod tests {
         assert!(CredentialHealth::RefreshFailed.needs_attention());
         assert!(CredentialHealth::NeedsConsent.needs_attention());
         assert!(CredentialHealth::Missing.needs_attention());
+    }
+
+    #[test]
+    fn daemon_info_and_recovery_round_trip_without_private_paths() {
+        let info = DaemonInfo {
+            version: "0.1.0".to_owned(),
+            pid: 42,
+            instance_id: "0123456789abcdef".to_owned(),
+            executable: PathBuf::from("/usr/local/bin/omnifs"),
+            attach_unix: Some(PathBuf::from("/tmp/omnifs-local.sock")),
+            attach_tcp: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000)),
+        };
+        let info_json = serde_json::to_value(&info).unwrap();
+        assert!(info_json.get("config_dir").is_none());
+        assert!(info_json.get("cache_dir").is_none());
+        assert!(info_json.get("store").is_none());
+
+        let recovery = DaemonRecovery {
+            phase: DaemonPhase::RecoveryRequired,
+            durable_revision: Some(MountRevision::new(7)),
+            serving_revision: None,
+            failed_mutation: Some(MutationId::from_bytes([0x11; 16])),
+            store_health: HealthReport::new(HealthState::Degraded, "store unavailable"),
+            repair: Some(RecoveryOffer {
+                id: RecoveryId::from_bytes([0x22; 16]),
+                actions: vec![RepairAction::RecreateControlStore],
+            }),
+        };
+        let encoded = serde_json::to_vec(&recovery).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<DaemonRecovery>(&encoded).unwrap(),
+            recovery
+        );
+        assert_eq!(
+            serde_json::to_value(DaemonPhase::RecoveryRequired).unwrap(),
+            "recovery_required"
+        );
+    }
+
+    #[test]
+    fn recovery_ids_are_exact_opaque_tokens() {
+        let current = RecoveryId::from_bytes([0xab; 16]);
+        let stale = RecoveryId::from_bytes([0xcd; 16]);
+        assert_eq!(current.as_bytes(), &[0xab; 16]);
+        assert_ne!(current, stale);
+        assert_eq!(format!("{current:?}"), "RecoveryId([REDACTED])");
+
+        let encoded = serde_json::to_vec(&current).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<RecoveryId>(&encoded).unwrap(),
+            current
+        );
+        assert!(serde_json::from_value::<RecoveryId>(serde_json::json!(vec![0_u8; 15])).is_err());
+        assert!(serde_json::from_value::<RecoveryId>(serde_json::json!(vec![0_u8; 17])).is_err());
+    }
+
+    #[test]
+    fn recovery_offer_and_receipt_have_no_path_fields() {
+        let offer = RecoveryOffer {
+            id: RecoveryId::from_bytes([1; 16]),
+            actions: vec![RepairAction::RecreateControlStore],
+        };
+        let receipt = RepairReceipt {
+            instance_id: "instance".to_owned(),
+            recovery_id: offer.id,
+            action: RepairAction::RecreateControlStore,
+            disposition: RepairDisposition::CorruptStoreArchived,
+        };
+
+        let offer_json = serde_json::to_value(&offer).unwrap();
+        let offer_fields = offer_json.as_object().unwrap();
+        assert_eq!(offer_fields.len(), 2);
+        assert!(offer_fields.contains_key("id"));
+        assert!(offer_fields.contains_key("actions"));
+
+        let receipt_json = serde_json::to_value(&receipt).unwrap();
+        let receipt_fields = receipt_json.as_object().unwrap();
+        assert_eq!(receipt_fields.len(), 4);
+        assert!(receipt_fields.contains_key("instance_id"));
+        assert!(receipt_fields.contains_key("recovery_id"));
+        assert!(receipt_fields.contains_key("action"));
+        assert!(receipt_fields.contains_key("disposition"));
+        assert_eq!(
+            serde_json::to_value(RepairAction::RecreateControlStore).unwrap(),
+            "recreate_control_store"
+        );
+        assert_eq!(
+            serde_json::to_value(RepairDisposition::CorruptStoreArchived).unwrap(),
+            "corrupt_store_archived"
+        );
     }
 }

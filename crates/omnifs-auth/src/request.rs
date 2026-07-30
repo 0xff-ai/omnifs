@@ -1,14 +1,13 @@
 use crate::error::AuthError;
+use crate::{
+    ClientSideTokenConfig, DeviceCodeConfig, OAuthFlow, OauthScheme, PkceLoopbackConfig,
+    PkceManualCodeConfig, TokenEndpointAuthMethod,
+};
 use oauth2::basic::BasicClient;
 use oauth2::{
     AuthType, AuthUrl, ClientId, ClientSecret, DeviceAuthorizationUrl, EndpointMaybeSet,
     EndpointNotSet, EndpointSet, RedirectUrl, RevocationUrl, TokenUrl,
 };
-use omnifs_workspace::authn::{
-    ClientSideTokenConfig, DeviceCodeConfig, OAuthFlow, OauthScheme, PkceLoopbackConfig,
-    PkceManualCodeConfig, TokenEndpointAuthMethod,
-};
-use omnifs_workspace::mounts::OAuth;
 use secrecy::{ExposeSecret, SecretString};
 
 pub(crate) type ConfiguredClient =
@@ -23,6 +22,42 @@ pub struct OAuthRequest {
     pub(crate) scheme: OauthScheme,
     client_id: Option<String>,
     client_secret: Option<SecretString>,
+}
+
+/// Client-supplied overrides for one OAuth login.
+#[derive(Clone, Debug, Default)]
+pub struct OAuthRequestConfig {
+    pub scopes: Option<Vec<String>>,
+    pub domain: Option<String>,
+    pub header: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret_file: Option<String>,
+    pub client_secret_env: Option<String>,
+}
+
+/// Daemon-validated OAuth overrides stored with submitted credential material.
+#[derive(Clone, Default)]
+pub struct OAuthRuntimeOverrides {
+    pub scopes: Option<Vec<String>>,
+    pub redirect_uri: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<SecretString>,
+}
+
+impl std::fmt::Debug for OAuthRuntimeOverrides {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OAuthRuntimeOverrides")
+            .field("scopes", &self.scopes)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 impl OAuthRequest {
@@ -160,8 +195,8 @@ impl OAuthRequest {
 
     /// Build an [`OAuthRequest`] from a mount's `auth` config block, applying
     /// scope, injection, redirect, and client credential overrides.
-    pub fn from_mount_config(
-        config: Option<&OAuth>,
+    pub fn from_config(
+        config: Option<&OAuthRequestConfig>,
         mut scheme: OauthScheme,
     ) -> Result<OAuthRequest, AuthError> {
         let Some(config) = config else {
@@ -205,6 +240,47 @@ impl OAuthRequest {
         }
         Ok(request)
     }
+
+    /// Build the refresh runtime from already-loaded daemon state.
+    ///
+    /// Unlike [`Self::from_config`], this path accepts a client secret directly
+    /// and cannot override injection policy.
+    pub fn from_runtime(
+        mut scheme: OauthScheme,
+        overrides: OAuthRuntimeOverrides,
+    ) -> Result<Self, AuthError> {
+        if let Some(scopes) = overrides.scopes {
+            scheme.default_scopes = scopes;
+        }
+        if let Some(redirect_uri) =
+            non_empty_config_value(overrides.redirect_uri.as_deref(), "oauth redirect_uri")?
+        {
+            match &mut scheme.flow {
+                OAuthFlow::PkceLoopback(flow) => {
+                    redirect_uri.clone_into(&mut flow.redirect_uri_template);
+                },
+                OAuthFlow::PkceManualCode(flow) => {
+                    redirect_uri.clone_into(&mut flow.redirect_uri);
+                },
+                OAuthFlow::ClientSideToken(flow) => {
+                    redirect_uri.clone_into(&mut flow.redirect_uri_template);
+                },
+                OAuthFlow::DeviceCode(_) => {},
+            }
+        }
+
+        let mut request = Self::new(scheme);
+        if let Some(client_id) =
+            non_empty_config_value(overrides.client_id.as_deref(), "oauth client_id")?
+        {
+            request.client_id = Some(client_id.to_owned());
+        }
+        if let Some(client_secret) = overrides.client_secret {
+            validate_non_empty_secret(&client_secret)?;
+            request.client_secret = Some(client_secret);
+        }
+        Ok(request)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -239,7 +315,9 @@ pub struct DeviceCodeLoginRequest {
     pub(crate) flow: DeviceCodeConfig,
 }
 
-fn read_oauth_client_secret(config: &OAuth) -> Result<Option<SecretString>, AuthError> {
+fn read_oauth_client_secret(
+    config: &OAuthRequestConfig,
+) -> Result<Option<SecretString>, AuthError> {
     if let Some(path) = config.client_secret_file.as_deref() {
         match std::fs::read_to_string(path) {
             Ok(contents) => {
@@ -273,6 +351,15 @@ fn secret_from_config_value(value: &str, source: &str) -> Result<Option<SecretSt
         .map(|value| value.map(|value| SecretString::from(value.to_owned())))
 }
 
+fn validate_non_empty_secret(secret: &SecretString) -> Result<(), AuthError> {
+    if secret.expose_secret().trim().is_empty() {
+        return Err(AuthError::RequestConfig(
+            "oauth client_secret is empty".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn non_empty_config_value<'a>(
     value: Option<&'a str>,
     source: &str,
@@ -284,4 +371,68 @@ fn non_empty_config_value<'a>(
         return Err(AuthError::RequestConfig(format!("{source} is empty")));
     }
     Ok(Some(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scheme() -> OauthScheme {
+        OauthScheme {
+            key: "oauth".to_owned(),
+            display_name: "OAuth".to_owned(),
+            authorization_endpoint: "https://example.com/authorize".to_owned(),
+            token_endpoint: "https://example.com/token".to_owned(),
+            revocation_endpoint: None,
+            default_client_id: Some("default-client".to_owned()),
+            default_scopes: vec!["read".to_owned()],
+            flow: OAuthFlow::PkceManualCode(PkceManualCodeConfig {
+                redirect_uri: "https://localhost/default".to_owned(),
+            }),
+            token_endpoint_auth: TokenEndpointAuthMethod::ClientSecretPost,
+            refresh_token_rotates: false,
+            extra_authorize_params: Vec::new(),
+            extra_token_params: Vec::new(),
+            inject_domains: vec!["api.example.com".to_owned()],
+            inject_header_name: None,
+            inject_value_prefix: "Bearer ".to_owned(),
+        }
+    }
+
+    #[test]
+    fn runtime_overrides_accept_direct_secret_without_changing_injection() {
+        let secret = SecretString::from("client-secret".to_owned());
+        let request = OAuthRequest::from_runtime(
+            scheme(),
+            OAuthRuntimeOverrides {
+                scopes: Some(vec!["write".to_owned()]),
+                redirect_uri: Some("https://localhost/callback".to_owned()),
+                client_id: Some("client".to_owned()),
+                client_secret: Some(secret),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(request.scheme.default_scopes, ["write"]);
+        assert_eq!(request.scheme.inject_domains, ["api.example.com"]);
+        assert_eq!(request.client_id.as_deref(), Some("client"));
+        assert!(request.client_secret.is_some());
+        let OAuthFlow::PkceManualCode(flow) = &request.scheme.flow else {
+            panic!("test scheme changed flow");
+        };
+        assert_eq!(flow.redirect_uri, "https://localhost/callback");
+        assert!(!format!("{request:?}").contains("client-secret"));
+    }
+
+    #[test]
+    fn runtime_overrides_reject_empty_direct_secret() {
+        let result = OAuthRequest::from_runtime(
+            scheme(),
+            OAuthRuntimeOverrides {
+                client_secret: Some(SecretString::from("  ".to_owned())),
+                ..OAuthRuntimeOverrides::default()
+            },
+        );
+        assert!(matches!(result, Err(AuthError::RequestConfig(_))));
+    }
 }

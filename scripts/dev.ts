@@ -6,7 +6,6 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -119,7 +118,7 @@ const GUEST_MOUNT = "/omnifs";
 // the interactive dev shell and any container-side probe use POSIX `/bin/sh`.
 const GUEST_SHELL = "/bin/sh";
 // Label `crates/omnifs-cli/src/fs_container.rs` stamps on the filesystem
-// container with the workspace's config dir (== `OMNIFS_HOME`): the single
+// container with the profile root (== `OMNIFS_HOME`): the single
 // owner of the home->container-name mapping, so this script discovers the
 // container by label instead of re-deriving its hashed name.
 const FILESYSTEM_HOME_LABEL = "ai.0xff.omnifs.home";
@@ -159,7 +158,7 @@ async function main() {
   const builds: Promise<void>[] = [];
   if (!options.skipCliBuild) {
     // The full CLI package includes the host-native daemon process owner and
-    // NFS filesystem support, which `omnifs up` needs to launch the daemon.
+    // NFS filesystem support used by mount and filesystem commands.
     builds.push(
       run($`cargo build -p omnifs-cli`.env({
         ...process.env,
@@ -207,12 +206,11 @@ async function main() {
     }
   }
 
-  await writeDevHome(devHome, filesystemImage, omnifsCli, render);
-
   const fixtures = await startFixtures(render.mounts, fixturePaths);
   try {
-    console.log("Starting the host-native daemon");
-    await run($`${omnifsCli} up`.env(cliEnv(devHome)));
+    // Host-resource mounts activate as soon as `mount add` reaches the daemon,
+    // so their files and sockets must exist before the mount RPC.
+    await writeDevHome(devHome, filesystemImage, omnifsCli, render);
 
     const hostProtocol = process.platform === "linux" ? "fuse" : "nfs";
     const hostLocation = join(devHome, "mnt");
@@ -418,7 +416,7 @@ async function renderDevHomePlan(
     // The checked-in db/k8s templates use container-shaped paths
     // (`/data/test.db`, `unix:///run/omnifs/k8s.sock`), but the daemon is
     // host-native. Render absolute host-visible fixture paths under `devHome`
-    // per session instead of baking workspace-specific paths into the template.
+    // per session instead of baking checkout-specific paths into the template.
     if (mountName === "db") {
       const spec = structuredClone(found.template);
       spec.config = { ...spec.config, path: fixturePaths.dbPath };
@@ -551,14 +549,8 @@ async function writeDevHome(
   mkdirSync(devHome, { recursive: true });
   chmodPrivateDir(devHome);
 
-  const mountsDir = join(devHome, "mounts");
-  const credentialsPath = join(devHome, "credentials.json");
-  rmSync(mountsDir, { recursive: true, force: true });
-  rmSync(credentialsPath, { force: true });
-  mkdirSync(mountsDir, { recursive: true });
-
   // The daemon always runs host-native. Keep the Docker filesystem image in the
-  // workspace config so `fs attach` resolves the local build without a
+  // client config so `fs attach` resolves the local build without a
   // registry lookup. Filesystem lifecycle itself is imperative and explicit.
   writeFileSync(
     join(devHome, "config.toml"),
@@ -567,9 +559,6 @@ async function writeDevHome(
 
   for (const mount of render.mounts) {
     await runInitMount(devHome, omnifsCli, mount, render.credentialEnv);
-  }
-  if (existsSync(credentialsPath)) {
-    chmodPrivateFile(credentialsPath);
   }
 }
 
@@ -652,7 +641,7 @@ async function startFixtures(mounts: DevMountRender[], fixturePaths: FixturePath
   return fixtures;
 }
 
-/// Discover the running filesystem container by the workspace-home label
+/// Discover the running filesystem container by the profile-home label
 /// `crates/omnifs-cli/src/fs_container.rs` stamps on it, rather than
 /// re-deriving its (possibly hashed) name in this script.
 async function discoverFilesystemContainer(devHome: string): Promise<string> {
@@ -772,14 +761,6 @@ function keepRunning(options: DevOptions): boolean {
 function chmodPrivateDir(path: string): void {
   try {
     chmodSync(path, 0o700);
-  } catch {
-    // Best effort on non-Unix filesystems.
-  }
-}
-
-function chmodPrivateFile(path: string): void {
-  try {
-    chmodSync(path, 0o600);
   } catch {
     // Best effort on non-Unix filesystems.
   }

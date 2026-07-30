@@ -1,14 +1,12 @@
 //! CLI type definitions: top-level parser and command enum.
 
-use clap::{Parser, Subcommand, ValueEnum};
-use std::ffi::OsString;
+use clap::{Parser, Subcommand};
 use std::fmt::Write as _;
 
 use crate::commands;
 use crate::commands::doctor::DoctorVerdict;
 use crate::error::ExitCode;
 use crate::ui::output::{Output, OutputMode};
-use omnifs_workspace::Workspace;
 
 #[derive(Parser)]
 #[command(
@@ -61,12 +59,6 @@ pub enum Commands {
     /// Show daemon, mount, and auth status
     Status,
 
-    /// Start the daemon and serve configured mounts
-    ///
-    /// Spawns or replaces the host-native daemon over configured mounts.
-    /// Filesystems are managed separately with `omnifs fs`.
-    #[command(visible_alias = "apply")]
-    Up(commands::up::UpArgs),
     /// Stop the daemon and clean up
     ///
     /// Asks attached filesystems to stop, drains them for a bounded time, then
@@ -78,6 +70,9 @@ pub enum Commands {
     Inspect(commands::inspect::InspectArgs),
     /// Add, list, reauthenticate, revoke, or remove mounts
     Mount(commands::mount::MountArgs),
+
+    /// List or remove stored credentials
+    Credential(commands::credential::CredentialArgs),
 
     /// Configure providers, start the daemon, and attach platform filesystems
     Setup(commands::setup::SetupArgs),
@@ -100,11 +95,7 @@ pub enum Commands {
     /// command, not invoked directly. The daemon still runs as its own process
     /// over the local control socket; this is the same binary, not a separate entrypoint.
     #[command(hide = true)]
-    Daemon(crate::daemon::DaemonArgs),
-
-    /// Warm retained providers. Internal: launched as detached cache work.
-    #[command(hide = true)]
-    WarmProviders(crate::provider_warmup::WarmProvidersArgs),
+    Daemon,
 
     /// Run a host filesystem. Internal: launched by filesystem lifecycle commands.
     #[command(hide = true)]
@@ -120,7 +111,7 @@ pub enum Commands {
 
 impl Cli {
     pub(crate) fn runs_daemon(&self) -> bool {
-        if matches!(&self.command, Some(Commands::Daemon(_))) {
+        if matches!(&self.command, Some(Commands::Daemon)) {
             return true;
         }
         false
@@ -140,7 +131,7 @@ impl Cli {
 
     pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         match self.command {
-            Some(command) => command.run(output).await,
+            Some(command) => Box::pin(command.run(output)).await,
             None => run_bare(output).await,
         }
     }
@@ -150,7 +141,6 @@ impl Commands {
     fn labels(&self) -> (Option<&'static str>, &'static str) {
         match self {
             Self::Status => (Some("status"), "status"),
-            Self::Up(_) => (Some("up"), "up"),
             Self::Down => (Some("down"), "down"),
             Self::Logs(_) => (Some("logs"), "logs"),
             Self::Inspect(_) => (Some("inspect"), "inspect"),
@@ -166,13 +156,19 @@ impl Commands {
                     commands::mount::MountCommand::Rm { .. } => "mount.rm",
                 },
             ),
+            Self::Credential(args) => (
+                Some("credential"),
+                match &args.command {
+                    commands::credential::CredentialCommand::Ls => "credential.ls",
+                    commands::credential::CredentialCommand::Rm(_) => "credential.rm",
+                },
+            ),
             Self::Setup(_) => (Some("setup"), "setup"),
             Self::Skill(_) => (Some("skill"), "skill"),
             Self::Doctor => (Some("doctor"), "doctor"),
             Self::Completions(_) => (Some("completions"), "completions"),
             Self::Version => (Some("version"), "version"),
-            Self::Daemon(_) => (None, "daemon"),
-            Self::WarmProviders(_) => (None, "warm-providers"),
+            Self::Daemon => (None, "daemon"),
             Self::RunFs(_) => (None, "run-fs"),
             Self::Fs(args) => (
                 Some("fs"),
@@ -194,7 +190,7 @@ impl Commands {
     }
 
     /// Top-level subcommand label for `cli.jsonl` usage metrics, or `None` for the
-    /// internal `daemon` subcommand (which records `daemon.jsonl` instead of
+    /// internal `daemon` subcommand (which records its own usage stream instead of
     /// counting as CLI usage).
     pub(crate) fn usage_label(&self) -> Option<&'static str> {
         self.labels().0
@@ -207,147 +203,35 @@ impl Commands {
                 Ok(exit_for_verdict(verdict))
             },
             Self::Status => commands::status::run(output).await,
-            Self::Up(args) => args.run(output).await,
             Self::Down => commands::down::run(output).await,
-            Self::Logs(args) => args.run(&output).map(|()| ExitCode::Success),
+            Self::Logs(args) => args.run(&output).await.map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),
             Self::Mount(args) => args.run(output).await,
-            Self::Setup(args) => args.run(output).await,
+            Self::Credential(args) => args.run(output).await,
+            Self::Setup(args) => Box::pin(args.run(output)).await,
             Self::Skill(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Completions(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Version => commands::version::run(output).await,
-            Self::Daemon(args) => crate::daemon::run(&args).await.map(|()| ExitCode::Success),
-            Self::WarmProviders(args) => args.run().await.map(|()| ExitCode::Success),
+            Self::Daemon => omnifs_daemon::run().await.map(|()| ExitCode::Success),
             Self::RunFs(_) => {
                 anyhow::bail!("run-fs must be dispatched before the CLI runtime starts")
             },
-            Self::Fs(args) => args.run(output).await,
+            Self::Fs(args) => Box::pin(args.run(output)).await,
         }
     }
 }
 
-/// Inspect raw argv just far enough to choose a structured error contract for
-/// a later Clap usage failure. Invalid, missing, duplicate, and post-`--`
-/// occurrences deliberately return `None`, leaving Clap's human error path in
-/// charge.
-pub(crate) fn raw_output_mode<I>(args: I) -> Option<OutputMode>
-where
-    I: IntoIterator<Item = OsString>,
-{
-    let args = args.into_iter().collect::<Vec<_>>();
-    let mut selected = None;
-    let mut occurrences = 0_u8;
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index].to_string_lossy();
-        if arg == "--" {
-            break;
-        }
-        let value = if let Some(value) = arg.strip_prefix("--output=") {
-            occurrences = occurrences.saturating_add(1);
-            Some(value.to_owned())
-        } else if arg == "--output" {
-            occurrences = occurrences.saturating_add(1);
-            index = index.saturating_add(1);
-            args.get(index)
-                .map(|value| value.to_string_lossy().into_owned())
-        } else {
-            index = index.saturating_add(1);
-            continue;
-        };
-        if let Some(value) = value
-            && let Ok(mode) = OutputMode::from_str(&value, true)
-        {
-            selected = Some(mode);
-        } else {
-            selected = None;
-        }
-        index = index.saturating_add(1);
-    }
-    (occurrences == 1).then_some(selected).flatten()
-}
-
-pub(crate) fn raw_command_path<I>(args: I) -> &'static str
-where
-    I: IntoIterator<Item = OsString>,
-{
-    let values = args
-        .into_iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    let mut positional = Vec::new();
-    let mut index = 0;
-    while index < values.len() {
-        let value = &values[index];
-        if value == "--" {
-            break;
-        }
-        if value == "--output" {
-            index = index.saturating_add(2);
-            continue;
-        }
-        if value.starts_with("--output=")
-            || value == "--quiet"
-            || value == "-q"
-            || value == "--yes"
-            || value == "--no-input"
-            || value == "--verbose"
-            || value.starts_with("-v")
-        {
-            index = index.saturating_add(1);
-            continue;
-        }
-        if !value.starts_with('-') {
-            positional.push(value.clone());
-            if positional.len() == 2 {
-                break;
-            }
-        }
-        index = index.saturating_add(1);
-    }
-    match positional.as_slice() {
-        [command, subcommand, ..] if command == "mount" && subcommand == "add" => "mount.add",
-        [command, subcommand, ..] if command == "mount" && subcommand == "ls" => "mount.ls",
-        [command, subcommand, ..] if command == "mount" && subcommand == "show" => "mount.show",
-        [command, subcommand, ..] if command == "mount" && subcommand == "update" => "mount.update",
-        [command, subcommand, ..] if command == "mount" && subcommand == "reauth" => "mount.reauth",
-        [command, subcommand, ..] if command == "mount" && subcommand == "revoke" => "mount.revoke",
-        [command, subcommand, ..] if command == "mount" && subcommand == "rm" => "mount.rm",
-        [command, subcommand, ..] if command == "fs" && subcommand == "create" => "fs.create",
-        [command, subcommand, ..] if command == "fs" && subcommand == "rm" => "fs.rm",
-        [command, subcommand, ..] if command == "fs" && subcommand == "attach" => "fs.attach",
-        [command, subcommand, ..] if command == "fs" && subcommand == "detach" => "fs.detach",
-        [command, subcommand, ..] if command == "fs" && subcommand == "restart" => "fs.restart",
-        [command, subcommand, ..] if command == "fs" && subcommand == "ls" => "fs.ls",
-        [command, subcommand, ..] if command == "fs" && subcommand == "shell" => "fs.shell",
-        [command, ..] if command == "apply" => "up",
-        [command, ..] if command == "status" => "status",
-        [command, ..] if command == "up" => "up",
-        [command, ..] if command == "down" => "down",
-        [command, ..] if command == "logs" => "logs",
-        [command, ..] if command == "inspect" => "inspect",
-        [command, ..] if command == "setup" => "setup",
-        [command, ..] if command == "skill" => "skill",
-        [command, ..] if command == "doctor" => "doctor",
-        [command, ..] if command == "completions" => "completions",
-        [command, ..] if command == "version" => "version",
-        [command, ..] if command == "daemon" => "daemon",
-        _ => "status",
-    }
-}
-
-/// Bare `omnifs` adapts to the workspace: a fresh workspace with
+/// Bare `omnifs` adapts to the profile: a fresh profile with
 /// no mounts at all shows a dedicated short screen instead of an empty
-/// status report; a configured workspace shows the shared status report
+/// status report; a configured profile shows the shared status report
 /// (`InventoryReport`, so this never drifts from `omnifs status`) closed by
-/// the single next actionable step, `Start serving:  omnifs up` when
-/// stopped or the derived browse action when running.
+/// the single next actionable step when stopped or the derived browse action
+/// when running.
 async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
-    let workspace = Workspace::resolve()?;
-    let inventory = crate::inventory::Inventory::collect(&workspace).await?;
+    let inventory = crate::inventory::Inventory::collect_rpc().await?;
     let exit_code = match inventory.verdict() {
-        crate::inventory::Verdict::Ok => ExitCode::Success,
-        crate::inventory::Verdict::Degraded => ExitCode::Degraded,
+        crate::ui::output::ResultVerdict::Ok => ExitCode::Success,
+        crate::ui::output::ResultVerdict::Degraded => ExitCode::Degraded,
     };
     if output.is_structured() {
         output.emit_result(inventory.verdict(), inventory)?;
@@ -357,7 +241,7 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
     if inventory.mounts.is_empty() {
         crate::ui::print_raw(&format!(
             "{}\n",
-            fresh_workspace_screen(&inventory, crate::ui::render::stdout_capabilities())
+            fresh_profile_screen(&inventory, crate::ui::render::stdout_capabilities())
         ));
         return Ok(exit_code);
     }
@@ -367,22 +251,22 @@ async fn run_bare(output: Output) -> anyhow::Result<ExitCode> {
     report.render().print();
     if let Some(action) = closing_action {
         output.narrate("");
-        output.narrate(crate::ui::access::action_line(&action).render());
+        output.narrate(crate::ui::access::ActionLine::from(&action).render());
     }
     Ok(exit_code)
 }
 
 /// A label column width fitting both "Get started:" (12) and "or piecewise:"
-/// (13), the two rows `fresh_workspace_block` prints.
+/// (13), the two rows `fresh_profile_block` prints.
 const FRESH_LABEL_WIDTH: usize = 14;
 /// A command column width fitting both "omnifs setup" (12) and "omnifs mount
 /// add" (16) with a 4-column gap before the description.
 const FRESH_CMD_WIDTH: usize = 20;
 
-/// One `<label> <accent(cmd)> <dim(desc)>` row of `fresh_workspace_block`,
+/// One `<label> <accent(cmd)> <dim(desc)>` row of `fresh_profile_block`,
 /// column-aligned against its sibling row rather than against the general
 /// ledger primitives.
-fn fresh_workspace_row(
+fn fresh_profile_row(
     label: &str,
     cmd: &str,
     desc: &str,
@@ -399,20 +283,20 @@ fn fresh_workspace_row(
     )
 }
 
-/// Bare `omnifs` on a workspace with no mounts at all: no status
+/// Bare `omnifs` on a profile with no mounts at all: no status
 /// probe, no empty report, just the two ways to get started.
-fn fresh_workspace_block(caps: crate::ui::render::Capabilities) -> String {
+fn fresh_profile_block(caps: crate::ui::render::Capabilities) -> String {
     let intro = crate::ui::render::sentence(
         "No mounts yet. omnifs projects external services as files.",
         caps,
     );
-    let get_started = fresh_workspace_row(
+    let get_started = fresh_profile_row(
         "Get started:",
         "omnifs setup",
         "pick services, sign in, mount",
         caps,
     );
-    let piecewise = fresh_workspace_row(
+    let piecewise = fresh_profile_row(
         "or piecewise:",
         "omnifs mount add",
         "configure one mount",
@@ -421,40 +305,38 @@ fn fresh_workspace_block(caps: crate::ui::render::Capabilities) -> String {
     format!("{intro}\n\n{get_started}\n{piecewise}")
 }
 
-/// The full bare-`omnifs` screen for a mount-less workspace: the get-started
+/// The full bare-`omnifs` screen for a mount-less profile: the get-started
 /// block, plus (when the inventory verdict is degraded) the one fact behind
 /// exit 5, so the exit code is never unexplained even though this screen
 /// skips the status report entirely.
-fn fresh_workspace_screen(
+fn fresh_profile_screen(
     inventory: &crate::inventory::Inventory,
     caps: crate::ui::render::Capabilities,
 ) -> String {
-    let mut screen = fresh_workspace_block(caps);
-    if let Some((what, fix)) = fresh_workspace_degradation(inventory) {
+    let mut screen = fresh_profile_block(caps);
+    if let Some((what, fix)) = fresh_profile_degradation(inventory) {
         let _ = write!(screen, "\n\n{what}:  `{fix}`");
     }
     screen
 }
 
 /// The one actionable fact behind a `Degraded` verdict on a mount-less
-/// workspace, if any: `Inventory::verdict` (inventory.rs) has two disjuncts
+/// profile, if any: `Inventory::verdict` (inventory.rs) has two disjuncts
 /// that can still fire when `mounts` is empty (a daemon that failed or went
 /// unreachable, or a filesystem severe enough to flip the verdict while the
 /// daemon is otherwise up), and the mount-related disjuncts are moot on an
 /// empty mount list. Returns the label and the one action selected by
 /// `Inventory::next_action`.
-fn fresh_workspace_degradation(
-    inventory: &crate::inventory::Inventory,
-) -> Option<(String, String)> {
+fn fresh_profile_degradation(inventory: &crate::inventory::Inventory) -> Option<(String, String)> {
     let action = inventory.next_action()?;
-    let command = crate::ui::access::action_line(&action).command;
+    let command = crate::ui::access::ActionLine::from(&action).command;
     match action {
         crate::inventory::NextAction::Doctor {
-            target: crate::inventory::ActionTarget::Workspace,
+            target: crate::inventory::ActionTarget::Profile,
         } => Some((
             match inventory.daemon_health() {
                 crate::inventory::DaemonHealth::Unreachable => "Daemon is unreachable",
-                _ => "Workspace needs attention",
+                _ => "Profile needs attention",
             }
             .to_owned(),
             command,
@@ -490,13 +372,8 @@ fn exit_for_verdict(verdict: DoctorVerdict) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
-    use std::ffi::OsString;
 
-    use super::{Cli, Commands, fresh_workspace_block, raw_command_path, raw_output_mode};
-
-    fn argv(args: &[&str]) -> Vec<OsString> {
-        args.iter().map(OsString::from).collect()
-    }
+    use super::{Cli, fresh_profile_block};
 
     fn caps(color: bool) -> crate::ui::render::Capabilities {
         crate::ui::render::Capabilities {
@@ -507,7 +384,7 @@ mod tests {
         }
     }
 
-    /// The fresh-workspace screen:
+    /// The fresh-profile screen:
     /// ```text
     /// No mounts yet. omnifs projects external services as files.
     ///
@@ -515,9 +392,9 @@ mod tests {
     /// or piecewise: omnifs mount add    configure one mount
     /// ```
     #[test]
-    fn fresh_workspace_block_matches_the_documented_shape() {
+    fn fresh_profile_block_matches_the_documented_shape() {
         assert_eq!(
-            fresh_workspace_block(caps(false)),
+            fresh_profile_block(caps(false)),
             "No mounts yet. omnifs projects external services as files.\n\
              \n\
              Get started:  omnifs setup        pick services, sign in, mount\n\
@@ -526,30 +403,30 @@ mod tests {
     }
 
     #[test]
-    fn fresh_workspace_block_accents_only_the_commands() {
-        let rendered = fresh_workspace_block(caps(true));
+    fn fresh_profile_block_accents_only_the_commands() {
+        let rendered = fresh_profile_block(caps(true));
         let plain = crate::ui::strip_ansi(&rendered);
-        assert_eq!(plain, fresh_workspace_block(caps(false)));
+        assert_eq!(plain, fresh_profile_block(caps(false)));
         assert!(rendered.contains(&crate::ui::style::accent("omnifs setup", true)));
         assert!(rendered.contains(&crate::ui::style::accent("omnifs mount add", true)));
     }
 
-    /// A genuinely clean fresh workspace (no mounts, nothing degraded) keeps
+    /// A genuinely clean fresh profile (no mounts, nothing degraded) keeps
     /// the plain get-started screen and exits 0 (the bug this guards against:
-    /// a mount-less workspace with a degraded inventory used to exit 5 while
+    /// a mount-less profile with a degraded inventory used to exit 5 while
     /// showing this same clean screen with no fact explaining the code).
     #[test]
-    fn fresh_workspace_screen_stays_plain_and_ok_when_nothing_is_degraded() {
+    fn fresh_profile_screen_stays_plain_and_ok_when_nothing_is_degraded() {
         let inventory = crate::inventory::Inventory::test(
             crate::inventory::DaemonHealth::Stopped,
             Vec::new(),
             Vec::new(),
         );
-        assert_eq!(inventory.verdict(), crate::inventory::Verdict::Ok);
-        assert_eq!(super::fresh_workspace_degradation(&inventory), None);
+        assert_eq!(inventory.verdict(), crate::ui::output::ResultVerdict::Ok);
+        assert_eq!(super::fresh_profile_degradation(&inventory), None);
         assert_eq!(
-            super::fresh_workspace_screen(&inventory, caps(false)),
-            fresh_workspace_block(caps(false))
+            super::fresh_profile_screen(&inventory, caps(false)),
+            fresh_profile_block(caps(false))
         );
     }
 
@@ -557,22 +434,25 @@ mod tests {
     /// with zero mounts; the screen must name it and reuse
     /// the Inventory-selected doctor action.
     #[test]
-    fn fresh_workspace_screen_names_an_unreachable_daemon() {
+    fn fresh_profile_screen_names_an_unreachable_daemon() {
         let inventory = crate::inventory::Inventory::test(
             crate::inventory::DaemonHealth::Unreachable,
             Vec::new(),
             Vec::new(),
         );
-        assert_eq!(inventory.verdict(), crate::inventory::Verdict::Degraded);
         assert_eq!(
-            super::fresh_workspace_degradation(&inventory),
+            inventory.verdict(),
+            crate::ui::output::ResultVerdict::Degraded
+        );
+        assert_eq!(
+            super::fresh_profile_degradation(&inventory),
             Some((
                 "Daemon is unreachable".to_owned(),
                 "omnifs doctor".to_owned()
             ))
         );
-        let screen = super::fresh_workspace_screen(&inventory, caps(false));
-        assert!(screen.starts_with(&fresh_workspace_block(caps(false))));
+        let screen = super::fresh_profile_screen(&inventory, caps(false));
+        assert!(screen.starts_with(&fresh_profile_block(caps(false))));
         assert!(
             screen.contains("Daemon is unreachable:  `omnifs doctor`"),
             "{screen}"
@@ -580,11 +460,11 @@ mod tests {
     }
 
     /// Leftover failed filesystem state (e.g. a stale entry under
-    /// `cache/filesystems`) can flip the verdict to `Degraded` while the daemon
+    /// `client/filesystems/state`) can flip the verdict to `Degraded` while the daemon
     /// is otherwise running and there are still zero mounts; the screen must
     /// name that filesystem and reuse its own `fix` field verbatim.
     #[test]
-    fn fresh_workspace_screen_names_a_failed_filesystem_while_daemon_is_up() {
+    fn fresh_profile_screen_names_a_failed_filesystem_while_daemon_is_up() {
         let filesystem = crate::inventory::FilesystemStatus {
             spec: omnifs_core::fs::Spec::new(
                 "test".parse().unwrap(),
@@ -602,77 +482,21 @@ mod tests {
             vec![filesystem],
             Vec::new(),
         );
-        assert_eq!(inventory.verdict(), crate::inventory::Verdict::Degraded);
         assert_eq!(
-            super::fresh_workspace_degradation(&inventory),
+            inventory.verdict(),
+            crate::ui::output::ResultVerdict::Degraded
+        );
+        assert_eq!(
+            super::fresh_profile_degradation(&inventory),
             Some((
                 "fuse (docker) filesystem is failed".to_owned(),
                 "omnifs doctor".to_owned()
             ))
         );
-        let screen = super::fresh_workspace_screen(&inventory, caps(false));
+        let screen = super::fresh_profile_screen(&inventory, caps(false));
         assert!(
             screen.contains("fuse (docker) filesystem is failed:  `omnifs doctor`"),
             "{screen}"
-        );
-    }
-
-    #[test]
-    fn raw_output_mode_accepts_global_flag_anywhere_before_double_dash() {
-        assert_eq!(
-            raw_output_mode(argv(&["omnifs", "status", "--output", "json"])),
-            Some(crate::ui::output::OutputMode::Json)
-        );
-        assert_eq!(
-            raw_output_mode(argv(&["omnifs", "--output=jsonl", "mount", "ls"])),
-            Some(crate::ui::output::OutputMode::Jsonl)
-        );
-        assert_eq!(
-            raw_output_mode(argv(&["omnifs", "status", "--", "--output", "json"])),
-            None
-        );
-    }
-
-    #[test]
-    fn raw_output_mode_rejects_ambiguous_or_invalid_occurrences() {
-        assert_eq!(
-            raw_output_mode(argv(&["omnifs", "status", "--output"])),
-            None
-        );
-        assert_eq!(
-            raw_output_mode(argv(&["omnifs", "status", "--output", "yaml"])),
-            None
-        );
-        assert_eq!(
-            raw_output_mode(argv(&[
-                "omnifs",
-                "status",
-                "--output",
-                "json",
-                "--output=jsonl"
-            ])),
-            None
-        );
-    }
-
-    #[test]
-    fn raw_command_path_skips_global_options_and_names_nested_commands() {
-        assert_eq!(
-            raw_command_path(argv(&["--output", "json", "mount", "show", "x"])),
-            "mount.show"
-        );
-        assert_eq!(
-            raw_command_path(argv(&["--yes", "--no-input", "status"])),
-            "status"
-        );
-        assert_eq!(
-            raw_command_path(argv(&["apply", "--output", "json", "--unknown"])),
-            "up"
-        );
-        let sentinel = "CLI_SECRET_SENTINEL_RAW_COMMAND";
-        assert_eq!(
-            raw_command_path(argv(&["--output", "json", "--token", sentinel])),
-            "status"
         );
     }
 
@@ -688,7 +512,6 @@ mod tests {
             ("mount add auth suppression", "mount add", "no-auth"),
             ("mount add provider config", "mount add", "config-json"),
             ("mount add resource limits", "mount add", "limits-json"),
-            ("up readiness wait", "up", "wait"),
         ];
 
         for (prompt, subcommand, arg) in table {
@@ -700,30 +523,37 @@ mod tests {
     }
 
     #[test]
-    fn apply_alias_parses_identically_to_up() {
-        let up = Cli::try_parse_from(["omnifs", "up", "--wait", "3s", "--offline"]).unwrap();
-        let apply = Cli::try_parse_from(["omnifs", "apply", "--wait", "3s", "--offline"]).unwrap();
-        let (Commands::Up(up), Commands::Up(apply)) = (up.command.unwrap(), apply.command.unwrap())
-        else {
-            panic!("up and apply must parse to Commands::Up");
-        };
-        assert_eq!(up.wait, apply.wait);
-        assert_eq!(up.offline, apply.offline);
+    fn removed_lifecycle_commands_are_not_in_the_user_grammar() {
+        for argv in [
+            &["omnifs", "up"][..],
+            &["omnifs", "apply"][..],
+            &["omnifs", "up", "--offline"][..],
+        ] {
+            let Err(error) = Cli::try_parse_from(argv) else {
+                panic!("obsolete command parsed: {argv:?}");
+            };
+            assert_eq!(error.exit_code(), 2);
+        }
     }
 
     #[test]
-    fn wait_is_typed_at_the_parser_boundary() {
-        let parsed = Cli::try_parse_from(["omnifs", "up", "--wait", "30s"]).unwrap();
-        let Some(Commands::Up(args)) = parsed.command else {
-            panic!("expected up");
-        };
-        assert_eq!(args.wait, Some(std::time::Duration::from_secs(30)));
-
-        let Err(error) = Cli::try_parse_from(["omnifs", "up", "--wait", "30"]) else {
-            panic!("invalid duration must fail in clap");
-        };
-        assert_eq!(error.exit_code(), 2);
-        assert!(error.to_string().contains("must use seconds"));
+    fn credential_inventory_and_removal_are_in_the_user_grammar() {
+        assert!(Cli::try_parse_from(["omnifs", "credential", "ls"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "omnifs",
+                "credential",
+                "rm",
+                "--provider",
+                "github",
+                "--scheme",
+                "oauth",
+                "--account",
+                "work",
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["omnifs", "credential", "rm"]).is_err());
     }
 
     #[test]

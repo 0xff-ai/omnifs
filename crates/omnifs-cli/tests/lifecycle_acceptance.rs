@@ -1,77 +1,69 @@
-//! Lifecycle acceptance tests for the CLI ↔ daemon lifecycle.
+//! Durable CLI and daemon lifecycle acceptance tests.
 //!
-//! Each test drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`
-//! with its own temp dir and mount point. No test touches the
-//! user's real `~/.omnifs`, `~/omnifs`, or port 7878.
-//!
-//! The fixture writes `test_provider.wasm` into `<OMNIFS_HOME>/providers/` and
-//! writes the no-auth test mount spec to `<OMNIFS_HOME>/mounts/test.json`. The
-//! mount serves `test/hello/message`.
-//!
-//! A `Drop` guard on `Fixture` force-unmounts the mount point and kills any
-//! surviving daemon, so a panicking or interrupted test still cleans up.
-//!
-//! Skip (not fail) only when the platform genuinely cannot mount. A daemon
-//! that exits due to a CLI parse error or bad argument is a real failure.
-//!
-//! Tests that involve live NFS mounts (scenarios 3-6 on macOS) run under a
-//! process-global mutex to avoid concurrent NFS mount/unmount operations that
-//! can serialize through the macOS kernel's NFS state and cause timeouts.
+//! These tests use a fresh profile for every scenario and talk to the real
+//! `omnifs` child process. The state under test belongs to the daemon or the
+//! CLI client, so the assertions use the typed local control protocol and the
+//! public command surface rather than reaching into implementation helpers.
 
 #![cfg(not(target_os = "wasi"))]
 
 mod common;
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::{Duration, Instant};
-
-use common::{
-    force_unmount, install_test_provider, live_acceptance_enabled, nfs_serial_lock, omnifs_bin,
-    platform_can_mount, recorded_pid, release_wasm_dir, test_mount_spec,
+use bytes::Bytes;
+use common::{omnifs_bin, release_wasm_dir};
+use hyper_util::rt::TokioIo;
+use omnifs_api::grpc::{self, wire};
+use omnifs_api::{
+    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInventory,
+    MountDefinition,
 };
-use omnifs_api::{ControlOperation, ControlOutcome};
-use omnifs_itest::live::control_request;
-use omnifs_mtab::MountState;
-use omnifs_workspace::Workspace;
+use omnifs_bootstrap::{Bootstrap, Client};
+use omnifs_core::{MountName, ProviderId};
+use prost::Message as _;
+use std::path::Path;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::Duration;
+use tokio::net::UnixStream;
+use tokio_stream::iter;
+use tonic::transport::{Channel, Endpoint};
+use tonic::{Code, Request, Status};
+use tower::service_fn;
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+type ControlClient = wire::control_client::ControlClient<Channel>;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
+const PROVIDER_IMPORT_TIMEOUT: Duration = Duration::from_mins(3);
+const MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
+const PROVIDER_CHUNK_BYTES: usize = CONTROL_STREAM_PAYLOAD_MAX_BYTES;
 
-// ── Fixture ───────────────────────────────────────────────────────────────────
+fn unary<T>(message: T) -> Request<T> {
+    let mut request = Request::new(message);
+    request.set_timeout(REQUEST_TIMEOUT);
+    request
+}
 
-/// Hermetic per-test fixture: a fresh temp dir, providers, and mount point.
-/// Drops cleanly even when a test panics.
+fn mutation<T>(message: T) -> Request<T> {
+    let mut request = Request::new(message);
+    request.set_timeout(MUTATION_TIMEOUT);
+    request
+}
+
+fn transient(status: &Status) -> bool {
+    matches!(
+        status.code(),
+        Code::Unavailable | Code::DeadlineExceeded | Code::ResourceExhausted
+    )
+}
+
 struct Fixture {
     home: tempfile::TempDir,
-    mount_point: PathBuf,
-    /// Content id of the test provider installed into the provider store.
-    test_provider_id: omnifs_core::ProviderId,
-    /// PID to kill on drop, when a daemon was spawned via `omnifs up` rather
-    /// than the daemon subcommand directly.
-    daemon_pid: Option<u32>,
 }
 
 impl Fixture {
-    /// Allocate a fresh fixture with the test provider installed. Does NOT write any
-    /// mount spec; callers write what they need.
     fn new() -> Self {
-        let home = tempfile::tempdir().expect("home tempdir");
-        let providers_dir = home.path().join("providers");
-        std::fs::create_dir_all(&providers_dir).expect("providers dir");
-
-        let test_provider_id = install_test_provider(&providers_dir);
-
-        let mounts_dir = home.path().join("mounts");
-        std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
-
-        let mount_point = home.path().join("mnt");
-        std::fs::create_dir_all(&mount_point).expect("mount point dir");
-
         Self {
-            home,
-            mount_point,
-            test_provider_id,
-            daemon_pid: None,
+            home: tempfile::tempdir().expect("home tempdir"),
         }
     }
 
@@ -79,884 +71,487 @@ impl Fixture {
         self.home.path()
     }
 
-    fn mounts_dir(&self) -> PathBuf {
-        self.home_path().join("mounts")
+    fn endpoint(&self) -> Bootstrap<Client> {
+        Bootstrap::<Client>::under_root(self.home_path())
     }
 
-    fn daemon_record_path(&self) -> PathBuf {
-        self.home_path().join("daemon.json")
-    }
-
-    /// Write the test mount spec (`test.json`) into `<home>/mounts/`.
-    fn write_test_spec(&self) {
-        std::fs::write(
-            self.mounts_dir().join("test.json"),
-            test_mount_spec(&self.test_provider_id),
-        )
-        .expect("write test mount spec");
-    }
-
-    /// Write a second valid mount spec pinned to the test provider.
-    fn write_other_spec(&self) {
-        let spec = test_mount_spec(&self.test_provider_id)
-            .replace(r#""mount":"test""#, r#""mount":"other""#);
-        std::fs::write(self.mounts_dir().join("other.json"), spec).expect("write other mount spec");
-    }
-
-    /// Run a CLI subcommand with the hermetic env. Returns the captured output.
     fn run(&self, args: &[&str]) -> Output {
         Command::new(omnifs_bin())
             .args(args)
             .env("OMNIFS_HOME", self.home_path())
+            .env("NO_COLOR", "1")
             .env("RUST_LOG", "warn")
             .output()
-            .unwrap_or_else(|e| panic!("spawn omnifs {}: {e}", args.join(" ")))
+            .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
     }
 
-    /// Run `omnifs up`, wait for the mount to become active, and record the
-    /// daemon PID for drop cleanup. Returns `None` (skip) when the platform
-    /// genuinely cannot mount.
-    ///
-    /// Panics when `up` exits non-zero (a real failure), or when the daemon
-    /// becomes ready but the mount never appears (platform limitation that we
-    /// convert to a skip with a clear message).
-    fn up_and_wait(&mut self) -> Option<()> {
-        let wasm_dir = release_wasm_dir();
-        if !wasm_dir.join("test_provider.wasm").exists() {
-            eprintln!("skip: test_provider.wasm missing (run `just build providers`)");
-            return None;
-        }
-        if !platform_can_mount() {
-            eprintln!("skip: platform cannot mount (no /dev/fuse)");
-            return None;
-        }
-
-        let out = self.run(&["up"]);
-        assert!(
-            out.status.success(),
-            "omnifs up failed (exit {})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-
-        // Record daemon PID from the daemon record so Drop can kill it.
-        self.update_pid_from_record();
-
-        // Filesystems are independent of daemon startup. Attach the host
-        // filesystem explicitly at this fixture's mount path before probing the
-        // projected tree.
-        let protocol = if cfg!(target_os = "macos") {
-            "nfs"
-        } else {
-            "fuse"
+    async fn start_daemon(&self) -> DaemonGuard {
+        let child = Command::new(omnifs_bin())
+            .arg("daemon")
+            .env("OMNIFS_HOME", self.home_path())
+            .env("RUST_LOG", "warn")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn omnifs daemon");
+        let mut guard = DaemonGuard {
+            child: Some(child),
+            endpoint: self.endpoint(),
         };
-        let location = self.mount_point.to_string_lossy().into_owned();
-        let created = self.run(&[
-            "fs",
-            "create",
-            "--name",
-            "acceptance",
-            "--protocol",
-            protocol,
-            "--runtime",
-            "host",
-            "--location",
-            &location,
-        ]);
+        wait_until_ready(&guard.endpoint).await;
+        // A child that exits during the readiness loop must fail the test with
+        // its status instead of leaking a process into the next scenario.
         assert!(
-            created.status.success(),
-            "host filesystem create failed (exit {})\nstdout: {}\nstderr: {}",
-            created.status,
-            String::from_utf8_lossy(&created.stdout),
-            String::from_utf8_lossy(&created.stderr),
+            guard
+                .child
+                .as_mut()
+                .expect("daemon child")
+                .try_wait()
+                .expect("poll daemon")
+                .is_none(),
+            "daemon exited after reporting ready"
         );
-        let attached = self.run(&["fs", "attach", "--name", "acceptance"]);
-        assert!(
-            attached.status.success(),
-            "host filesystem attach failed (exit {})\nstdout: {}\nstderr: {}",
-            attached.status,
-            String::from_utf8_lossy(&attached.stdout),
-            String::from_utf8_lossy(&attached.stderr),
-        );
+        guard
+    }
+}
 
-        // Wait for the mount to serve the projected tree.
-        let message = self.mount_point.join("test/hello/message");
-        let deadline = Instant::now() + Duration::from_secs(30);
+struct DaemonGuard {
+    child: Option<Child>,
+    endpoint: Bootstrap<Client>,
+}
+
+impl DaemonGuard {
+    fn reap_if_exited(&mut self) {
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        if child.try_wait().expect("poll daemon exit").is_some() {
+            self.child = None;
+        }
+    }
+
+    async fn stop(&mut self) {
+        let socket = self.endpoint.control_socket();
+        if let Ok(mut control) = client(&socket).await {
+            let _ = control
+                .shutdown(unary(wire::ShutdownRequest {
+                    stop_filesystems: false,
+                }))
+                .await;
+        }
+        let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
         loop {
-            if message.is_file() {
-                return Some(());
+            let Some(child) = self.child.as_mut() else {
+                return;
+            };
+            if child.try_wait().expect("poll daemon exit").is_some() {
+                self.child = None;
+                return;
             }
-            if Instant::now() >= deadline {
-                eprintln!(
-                    "skip: {} never appeared within 30s; the mount could not come up on \
-                     this platform",
-                    message.display()
-                );
-                return None;
+            if tokio::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                self.child = None;
+                panic!("daemon did not stop within {}s", STARTUP_TIMEOUT.as_secs());
             }
-            std::thread::sleep(Duration::from_millis(50));
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
-    }
-
-    /// Update the stored daemon PID by reading the daemon record. Best-effort.
-    /// A native record carries the pid flat at the top level.
-    fn update_pid_from_record(&mut self) {
-        self.daemon_pid = recorded_pid(self.home_path());
-    }
-
-    /// Force-kill the daemon PID recorded in the daemon record, if present.
-    fn kill_daemon_from_record(&self) {
-        if let Some(pid) = recorded_pid(self.home_path()) {
-            // SIGKILL so it cannot clean up voluntarily.
-            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
-        }
-    }
-
-    /// True when the mount point is active in the OS mount table.
-    fn mount_is_active(&self) -> bool {
-        omnifs_nfs::mount_is_active(&self.mount_point)
-    }
-
-    fn host_filesystem_states(&self) -> Vec<MountState> {
-        MountState::files_under(
-            Workspace::under_root(self.home_path())
-                .filesystem_state()
-                .state_root(),
-        )
-        .expect("read filesystem state files")
-        .into_iter()
-        .filter_map(|path| MountState::read_file(&path).ok())
-        .filter(|state| state.mount_point == self.mount_point)
-        .collect()
-    }
-
-    fn host_filesystem_pid(&self) -> u32 {
-        let states = self.host_filesystem_states();
-        assert_eq!(
-            states.len(),
-            1,
-            "expected one host filesystem state for {}; got {states:?}",
-            self.mount_point.display()
-        );
-        states[0].pid
     }
 }
 
-impl Drop for Fixture {
+impl Drop for DaemonGuard {
     fn drop(&mut self) {
-        // Kill any daemon we know about.
-        if let Some(pid) = self.daemon_pid {
-            let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
-        // Also try the daemon record in case we didn't capture the PID yet.
-        self.kill_daemon_from_record();
-        // Force-unmount.
-        force_unmount(&self.mount_point);
     }
 }
 
-// Status when no daemon is running.
-
-/// `status` when no daemon is running: exit 0, reports not running.
-#[test]
-fn scenario_1_status_nothing_running() {
-    let fixture = Fixture::new();
-    let out = fixture.run(&["status", "--output", "json"]);
-
-    assert!(
-        out.status.success(),
-        "omnifs status should exit 0 when nothing is running (exit {})\nstderr: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr),
-    );
-
-    let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("status --output json must produce valid JSON");
-    assert_eq!(
-        json["result"]["daemon"]["probe"]["state"], "stopped",
-        "result.daemon.probe.state must be 'stopped' when no daemon is up; got:\n{json:#}"
-    );
+async fn wait_until_ready(endpoint: &Bootstrap<Client>) -> DaemonInventory {
+    let socket = endpoint.control_socket();
+    let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        if let Ok(mut control) = client(&socket).await {
+            match control.get_inventory(unary(wire::Empty {})).await {
+                Ok(response) => {
+                    if let Some(inventory) = response.into_inner().inventory {
+                        let inventory = grpc::daemon_inventory(&inventory)
+                            .expect("daemon returned invalid inventory");
+                        if inventory.phase == omnifs_api::DaemonPhase::Ready {
+                            return inventory;
+                        }
+                    }
+                },
+                Err(status) if transient(&status) => {},
+                Err(status) => panic!("daemon inventory request failed during startup: {status}"),
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "daemon did not become ready within {}s",
+            STARTUP_TIMEOUT.as_secs()
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
-// Shutdown when no daemon is running.
-
-/// `down` when nothing is running: exit 0, prints "Nothing to stop. The
-/// daemon isn't running."
-#[test]
-fn scenario_2_down_nothing_running() {
-    let fixture = Fixture::new();
-    let out = fixture.run(&["down"]);
-
-    assert!(
-        out.status.success(),
-        "omnifs down should exit 0 when nothing is running (exit {})\nstderr: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr),
-    );
-
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    assert!(
-        combined.contains("Nothing to stop. The daemon isn't running."),
-        "expected the no-op sentence in output; got:\n{combined}"
-    );
+async fn client(path: &Path) -> anyhow::Result<ControlClient> {
+    let path = path.to_owned();
+    let endpoint = Endpoint::from_static("http://[::]:50051").connect_timeout(REQUEST_TIMEOUT);
+    let future = endpoint.connect_with_connector(service_fn(move |_| {
+        let path = path.clone();
+        async move { UnixStream::connect(path).await.map(TokioIo::new) }
+    }));
+    let channel = tokio::time::timeout(REQUEST_TIMEOUT, future)
+        .await
+        .map_err(|_| anyhow::anyhow!("control HTTP/2 setup timed out"))??;
+    Ok(ControlClient::new(channel))
 }
 
-#[test]
-fn zero_wait_does_not_publish_or_apply_a_revision() {
-    let fixture = Fixture::new();
-    fixture.write_test_spec();
+/// Provider import carries no mutation identity: the daemon dedupes by
+/// content digest, so this is a plain streamed upload.
+async fn import_provider(
+    path: &Path,
+    bytes: &[u8],
+) -> anyhow::Result<omnifs_api::ProviderImportReceipt> {
+    let mut control = client(path).await?;
+    let start = wire::ImportProviderRequest {
+        value: Some(wire::import_provider_request::Value::Start(
+            grpc::to_provider_upload_start(
+                "test_provider.wasm",
+                bytes.len() as u64,
+                &ProviderId::from_wasm_bytes(bytes),
+            ),
+        )),
+    };
+    let payload = Bytes::copy_from_slice(bytes);
+    let mut items = Vec::with_capacity(payload.len().div_ceil(PROVIDER_CHUNK_BYTES) + 1);
+    items.push(start);
+    for start in (0..payload.len()).step_by(PROVIDER_CHUNK_BYTES) {
+        let end = (start + PROVIDER_CHUNK_BYTES).min(payload.len());
+        items.push(wire::ImportProviderRequest {
+            value: Some(wire::import_provider_request::Value::Chunk(
+                payload.slice(start..end),
+            )),
+        });
+    }
+    let mut request = Request::new(iter(items));
+    request.set_timeout(PROVIDER_IMPORT_TIMEOUT);
+    let response = control.import_provider(request).await?.into_inner();
+    let receipt = response
+        .receipt
+        .ok_or_else(|| anyhow::anyhow!("missing provider import receipt"))?;
+    grpc::provider_import_receipt(&receipt).map_err(Into::into)
+}
 
-    let output = fixture.run(&["up", "--wait", "0s"]);
-    assert_eq!(
-        output.status.code(),
-        Some(3),
-        "stdout: {}\nstderr: {}",
+fn random_mutation_id() -> Bytes {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).expect("generate mutation id");
+    bytes.to_vec().into()
+}
+
+fn mutation_id_of(bytes: &Bytes) -> omnifs_core::MutationId {
+    omnifs_core::MutationId::from_bytes(bytes.as_ref().try_into().expect("mutation id is 16 bytes"))
+}
+
+async fn begin_mutation(control: &mut ControlClient, mutation_id: Bytes) {
+    control
+        .begin_mutation(mutation(wire::BeginMutationRequest { mutation_id }))
+        .await
+        .expect("begin mutation");
+}
+
+async fn apply_mount_create(
+    control: &mut ControlClient,
+    mutation_id: Bytes,
+    definition: &MountDefinition,
+) -> Result<omnifs_api::MountOpResult, Status> {
+    let response = control
+        .apply_mutation(mutation(wire::ApplyMutationRequest {
+            mutation_id,
+            ops: vec![wire::MutationOp {
+                op: Some(wire::mutation_op::Op::CreateMount(wire::CreateMountOp {
+                    definition: Some(grpc::to_mount_definition(definition)),
+                })),
+            }],
+        }))
+        .await?
+        .into_inner();
+    let result = response
+        .results
+        .into_iter()
+        .next()
+        .expect("apply reply carries one result per submitted op");
+    match result.result.expect("mutation op result missing its op") {
+        wire::mutation_op_result::Result::Mount(mount) => {
+            Ok(grpc::mount_op_result(&mount).expect("decode mount op result"))
+        },
+        wire::mutation_op_result::Result::Credential(_) => {
+            panic!("expected a mount op result from a mount-create batch")
+        },
+    }
+}
+
+/// The structured `ControlErrorCode` a failed control RPC carries, decoded
+/// from its status details the same way the CLI's `rpc.rs` does.
+fn control_error_code(status: &Status) -> Option<omnifs_api::ControlErrorCode> {
+    let detail = wire::ErrorDetail::decode(status.details()).ok()?;
+    grpc::error_detail(&detail).ok().map(|error| error.code)
+}
+
+fn mount_definition(provider: ProviderId, name: &str) -> MountDefinition {
+    MountDefinition {
+        name: MountName::new(name.to_owned()).expect("valid test mount name"),
+        provider,
+        auth: None,
+        limits: None,
+        config: br"{}".to_vec(),
+    }
+}
+
+fn assert_success(output: &Output, command: &str) {
+    assert!(
+        output.status.success(),
+        "{command} failed with {}\nstdout: {}\nstderr: {}",
+        output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("within 0s"));
-    assert!(!fixture.daemon_record_path().exists());
-    assert_eq!(
-        omnifs_workspace::mounts::Repository::open(fixture.mounts_dir())
-            .expect("open mounts after timeout")
-            .applied()
-            .expect("read applied ref"),
-        None
-    );
 }
 
-// Full up, status, repeated up, and down lifecycle.
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_starts_and_reports_ready_inventory() {
+    let fixture = Fixture::new();
+    let mut daemon = fixture.start_daemon().await;
+    let mut control = client(&fixture.endpoint().control_socket())
+        .await
+        .expect("control client");
+    let inventory = control
+        .get_inventory(unary(wire::Empty {}))
+        .await
+        .expect("inventory request")
+        .into_inner()
+        .inventory
+        .map(|inventory| grpc::daemon_inventory(&inventory).expect("invalid inventory response"))
+        .expect("missing inventory response");
+    assert_eq!(inventory.phase, omnifs_api::DaemonPhase::Ready);
+    assert_eq!(inventory.mounts.len(), 0);
+    assert!(inventory.info.pid > 0);
+    assert!(inventory.info.attach_tcp.is_some());
+    daemon.stop().await;
+}
 
-/// Up serves the mount through an explicitly attached host filesystem, status
-/// shows it running, and down drains that filesystem. Scenarios 3-6 share a
-/// single daemon lifecycle so we do not pay 4x mount creation latency.
-#[test]
-#[allow(clippy::too_many_lines)] // one shared daemon lifecycle across scenarios 3-6
-fn scenarios_3_to_6_lifecycle_cycle() {
-    if !live_acceptance_enabled() {
-        eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run live-mount acceptance tests");
-        return;
-    }
-    let wasm_dir = release_wasm_dir();
-    if !wasm_dir.join("test_provider.wasm").exists() {
-        eprintln!("skip: test_provider.wasm missing (run `just build providers`)");
-        return;
-    }
-    if !platform_can_mount() {
-        eprintln!("skip: platform cannot mount (no /dev/fuse)");
-        return;
-    }
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_and_mount_survive_daemon_restart() {
+    let fixture = Fixture::new();
+    let provider_bytes = std::fs::read(release_wasm_dir().join("test_provider.wasm"))
+        .expect("build the test provider before running acceptance tests");
+    let provider_id = ProviderId::from_wasm_bytes(&provider_bytes);
+    let mut daemon = fixture.start_daemon().await;
+    let socket = fixture.endpoint().control_socket();
+    let imported = import_provider(&socket, &provider_bytes)
+        .await
+        .expect("import test provider");
+    assert_eq!(imported.provider.id, provider_id);
 
-    // Serialize mount-involving tests across processes to avoid concurrent NFS
-    // state contention (held for the rest of the test).
-    let _guard = nfs_serial_lock();
+    let mut control = client(&socket).await.expect("control client");
+    let mutation_id = random_mutation_id();
+    begin_mutation(&mut control, mutation_id.clone()).await;
+    let mount = apply_mount_create(
+        &mut control,
+        mutation_id,
+        &mount_definition(provider_id, "durable"),
+    )
+    .await
+    .expect("create mount");
+    assert_eq!(mount.name.as_str(), "durable");
 
-    let mut fixture = Fixture::new();
-    fixture.write_test_spec();
+    daemon.stop().await;
+    drop(daemon);
+    let mut restarted = fixture.start_daemon().await;
+    let inventory = wait_until_ready(&fixture.endpoint()).await;
+    assert_eq!(inventory.mounts.len(), 1);
+    assert_eq!(inventory.mounts[0].definition.name.as_str(), "durable");
+    assert_eq!(inventory.mounts[0].definition.provider, provider_id);
+    let mut control = client(&socket).await.expect("control client");
+    let metadata = control
+        .get_provider_metadata(unary(wire::GetProviderMetadataRequest {
+            provider_id: Bytes::copy_from_slice(provider_id.as_bytes()),
+        }))
+        .await
+        .expect("provider metadata request")
+        .into_inner()
+        .metadata;
+    assert!(metadata.is_some());
+    restarted.stop().await;
+}
 
-    // Start the daemon, then attach the host filesystem for the mount.
+/// Provenance is the only recovery mechanism left: a client that lost track
+/// of whether its `ApplyMutation` committed re-reads the target and compares
+/// `last_mutation_id` against the id it journaled, instead of asking the
+/// daemon to remember a receipt. This proves both windows converge:
+/// a batch that reached the daemon stamps its row exactly once, no matter how
+/// many times a confused client re-derives its outcome or retries the whole
+/// logical operation from scratch, and a batch that never got its ops applied
+/// (lease held, nothing written) leaves no trace to be mistaken for success.
+#[tokio::test(flavor = "multi_thread")]
+async fn provenance_converges_for_committed_and_not_committed_batches() {
+    let fixture = Fixture::new();
+    let provider_bytes = std::fs::read(release_wasm_dir().join("test_provider.wasm"))
+        .expect("build the test provider before running acceptance tests");
+    let provider_id = ProviderId::from_wasm_bytes(&provider_bytes);
+    let mut daemon = fixture.start_daemon().await;
+    let socket = fixture.endpoint().control_socket();
+    import_provider(&socket, &provider_bytes)
+        .await
+        .expect("import test provider");
 
-    let Some(()) = fixture.up_and_wait() else {
-        return; // skip: platform could not mount
-    };
+    // Window 1: a batch that committed. A client that journaled `first_id`
+    // and lost the reply re-reads the mount and finds its own id stamped on
+    // it, which (the batch being atomic) is exactly the "committed" signal
+    // the journal's provenance check looks for.
+    let mut control = client(&socket).await.expect("control client");
+    let first_id = random_mutation_id();
+    begin_mutation(&mut control, first_id.clone()).await;
+    let created = apply_mount_create(
+        &mut control,
+        first_id.clone(),
+        &mount_definition(provider_id, "once"),
+    )
+    .await
+    .expect("first mount creation commits");
+    assert_eq!(created.name.as_str(), "once");
 
-    // Mount is active.
-    assert!(
-        fixture.mount_is_active(),
-        "mount point {} must be active after `omnifs up`",
-        fixture.mount_point.display()
-    );
-
-    // `test/hello/message` is readable and contains the expected bytes.
-    let message_path = fixture.mount_point.join("test/hello/message");
-    let content =
-        std::fs::read(&message_path).expect("test/hello/message must be readable after up");
+    let mounts_after_first = control
+        .list_mounts(unary(wire::Empty {}))
+        .await
+        .expect("list mounts")
+        .into_inner()
+        .mounts;
     assert_eq!(
-        content, b"Hello, world!",
-        "test/hello/message content mismatch"
+        mounts_after_first.len(),
+        1,
+        "exactly one row after the first batch"
     );
-
-    // The daemon record exists.
-    assert!(
-        fixture.daemon_record_path().exists(),
-        "daemon.json must exist after `omnifs up`"
-    );
-
-    // Status reports the running daemon.
-
-    let out = fixture.run(&["status", "--output", "json"]);
-    assert!(
-        out.status.success(),
-        "omnifs status should exit 0 while running (exit {})\nstderr: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr),
-    );
-
-    let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("status --output json must produce valid JSON");
-
+    let stored = grpc::mount_record(&mounts_after_first[0]).expect("decode mount record");
     assert_eq!(
-        json["result"]["daemon"]["probe"]["state"], "running",
-        "result.daemon.probe.state must be 'running'; got:\n{json:#}"
+        stored.last_mutation_id,
+        mutation_id_of(&first_id),
+        "the stored row names the batch that actually wrote it"
     );
 
-    // The `test` mount is loaded.
-    let mounts = json["result"]["mounts"]
+    // Re-running the same logical command (a client that never learned the
+    // first attempt committed, so it retries mount creation from scratch
+    // under a fresh id) must not create a duplicate row: the daemon rejects
+    // the retried batch outright, and the row's provenance still names only
+    // the batch that actually wrote it.
+    let retry_id = random_mutation_id();
+    begin_mutation(&mut control, retry_id.clone()).await;
+    let retry_error = apply_mount_create(
+        &mut control,
+        retry_id,
+        &mount_definition(provider_id, "once"),
+    )
+    .await
+    .expect_err("retrying a completed mount creation must fail, not duplicate the row");
+    assert_eq!(
+        control_error_code(&retry_error),
+        Some(omnifs_api::ControlErrorCode::AlreadyExists)
+    );
+    let mounts_after_retry = control
+        .list_mounts(unary(wire::Empty {}))
+        .await
+        .expect("list mounts")
+        .into_inner()
+        .mounts;
+    assert_eq!(
+        mounts_after_retry.len(),
+        1,
+        "the failed retry must not add a second row"
+    );
+    let still_stored = grpc::mount_record(&mounts_after_retry[0]).expect("decode mount record");
+    assert_eq!(
+        still_stored.last_mutation_id, stored.last_mutation_id,
+        "the row's provenance is untouched by the rejected retry"
+    );
+
+    // Window 2: a batch that never got its ops applied (the lease was
+    // acquired, but the client vanished before `ApplyMutation` reached the
+    // daemon). A client that journaled `stalled_id` and later re-reads its
+    // target finds no row at all, which is the "not committed" signal.
+    let stalled_id = random_mutation_id();
+    begin_mutation(&mut control, stalled_id.clone()).await;
+    control
+        .drop_mutation(mutation(wire::DropMutationRequest {
+            mutation_id: stalled_id,
+        }))
+        .await
+        .expect("drop the stalled lease");
+    let absent = control
+        .get_mount(unary(wire::GetMountRequest {
+            name: "never-created".to_owned(),
+        }))
+        .await
+        .expect("get mount request")
+        .into_inner()
+        .mount;
+    assert!(
+        absent.is_none(),
+        "a batch that never applied must leave no row for its target"
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn down_stops_daemon_but_keeps_cli_filesystem_specs() {
+    let fixture = Fixture::new();
+    let location = fixture.home_path().join("mount-point");
+    std::fs::create_dir_all(&location).expect("mount point");
+    let location_arg = location.to_string_lossy().into_owned();
+    #[cfg(target_os = "macos")]
+    let protocol = "nfs";
+    #[cfg(not(target_os = "macos"))]
+    let protocol = "fuse";
+    let create = fixture.run(&[
+        "--output",
+        "json",
+        "fs",
+        "create",
+        "--name",
+        "kept",
+        "--protocol",
+        protocol,
+        "--runtime",
+        "host",
+        "--location",
+        &location_arg,
+    ]);
+    assert_success(&create, "fs create");
+    let mut daemon = fixture.start_daemon().await;
+    // Keep ownership of the daemon child while `down` runs. An exited child is
+    // still visible as a zombie until this test reaps it, which proves teardown
+    // uses the exact process identity rather than `kill -0` alone.
+    let down = fixture.run(&["--output", "json", "down"]);
+    assert_success(&down, "down");
+    daemon.reap_if_exited();
+    assert!(daemon.child.is_none(), "daemon child did not exit");
+    let listed = fixture.run(&["--output", "json", "fs", "ls"]);
+    assert_success(&listed, "fs ls");
+    let json: serde_json::Value = serde_json::from_slice(&listed.stdout)
+        .expect("fs ls --output json must produce valid JSON");
+    let filesystems = json["result"]["filesystems"]
         .as_array()
-        .expect("result.mounts must be an array");
-    assert!(
-        mounts.iter().any(|m| m["name"].as_str() == Some("test")),
-        "result.mounts must include 'test'; got: {mounts:?}"
-    );
-
-    // Verify the daemon reports its live PID through the typed local control socket.
-    let control_socket = fixture.home_path().join("control.sock");
-    let status = control_request(&control_socket, ControlOperation::Status)
-        .expect("daemon status control reply");
-    let ControlOutcome::Status(status) = status.outcome else {
-        panic!("daemon status request returned an unexpected reply");
-    };
-    assert!(status.pid > 0, "daemon status must report its pid");
-
-    // Applying the same revision is a no-op and retains the daemon process.
-    let original_pid = recorded_pid(fixture.home_path()).expect("running daemon pid");
-    let out = fixture.run(&["up"]);
-    assert!(
-        out.status.success(),
-        "omnifs up while already serving HEAD must succeed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    assert_eq!(
-        recorded_pid(fixture.home_path()),
-        Some(original_pid),
-        "applying the served revision must retain the daemon pid"
-    );
-
-    // Exact host restarts must wait for the predecessor runner to exit before
-    // launching its replacement, or a detached NFS runner can survive forever
-    // after observing the replacement mount.
-    let mut predecessor_pid = fixture.host_filesystem_pid();
-    for restart in 1..=2 {
-        let restarted = fixture.run(&["fs", "restart", "--name", "acceptance"]);
-        assert!(
-            restarted.status.success(),
-            "exact host restart {restart} must succeed\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&restarted.stdout),
-            String::from_utf8_lossy(&restarted.stderr),
-        );
-        let replacement_pid = fixture.host_filesystem_pid();
-        assert_ne!(
-            replacement_pid, predecessor_pid,
-            "exact host restart {restart} must publish a new runner PID"
-        );
-        assert!(
-            !pid_is_alive(predecessor_pid),
-            "predecessor runner PID {predecessor_pid} must be dead when exact host restart {restart} returns"
-        );
-        assert!(
-            pid_is_alive(replacement_pid),
-            "replacement runner PID {replacement_pid} must be alive when exact host restart {restart} returns"
-        );
-        assert!(
-            fixture.mount_is_active(),
-            "mount must remain active after exact host restart {restart}"
-        );
-        predecessor_pid = replacement_pid;
-    }
-
-    let final_runner_pid = fixture.host_filesystem_pid();
-
-    // Explicit shutdown pushes Stop to the attached filesystem and waits for
-    // its mount and process to leave before the daemon exits.
-    let out = fixture.run(&["down"]);
-    assert!(
-        out.status.success(),
-        "omnifs down must exit 0 (exit {})\nstdout: {}\nstderr: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-
-    // `down` does not return until the daemon control surface is gone, so an
-    // immediate status probe must already report the settled not-running state.
-    let immediate_status = fixture.run(&["status", "--output", "json"]);
-    assert!(
-        immediate_status.status.success(),
-        "status immediately after down must succeed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&immediate_status.stdout),
-        String::from_utf8_lossy(&immediate_status.stderr),
-    );
-    let immediate_json: serde_json::Value = serde_json::from_slice(&immediate_status.stdout)
-        .expect("immediate status --output json must produce valid JSON");
-    assert_eq!(
-        immediate_json["result"]["daemon"]["probe"]["state"], "stopped",
-        "status immediately after down must report stopped: {immediate_json:#}"
-    );
-
-    // The persisted spec remains, while daemon-authoritative attachment state
-    // settles to detached after shutdown.
-    let filesystems = immediate_json["result"]["filesystems"]
-        .as_array()
-        .expect("status result.filesystems must be an array");
-    assert_eq!(filesystems.len(), 1, "{filesystems:?}");
-    assert_eq!(filesystems[0]["id"], "acceptance");
+        .expect("fs ls result.filesystems array");
+    assert_eq!(filesystems.len(), 1);
+    assert_eq!(filesystems[0]["id"], "kept");
     assert_eq!(filesystems[0]["state"], "detached");
     assert!(
-        !fixture.mount_is_active(),
-        "mount point {} must be gone after down",
-        fixture.mount_point.display()
-    );
-    assert!(
-        !pid_is_alive(final_runner_pid),
-        "final host runner PID {final_runner_pid} must be dead after down"
-    );
-    assert!(
-        fixture.host_filesystem_states().is_empty(),
-        "down must remove the final host runner state"
-    );
-
-    // A later exact detach remains idempotent and retains the spec.
-    let repeated_disable =
-        fixture.run(&["fs", "detach", "--name", "acceptance", "--output", "json"]);
-    assert!(
-        repeated_disable.status.success(),
-        "repeated filesystem detach must succeed (exit {})\nstdout: {}\nstderr: {}",
-        repeated_disable.status,
-        String::from_utf8_lossy(&repeated_disable.stdout),
-        String::from_utf8_lossy(&repeated_disable.stderr),
-    );
-    let repeated_disable_json: serde_json::Value = serde_json::from_slice(&repeated_disable.stdout)
-        .expect("repeated filesystem detach must produce valid JSON");
-    assert_eq!(
-        repeated_disable_json["result"]["filesystem"]["id"],
-        "acceptance"
-    );
-    assert_eq!(repeated_disable_json["result"]["state"], "detached");
-
-    // Poll briefly: the OS may take a moment to acknowledge the unmount.
-    let settled = {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if !fixture.mount_is_active() {
-                break true;
-            }
-            if Instant::now() >= deadline {
-                break false;
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-    };
-    assert!(
-        settled,
-        "mount point {} must be gone from the mount table after filesystem detach",
-        fixture.mount_point.display()
-    );
-    let after_detach = fixture.run(&["status", "--output", "json"]);
-    assert!(
-        after_detach.status.success(),
-        "status after filesystem detach must succeed\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&after_detach.stdout),
-        String::from_utf8_lossy(&after_detach.stderr),
-    );
-    let after_detach_json: serde_json::Value = serde_json::from_slice(&after_detach.stdout)
-        .expect("status after filesystem detach must produce valid JSON");
-    let remaining_filesystems = after_detach_json["result"]["filesystems"]
-        .as_array()
-        .expect("status result.filesystems must be an array after detach");
-    assert!(
-        remaining_filesystems.iter().any(|entry| {
-            entry["id"].as_str() == Some("acceptance")
-                && entry["state"].as_str() == Some("detached")
-        }),
-        "filesystem detach must retain the configured detached row: {remaining_filesystems:?}"
-    );
-
-    let removed = fixture.run(&["fs", "rm", "--name", "acceptance"]);
-    assert!(removed.status.success(), "{removed:?}");
-
-    // The daemon record is removed.
-    assert!(
-        !fixture.daemon_record_path().exists(),
-        "daemon.json must be removed after `omnifs down`"
-    );
-
-    // Daemon process is gone: the PID recorded in our fixture should no longer
-    // be alive. Poll briefly because the daemon receives SIGTERM and may take
-    // a moment to exit after the mount is gone.
-    if let Some(pid) = fixture.daemon_pid {
-        let exited = {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                let alive = Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .output()
-                    .is_ok_and(|o| o.status.success());
-                if !alive {
-                    break true;
-                }
-                if Instant::now() >= deadline {
-                    break false;
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-        };
-        assert!(
-            exited,
-            "daemon pid {pid} must have exited within 5s after `omnifs down`"
-        );
-    }
-}
-
-fn pid_is_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-// Recovery from a dead daemon.
-
-/// No daemon answers the control socket; `down` falls back to the daemon record
-/// to identify the backend, reclaims, and removes the record, without hanging.
-///
-/// Uses a synthetic record (dead pid, no live mount) so the test never strands a
-/// real NFS mount. The on-disk stale-mount sweep is exercised on Linux (FUSE),
-/// where a dead-server mount can be force-unmounted without root; macOS NFS
-/// cannot, so a crashed-daemon mount there clears on the kernel NFS timeout.
-#[test]
-fn scenario_7_dead_daemon_record_fallback() {
-    if !live_acceptance_enabled() {
-        eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run live-mount acceptance tests");
-        return;
-    }
-
-    let fixture = Fixture::new();
-    // A record for a daemon that is gone: a dead pid, and a mount point that is
-    // not actually mounted. No control listener answers, so `down` takes the
-    // record-fallback path and liveness-checks the dead pid before sweeping.
-    let record = format!(
-        r#"{{"version":4,"mount_revision":"0000000000000000000000000000000000000000","endpoint":{{"kind":"unix","path":"{}"}},"pid":2000000,"instance_id":"deadbeefdeadbeef","started_at":"2026-07-07T00:00:00Z","attach":[]}}"#,
-        fixture.home_path().join("control.sock").display(),
-    );
-    std::fs::write(fixture.daemon_record_path(), record).expect("write synthetic daemon record");
-
-    let out = fixture.run(&["down"]);
-    assert!(
-        out.status.success(),
-        "omnifs down must consume a stale daemon record and exit 0 (exit {})\nstdout: {}\nstderr: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    assert!(
-        !fixture.daemon_record_path().exists(),
-        "down must remove the daemon record after reclaiming a dead daemon"
-    );
-}
-
-// Revision application is atomic at the daemon lifecycle boundary.
-
-/// A changed valid revision restarts the daemon and advances the applied ref;
-/// malformed desired state fails before stopping it and leaves the ref alone.
-#[test]
-#[allow(clippy::too_many_lines)] // one end-to-end revision lifecycle scenario
-fn scenario_8_revision_restart_and_preflight_failure() {
-    if !live_acceptance_enabled() {
-        eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run live-mount acceptance tests");
-        return;
-    }
-    let wasm_dir = release_wasm_dir();
-    if !wasm_dir.join("test_provider.wasm").exists() {
-        eprintln!("skip: test_provider.wasm missing (run `just build providers`)");
-        return;
-    }
-
-    let mut fixture = Fixture::new();
-    fixture.write_test_spec();
-    let out = fixture.run(&["up"]);
-    assert!(
-        out.status.success(),
-        "initial up failed (exit {})\nstdout: {}\nstderr: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    fixture.update_pid_from_record();
-    let first = omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
-        .expect("read initial daemon record")
-        .expect("initial daemon record");
-
-    fixture.write_other_spec();
-    let out = fixture.run(&["apply", "--output", "json"]);
-    assert!(
-        out.status.success(),
-        "changed-revision apply failed (exit {})\nstdout: {}\nstderr: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    assert!(out.stderr.is_empty(), "structured apply leaked stderr");
-    let stdout = String::from_utf8(out.stdout).expect("structured apply stdout");
-    assert_eq!(stdout.lines().count(), 1, "structured apply result count");
-    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect("apply result envelope");
-    assert_eq!(envelope["command"], "up");
-    fixture.update_pid_from_record();
-    let second = omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
-        .expect("read changed daemon record")
-        .expect("changed daemon record");
-    assert_ne!(
-        first.pid, second.pid,
-        "changed revision must restart the daemon"
-    );
-    assert_ne!(
-        first.mount_revision, second.mount_revision,
-        "changed desired state must load a new revision"
-    );
-    let reused = fixture.run(&["up", "--output", "json"]);
-    assert!(
-        reused.status.success(),
-        "same-revision up failed (exit {})\nstdout: {}\nstderr: {}",
-        reused.status,
-        String::from_utf8_lossy(&reused.stdout),
-        String::from_utf8_lossy(&reused.stderr),
-    );
-    assert!(reused.stderr.is_empty(), "structured reuse leaked stderr");
-    let stdout = String::from_utf8(reused.stdout).expect("structured reuse stdout");
-    assert_eq!(stdout.lines().count(), 1, "structured reuse result count");
-    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect("reuse result envelope");
-    assert_eq!(envelope["command"], "up");
-    let repository = omnifs_workspace::mounts::Repository::open(fixture.mounts_dir())
-        .expect("open mount repository after apply");
-    assert_eq!(
-        repository.applied().expect("read applied ref"),
-        Some(second.mount_revision.clone()),
-        "readiness must advance refs/omnifs/applied to the running revision"
-    );
-    drop(repository);
-
-    let test_spec_path = fixture.mounts_dir().join("test.json");
-    let committed_spec = std::fs::read(&test_spec_path).expect("read committed test spec");
-
-    let projection_root = std::fs::read_dir(fixture.home_path().join("cache/projections"))
-        .expect("read projection roots")
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|root| {
-            let Ok(bytes) = std::fs::read(root.join("manifest.json")) else {
-                return false;
-            };
-            let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-                return false;
-            };
-            manifest["mount"] == "test"
-                && manifest["provider_id"] == fixture.test_provider_id.to_string()
-                && manifest["spec_digest"] == blake3::hash(&committed_spec).to_hex().to_string()
-        })
-        .expect("find current test projection");
-    let manifest_path = projection_root.join("manifest.json");
-    let manifest_bytes = std::fs::read(&manifest_path).expect("read current projection manifest");
-    std::fs::write(&manifest_path, b"{").expect("corrupt current projection manifest");
-    let rejected_manifest = fixture.run(&["up", "--offline"]);
-    assert!(
-        !rejected_manifest.status.success(),
-        "offline replacement must reject a corrupt reused projection manifest"
-    );
-    let surviving_manifest_failure =
-        omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
-            .expect("read daemon after manifest validation failure")
-            .expect("online daemon must remain recorded after manifest failure");
-    assert_eq!(surviving_manifest_failure.pid, second.pid);
-    assert_eq!(
-        surviving_manifest_failure.mount_revision,
-        second.mount_revision
-    );
-    assert!(!surviving_manifest_failure.offline);
-    assert_eq!(
-        omnifs_workspace::mounts::Repository::observe(fixture.mounts_dir())
-            .expect("observe after manifest validation failure")
-            .applied()
-            .expect("read applied after manifest validation failure"),
-        Some(second.mount_revision.clone())
-    );
-    std::fs::write(&manifest_path, manifest_bytes).expect("restore current projection manifest");
-
-    // An exact spec-byte change creates a new projection identity even when
-    // the parsed mount semantics are unchanged. The live daemon validates it
-    // before teardown, so a missing projection must leave the online daemon
-    // and applied ref untouched.
-    let mut unprojected_spec = committed_spec.clone();
-    unprojected_spec.extend_from_slice(b"\n");
-    std::fs::write(&test_spec_path, &unprojected_spec).expect("write unprojected spec bytes");
-    let repository = omnifs_workspace::mounts::Repository::open(fixture.mounts_dir())
-        .expect("commit unprojected spec bytes");
-    let unprojected_revision = repository
-        .head_revision()
-        .expect("read unprojected HEAD")
-        .expect("unprojected HEAD");
-    assert_ne!(unprojected_revision, second.mount_revision);
-    drop(repository);
-    let rejected = fixture.run(&["up", "--offline"]);
-    assert!(
-        !rejected.status.success(),
-        "offline replacement must reject an unprojected exact spec"
-    );
-    let surviving =
-        omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
-            .expect("read daemon after rejected offline replacement")
-            .expect("online daemon must remain recorded");
-    assert_eq!(surviving.pid, second.pid);
-    assert_eq!(surviving.mount_revision, second.mount_revision);
-    assert!(!surviving.offline);
-    assert_eq!(
-        omnifs_workspace::mounts::Repository::observe(fixture.mounts_dir())
-            .expect("observe after rejected offline replacement")
-            .applied()
-            .expect("read applied after rejected offline replacement"),
-        Some(second.mount_revision.clone())
-    );
-    std::fs::write(&test_spec_path, &committed_spec).expect("restore exact projected spec bytes");
-    let repository = omnifs_workspace::mounts::Repository::open(fixture.mounts_dir())
-        .expect("commit restored exact spec bytes");
-    drop(repository);
-
-    // Offline startup observes the committed HEAD while the mutable worktree
-    // is dirty. It does not need the provider artifact or credentials, does
-    // not move the applied ref, and opposite-mode reuse at the same revision
-    // restarts the daemon.
-    let mut dirty_spec = committed_spec.clone();
-    dirty_spec.extend_from_slice(b"\n");
-    let dirty_spec_snapshot = dirty_spec.clone();
-    std::fs::write(&test_spec_path, dirty_spec).expect("dirty mutable spec");
-    let repository = omnifs_workspace::mounts::Repository::observe(fixture.mounts_dir())
-        .expect("observe dirty mount repository");
-    let head_before_offline = repository
-        .head_revision()
-        .expect("read HEAD before offline startup")
-        .expect("committed HEAD before offline startup");
-    let applied_before_offline = repository.applied().expect("read applied before offline");
-    drop(repository);
-    let provider_path =
-        omnifs_workspace::provider::ProviderStore::new(fixture.home_path().join("providers"))
-            .artifact_path(&fixture.test_provider_id);
-    let provider_backup = fixture.home_path().join("provider-offline-backup.wasm");
-    std::fs::rename(&provider_path, &provider_backup).expect("hide provider artifact");
-    std::fs::write(fixture.home_path().join("credentials.json"), b"not-json")
-        .expect("write malformed credentials");
-    let offline = fixture.run(&["up", "--offline"]);
-    assert!(
-        offline.status.success(),
-        "offline up failed without provider artifact (exit {})\nstdout: {}\nstderr: {}",
-        offline.status,
-        String::from_utf8_lossy(&offline.stdout),
-        String::from_utf8_lossy(&offline.stderr),
-    );
-    fixture.update_pid_from_record();
-    let offline_record =
-        omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
-            .expect("read offline daemon record")
-            .expect("offline daemon record");
-    assert!(
-        offline_record.offline,
-        "record must identify cache-only mode"
-    );
-    assert_eq!(offline_record.mount_revision, head_before_offline);
-    let after_offline = omnifs_workspace::mounts::Repository::observe(fixture.mounts_dir())
-        .expect("observe repository after offline startup");
-    assert_eq!(
-        after_offline
-            .head_revision()
-            .expect("read HEAD after offline startup"),
-        Some(head_before_offline.clone())
-    );
-    assert_eq!(
-        std::fs::read(&test_spec_path).expect("read dirty spec after offline startup"),
-        dirty_spec_snapshot,
-        "offline startup must preserve dirty worktree bytes"
-    );
-    assert_eq!(
-        omnifs_workspace::mounts::Repository::observe(fixture.mounts_dir())
-            .expect("observe after offline startup")
-            .applied()
-            .expect("read applied after offline"),
-        applied_before_offline,
-        "offline startup must not advance refs/omnifs/applied"
-    );
-    let status = fixture.run(&["status", "--output", "json"]);
-    assert!(status.status.success(), "offline status failed");
-    let status_json: serde_json::Value =
-        serde_json::from_slice(&status.stdout).expect("decode offline status");
-    assert_eq!(status_json["result"]["daemon"]["status"]["offline"], true);
-    assert_eq!(
-        status_json["result"]["mounts"][0]["provider"]["state"],
-        "not_required"
-    );
-    assert_eq!(
-        status_json["result"]["mounts"][0]["serving"]["state"],
-        "offline"
-    );
-
-    std::fs::rename(&provider_backup, &provider_path).expect("restore provider artifact");
-    std::fs::remove_file(fixture.home_path().join("credentials.json"))
-        .expect("remove malformed credentials");
-    std::fs::write(&test_spec_path, committed_spec).expect("restore mutable spec");
-    let online = fixture.run(&["up"]);
-    assert!(online.status.success(), "online mode switch failed");
-    fixture.update_pid_from_record();
-    let online_record =
-        omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
-            .expect("read online daemon record")
-            .expect("online daemon record");
-    assert!(!online_record.offline);
-    assert_ne!(online_record.pid, offline_record.pid);
-    assert_eq!(online_record.mount_revision, head_before_offline);
-
-    std::fs::write(fixture.mounts_dir().join("malformed.json"), b"{")
-        .expect("write malformed desired state");
-    let out = fixture.run(&["up"]);
-    assert!(
-        !out.status.success(),
-        "malformed desired state must reject up"
-    );
-    let after_failure =
-        omnifs_workspace::daemon_record::DaemonRecord::read(&fixture.daemon_record_path())
-            .expect("read daemon record after rejected apply")
-            .expect("healthy daemon must remain recorded after rejected apply");
-    assert_eq!(
-        after_failure.pid, online_record.pid,
-        "preflight failure must not stop the healthy daemon"
-    );
-    assert_eq!(
-        after_failure.mount_revision, online_record.mount_revision,
-        "preflight failure must not change the running revision"
-    );
-    let alive = recorded_pid(fixture.home_path()).is_some_and(|pid| {
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .is_ok_and(|output| output.status.success())
-    });
-    assert!(
-        alive,
-        "preflight failure must leave the healthy daemon alive"
-    );
-    std::fs::remove_file(fixture.mounts_dir().join("malformed.json"))
-        .expect("remove malformed desired state");
-
-    let out = fixture.run(&["down"]);
-    assert!(
-        out.status.success(),
-        "omnifs down must exit 0 after scenario 8 (exit {})\nstdout: {}\nstderr: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
+        fixture
+            .home_path()
+            .join("client/filesystems/specs/kept.json")
+            .is_file()
     );
 }

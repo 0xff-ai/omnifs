@@ -1,11 +1,9 @@
 //! Control-plane acceptance: two daemons, two homes, one socket each.
 //!
-//! Proves the Unix-socket control plane and the daemon-owned daemon record end
-//! to end against real mounts: each daemon binds its own workspace's
-//! `control.sock` and writes its own `daemon.json`; the CLI only ever dials the
-//! endpoint it read from its own workspace's record, so two daemons never
-//! address each other and a fresh home with no record never dials blind. A
-//! `SIGKILL`ed daemon leaves a stale record, which the next command cleans up.
+//! Proves the fixed Unix-socket control plane and narrow process identity end
+//! to end: each daemon binds its own profile's `control.sock`; the CLI resolves
+//! only that socket, so two daemons never address each other. A `SIGKILL`ed
+//! daemon leaves a stale process identity, which `omnifs doctor` cleans up.
 //!
 //! Gated on `OMNIFS_ACCEPTANCE_LIVE` (it serves real mounts). Holds the
 //! cross-process NFS serialization lock for the whole test.
@@ -19,7 +17,7 @@ use std::time::{Duration, Instant};
 use omnifs_itest::live::{self, hermetic_home, omnifs_bin, platform_can_mount};
 use tempfile::TempDir;
 
-/// A host-native daemon serving only its workspace-local control socket, torn
+/// A host-native daemon serving only its profile-local control socket, torn
 /// down on drop.
 struct Daemon {
     child: Child,
@@ -34,8 +32,12 @@ impl Drop for Daemon {
 }
 
 impl Daemon {
-    fn record_path(&self) -> PathBuf {
-        self.home.path().join("daemon.json")
+    fn identity_path(&self) -> PathBuf {
+        self.home.path().join("process.json")
+    }
+
+    fn control_socket(&self) -> PathBuf {
+        self.home.path().join("control.sock")
     }
 
     fn pid(&self) -> u32 {
@@ -43,8 +45,7 @@ impl Daemon {
     }
 
     /// Spawn a host-native daemon for a fresh hermetic home. The daemon binds
-    /// its fixed local filesystem socket but launches no runner, so its control
-    /// API is reachable only through its own workspace's record.
+    /// its fixed local filesystem socket but launches no runner.
     fn spawn() -> Option<Self> {
         let hermetic = hermetic_home();
         let child = Command::new(omnifs_bin())
@@ -65,24 +66,24 @@ impl Daemon {
         })
     }
 
-    /// Wait for the daemon to publish its record. This fixture intentionally
+    /// Wait for the daemon to answer on its fixed socket. This fixture intentionally
     /// starts the pure namespace daemon without a filesystem: the control-plane
     /// assertion is socket ownership, not a filesystem mount.
     fn wait_serving(&mut self) -> Option<()> {
-        let record = self.record_path();
+        let control_socket = self.control_socket();
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if record.exists() {
+            if live::control_ready(&control_socket) {
                 return Some(());
             }
             if let Ok(Some(status)) = self.child.try_wait() {
-                eprintln!("skip: daemon exited ({status}) before publishing its record");
+                eprintln!("skip: daemon exited ({status}) before control readiness");
                 return None;
             }
             if Instant::now() >= deadline {
                 eprintln!(
-                    "skip: daemon never published {} within 30s",
-                    record.display()
+                    "skip: daemon never answered on {} within 30s",
+                    control_socket.display()
                 );
                 return None;
             }
@@ -92,7 +93,7 @@ impl Daemon {
 }
 
 /// Run `omnifs status --output json` against `home`, resolving through the
-/// workspace's local control socket.
+/// profile's local control socket.
 fn run_status(home: &std::path::Path) -> Output {
     Command::new(omnifs_bin())
         .args(["status", "--output", "json"])
@@ -100,6 +101,15 @@ fn run_status(home: &std::path::Path) -> Output {
         .env("RUST_LOG", "warn")
         .output()
         .expect("spawn omnifs status")
+}
+
+fn run_doctor(home: &std::path::Path) -> Output {
+    Command::new(omnifs_bin())
+        .args(["doctor", "--yes"])
+        .env("OMNIFS_HOME", home)
+        .env("RUST_LOG", "warn")
+        .output()
+        .expect("spawn omnifs doctor")
 }
 
 fn exit_code(output: &Output) -> i32 {
@@ -118,7 +128,7 @@ fn status_json(output: &Output) -> serde_json::Value {
 
 #[test]
 #[allow(clippy::too_many_lines)] // linear end-to-end acceptance scenario
-fn two_daemons_two_homes_resolve_through_their_own_records() {
+fn two_daemons_two_homes_resolve_through_their_own_sockets() {
     if std::env::var_os("OMNIFS_ACCEPTANCE_LIVE").is_none() {
         eprintln!("skip: set OMNIFS_ACCEPTANCE_LIVE=1 to run live control-plane acceptance");
         return;
@@ -154,7 +164,9 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
     let json_a = status_json(&out_a);
     let result_a = json_a["result"].as_object().expect("status result");
     assert_eq!(result_a["daemon"]["probe"]["state"], "responding");
-    let pid_a = result_a["daemon"]["status"]["pid"].as_u64().expect("A pid");
+    let pid_a = result_a["daemon"]["status"]["info"]["pid"]
+        .as_u64()
+        .expect("A pid");
     assert_eq!(
         pid_a,
         u64::from(daemon_a.pid()),
@@ -165,16 +177,12 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
             .as_array()
             .is_some_and(Vec::is_empty)
     );
-    assert!(
-        result_a["mounts"]
-            .as_array()
-            .is_some_and(|mounts| mounts.len() >= 2)
-    );
+    assert!(result_a["mounts"].as_array().is_some_and(Vec::is_empty));
 
     let out_b = run_status(daemon_b.home.path());
     assert_eq!(exit_code(&out_b), 0, "status for home B must exit 0");
     let json_b = status_json(&out_b);
-    let pid_b = json_b["result"]["daemon"]["status"]["pid"]
+    let pid_b = json_b["result"]["daemon"]["status"]["info"]["pid"]
         .as_u64()
         .expect("B pid");
     assert_eq!(
@@ -190,49 +198,41 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
 
     assert_ne!(pid_a, pid_b, "the two daemons must be distinct processes");
 
-    // A fresh home with no daemon record never dials a default address.
+    // A fresh home with no control socket never dials another profile.
     //
     // `omnifs status` is informational and exits 0 whether or not a daemon is
-    // running (locked by the CLI lifecycle suite's scenario_1). The property
-    // that matters here is that a home with no record reports `not_running` and
-    // never dials A or B: with no record and no override, resolution short
-    // circuits to absent, so it can only ever report its own (missing) daemon.
+    // running. The property that matters here is that a fresh profile reports
+    // stopped and never dials A or B.
     let fresh = hermetic_home();
     let out_fresh = run_status(fresh.home.path());
     assert_eq!(
         exit_code(&out_fresh),
         0,
-        "status for a home with no record must exit 0 (informational)\nstderr: {}",
+        "status for a home with no socket must exit 0 (informational)\nstderr: {}",
         String::from_utf8_lossy(&out_fresh.stderr)
     );
     assert_eq!(
         status_json(&out_fresh)["result"]["daemon"]["probe"]["state"],
         "stopped",
-        "a home with no record must report not_running, never a foreign daemon"
+        "a home with no socket must report stopped, never a foreign daemon"
     );
 
-    // After home A's daemon is killed, its next command cleans the stale
-    // record without disturbing home B.
-    let pid_a = daemon_a.pid();
-    let _ = Command::new("kill")
-        .args(["-9", &pid_a.to_string()])
-        .output();
-    // Wait for the kernel to reap it so its socket stops accepting connections.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        let alive = Command::new("kill")
-            .args(["-0", &pid_a.to_string()])
-            .output()
-            .is_ok_and(|o| o.status.success());
-        if !alive {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    // After home A's daemon is killed, doctor cleans the stale process
+    // identity without disturbing home B.
+    daemon_a.child.kill().expect("kill daemon A");
+    daemon_a.child.wait().expect("reap daemon A");
 
-    // A's record still points at its now-dead socket. Resolving through it, the
-    // status probe hits a refused socket, removes the stale record, and reports
-    // the daemon as not running.
+    // A's stale identity remains beside its now-dead socket. Doctor removes it
+    // only after exact process proof fails.
+    let doctor_dead = run_doctor(daemon_a.home.path());
+    assert!(
+        !daemon_a.identity_path().exists(),
+        "doctor must clean the stale process identity\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&doctor_dead.stdout),
+        String::from_utf8_lossy(&doctor_dead.stderr)
+    );
+
+    // Status is then informational and reports stopped.
     let out_dead = run_status(daemon_a.home.path());
     assert_eq!(
         exit_code(&out_dead),
@@ -245,10 +245,6 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         "stopped",
         "the killed home A must report not_running"
     );
-    assert!(
-        !daemon_a.record_path().exists(),
-        "the stale daemon record must be cleaned up after dialing a refused socket"
-    );
 
     // Home B still answers correctly.
     let out_b2 = run_status(daemon_b.home.path());
@@ -258,23 +254,24 @@ fn two_daemons_two_homes_resolve_through_their_own_records() {
         "home B must still answer after A is gone"
     );
     assert_eq!(
-        status_json(&out_b2)["result"]["daemon"]["status"]["pid"].as_u64(),
+        status_json(&out_b2)["result"]["daemon"]["status"]["info"]["pid"].as_u64(),
         Some(u64::from(daemon_b.pid())),
     );
 
-    // A graceful SIGTERM removes home B's daemon record.
+    // A graceful SIGTERM removes home B's process identity.
     let pid_b = daemon_b.pid();
     let _ = Command::new("kill")
         .args(["-TERM", &pid_b.to_string()])
         .output();
-    let record_b = daemon_b.record_path();
+    daemon_b.child.wait().expect("reap daemon B");
+    let identity_b = daemon_b.identity_path();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while record_b.exists() && Instant::now() < deadline {
+    while identity_b.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(
-        !record_b.exists(),
-        "a gracefully stopped daemon must remove its daemon record"
+        !identity_b.exists(),
+        "a gracefully stopped daemon must remove its process identity"
     );
 
     drop(daemon_a);

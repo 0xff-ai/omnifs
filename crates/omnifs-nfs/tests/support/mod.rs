@@ -1,7 +1,7 @@
 use omnifs_core::path::Path as NamespacePath;
 use omnifs_engine::{
-    Attrs, DirCursor, DirPage, EventStream, LookupAnswer, MountTable, Namespace, NsError, NsEvent,
-    ReadAnswer, TreeNamespace,
+    Attrs, DirCursor, DirPage, EngineNamespace, EventStream, LookupAnswer, MountTable, Namespace,
+    NsError, NsEvent, ReadAnswer,
 };
 use omnifs_nfs::Export;
 use std::future::Future;
@@ -23,7 +23,7 @@ pub struct TestExport {
     pub export: Arc<Export>,
     pub runtime: Runtime,
     pub registry: Arc<MountTable>,
-    pub namespace: Arc<TreeNamespace>,
+    pub namespace: Arc<EngineNamespace>,
     pub events: broadcast::Sender<NsEvent>,
     _config_dir: TempDir,
     _cache_dir: TempDir,
@@ -31,7 +31,7 @@ pub struct TestExport {
 }
 
 struct EventNamespace {
-    inner: Arc<TreeNamespace>,
+    inner: Arc<EngineNamespace>,
     events: broadcast::Sender<NsEvent>,
 }
 
@@ -97,10 +97,7 @@ pub fn test_export_with_mount(mount: &str) -> TestExport {
     let cache_dir = tempfile::tempdir().expect("cache dir");
     let clone_dir = tempfile::tempdir().expect("clone dir");
     let mounts_dir = config_dir.path().join("mounts");
-    let providers_dir = config_dir.path().join("providers");
     std::fs::create_dir_all(&mounts_dir).expect("mounts dir");
-    std::fs::create_dir_all(&providers_dir).expect("providers dir");
-    install_test_provider(&providers_dir);
     let reference = serde_json::to_string(&test_provider_reference()).expect("provider ref json");
     let provider_config = format!(
         r#"{{
@@ -114,15 +111,12 @@ pub fn test_export_with_mount(mount: &str) -> TestExport {
     let runtime = Runtime::new().expect("tokio runtime");
     let registry = load_registry_from_mount_dir(
         cache_dir.path(),
-        config_dir.path(),
-        &providers_dir,
-        &config_dir.path().join("credentials.json"),
         clone_dir.path(),
         &mounts_dir,
         runtime.handle(),
     );
     let registry = Arc::new(registry);
-    let namespace = TreeNamespace::online(Arc::clone(&registry), runtime.handle().clone());
+    let namespace = EngineNamespace::online(Arc::clone(&registry), runtime.handle().clone());
     let (events, _) = broadcast::channel(64);
     let mut inner_events = namespace.subscribe();
     let forwarded_events = events.clone();
@@ -149,20 +143,11 @@ pub fn test_export_with_mount(mount: &str) -> TestExport {
 }
 
 /// The pinned reference for the test provider, derived from its built bytes.
-pub fn test_provider_reference() -> omnifs_workspace::ids::ProviderRef {
-    use omnifs_workspace::provider::Artifact;
+pub fn test_provider_reference() -> omnifs_core::ProviderRef {
+    use omnifs_provider::Artifact;
     Artifact::from_file(provider_wasm_path("test_provider.wasm"))
         .expect("parse test provider")
         .reference()
-}
-
-/// Install the test provider into the content-addressed store at `providers_dir`.
-fn install_test_provider(providers_dir: &Path) {
-    use omnifs_workspace::provider::{Artifact, ProviderStore};
-    let artifact =
-        Artifact::from_file(provider_wasm_path("test_provider.wasm")).expect("parse test provider");
-    let store = ProviderStore::new(providers_dir);
-    store.retain(&artifact).expect("retain test provider");
 }
 
 pub fn provider_wasm_path(plugin_name: &str) -> PathBuf {

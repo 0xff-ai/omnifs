@@ -5,9 +5,8 @@ installs the native `omnifs` CLI and daemon binary for your host platform.
 
 ```bash
 npm install -g @0xff-ai/omnifs
-omnifs mount add github
-omnifs up
-omnifs shell
+omnifs setup --providers github
+omnifs status
 ```
 
 The npm install step does not start the daemon or fetch assets for an optional

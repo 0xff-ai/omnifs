@@ -144,16 +144,16 @@ pub use config_resource::{HostFile, HostSocket};
 // tooling. The wasm guest emits its metadata as compile-time JSON bytes and
 // does not depend on these types.
 #[cfg(not(target_arch = "wasm32"))]
-pub use omnifs_workspace::authn::{
+pub use omnifs_auth::{
     AmbientKind, AmbientSource, DevicePollCompat, OauthScheme, SchemeGuidance, StaticTokenScheme,
     TokenValidation,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use omnifs_workspace::provider::{
+pub use omnifs_provider::{
     AccessNeed, LimitDeclarations, PreopenMode, PreopenedPath, ResourceLimit,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use omnifs_workspace::provider::{
+pub use omnifs_provider::{
     ConfigField, ConfigMetadata, ConfigType, HostResourceBinding, ProviderAuthManifest,
     ProviderManifest,
 };

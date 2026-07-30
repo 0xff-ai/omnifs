@@ -96,7 +96,7 @@ impl From<&NsError> for Status {
                 _ => Self::Io,
             },
             NsRetryClass::Terminal => match error {
-                NsError::Permission => Self::Access,
+                NsError::AuthRequired | NsError::Permission => Self::Access,
                 NsError::Invalid => Self::Invalid,
                 _ => Self::Io,
             },
@@ -432,5 +432,10 @@ mod tests {
     fn too_large_maps_to_nfs_resource() {
         assert_eq!(Status::from(&NsError::TooLarge), Status::Resource);
         assert_eq!(Status::from(&NsError::OfflineMiss), Status::Io);
+    }
+
+    #[test]
+    fn auth_required_maps_to_access_denied() {
+        assert_eq!(Status::from(&NsError::AuthRequired), Status::Access);
     }
 }

@@ -26,20 +26,31 @@ readme = "README.md"
 [workspace.dependencies]
 omnifs-api = { version = "0.2.1", path = "crates/omnifs-api" }
 omnifs-auth = { version = "0.2.1", path = "crates/omnifs-auth" }
+omnifs-bootstrap = { version = "0.2.1", path = "crates/omnifs-bootstrap" }
 omnifs-engine = { version = "0.2.1", path = "crates/omnifs-engine", default-features = false }
 omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse", default-features = false }
+omnifs-inspector = { version = "0.2.1", path = "crates/omnifs-inspector" }
 omnifs-libkrun = { version = "0.2.1", path = "crates/omnifs-libkrun" }
-omnifs-workspace = { version = "0.2.1", path = "crates/omnifs-workspace" }
 omnifs-core = { version = "0.2.1", path = "crates/omnifs-core" }
+omnifs-daemon = { version = "0.2.1", path = "crates/omnifs-daemon" }
 omnifs-mtab = { version = "0.2.1", path = "crates/omnifs-mtab" }
 omnifs-vfs = { version = "0.2.1", path = "crates/omnifs-vfs", default-features = false }
 omnifs-nfs = { version = "0.2.1", path = "crates/omnifs-nfs", default-features = false }
+omnifs-provider = { version = "0.2.1", path = "crates/omnifs-provider" }
+omnifs-state = { version = "0.2.1", path = "crates/omnifs-state" }
 omnifs-thin = { version = "0.2.1", path = "crates/omnifs-thin", default-features = false }
 omnifs-sdk = { version = "0.2.1", path = "crates/omnifs-sdk" }
 omnifs-sdk-macros = { version = "0.2.1", path = "crates/omnifs-sdk-macros" }
 omnifs-wit = { version = "0.2.1", path = "crates/omnifs-wit" }
 wasmtime = { version = "46.0.1", default-features = false, features = ["async", "cache", "component-model", "component-model-async", "cranelift", "runtime"] }
 tokio = { version = "1", features = ["full"] }
+tonic = { version = "0.14.2", features = ["transport"] }
+prost = "0.14.1"
+tonic-prost = "0.14.2"
+bytes = "1"
+tokio-stream = { version = "0.1", features = ["net"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["limit", "util"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls"] }
 blake3 = "1"
 hex = "0.4"
@@ -69,16 +80,24 @@ strum = { version = "0.27", features = ["derive"] }
 trybuild = "1"
 percent-encoding = "2"
 url = "2"
+zeroize = { version = "1", features = ["derive"] }
 time = { version = "0.3", default-features = false, features = ["std", "parsing"] }
 quick-xml = { version = "0.38", features = ["serialize", "overlapped-lists"] }
 tar = { version = "0.4", default-features = false }
 zstd = { version = "0.13.3", default-features = false }
 sha2 = "0.10"
 fs2 = "0.4"
+atomic-write-file = "0.3"
 oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
 webbrowser = "1"
 arc-swap = "1"
 async_singleflight = "0.6"
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+libsqlite3-sys = "=0.30.1"
+rusqlite = { version = "=0.32.1", default-features = false, features = ["bundled"] }
+tonic-prost-build = "0.14.2"
+prost-build = "0.14.1"
+protoc-bin-vendored = "3.2.0"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

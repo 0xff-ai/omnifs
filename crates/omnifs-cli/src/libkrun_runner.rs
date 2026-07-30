@@ -3,11 +3,11 @@
 //! container, attached to the host-native daemon's namespace over vsock
 //! instead of TCP.
 //!
-//! State lives under `filesystems/runtime/<id>/libkrun/`: a persistent
+//! State lives under `client/filesystems/runtime/<id>/libkrun/`: a persistent
 //! per-filesystem ed25519 keypair (survives across launches and authenticates guest ssh access
 //! independent of any one VM instance) plus per-launch artifacts (a writable
 //! root disk, strict helper record, seed ISO, the helper-owned attach bridge, the readiness,
-//! SSH, and control sockets, and the serial log). Every path lives under the workspace config dir,
+//! SSH, and control sockets, and the serial log). Every path lives under the CLI client dir,
 //! never a system temp dir, so `omnifs down`/`fs detach` can find and
 //! remove exactly what this runner owns. The resolved guest image is an
 //! immutable base artifact and is only the source for that launch-local root.
@@ -50,15 +50,20 @@ use omnifs_libkrun::{
 };
 use tokio::io::AsyncReadExt as _;
 
+use crate::client_fs_state::ClientConfig;
 use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
 #[cfg(test)]
 use crate::process::is_alive as process_alive;
 use crate::ui::output::Output;
-use omnifs_workspace::config::Config;
 
 const SSH_KEY_NAME: &str = "id_ed25519";
 const ROOT_RAW_PART_PREFIX: &str = "root.raw.part.";
 const SEED_STAGING_NAME: &str = "seed-staging";
+
+/// How long a launch waits for the guest readiness beacon. Generous relative
+/// to the host and Docker drivers' launch timeouts because it covers a full
+/// microVM boot, not just a process or container start.
+const LAUNCH_READY_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Guest vsock port the daemon's attach listener is proxied onto.
 const ATTACH_VSOCK_PORT: u32 = 1024;
@@ -89,8 +94,9 @@ const SEED_CONF_NAME: &str = "omnifs-seed.conf";
 /// The exact seed keys a launch ever writes. The lockdown audit
 /// ([`audit_seed_staging`]) asserts the staging dir carries exactly this set
 /// before it is burned into the ISO.
-const SEED_CONF_KEYS: [&str; 4] = [
+const SEED_CONF_KEYS: [&str; 5] = [
     "OMNIFS_ATTACH_ADDR",
+    "OMNIFS_CLIENT_OWNER",
     "OMNIFS_FS_ID",
     "OMNIFS_READY_VSOCK_PORT",
     "OMNIFS_SSH_PUBKEY",
@@ -101,19 +107,6 @@ const SEED_CONF_KEYS: [&str; 4] = [
 /// CLI and daemon do not share a path-validation crate, and this check is
 /// small enough that a shared abstraction would cost more than it saves).
 const UDS_PATH_BYTE_LIMIT: usize = 100;
-
-fn new_instance_id() -> Result<String> {
-    use std::fmt::Write as _;
-
-    let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes).context("generate libkrun helper instance id")?;
-    Ok(bytes
-        .iter()
-        .fold(String::with_capacity(32), |mut id, byte| {
-            let _ = write!(id, "{byte:02x}");
-            id
-        }))
-}
 
 fn check_uds_path_length(path: &Path) -> Result<()> {
     use std::os::unix::ffi::OsStrExt as _;
@@ -156,7 +149,26 @@ pub(crate) fn ensure_socat_available() -> Result<()> {
     }
 }
 
-/// The libkrun microVM filesystem runner. Durable workspace state and explicit
+/// One filesystem id directory found while [`LibkrunRunner::owned`] scans a
+/// client's libkrun runtime root.
+#[derive(Debug)]
+pub(crate) enum LibkrunCandidate {
+    /// A directory with a `libkrun` state dir, whose helper record
+    /// confirmation either succeeded (present or absent) or failed.
+    Runner {
+        id: fs::Id,
+        state_dir: PathBuf,
+        confirmed: Result<Option<HelperRecord>, String>,
+    },
+    /// A directory entry that could not be identified as a valid filesystem
+    /// id, or a runtime root that could not be scanned at all.
+    Invalid {
+        target: Option<String>,
+        error: String,
+    },
+}
+
+/// The libkrun microVM filesystem runner. Durable client state and explicit
 /// teardown live here; one launch's resources live in [`LibkrunLaunchLease`].
 pub(crate) struct LibkrunRunner {
     dir: PathBuf,
@@ -252,7 +264,7 @@ impl LibkrunRunner {
             .collect()
     }
 
-    /// Generate the per-workspace ed25519 keypair if absent, returning the
+    /// Generate the per-profile ed25519 keypair if absent, returning the
     /// trimmed public key line to embed in the seed. Persistent across
     /// launches (unlike the seed, which is per-launch): it authenticates
     /// guest ssh access independent of any one VM instance.
@@ -285,7 +297,12 @@ impl LibkrunRunner {
     /// staging dir against the exact expected key set, then hand it to
     /// `hdiutil makehybrid`. Array args throughout: nothing here is
     /// interpolated into a shell.
-    fn write_seed_iso(&self, spec: &fs::Spec, ssh_pubkey: &str) -> Result<()> {
+    fn write_seed_iso(
+        &self,
+        client_owner: omnifs_core::ClientOwnerId,
+        spec: &fs::Spec,
+        ssh_pubkey: &str,
+    ) -> Result<()> {
         let staging = self.seed_staging();
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging)
@@ -294,6 +311,7 @@ impl LibkrunRunner {
         let conf_path = staging.join(SEED_CONF_NAME);
         let conf = format!(
             "OMNIFS_ATTACH_ADDR=vsock:{ATTACH_VSOCK_PORT}\n\
+             OMNIFS_CLIENT_OWNER={client_owner}\n\
              OMNIFS_FS_ID={}\n\
              OMNIFS_READY_VSOCK_PORT={READY_VSOCK_PORT}\n\
              OMNIFS_SSH_PUBKEY={ssh_pubkey}\n",
@@ -404,7 +422,7 @@ fn audit_seed_staging(staging: &Path) -> Result<(), String> {
 /// by the OCI/cache module; this function only chooses the channel-specific
 /// input and validates the result.
 async fn resolve_guest_image(
-    config: &Config,
+    config: &ClientConfig,
     guest_image_cache: &Path,
     output: Output,
 ) -> Result<PathBuf> {
@@ -441,24 +459,13 @@ struct LibkrunLaunchLease<'a> {
     runner: &'a LibkrunRunner,
     daemon_attach_socket: PathBuf,
     guest_image: PathBuf,
-    mount: Option<String>,
-    timeout: Duration,
     child: Option<std::process::Child>,
     ready_listener: Option<tokio::net::UnixListener>,
     instance_id: Option<String>,
+    client_owner: Option<omnifs_core::ClientOwnerId>,
     spec: Option<fs::Spec>,
     expected_record: Option<HelperRecord>,
     replaced: bool,
-}
-
-pub(crate) struct LibkrunLaunchRequest<'a> {
-    pub(crate) spec: &'a fs::Spec,
-    pub(crate) daemon_attach_socket: &'a Path,
-    pub(crate) config: &'a Config,
-    pub(crate) guest_image_cache: &'a Path,
-    pub(crate) output: Output,
-    pub(crate) mount: Option<&'a str>,
-    pub(crate) timeout: Duration,
 }
 
 impl<'a> LibkrunLaunchLease<'a> {
@@ -467,46 +474,42 @@ impl<'a> LibkrunLaunchLease<'a> {
             runner,
             daemon_attach_socket: daemon_attach_socket.to_path_buf(),
             guest_image,
-            mount: None,
-            timeout: Duration::ZERO,
             child: None,
             ready_listener: None,
             instance_id: None,
+            client_owner: None,
             spec: None,
             expected_record: None,
             replaced: false,
         }
     }
 
-    fn for_teardown(runner: &'a LibkrunRunner) -> Self {
+    fn for_confirmed_teardown(runner: &'a LibkrunRunner, expected_record: HelperRecord) -> Self {
         Self {
             runner,
             daemon_attach_socket: PathBuf::new(),
             guest_image: PathBuf::new(),
-            mount: None,
-            timeout: Duration::ZERO,
             child: None,
             ready_listener: None,
             instance_id: None,
+            client_owner: None,
             spec: None,
-            expected_record: None,
+            expected_record: Some(expected_record),
             replaced: true,
         }
     }
 
-    fn for_confirmed_teardown(runner: &'a LibkrunRunner, expected_record: HelperRecord) -> Self {
-        let mut lease = Self::for_teardown(runner);
-        lease.expected_record = Some(expected_record);
-        lease
-    }
-
-    async fn prepare(runner: &'a LibkrunRunner, request: LibkrunLaunchRequest<'_>) -> Result<Self> {
+    async fn prepare(
+        runner: &'a LibkrunRunner,
+        ctx: &crate::filesystem_driver::LaunchContext<'_>,
+    ) -> Result<Self> {
+        let config = ctx.client_state.config()?;
+        let guest_image_cache = ctx.client_state.guest_image_cache();
         let guest_image =
-            resolve_guest_image(request.config, request.guest_image_cache, request.output).await?;
-        let mut lease = Self::new(runner, request.daemon_attach_socket, guest_image);
-        lease.spec = Some(request.spec.clone());
-        lease.mount = request.mount.map(str::to_owned);
-        lease.timeout = request.timeout;
+            resolve_guest_image(&config, &guest_image_cache, ctx.output.clone()).await?;
+        let mut lease = Self::new(runner, ctx.attach_unix()?, guest_image);
+        lease.client_owner = Some(ctx.client_owner);
+        lease.spec = Some(ctx.spec.clone());
         Ok(lease)
     }
 
@@ -559,12 +562,16 @@ impl<'a> LibkrunLaunchLease<'a> {
             .as_ref()
             .context("libkrun launch has no filesystem identity")?
             .clone();
-        self.runner.write_seed_iso(&spec, &ssh_pubkey)?;
+        let client_owner = self
+            .client_owner
+            .context("libkrun launch has no client owner identity")?;
+        self.runner
+            .write_seed_iso(client_owner, &spec, &ssh_pubkey)?;
         self.ready_listener = Some(self.bind_ready_listener()?);
         let _ = std::fs::remove_file(self.runner.ssh_socket());
         let _ = std::fs::remove_file(self.runner.control_socket());
 
-        let instance_id = new_instance_id()?;
+        let instance_id = crate::process::new_instance_id("libkrun helper")?;
         let helper_config = omnifs_libkrun::Config::omnifs(
             dir,
             &self.daemon_attach_socket,
@@ -627,8 +634,7 @@ impl<'a> LibkrunLaunchLease<'a> {
         );
         self.runner.confirm_record(&record)?;
 
-        let mount = self.mount.clone();
-        self.wait_for_ready(mount.as_deref(), self.timeout).await?;
+        self.wait_for_ready().await?;
         attached.await
     }
 
@@ -689,38 +695,47 @@ impl<'a> LibkrunLaunchLease<'a> {
     }
 
     async fn wait_for_helper_record(&mut self) -> Result<HelperRecord> {
-        let pidfile = self.runner.pidfile();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Ok(Some(record)) = self.runner.read_helper_record()
-                && self.instance_id.as_deref() == Some(record.instance_id.as_str())
-            {
-                return Ok(record);
-            }
-            if let Some(status) = self
-                .child
-                .as_mut()
-                .context("libkrun helper identity was lost before helper-record publication")?
-                .try_wait()
-                .context("poll libkrun helper before helper-record publication")?
-            {
-                anyhow::bail!(
-                    "omnifs-libkrun exited with {status} before publishing {};\n{}",
-                    pidfile.display(),
-                    self.runner.diagnostic_tail()
-                );
-            }
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline,
+        let ready = crate::process::poll_until_mut(
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+            self,
+            |lease| {
+                Box::pin(async move {
+                    if let Ok(Some(record)) = lease.runner.read_helper_record()
+                        && lease.instance_id.as_deref() == Some(record.instance_id.as_str())
+                    {
+                        return Ok(Some(record));
+                    }
+                    if let Some(status) = lease
+                        .child
+                        .as_mut()
+                        .context(
+                            "libkrun helper identity was lost before helper-record publication",
+                        )?
+                        .try_wait()
+                        .context("poll libkrun helper before helper-record publication")?
+                    {
+                        anyhow::bail!(
+                            "omnifs-libkrun exited with {status} before publishing {};\n{}",
+                            lease.runner.pidfile().display(),
+                            lease.runner.diagnostic_tail()
+                        );
+                    }
+                    Ok(None)
+                })
+            },
+        )
+        .await?;
+        ready.with_context(|| {
+            format!(
                 "omnifs-libkrun did not publish {} within 5s;\n{}",
-                pidfile.display(),
+                self.runner.pidfile().display(),
                 self.runner.diagnostic_tail()
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+            )
+        })
     }
 
-    async fn wait_for_ready(&mut self, mount: Option<&str>, timeout: Duration) -> Result<()> {
+    async fn wait_for_ready(&mut self) -> Result<()> {
         let listener = self
             .ready_listener
             .take()
@@ -753,16 +768,13 @@ impl<'a> LibkrunLaunchLease<'a> {
                 }
             }
         };
-        if let Ok(result) = tokio::time::timeout(timeout, wait).await {
+        if let Ok(result) = tokio::time::timeout(LAUNCH_READY_TIMEOUT, wait).await {
             result.context("read the libkrun readiness beacon")
         } else {
-            let path = mount.map_or_else(
-                || fs::GUEST_LOCATION.to_owned(),
-                |name| format!("{}/{name}", fs::GUEST_LOCATION),
-            );
             anyhow::bail!(
-                "{path} did not appear inside the filesystem within {}s",
-                timeout.as_secs()
+                "{} did not appear inside the filesystem within {}s",
+                fs::GUEST_LOCATION,
+                LAUNCH_READY_TIMEOUT.as_secs()
             )
         }
     }
@@ -822,22 +834,21 @@ impl<'a> LibkrunLaunchLease<'a> {
     }
 
     async fn wait_for_owned_child_exit(&mut self, timeout: Duration) -> Result<bool> {
-        let until = tokio::time::Instant::now() + timeout;
-        loop {
-            let exited = self
-                .child
-                .as_mut()
-                .context("libkrun child identity was lost while waiting for exit")?
-                .try_wait()?
-                .is_some();
-            if exited {
-                return Ok(true);
-            }
-            if tokio::time::Instant::now() >= until {
-                return Ok(false);
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        Ok(
+            crate::process::poll_until_mut(timeout, Duration::from_millis(100), self, |lease| {
+                Box::pin(async move {
+                    let exited = lease
+                        .child
+                        .as_mut()
+                        .context("libkrun child identity was lost while waiting for exit")?
+                        .try_wait()?
+                        .is_some();
+                    Ok(exited.then_some(()))
+                })
+            })
+            .await?
+            .is_some(),
+        )
     }
 
     async fn wait_for_detached_exit(
@@ -845,25 +856,24 @@ impl<'a> LibkrunLaunchLease<'a> {
         expected: &HelperRecord,
         timeout: Duration,
     ) -> Result<()> {
-        let until = tokio::time::Instant::now() + timeout;
-        loop {
+        crate::process::poll_until(timeout, Duration::from_millis(100), || async {
             match self.runner.read_helper_record()? {
-                None => return Ok(()),
+                None => Ok(Some(())),
                 Some(current) if current != *expected => {
                     anyhow::bail!(
                         "libkrun helper identity changed while waiting for shutdown; recovery artifacts were preserved"
                     );
                 },
-                Some(_) => {},
+                Some(_) => Ok(None),
             }
-            if tokio::time::Instant::now() >= until {
-                anyhow::bail!(
-                    "identity-matched libkrun helper did not finish shutdown within {}s; recovery artifacts were preserved",
-                    timeout.as_secs()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        })
+        .await?
+        .with_context(|| {
+            format!(
+                "identity-matched libkrun helper did not finish shutdown within {}s; recovery artifacts were preserved",
+                timeout.as_secs()
+            )
+        })
     }
 
     /// Remove only launch artifacts. The daemon attach listener, verified
@@ -892,10 +902,17 @@ impl<'a> LibkrunLaunchLease<'a> {
 impl LibkrunRunner {
     pub(crate) async fn launch(
         &self,
-        request: LibkrunLaunchRequest<'_>,
-        attached: impl Future<Output = Result<()>>,
+        ctx: &crate::filesystem_driver::LaunchContext<'_>,
     ) -> Result<()> {
-        LibkrunLaunchLease::prepare(self, request)
+        let attached = async {
+            anyhow::ensure!(
+                crate::commands::fs::wait_for_attachment(ctx.spec).await,
+                "filesystem `{}` did not attach to the daemon",
+                ctx.spec.id()
+            );
+            Ok(())
+        };
+        LibkrunLaunchLease::prepare(self, ctx)
             .await?
             .run(attached)
             .await
@@ -914,7 +931,9 @@ impl LibkrunRunner {
         Ok(())
     }
 
-    pub(crate) fn confirmed_record(&self) -> Result<Option<HelperRecord>> {
+    /// Prove a live, identity-matched helper, matching the host and Docker
+    /// drivers' `confirmed`.
+    pub(crate) fn confirmed(&self) -> Result<Option<HelperRecord>> {
         let Some(record) = self.read_helper_record()? else {
             anyhow::ensure!(
                 !self.has_operational_state(),
@@ -927,10 +946,68 @@ impl LibkrunRunner {
         Ok(Some(record))
     }
 
-    pub(crate) async fn tear_down_confirmed(&self, expected: HelperRecord) -> Result<()> {
+    /// The one teardown entry point for a proven identity, matching the host
+    /// and Docker drivers' `stop_confirmed`.
+    pub(crate) async fn stop_confirmed(&self, expected: HelperRecord) -> Result<()> {
         LibkrunLaunchLease::for_confirmed_teardown(self, expected)
             .stop_and_remove()
             .await
+    }
+
+    /// Scan every filesystem id directory under `runtime_root` for one that
+    /// still carries a `libkrun` state directory, and prove each one's
+    /// helper record identity. Not a `&self` method: it enumerates every
+    /// filesystem's libkrun runtime, not just one instance's, matching the
+    /// host driver's `owned` and Docker's `owned`.
+    pub(crate) fn owned(runtime_root: &Path) -> Vec<LibkrunCandidate> {
+        let mut owned = Vec::new();
+        let entries = match std::fs::read_dir(runtime_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return owned,
+            Err(error) => {
+                owned.push(LibkrunCandidate::Invalid {
+                    target: Some(runtime_root.display().to_string()),
+                    error: error.to_string(),
+                });
+                return owned;
+            },
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    owned.push(LibkrunCandidate::Invalid {
+                        target: None,
+                        error: error.to_string(),
+                    });
+                    continue;
+                },
+            };
+            let state_dir = entry.path().join("libkrun");
+            if !state_dir.exists() {
+                continue;
+            }
+            let raw_id = entry.file_name().to_string_lossy().into_owned();
+            let id = match fs::Id::new(raw_id.clone()) {
+                Ok(id) => id,
+                Err(error) => {
+                    owned.push(LibkrunCandidate::Invalid {
+                        target: Some(raw_id),
+                        error: error.to_string(),
+                    });
+                    continue;
+                },
+            };
+            let confirmed = Self::new(state_dir.clone())
+                .confirmed()
+                .map_err(|error| format!("{error:#}"));
+            owned.push(LibkrunCandidate::Runner {
+                id,
+                state_dir,
+                confirmed,
+            });
+        }
+        owned
     }
 
     /// Pure command construction: no I/O. Callers that are about to actually
@@ -1006,7 +1083,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let custom = temp.path().join("custom.raw");
         std::fs::write(&custom, b"guest image").unwrap();
-        let mut config = Config::default();
+        let mut config = ClientConfig::default();
         config.filesystem.guest_image = Some(custom.to_string_lossy().into_owned());
         let image = resolve_guest_image(
             &config,
@@ -1137,6 +1214,7 @@ mod tests {
         std::fs::write(
             dir.path().join(SEED_CONF_NAME),
             "OMNIFS_ATTACH_ADDR=vsock:1024\n\
+             OMNIFS_CLIENT_OWNER=0123456789abcdef0123456789abcdef\n\
              OMNIFS_FS_ID=main\n\
              OMNIFS_READY_VSOCK_PORT=1025\n\
              OMNIFS_SSH_PUBKEY=ssh-ed25519 AAAA test\n",

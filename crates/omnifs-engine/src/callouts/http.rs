@@ -13,7 +13,6 @@
 //! without re-buffering. That is the only reqwest type any caller ever
 //! sees.
 
-use crate::auth::www_authenticate;
 use crate::authority::{ApprovedHttpTransport, RuntimeAuthority};
 use crate::cache::identity::BlobRequestId;
 use crate::callouts::{callout_denied, callout_internal, callout_network, record_outcome};
@@ -28,6 +27,15 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
+
+pub(crate) fn www_authenticate(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let values = headers
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.join(", "))
+}
 
 pub struct HttpStack {
     https_client: reqwest::Client,

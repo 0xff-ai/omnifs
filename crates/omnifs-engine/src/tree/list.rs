@@ -25,7 +25,7 @@ use tracing::warn;
 use super::error::{Result, TreeError};
 use super::node::{Entry, Node, PaginationControl, Synthetic};
 use super::synthetic;
-use crate::{RequestCtx, TreeNamespace};
+use crate::{EngineNamespace, RequestCtx};
 use omnifs_api::events::CacheKind;
 
 /// Opaque pagination cursor. Newtype over the substrate's `CachedCursor` so no
@@ -57,7 +57,7 @@ pub enum ListOutcome {
     Host,
 }
 
-impl TreeNamespace {
+impl EngineNamespace {
     /// List a directory node. `cursor = None` starts a first-page browse listing
     /// (coalesced, cache-consulted, and carrying the host-synthesized control /
     /// ignore entries as synthetic `Entry` origins); `Some(cursor)` continues

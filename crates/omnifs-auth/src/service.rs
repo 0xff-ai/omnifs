@@ -1,15 +1,19 @@
 //! Startup-owned credential bindings and live OAuth refresh.
 
+use crate::CredentialEntry;
 use crate::client::OAuthClient;
 use crate::error::AuthError;
 use crate::request::OAuthRequest;
+use crate::{AuthKind, CredentialId};
 use arc_swap::ArcSwapOption;
 use async_singleflight::Group;
-use omnifs_workspace::authn::{AuthKind, CredentialId};
-use omnifs_workspace::creds::{CredentialEntry, CredentialStore};
+use omnifs_core::CredentialVersion;
 use secrecy::ExposeSecret;
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use time::OffsetDateTime;
 
@@ -29,6 +33,86 @@ pub enum AuthUnavailable {
     Expired,
     #[error("credential refresh failed: {0}")]
     RefreshFailed(String),
+    #[error("credential refresh needs namespace republication")]
+    RefreshPending,
+}
+
+/// Whether a refresh keeps the same effective authorization grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshClassification {
+    /// Only short-lived token material changed.
+    Routine,
+    /// Scopes or upstream identity changed, so the serving generation must be rebuilt.
+    AuthorityChanged,
+}
+
+/// A credential snapshot used to construct a durable service.
+///
+/// The entry contains secret material and therefore uses the redacted
+/// [`CredentialEntry`] debug implementation. The version is the exact CAS
+/// value read from durable state at generation construction time.
+#[derive(Clone)]
+pub struct DurableCredentialSnapshot {
+    pub entry: CredentialEntry,
+    pub version: CredentialVersion,
+}
+
+impl std::fmt::Debug for DurableCredentialSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DurableCredentialSnapshot")
+            .field("entry", &self.entry)
+            .field("version", &self.version)
+            .finish()
+    }
+}
+
+/// The exact refresh candidate submitted to daemon-owned durable state.
+pub struct RefreshCandidate {
+    pub credential_id: CredentialId,
+    pub expected_version: CredentialVersion,
+    pub refreshed: CredentialEntry,
+    pub classification: RefreshClassification,
+}
+
+impl std::fmt::Debug for RefreshCandidate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RefreshCandidate")
+            .field("credential_id", &self.credential_id)
+            .field("expected_version", &self.expected_version)
+            .field("refreshed", &self.refreshed)
+            .field("classification", &self.classification)
+            .finish()
+    }
+}
+
+/// The durable result of a refresh CAS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshPersistence {
+    /// The new token is active and may be exposed to the request.
+    Active { version: CredentialVersion },
+    /// The new token is durable but blocked until a new generation publishes it.
+    PendingRepublish { version: CredentialVersion },
+}
+
+/// Non-secret failures from the daemon's refresh persistence boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RefreshPersistError {
+    #[error("credential refresh compare-and-swap conflict")]
+    Conflict,
+    #[error("credential refresh persistence is unavailable")]
+    Unavailable,
+    #[error("credential refresh was rejected")]
+    Rejected,
+}
+
+/// A narrow async boundary for durable refresh CAS operations.
+pub trait RefreshSink: Send + Sync {
+    fn persist<'a>(
+        &'a self,
+        candidate: RefreshCandidate,
+    ) -> Pin<Box<dyn Future<Output = Result<RefreshPersistence, RefreshPersistError>> + Send + 'a>>;
 }
 
 /// Coarse non-secret health for one mount-owned binding.
@@ -102,7 +186,14 @@ pub enum RefreshOutcome {
 #[derive(Debug, Clone)]
 struct RefreshFailure {
     needs_consent: bool,
+    pending: bool,
     message: String,
+}
+
+struct DurableBackend {
+    snapshots: RwLock<HashMap<CredentialId, DurableCredentialSnapshot>>,
+    pending: RwLock<HashSet<CredentialId>>,
+    sink: Arc<dyn RefreshSink>,
 }
 
 /// A single immutable mount binding. Its injection facts belong to the mount,
@@ -217,6 +308,9 @@ impl AuthBinding {
         if self.needs_consent.load(Ordering::Relaxed) {
             return Err(AuthUnavailable::NeedsConsent);
         }
+        if self.service.refresh_pending(&self.id)? {
+            return Err(AuthUnavailable::RefreshPending);
+        }
         let Some(entry) = self.current.load_full() else {
             return Err(AuthUnavailable::Missing);
         };
@@ -250,6 +344,13 @@ impl AuthBinding {
         if self.needs_consent.load(Ordering::Relaxed) {
             return RefreshOutcome::RefreshFailed(AuthUnavailable::NeedsConsent.to_string());
         }
+        match self.service.refresh_pending(&self.id) {
+            Ok(true) => {
+                return RefreshOutcome::RefreshFailed(AuthUnavailable::RefreshPending.to_string());
+            },
+            Ok(false) => {},
+            Err(error) => return RefreshOutcome::RefreshFailed(error.to_string()),
+        }
         match self.refresh(true).await {
             Ok(Some(_)) => RefreshOutcome::Refreshed,
             Ok(None) | Err(AuthUnavailable::Missing) => RefreshOutcome::NoCredential,
@@ -281,6 +382,9 @@ impl AuthBinding {
                 if error.needs_consent {
                     self.needs_consent.store(true, Ordering::Relaxed);
                 }
+                if error.pending {
+                    return Err(AuthUnavailable::RefreshPending);
+                }
                 let attempts = self.refresh_failures.fetch_add(1, Ordering::Relaxed) + 1;
                 Err(if error.needs_consent {
                     AuthUnavailable::NeedsConsent
@@ -304,21 +408,40 @@ impl AuthBinding {
             ),
         )
     }
+
+    #[cfg(test)]
+    pub(crate) fn current_for_test(&self) -> Option<CredentialEntry> {
+        self.current.load_full().map(|entry| (*entry).clone())
+    }
 }
 
 /// Shared durable store and OAuth transport. Mount bindings retain the loaded
 /// entry and runtime metadata; this service has no mount registry.
 pub struct CredentialService {
-    store: Arc<dyn CredentialStore>,
+    backend: Arc<DurableBackend>,
     oauth: OAuthClient,
     refreshes: Group<String, Option<CredentialEntry>, RefreshFailure>,
 }
 
 impl CredentialService {
+    /// Creates a service backed by daemon-owned durable refresh CAS.
+    ///
+    /// The snapshots must come from one serving generation and include the
+    /// exact durable version read with each entry. The sink is the sole
+    /// persistence authority and is awaited before a routine token becomes
+    /// visible.
     #[must_use]
-    pub fn new(store: Arc<dyn CredentialStore>, oauth: OAuthClient) -> Self {
+    pub fn new(
+        snapshots: impl IntoIterator<Item = (CredentialId, DurableCredentialSnapshot)>,
+        oauth: OAuthClient,
+        sink: Arc<dyn RefreshSink>,
+    ) -> Self {
         Self {
-            store,
+            backend: Arc::new(DurableBackend {
+                snapshots: RwLock::new(snapshots.into_iter().collect()),
+                pending: RwLock::new(HashSet::new()),
+                sink,
+            }),
             oauth,
             refreshes: Group::new(),
         }
@@ -339,7 +462,7 @@ impl CredentialService {
         header_name: String,
         value_prefix: String,
     ) -> Result<AuthBinding, AuthError> {
-        let current = self.store.get(&id)?;
+        let current = self.current_entry(&id)?;
         validate_kind(&id, AuthKind::StaticToken, current.as_ref())?;
         Ok(AuthBinding::new(
             Arc::clone(self),
@@ -360,7 +483,7 @@ impl CredentialService {
         header_name: String,
         value_prefix: String,
     ) -> Result<AuthBinding, AuthError> {
-        let current = self.store.get(&id)?;
+        let current = self.current_entry(&id)?;
         validate_kind(&id, AuthKind::OAuth, current.as_ref())?;
         Ok(AuthBinding::new(
             Arc::clone(self),
@@ -395,6 +518,7 @@ impl CredentialService {
             Err(Some(error)) => Err(error),
             Err(None) => Err(RefreshFailure {
                 needs_consent: false,
+                pending: false,
                 message: "refresh leader failed".to_string(),
             }),
         }
@@ -407,47 +531,72 @@ impl CredentialService {
         observed: Option<&CredentialEntry>,
         force: bool,
     ) -> Result<Option<CredentialEntry>, RefreshFailure> {
-        let stored = self
-            .store
-            .get(id)
-            .map_err(|error| RefreshFailure {
-                needs_consent: false,
-                message: error.to_string(),
-            })?
-            .filter(|entry| entry.kind() == AuthKind::OAuth);
+        let snapshot = self.backend.snapshot(id).map_err(|()| RefreshFailure {
+            needs_consent: false,
+            pending: false,
+            message: "credential snapshot unavailable".to_owned(),
+        })?;
+        let expected_version = snapshot.as_ref().map(|snapshot| snapshot.version);
+        let stored = snapshot.map(|snapshot| snapshot.entry);
+        let stored = stored.filter(|entry| entry.kind() == AuthKind::OAuth);
         let Some(stored) = stored else {
             return Ok(None);
         };
         if Self::stored_satisfies(&stored, observed, OffsetDateTime::now_utc(), force) {
             return Ok(Some(stored));
         }
-        let Some(refresh_token) = stored.refresh_token() else {
+        if stored.refresh_token().is_none() {
             return Err(RefreshFailure {
                 needs_consent: true,
+                pending: false,
                 message: format!("OAuth credential {id} requires re-authentication"),
             });
-        };
-        match self.oauth.refresh(request.clone(), refresh_token).await {
+        }
+        match self.oauth.refresh(request.clone(), &stored).await {
             Ok(refreshed) => {
-                self.store
-                    .put(id, &refreshed)
-                    .map_err(|error| RefreshFailure {
-                        needs_consent: false,
-                        message: error.to_string(),
-                    })?;
-                Ok(Some(refreshed))
+                let expected_version = expected_version.ok_or_else(|| RefreshFailure {
+                    needs_consent: false,
+                    pending: false,
+                    message: "credential snapshot unavailable".to_owned(),
+                })?;
+                persist_durable_refresh(&self.backend, id, expected_version, &stored, refreshed)
+                    .await
             },
             Err(AuthError::TokenEndpoint { error, .. }) if error == "invalid_grant" => {
                 Err(RefreshFailure {
                     needs_consent: true,
+                    pending: false,
                     message: "OAuth refresh token was rejected".to_string(),
                 })
             },
             Err(error) => Err(RefreshFailure {
                 needs_consent: false,
+                pending: false,
                 message: error.to_string(),
             }),
         }
+    }
+
+    fn current_entry(&self, id: &CredentialId) -> Result<Option<CredentialEntry>, AuthError> {
+        self.backend
+            .snapshot(id)
+            .map_err(|()| AuthError::RequestConfig("credential snapshot unavailable".to_owned()))
+            .map(|snapshot| snapshot.map(|snapshot| snapshot.entry))
+    }
+
+    fn refresh_pending(&self, id: &CredentialId) -> Result<bool, AuthUnavailable> {
+        self.backend.is_pending(id).map_err(|()| {
+            AuthUnavailable::RefreshFailed("credential snapshot unavailable".to_owned())
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn version_for_test(&self, id: &CredentialId) -> Option<CredentialVersion> {
+        self.backend
+            .snapshot(id)
+            .ok()
+            .flatten()
+            .map(|snapshot| snapshot.version)
     }
 
     fn stored_satisfies(
@@ -458,6 +607,126 @@ impl CredentialService {
     ) -> bool {
         Self::is_fresh(stored, now)
             && (!force || observed.is_none_or(|entry| !same_oauth_token(stored, entry)))
+    }
+}
+
+impl DurableBackend {
+    fn update(
+        &self,
+        id: &CredentialId,
+        entry: CredentialEntry,
+        version: CredentialVersion,
+    ) -> Result<(), ()> {
+        let mut snapshots = self.snapshots.write().map_err(|_| ())?;
+        snapshots.insert(id.clone(), DurableCredentialSnapshot { entry, version });
+        Ok(())
+    }
+
+    fn snapshot(&self, id: &CredentialId) -> Result<Option<DurableCredentialSnapshot>, ()> {
+        self.snapshots
+            .read()
+            .map(|snapshots| snapshots.get(id).cloned())
+            .map_err(|_| ())
+    }
+
+    fn mark_pending(&self, id: &CredentialId) -> Result<(), ()> {
+        self.pending.write().map_err(|_| ())?.insert(id.clone());
+        Ok(())
+    }
+
+    fn is_pending(&self, id: &CredentialId) -> Result<bool, ()> {
+        self.pending
+            .read()
+            .map(|pending| pending.contains(id))
+            .map_err(|_| ())
+    }
+}
+
+async fn persist_durable_refresh(
+    durable: &DurableBackend,
+    id: &CredentialId,
+    expected_version: CredentialVersion,
+    current: &CredentialEntry,
+    refreshed: CredentialEntry,
+) -> Result<Option<CredentialEntry>, RefreshFailure> {
+    let classification = classify_refresh(current, &refreshed);
+    let Some(next_version) = expected_version.next() else {
+        return Err(RefreshFailure {
+            needs_consent: false,
+            pending: false,
+            message: "credential version exhausted".to_owned(),
+        });
+    };
+    let candidate = RefreshCandidate {
+        credential_id: id.clone(),
+        expected_version,
+        refreshed: refreshed.clone(),
+        classification,
+    };
+    let persisted = durable
+        .sink
+        .persist(candidate)
+        .await
+        .map_err(|error| RefreshFailure {
+            needs_consent: false,
+            pending: false,
+            message: error.to_string(),
+        })?;
+    match (classification, persisted) {
+        (RefreshClassification::Routine, RefreshPersistence::Active { version })
+            if version == next_version =>
+        {
+            durable
+                .update(id, refreshed.clone(), version)
+                .map_err(|()| RefreshFailure {
+                    needs_consent: false,
+                    pending: false,
+                    message: "credential snapshot unavailable".to_owned(),
+                })?;
+            Ok(Some(refreshed))
+        },
+        (
+            RefreshClassification::AuthorityChanged,
+            RefreshPersistence::PendingRepublish { version },
+        ) if version == next_version => {
+            durable.mark_pending(id).map_err(|()| RefreshFailure {
+                needs_consent: false,
+                pending: false,
+                message: "credential snapshot unavailable".to_owned(),
+            })?;
+            Err(RefreshFailure {
+                needs_consent: false,
+                pending: true,
+                message: "credential refresh needs republication".to_owned(),
+            })
+        },
+        (
+            RefreshClassification::Routine,
+            RefreshPersistence::PendingRepublish { .. } | RefreshPersistence::Active { .. },
+        )
+        | (
+            RefreshClassification::AuthorityChanged,
+            RefreshPersistence::Active { .. } | RefreshPersistence::PendingRepublish { .. },
+        ) => Err(RefreshFailure {
+            needs_consent: false,
+            pending: false,
+            message: "refresh persistence returned an invalid state".to_owned(),
+        }),
+    }
+}
+
+fn classify_refresh(
+    current: &CredentialEntry,
+    refreshed: &CredentialEntry,
+) -> RefreshClassification {
+    let current_scopes: BTreeSet<&str> = current.scopes().iter().map(String::as_str).collect();
+    let refreshed_scopes: BTreeSet<&str> = refreshed.scopes().iter().map(String::as_str).collect();
+    if current_scopes == refreshed_scopes
+        && current.upstream_identity() == refreshed.upstream_identity()
+    {
+        RefreshClassification::Routine
+    } else {
+        RefreshClassification::AuthorityChanged
     }
 }
 

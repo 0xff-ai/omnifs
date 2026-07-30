@@ -4,23 +4,23 @@
 //! call into `commands::mount`'s internal API.
 
 use anyhow::Context as _;
+use omnifs_bootstrap::Client;
 use omnifs_core::fs;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-use omnifs_workspace::creds::CredentialStore;
-
+use crate::client_fs_state::{Claim, ClientFilesystemState, Registry};
 use crate::docker::{
-    DockerClient, DockerContainerIdentity, DockerTarget, OwnedFilesystemContainer,
+    DockerClient, DockerContainerIdentity, DockerTarget, OwnedFilesystemCandidate,
+    OwnedFilesystemContainer,
 };
-use crate::fs_container::{filesystem_container_name, resolve_filesystem_image};
+use crate::filesystem_driver::Candidate;
 use crate::image::ImageRef;
-use crate::inventory::{AuthState, DaemonHealth, Inventory, MountStatus, Severity};
+use crate::inventory::{AuthState, DaemonHealth, DaemonProbe, Inventory, MountStatus, Severity};
 use crate::ui::output::{Output, ResultVerdict};
 use crate::ui::prompt::Confirm;
 use crate::ui::render::{self, Capabilities, LedgerRow};
 use crate::ui::style::{self, Glyph};
-use omnifs_workspace::Workspace;
 
 /// Aggregate result of a completed diagnostic run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,12 +31,12 @@ pub(crate) enum DoctorVerdict {
 }
 
 pub async fn run(output: Output) -> anyhow::Result<DoctorVerdict> {
-    let workspace = Workspace::resolve()?;
-    let inventory = Inventory::collect(&workspace).await?;
-    let docker_target = resolve_filesystem_target(&workspace)
+    let client_filesystems = ClientFilesystemState::resolve()?;
+    let inventory = Inventory::collect_rpc().await?;
+    let docker_target = resolve_filesystem_target(&client_filesystems)
         .map_err(|error: anyhow::Error| format!("resolve target: {error:#}"));
     Doctor {
-        workspace: &workspace,
+        client_filesystems,
         inventory,
         docker_target,
         output,
@@ -48,9 +48,11 @@ pub async fn run(output: Output) -> anyhow::Result<DoctorVerdict> {
 /// The optional Docker-hosted FUSE filesystem's target, probed by the
 /// `docker reachable`/`image cached` diagnostics. The daemon itself always
 /// runs host-native, so there is no daemon Docker target to resolve here.
-fn resolve_filesystem_target(workspace: &Workspace) -> anyhow::Result<DockerTarget> {
-    let id = workspace
-        .filesystems()
+fn resolve_filesystem_target(
+    client_filesystems: &ClientFilesystemState,
+) -> anyhow::Result<DockerTarget> {
+    let id = client_filesystems
+        .registry()
         .list()?
         .into_iter()
         .find(|spec| spec.runtime() == fs::Runtime::Docker)
@@ -58,25 +60,11 @@ fn resolve_filesystem_target(workspace: &Workspace) -> anyhow::Result<DockerTarg
             || fs::Id::new("doctor").expect("static filesystem id"),
             |spec| spec.id().clone(),
         );
-    resolve_docker_target(workspace, &id)
+    DockerTarget::for_filesystem(client_filesystems, &id)
 }
 
-fn resolve_docker_target(
-    workspace: &Workspace,
-    filesystem_id: &fs::Id,
-) -> anyhow::Result<DockerTarget> {
-    let config = workspace.config()?;
-    let image = resolve_filesystem_image(None, &config)?;
-    let container_name =
-        filesystem_container_name(workspace.identity().container_label(), filesystem_id)?;
-    DockerTarget::new(
-        container_name.as_str().to_owned(),
-        image.as_str().to_owned(),
-    )
-}
-
-struct Doctor<'a> {
-    workspace: &'a Workspace,
+struct Doctor {
+    client_filesystems: ClientFilesystemState,
     inventory: Inventory,
     /// The filesystem's Docker target, or the error resolving it.
     docker_target: Result<DockerTarget, String>,
@@ -89,15 +77,76 @@ struct Doctor<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     Environment,
-    Workspace,
+    Profile,
     Mounts,
     Filesystems,
+}
+
+/// Which specific check a finding reports. A closed enum sitting next to
+/// [`Section`] instead of a bare string, so a check's identity cannot drift
+/// from its own spelling the way five repeated string literals could. Each
+/// variant's wire and display text is the exact string doctor has always
+/// emitted for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+enum Check {
+    #[serde(rename = "docker")]
+    Docker,
+    #[serde(rename = "fuse")]
+    Fuse,
+    #[serde(rename = "image")]
+    Image,
+    #[serde(rename = "credential store")]
+    CredentialStore,
+    #[serde(rename = "ssh-agent")]
+    SshAgent,
+    #[serde(rename = "config")]
+    Config,
+    #[serde(rename = "network")]
+    Network,
+    #[serde(rename = "daemon identity")]
+    DaemonIdentity,
+    #[serde(rename = "credentials")]
+    Credentials,
+    #[serde(rename = "filesystem state")]
+    FilesystemState,
+    #[serde(rename = "stray filesystem")]
+    StrayFilesystem,
+    #[serde(rename = "stale filesystem state")]
+    StaleFilesystemState,
+    #[serde(rename = "docker filesystem ownership")]
+    DockerFilesystemOwnership,
+    #[serde(rename = "libkrun filesystem ownership")]
+    LibkrunFilesystemOwnership,
+}
+
+impl Check {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Docker => "docker",
+            Self::Fuse => "fuse",
+            Self::Image => "image",
+            Self::CredentialStore => "credential store",
+            Self::SshAgent => "ssh-agent",
+            Self::Config => "config",
+            Self::Network => "network",
+            Self::DaemonIdentity => "daemon identity",
+            Self::Credentials => "credentials",
+            Self::FilesystemState => "filesystem state",
+            Self::StrayFilesystem => "stray filesystem",
+            Self::StaleFilesystemState => "stale filesystem state",
+            Self::DockerFilesystemOwnership => "docker filesystem ownership",
+            Self::LibkrunFilesystemOwnership => "libkrun filesystem ownership",
+        }
+    }
 }
 
 /// A remediation doctor knows how to execute itself.
 #[derive(Debug, Clone)]
 enum Remediation {
     MountReauth(String),
+    CleanStaleInstance {
+        identity: omnifs_bootstrap::Instance,
+    },
     StopHostFilesystem {
         state_dir: PathBuf,
         record: omnifs_mtab::RunnerRecord,
@@ -109,7 +158,7 @@ enum Remediation {
     StopDockerFilesystem {
         target: DockerTarget,
         identity: DockerContainerIdentity,
-        workspace_home: PathBuf,
+        profile_root: PathBuf,
         spec: fs::Spec,
     },
     StopLibkrunFilesystem {
@@ -128,6 +177,9 @@ impl Remediation {
     fn command_line(&self) -> String {
         match self {
             Self::MountReauth(name) => format!("omnifs mount reauth {name}"),
+            Self::CleanStaleInstance { .. } => {
+                "omnifs doctor (clean stale daemon identity)".to_owned()
+            },
             Self::StopHostFilesystem { record, .. } => {
                 format!("omnifs fs detach --name {}", record.spec.id())
             },
@@ -150,7 +202,7 @@ impl Remediation {
     /// arguments only, never a shell string: the mount name came from the
     /// already-collected inventory, not from re-parsing the advisory `fix`
     /// text.
-    async fn apply(&self, workspace: &Workspace) -> anyhow::Result<()> {
+    async fn apply(&self, client_filesystems: &ClientFilesystemState) -> anyhow::Result<()> {
         let binary = std::env::current_exe().context("resolve the omnifs executable")?;
         match self {
             Self::MountReauth(name) => std::process::Command::new(&binary)
@@ -165,67 +217,114 @@ impl Remediation {
                     );
                     Ok(())
                 }),
+            Self::CleanStaleInstance { identity } => {
+                let endpoint = omnifs_bootstrap::Bootstrap::<Client>::for_client()?;
+                if endpoint.remove_daemon_bootstrap_if(identity)? {
+                    return Ok(());
+                }
+                match endpoint.read_process_identity()? {
+                    None => Ok(()),
+                    Some(current) if current == *identity => {
+                        anyhow::bail!("stale daemon identity still exists after cleanup")
+                    },
+                    Some(_) => {
+                        anyhow::bail!("daemon identity changed; refusing to remove its replacement")
+                    },
+                }
+            },
             Self::StopHostFilesystem {
                 state_dir, record, ..
             } => {
-                let _claim = workspace.filesystems().claim(record.spec.id())?;
-                ensure_daemon_cleanly_stopped(workspace).await?;
-                crate::host_fs::stop_confirmed(state_dir, record).await
+                let registry = client_filesystems.registry();
+                let _guard = claim_for_teardown(&registry, record.spec.id()).await?;
+                crate::host_fs::HostDriver::new(state_dir.clone())
+                    .stop_confirmed(record)
+                    .await
             },
             Self::CleanStaleHostRecord {
                 state_dir, record, ..
             } => {
-                let _claim = workspace.filesystems().claim(record.spec.id())?;
-                crate::host_fs::cleanup_stale(state_dir, record).await
+                let registry = client_filesystems.registry();
+                let _guard = claim_for_teardown(&registry, record.spec.id()).await?;
+                crate::host_fs::HostDriver::new(state_dir.clone())
+                    .cleanup_stale(record)
+                    .await
             },
             Self::StopDockerFilesystem {
                 target,
                 identity,
-                workspace_home,
+                profile_root,
                 spec,
             } => {
-                let _claim = workspace.filesystems().claim(spec.id())?;
-                ensure_daemon_cleanly_stopped(workspace).await?;
+                let registry = client_filesystems.registry();
+                let _guard = claim_for_teardown(&registry, spec.id()).await?;
                 DockerClient::connect_for(
                     target,
                     Output::new(crate::ui::output::OutputMode::Human, false),
                 )?
-                .remove_confirmed(identity, workspace_home, spec)
+                .stop_confirmed(
+                    identity,
+                    profile_root,
+                    crate::commands::fs::client_owner_id()?,
+                    spec,
+                )
                 .await
             },
             Self::StopLibkrunFilesystem { state_dir, record } => {
-                let _claim = workspace.filesystems().claim(record.spec.id())?;
-                ensure_daemon_cleanly_stopped(workspace).await?;
+                let registry = client_filesystems.registry();
+                let _guard = claim_for_teardown(&registry, record.spec.id()).await?;
                 crate::libkrun_runner::LibkrunRunner::new(state_dir.clone())
-                    .tear_down_confirmed(record.clone())
+                    .stop_confirmed(record.clone())
                     .await
             },
         }
     }
 }
 
-async fn ensure_daemon_cleanly_stopped(workspace: &Workspace) -> anyhow::Result<()> {
-    let client = crate::client::DaemonClient::for_workspace(workspace);
+/// Claim the registry lock for `id` and prove the daemon is stopped, in one
+/// call: every filesystem-teardown remediation needs exactly this pair
+/// before it touches a runner, container, or helper. Returning both guards
+/// keeps them alive for the caller's teardown call; dropping either early
+/// would let a race the guards exist to prevent slip back in.
+async fn claim_for_teardown<'a>(
+    registry: &'a Registry,
+    id: &fs::Id,
+) -> anyhow::Result<(Claim<'a>, omnifs_bootstrap::SpawnLock)> {
+    let claim = registry.claim(id)?;
+    let spawn_lock = acquire_stopped_daemon_guard().await?;
+    Ok((claim, spawn_lock))
+}
+
+async fn acquire_stopped_daemon_guard() -> anyhow::Result<omnifs_bootstrap::SpawnLock> {
+    let endpoint = omnifs_bootstrap::Bootstrap::<Client>::for_client()?;
+    let guard = endpoint
+        .acquire_spawn_lock()
+        .context("acquire daemon spawn lock")?;
     anyhow::ensure!(
-        client.record()?.is_none(),
-        "daemon has a process record; refusing filesystem teardown"
+        endpoint.read_process_identity()?.is_none(),
+        "daemon has a process identity; refusing filesystem teardown"
     );
+    match tokio::net::UnixStream::connect(endpoint.control_socket()).await {
+        Ok(_) => anyhow::bail!("daemon is running; refusing filesystem teardown"),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) => {},
+        Err(error) => return Err(error).context("probe daemon control socket before teardown"),
+    }
     anyhow::ensure!(
-        client.status_optional_checked().await?.is_none(),
-        "daemon is running; refusing filesystem teardown"
-    );
-    anyhow::ensure!(
-        client.record()?.is_none(),
+        endpoint.read_process_identity()?.is_none(),
         "daemon started during the safety check; refusing filesystem teardown"
     );
-    Ok(())
+    Ok(guard)
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct Finding {
     #[serde(skip)]
     section: Section,
-    check: String,
+    check: Check,
     target: Option<String>,
     severity: Severity,
     message: String,
@@ -249,13 +348,18 @@ impl DoctorResult {
             .max()
             .unwrap_or(Severity::Positive);
         match (self.inventory.verdict(), finding_severity) {
-            (_, Severity::Error) => DoctorVerdict::Failures,
-            (crate::inventory::Verdict::Degraded, _) | (_, Severity::Attention) => {
-                DoctorVerdict::Warnings
-            },
-            (crate::inventory::Verdict::Ok, Severity::Positive | Severity::Neutral) => {
-                DoctorVerdict::Clean
-            },
+            (_, Severity::Failure) => DoctorVerdict::Failures,
+            (ResultVerdict::Degraded, _) | (_, Severity::Attention) => DoctorVerdict::Warnings,
+            (ResultVerdict::Ok, Severity::Positive | Severity::Neutral) => DoctorVerdict::Clean,
+        }
+    }
+}
+
+impl From<DoctorVerdict> for ResultVerdict {
+    fn from(verdict: DoctorVerdict) -> Self {
+        match verdict {
+            DoctorVerdict::Clean => Self::Ok,
+            DoctorVerdict::Warnings | DoctorVerdict::Failures => Self::Degraded,
         }
     }
 }
@@ -263,14 +367,14 @@ impl DoctorResult {
 impl Finding {
     fn from_probe(
         section: Section,
-        check: impl Into<String>,
+        check: Check,
         target: Option<String>,
         result: ProbeResult,
     ) -> Self {
         let (severity, message) = result.into_parts();
         Self {
             section,
-            check: check.into(),
+            check,
             target,
             severity,
             message,
@@ -290,7 +394,7 @@ impl Finding {
         };
         Some(Self {
             section: Section::Mounts,
-            check: "credentials".to_owned(),
+            check: Check::Credentials,
             target: Some(mount.name.clone()),
             severity: mount.auth.severity(),
             message,
@@ -303,10 +407,38 @@ impl Finding {
 fn docker_ownership_finding(target: impl Into<Option<String>>, result: ProbeResult) -> Finding {
     Finding::from_probe(
         Section::Filesystems,
-        "docker filesystem ownership",
+        Check::DockerFilesystemOwnership,
         target.into(),
         result,
     )
+}
+
+fn doctor_client_owner() -> Result<omnifs_core::ClientOwnerId, String> {
+    crate::commands::fs::client_owner_id()
+        .map_err(|error| format!("resolve client owner identity: {error:#}"))
+}
+
+fn stale_process_identity_finding(
+    probe: &DaemonProbe,
+    endpoint: &omnifs_bootstrap::Bootstrap<Client>,
+) -> Option<Finding> {
+    if !matches!(probe, DaemonProbe::Unreachable { .. }) {
+        return None;
+    }
+    let identity = endpoint.read_process_identity().ok()??;
+    if identity.still_identifies_running_process() {
+        return None;
+    }
+    let remediation = Remediation::CleanStaleInstance { identity };
+    Some(Finding {
+        section: Section::Profile,
+        check: Check::DaemonIdentity,
+        target: None,
+        severity: Severity::Attention,
+        message: "recorded daemon process no longer exists".to_owned(),
+        fix: Some(remediation.command_line()),
+        remediation: Some(remediation),
+    })
 }
 
 #[derive(Debug)]
@@ -322,7 +454,7 @@ impl ProbeResult {
         match self {
             Self::Ok(message) => (Severity::Positive, message),
             Self::Warn(message) => (Severity::Attention, message),
-            Self::Err(message) => (Severity::Error, message),
+            Self::Err(message) => (Severity::Failure, message),
             Self::Skipped(message) => (Severity::Neutral, message.to_owned()),
         }
     }
@@ -343,7 +475,7 @@ impl Row {
             Severity::Positive => Glyph::Done,
             Severity::Neutral => Glyph::Skip,
             Severity::Attention => Glyph::Warn,
-            Severity::Error => Glyph::Fail,
+            Severity::Failure => Glyph::Fail,
         }
     }
 
@@ -356,7 +488,7 @@ impl From<&Finding> for Row {
     fn from(finding: &Finding) -> Self {
         Self {
             severity: finding.severity,
-            key: finding.check.clone(),
+            key: finding.check.label().to_owned(),
             value: finding.target.as_deref().map_or_else(
                 || finding.message.clone(),
                 |target| format!("{target} {}", finding.message),
@@ -366,22 +498,22 @@ impl From<&Finding> for Row {
     }
 }
 
-/// Split findings into the Environment/Workspace groups; the
+/// Split findings into the Environment/Profile groups; the
 /// Daemon group's single row comes from `daemon_row`, not from `findings`.
 fn build_rows(findings: &[Finding]) -> (Vec<Row>, Vec<Row>, Vec<Row>, Vec<Row>) {
     let mut environment = Vec::new();
-    let mut workspace = Vec::new();
+    let mut profile = Vec::new();
     let mut mounts = Vec::new();
     let mut filesystems = Vec::new();
     for finding in findings {
         match finding.section {
             Section::Environment => environment.push(Row::from(finding)),
-            Section::Workspace => workspace.push(Row::from(finding)),
+            Section::Profile => profile.push(Row::from(finding)),
             Section::Mounts => mounts.push(Row::from(finding)),
             Section::Filesystems => filesystems.push(Row::from(finding)),
         }
     }
-    (environment, workspace, mounts, filesystems)
+    (environment, profile, mounts, filesystems)
 }
 
 fn daemon_row(inventory: &Inventory) -> Row {
@@ -408,18 +540,18 @@ fn daemon_row(inventory: &Inventory) -> Row {
             severity: Severity::Neutral,
             key: "stopped".to_owned(),
             value: "daemon is not running".to_owned(),
-            fix: Some("omnifs up".to_owned()),
+            fix: None,
         },
         DaemonHealth::Failed => Row {
-            severity: Severity::Error,
+            severity: Severity::Failure,
             key: "failed".to_owned(),
             value: "daemon is unhealthy".to_owned(),
             fix: Some("omnifs logs".to_owned()),
         },
         DaemonHealth::Unreachable => Row {
-            severity: Severity::Error,
+            severity: Severity::Failure,
             key: "unreachable".to_owned(),
-            value: "daemon record exists but the control socket did not answer".to_owned(),
+            value: "daemon identity exists but the control socket did not answer".to_owned(),
             fix: Some("omnifs logs".to_owned()),
         },
     }
@@ -432,27 +564,14 @@ fn daemon_running_value(inventory: &Inventory) -> String {
     if let Some(pid) = inventory.daemon.pid() {
         parts.push(format!("pid {pid}"));
     }
-    if let Some(revision) = &inventory.mount_revision {
-        parts.push(format!("revision {revision}"));
-    }
-    if let Some(uptime) = daemon_uptime(inventory) {
-        parts.push(format!("up {uptime}"));
+    if let Some(revision) = &inventory.durable_revision {
+        parts.push(format!("revision {}", revision.get()));
     }
     if parts.is_empty() {
         "running".to_owned()
     } else {
         parts.join(", ")
     }
-}
-
-fn daemon_uptime(inventory: &Inventory) -> Option<String> {
-    use time::OffsetDateTime;
-    use time::format_description::well_known::Rfc3339;
-
-    let record = inventory.daemon.runtime.as_ref()?;
-    let started = OffsetDateTime::parse(&record.started_at, &Rfc3339).ok()?;
-    let secs = (OffsetDateTime::now_utc() - started).whole_seconds();
-    (secs >= 0).then(|| crate::docker::duration_words(secs))
 }
 
 /// Render one group: a bold heading, then each row indented two spaces
@@ -481,7 +600,7 @@ fn verdict_line(rows: &[&Row], verdict: DoctorVerdict, caps: Capabilities) -> St
     }
     let failures = rows
         .iter()
-        .filter(|row| row.severity == Severity::Error)
+        .filter(|row| row.severity == Severity::Failure)
         .count();
     let warnings = rows
         .iter()
@@ -514,7 +633,7 @@ fn verdict_line(rows: &[&Row], verdict: DoctorVerdict, caps: Capabilities) -> St
     }
 }
 
-/// Assemble the complete human checklist: Environment, Workspace,
+/// Assemble the complete human checklist: Environment, Profile,
 /// and Daemon groups, each separated by one blank line, then the verdict
 /// line.
 fn render_report(
@@ -523,22 +642,22 @@ fn render_report(
     verdict: DoctorVerdict,
     caps: Capabilities,
 ) -> String {
-    let (environment, workspace, mounts, filesystems) = build_rows(findings);
+    let (environment, profile, mounts, filesystems) = build_rows(findings);
     let daemon = vec![daemon_row(inventory)];
     let mut out = String::new();
-    out.push_str(&render_group("Environment", &environment, caps));
-    out.push('\n');
-    out.push_str(&render_group("Workspace", &workspace, caps));
-    out.push('\n');
-    out.push_str(&render_group("Mounts", &mounts, caps));
-    out.push('\n');
-    out.push_str(&render_group("Filesystems", &filesystems, caps));
-    out.push('\n');
-    out.push_str(&render_group("Daemon", &daemon, caps));
-    out.push('\n');
+    for (name, rows) in [
+        ("Environment", &environment),
+        ("Profile", &profile),
+        ("Mounts", &mounts),
+        ("Filesystems", &filesystems),
+        ("Daemon", &daemon),
+    ] {
+        out.push_str(&render_group(name, rows, caps));
+        out.push('\n');
+    }
     let all_rows: Vec<&Row> = environment
         .iter()
-        .chain(workspace.iter())
+        .chain(profile.iter())
         .chain(mounts.iter())
         .chain(filesystems.iter())
         .chain(daemon.iter())
@@ -570,14 +689,13 @@ struct RepairSummary {
 /// Show the complete repair set, ask once, then continue through independent
 /// failures. Fresh ownership checks still run inside each remediation.
 async fn offer_fix(
-    workspace: &Workspace,
+    client_filesystems: &ClientFilesystemState,
     output: &Output,
     findings: &[Finding],
 ) -> anyhow::Result<RepairSummary> {
     let remediations = remediable_fixes(findings);
     if remediations.is_empty()
         || output.no_input()
-        || output.is_structured()
         || (!output.yes() && !crate::ui::prompt::is_terminal())
     {
         return Ok(RepairSummary::default());
@@ -603,7 +721,7 @@ async fn offer_fix(
     let mut summary = RepairSummary::default();
     for (remediation, mut ledger_row) in remediations.into_iter().zip(ledger_rows) {
         summary.attempted += 1;
-        let outcome = remediation.apply(workspace).await;
+        let outcome = remediation.apply(client_filesystems).await;
         if let Err(error) = outcome {
             summary.failed += 1;
             ledger_row.glyph = Glyph::Fail;
@@ -617,18 +735,13 @@ async fn offer_fix(
     Ok(summary)
 }
 
-impl Doctor<'_> {
+impl Doctor {
     async fn run(self) -> anyhow::Result<DoctorVerdict> {
         let mut result = self.diagnose().await?;
         let mut verdict = result.verdict();
         if self.output.is_structured() {
-            self.output.emit_result(
-                match verdict {
-                    DoctorVerdict::Clean => ResultVerdict::Ok,
-                    DoctorVerdict::Warnings | DoctorVerdict::Failures => ResultVerdict::Degraded,
-                },
-                result,
-            )?;
+            self.output
+                .emit_result(ResultVerdict::from(verdict), result)?;
             return Ok(verdict);
         }
 
@@ -639,12 +752,12 @@ impl Doctor<'_> {
             verdict,
             caps,
         ));
-        let repairs = offer_fix(self.workspace, &self.output, &result.findings).await?;
+        let repairs = offer_fix(&self.client_filesystems, &self.output, &result.findings).await?;
         if repairs.attempted > 0 {
             let fresh = Doctor {
-                workspace: self.workspace,
-                inventory: Inventory::collect(self.workspace).await?,
-                docker_target: resolve_filesystem_target(self.workspace)
+                client_filesystems: self.client_filesystems.clone(),
+                inventory: Inventory::collect_rpc().await?,
+                docker_target: resolve_filesystem_target(&self.client_filesystems)
                     .map_err(|error: anyhow::Error| format!("resolve target: {error:#}")),
                 output: self.output.clone(),
             };
@@ -665,12 +778,10 @@ impl Doctor<'_> {
         let (runtime, mut findings) = self.base_findings().await;
         findings.extend(self.inventory.mounts.iter().filter_map(Finding::mount_auth));
         let daemon_health = self.inventory.daemon.health();
-        findings.extend(self.host_filesystem_findings(daemon_health).await?);
         findings.extend(
-            self.docker_filesystem_findings(runtime.as_ref(), daemon_health)
+            self.filesystem_findings(runtime.as_ref(), daemon_health)
                 .await,
         );
-        findings.extend(self.libkrun_filesystem_findings(daemon_health));
 
         Ok(DoctorResult {
             inventory: self.inventory.clone(),
@@ -680,17 +791,23 @@ impl Doctor<'_> {
 
     async fn base_findings(&self) -> (Option<DockerClient>, Vec<Finding>) {
         let mut findings = Vec::new();
+        if let Ok(endpoint) = omnifs_bootstrap::Bootstrap::<Client>::for_client()
+            && let Some(finding) =
+                stale_process_identity_finding(&self.inventory.daemon.probe, &endpoint)
+        {
+            findings.push(finding);
+        }
         let (runtime, docker_result) = self.probe_docker_reachable().await;
         let docker_ok = matches!(docker_result, ProbeResult::Ok(_));
         findings.push(Finding::from_probe(
             Section::Environment,
-            "docker",
+            Check::Docker,
             None,
             docker_result,
         ));
         findings.push(Finding::from_probe(
             Section::Environment,
-            "fuse",
+            Check::Fuse,
             None,
             Self::probe_fuse(),
         ));
@@ -706,20 +823,20 @@ impl Doctor<'_> {
         };
         findings.push(Finding::from_probe(
             Section::Environment,
-            "image",
+            Check::Image,
             None,
             image_result,
         ));
         for (check, result) in [
-            ("credential store", self.probe_credential_store()),
-            ("ssh-agent", Self::probe_ssh_agent()),
-            ("config", self.probe_config_file()),
+            (Check::CredentialStore, self.probe_credential_store()),
+            (Check::SshAgent, Self::probe_ssh_agent()),
+            (Check::Config, self.probe_config_file()),
         ] {
-            findings.push(Finding::from_probe(Section::Workspace, check, None, result));
+            findings.push(Finding::from_probe(Section::Profile, check, None, result));
         }
         findings.push(Finding::from_probe(
             Section::Environment,
-            "network",
+            Check::Network,
             None,
             self.probe_network().await,
         ));
@@ -733,218 +850,248 @@ impl Doctor<'_> {
             .any(|filesystem| filesystem.spec == *spec)
     }
 
-    async fn host_filesystem_findings(
+    /// One generic pass over every backend's owned-instance scan: a
+    /// candidate confirmed live but unattached becomes a stray-filesystem
+    /// finding, and a candidate the backend could not confirm becomes its
+    /// own error finding. Each backend still resolves and confirms its
+    /// candidates its own way (a Docker container needs a second connection
+    /// and identity re-check no on-disk record needs), so this dispatches
+    /// one small per-backend helper per candidate rather than forcing every
+    /// backend's genuinely different confirmation shape into one signature.
+    async fn filesystem_findings(
         &self,
-        daemon_health: DaemonHealth,
-    ) -> anyhow::Result<Vec<Finding>> {
-        let mut findings = Vec::new();
-        let probes = match crate::host_fs::probe_all(self.workspace.filesystem_state()).await {
-            Ok(probes) => probes,
-            Err(error) => {
-                findings.push(Finding::from_probe(
-                    Section::Filesystems,
-                    "filesystem state",
-                    None,
-                    ProbeResult::Err(format!("{error:#}")),
-                ));
-                return Ok(findings);
-            },
-        };
-        for probe in probes {
-            let (state_dir, record, confirmed) = match probe {
-                crate::host_fs::RunnerProbe::Runner {
-                    state_dir,
-                    record,
-                    confirmed,
-                } => (state_dir, record, confirmed),
-                crate::host_fs::RunnerProbe::Invalid { state_dir, error } => {
-                    findings.push(Finding::from_probe(
-                        Section::Filesystems,
-                        "filesystem state",
-                        Some(state_dir.display().to_string()),
-                        ProbeResult::Err(error),
-                    ));
-                    continue;
-                },
-            };
-            let spec = record.spec.clone();
-            let mount_point = spec.location().to_path_buf();
-            let is_attached = self.attached(&spec);
-            let target = Some(format!(
-                "`{}` {}/host at {}",
-                spec.id(),
-                spec.protocol(),
-                mount_point.display()
-            ));
-            match confirmed {
-                Ok(_) if is_attached => {},
-                Ok(phase) => {
-                    let remediation = (daemon_health == DaemonHealth::Stopped)
-                        .then_some(Remediation::StopHostFilesystem { state_dir, record });
-                    findings.push(Finding {
-                        section: Section::Filesystems,
-                        check: "stray filesystem".to_owned(),
-                        target,
-                        severity: Severity::Attention,
-                        message: format!(
-                            "runner is confirmed in phase {phase:?} but daemon health is {daemon_health:?} and reports no matching attachment"
-                        ),
-                        fix: remediation.as_ref().map(Remediation::command_line),
-                        remediation,
-                    });
-                },
-                Err(error) => {
-                    let mount_active = omnifs_nfs::mount_is_active_checked(&mount_point)?;
-                    let remediation = (!mount_active && !is_attached)
-                        .then_some(Remediation::CleanStaleHostRecord { state_dir, record });
-                    findings.push(Finding {
-                        section: Section::Filesystems,
-                        check: "stale filesystem state".to_owned(),
-                        target,
-                        severity: if mount_active || is_attached {
-                            Severity::Error
-                        } else {
-                            Severity::Attention
-                        },
-                        message: if is_attached {
-                            format!(
-                                "runner control cannot be confirmed but the daemon still reports it attached: {error}"
-                            )
-                        } else if mount_active {
-                            format!("runner cannot be confirmed but its mount is active: {error}")
-                        } else {
-                            format!("runner cannot be confirmed: {error}")
-                        },
-                        fix: remediation.as_ref().map(Remediation::command_line),
-                        remediation,
-                    });
-                },
-            }
-        }
-        Ok(findings)
-    }
-
-    async fn docker_filesystem_findings(
-        &self,
-        runtime: Option<&DockerClient>,
+        docker: Option<&DockerClient>,
         daemon_health: DaemonHealth,
     ) -> Vec<Finding> {
-        let Some(runtime) = runtime else {
-            return Vec::new();
-        };
-        let candidates = match runtime
-            .owned_filesystem_containers(self.workspace.identity().container_label())
-            .await
-        {
-            Ok(candidates) => candidates,
-            Err(error) => {
-                return vec![docker_ownership_finding(
-                    None,
-                    ProbeResult::Err(error.to_string()),
-                )];
-            },
-        };
+        let candidates =
+            crate::filesystem_driver::owned_filesystems(&self.client_filesystems, docker).await;
+        let client_owner = doctor_client_owner();
+        let mut client_owner_reported = false;
         let mut findings = Vec::new();
         for candidate in candidates {
-            let finding_target = candidate.filesystem_id.clone().or(candidate
-                .identity
-                .as_ref()
-                .map(|identity| identity.id.clone()));
-            let candidate = match self.resolve_docker_candidate(candidate) {
-                Ok(candidate) => candidate,
-                Err(error) => {
-                    findings.push(docker_ownership_finding(
-                        finding_target,
+            match candidate {
+                Candidate::ListingFailed { backend, error } => {
+                    let check = match backend {
+                        "docker" => Check::DockerFilesystemOwnership,
+                        "libkrun" => Check::LibkrunFilesystemOwnership,
+                        _ => Check::FilesystemState,
+                    };
+                    findings.push(Finding::from_probe(
+                        Section::Filesystems,
+                        check,
+                        None,
+                        ProbeResult::Err(error),
+                    ));
+                },
+                Candidate::Host(probe) => match self.host_candidate_finding(probe, daemon_health) {
+                    Ok(finding) => findings.extend(finding),
+                    Err(error) => findings.push(Finding::from_probe(
+                        Section::Filesystems,
+                        Check::FilesystemState,
+                        None,
                         ProbeResult::Err(format!("{error:#}")),
-                    ));
-                    continue;
+                    )),
                 },
-            };
-            let client = match DockerClient::connect_for(&candidate.target, self.output.clone()) {
-                Ok(client) => client,
-                Err(error) => {
-                    findings.push(docker_ownership_finding(
-                        candidate.spec.id().to_string(),
-                        ProbeResult::Err(format!("{error:#}")),
-                    ));
-                    continue;
+                Candidate::Docker(OwnedFilesystemCandidate::Invalid { target, error }) => {
+                    findings.push(docker_ownership_finding(target, ProbeResult::Err(error)));
                 },
-            };
-            let confirmed = client
-                .confirmed_container_for_spec(
-                    self.workspace.identity().container_label(),
-                    &candidate.spec,
-                )
-                .await;
-            let (confirmed_identity, running) = match confirmed {
-                Ok(Some(confirmed)) => confirmed,
-                Ok(None) => {
-                    findings.push(docker_ownership_finding(
-                        candidate.spec.id().to_string(),
-                        ProbeResult::Warn("container disappeared during inspection".to_owned()),
-                    ));
-                    continue;
-                },
-                Err(error) => {
-                    findings.push(docker_ownership_finding(
-                        candidate.spec.id().to_string(),
-                        ProbeResult::Err(format!("{error:#}")),
-                    ));
-                    continue;
-                },
-            };
-            if confirmed_identity != candidate.listed_identity {
-                findings.push(docker_ownership_finding(
-                    candidate.spec.id().to_string(),
-                    ProbeResult::Err(
-                        "container identity changed during inspection; refusing remediation"
-                            .to_owned(),
-                    ),
-                ));
-                continue;
-            }
-            if !self.attached(&candidate.spec) {
-                let remediation = (daemon_health == DaemonHealth::Stopped).then_some(
-                    Remediation::StopDockerFilesystem {
-                        target: candidate.target,
-                        identity: confirmed_identity,
-                        workspace_home: self.workspace.identity().container_label().to_path_buf(),
-                        spec: candidate.spec.clone(),
+                Candidate::Docker(OwnedFilesystemCandidate::Valid(owned)) => match &client_owner {
+                    Ok(client_owner) => {
+                        findings.extend(
+                            self.docker_candidate_finding(owned, *client_owner, daemon_health)
+                                .await,
+                        );
                     },
-                );
-                let state = if running { "running" } else { "stopped" };
-                findings.push(Finding {
-                    section: Section::Filesystems,
-                    check: "stray filesystem".to_owned(),
-                    target: Some(candidate.spec.id().to_string()),
-                    severity: Severity::Attention,
-                    message: format!(
-                        "{state} container identity is confirmed but daemon health is {daemon_health:?} and reports no matching attachment"
-                    ),
-                    fix: remediation.as_ref().map(Remediation::command_line),
-                    remediation,
-                });
+                    Err(error) => {
+                        if !client_owner_reported {
+                            findings.push(docker_ownership_finding(
+                                None,
+                                ProbeResult::Err(error.clone()),
+                            ));
+                            client_owner_reported = true;
+                        }
+                    },
+                },
+                Candidate::Libkrun(candidate) => {
+                    findings.extend(self.libkrun_candidate_finding(candidate, daemon_health));
+                },
             }
         }
         findings
+    }
+
+    /// One host runner candidate: `Ok(None)` when it needs no finding
+    /// (confirmed and attached), an error only when proving the mount's
+    /// active state itself fails (the runner control probe's own failure is
+    /// reported as a finding, not propagated).
+    fn host_candidate_finding(
+        &self,
+        probe: crate::host_fs::RunnerProbe,
+        daemon_health: DaemonHealth,
+    ) -> anyhow::Result<Option<Finding>> {
+        let (state_dir, record, confirmed) = match probe {
+            crate::host_fs::RunnerProbe::Runner {
+                state_dir,
+                record,
+                confirmed,
+            } => (state_dir, record, confirmed),
+            crate::host_fs::RunnerProbe::Invalid { state_dir, error } => {
+                return Ok(Some(Finding::from_probe(
+                    Section::Filesystems,
+                    Check::FilesystemState,
+                    Some(state_dir.display().to_string()),
+                    ProbeResult::Err(error),
+                )));
+            },
+        };
+        let spec = record.spec.clone();
+        let mount_point = spec.location().to_path_buf();
+        let is_attached = self.attached(&spec);
+        let target = Some(format!(
+            "`{}` {}/host at {}",
+            spec.id(),
+            spec.protocol(),
+            mount_point.display()
+        ));
+        match confirmed {
+            Ok(_) if is_attached => Ok(None),
+            Ok(phase) => {
+                let remediation = (daemon_health == DaemonHealth::Stopped)
+                    .then_some(Remediation::StopHostFilesystem { state_dir, record });
+                Ok(Some(Finding {
+                    section: Section::Filesystems,
+                    check: Check::StrayFilesystem,
+                    target,
+                    severity: Severity::Attention,
+                    message: format!(
+                        "runner is confirmed in phase {phase:?} but daemon health is {daemon_health:?} and reports no matching attachment"
+                    ),
+                    fix: remediation.as_ref().map(Remediation::command_line),
+                    remediation,
+                }))
+            },
+            Err(error) => {
+                let mount_active = omnifs_nfs::mount_is_active_checked(&mount_point)?;
+                let remediation = (!mount_active && !is_attached)
+                    .then_some(Remediation::CleanStaleHostRecord { state_dir, record });
+                Ok(Some(Finding {
+                    section: Section::Filesystems,
+                    check: Check::StaleFilesystemState,
+                    target,
+                    severity: if mount_active || is_attached {
+                        Severity::Failure
+                    } else {
+                        Severity::Attention
+                    },
+                    message: if is_attached {
+                        format!(
+                            "runner control cannot be confirmed but the daemon still reports it attached: {error}"
+                        )
+                    } else if mount_active {
+                        format!("runner cannot be confirmed but its mount is active: {error}")
+                    } else {
+                        format!("runner cannot be confirmed: {error}")
+                    },
+                    fix: remediation.as_ref().map(Remediation::command_line),
+                    remediation,
+                }))
+            },
+        }
+    }
+
+    /// One already-validated owned Docker container: resolve its target,
+    /// reconnect, and re-confirm its exact identity before ever offering a
+    /// stray-filesystem finding, matching the confirm-before-remediate
+    /// contract every driver's `stop_confirmed` also holds callers to.
+    async fn docker_candidate_finding(
+        &self,
+        owned: OwnedFilesystemContainer,
+        client_owner: omnifs_core::ClientOwnerId,
+        daemon_health: DaemonHealth,
+    ) -> Vec<Finding> {
+        let finding_target = owned.filesystem_id.clone();
+        let candidate = match self.resolve_docker_candidate(owned) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                return vec![docker_ownership_finding(
+                    finding_target,
+                    ProbeResult::Err(format!("{error:#}")),
+                )];
+            },
+        };
+        let client = match DockerClient::connect_for(&candidate.target, self.output.clone()) {
+            Ok(client) => client,
+            Err(error) => {
+                return vec![docker_ownership_finding(
+                    candidate.spec.id().to_string(),
+                    ProbeResult::Err(format!("{error:#}")),
+                )];
+            },
+        };
+        let confirmed = client
+            .confirmed(
+                self.client_filesystems.profile_root(),
+                client_owner,
+                &candidate.spec,
+            )
+            .await;
+        let (confirmed_identity, running) = match confirmed {
+            Ok(Some(confirmed)) => confirmed,
+            Ok(None) => {
+                return vec![docker_ownership_finding(
+                    candidate.spec.id().to_string(),
+                    ProbeResult::Warn("container disappeared during inspection".to_owned()),
+                )];
+            },
+            Err(error) => {
+                return vec![docker_ownership_finding(
+                    candidate.spec.id().to_string(),
+                    ProbeResult::Err(format!("{error:#}")),
+                )];
+            },
+        };
+        if confirmed_identity != candidate.listed_identity {
+            return vec![docker_ownership_finding(
+                candidate.spec.id().to_string(),
+                ProbeResult::Err(
+                    "container identity changed during inspection; refusing remediation".to_owned(),
+                ),
+            )];
+        }
+        if self.attached(&candidate.spec) {
+            return Vec::new();
+        }
+        let remediation =
+            (daemon_health == DaemonHealth::Stopped).then_some(Remediation::StopDockerFilesystem {
+                target: candidate.target,
+                identity: confirmed_identity,
+                profile_root: self.client_filesystems.profile_root().to_path_buf(),
+                spec: candidate.spec.clone(),
+            });
+        let state = if running { "running" } else { "stopped" };
+        vec![Finding {
+            section: Section::Filesystems,
+            check: Check::StrayFilesystem,
+            target: Some(candidate.spec.id().to_string()),
+            severity: Severity::Attention,
+            message: format!(
+                "{state} container identity is confirmed but daemon health is {daemon_health:?} and reports no matching attachment"
+            ),
+            fix: remediation.as_ref().map(Remediation::command_line),
+            remediation,
+        }]
     }
 
     fn resolve_docker_candidate(
         &self,
         candidate: OwnedFilesystemContainer,
     ) -> anyhow::Result<DockerCandidate> {
-        let identity = candidate
-            .identity
-            .context("Docker did not return an immutable container ID")?;
-        let id_label = candidate
-            .filesystem_id
-            .context("workspace-owned container has no filesystem identity label")?;
-        let id = fs::Id::new(id_label)?;
-        let target = resolve_docker_target(self.workspace, &id)?;
+        let id = fs::Id::new(candidate.filesystem_id)?;
+        let target = DockerTarget::for_filesystem(&self.client_filesystems, &id)?;
         let canonical_name = format!("/{}", target.container_name());
         anyhow::ensure!(
             candidate.names.iter().any(|name| name == &canonical_name),
-            "workspace labels are on a non-canonical container name; expected `{canonical_name}`"
+            "profile labels are on a non-canonical container name; expected `{canonical_name}`"
         );
         let spec = fs::Spec::new(
             id,
@@ -954,80 +1101,55 @@ impl Doctor<'_> {
         )
         .expect("the fixed Docker filesystem identity is valid");
         Ok(DockerCandidate {
-            listed_identity: identity,
+            listed_identity: candidate.identity,
             target,
             spec,
         })
     }
 
-    fn libkrun_filesystem_findings(&self, daemon_health: DaemonHealth) -> Vec<Finding> {
-        let mut findings = Vec::new();
-        let runtime_root = self.workspace.filesystem_state().runtime_root();
-        let entries = match std::fs::read_dir(&runtime_root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return findings,
-            Err(error) => {
-                findings.push(Finding::from_probe(
+    /// One libkrun helper candidate, matching
+    /// [`Self::host_candidate_finding`] and [`Self::docker_candidate_finding`]'s
+    /// shape: 0 or 1 findings, stray filesystem or the reason it could not
+    /// be confirmed.
+    fn libkrun_candidate_finding(
+        &self,
+        candidate: crate::libkrun_runner::LibkrunCandidate,
+        daemon_health: DaemonHealth,
+    ) -> Vec<Finding> {
+        match candidate {
+            crate::libkrun_runner::LibkrunCandidate::Invalid { target, error } => {
+                vec![Finding::from_probe(
                     Section::Filesystems,
-                    "libkrun filesystem ownership",
-                    Some(runtime_root.display().to_string()),
-                    ProbeResult::Err(error.to_string()),
-                ));
-                return findings;
+                    Check::LibkrunFilesystemOwnership,
+                    target,
+                    ProbeResult::Err(error),
+                )]
             },
-        };
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) => {
-                    findings.push(Finding::from_probe(
-                        Section::Filesystems,
-                        "libkrun filesystem ownership",
-                        None,
-                        ProbeResult::Err(error.to_string()),
-                    ));
-                    continue;
-                },
-            };
-            let state_dir = entry.path().join("libkrun");
-            if !state_dir.exists() {
-                continue;
-            }
-            let raw_id = entry.file_name().to_string_lossy().into_owned();
-            let id = match fs::Id::new(raw_id.clone()) {
-                Ok(id) => id,
-                Err(error) => {
-                    findings.push(Finding::from_probe(
-                        Section::Filesystems,
-                        "libkrun filesystem ownership",
-                        Some(raw_id),
-                        ProbeResult::Err(error.to_string()),
-                    ));
-                    continue;
-                },
-            };
-            let runner = crate::libkrun_runner::LibkrunRunner::new(state_dir.clone());
-            match runner.confirmed_record() {
+            crate::libkrun_runner::LibkrunCandidate::Runner {
+                id,
+                state_dir,
+                confirmed,
+            } => match confirmed {
                 Ok(Some(record)) if record.spec.id() != &id => {
-                    findings.push(Finding::from_probe(
+                    vec![Finding::from_probe(
                         Section::Filesystems,
-                        "libkrun filesystem ownership",
+                        Check::LibkrunFilesystemOwnership,
                         Some(id.to_string()),
                         ProbeResult::Err(format!(
                             "helper claims filesystem `{}` instead of matching its state path",
                             record.spec.id()
                         )),
-                    ));
+                    )]
                 },
                 Ok(Some(record)) => {
                     if self.attached(&record.spec) {
-                        continue;
+                        return Vec::new();
                     }
                     let remediation = (daemon_health == DaemonHealth::Stopped)
                         .then_some(Remediation::StopLibkrunFilesystem { state_dir, record });
-                    findings.push(Finding {
+                    vec![Finding {
                         section: Section::Filesystems,
-                        check: "stray filesystem".to_owned(),
+                        check: Check::StrayFilesystem,
                         target: Some(id.to_string()),
                         severity: Severity::Attention,
                         message: format!(
@@ -1035,18 +1157,17 @@ impl Doctor<'_> {
                         ),
                         fix: remediation.as_ref().map(Remediation::command_line),
                         remediation,
-                    });
+                    }]
                 },
-                Ok(None) => {},
-                Err(error) => findings.push(Finding::from_probe(
+                Ok(None) => Vec::new(),
+                Err(error) => vec![Finding::from_probe(
                     Section::Filesystems,
-                    "libkrun filesystem ownership",
+                    Check::LibkrunFilesystemOwnership,
                     Some(id.to_string()),
-                    ProbeResult::Err(format!("{error:#}")),
-                )),
-            }
+                    ProbeResult::Err(error),
+                )],
+            },
         }
-        findings
     }
 
     async fn probe_docker_reachable(&self) -> (Option<DockerClient>, ProbeResult) {
@@ -1110,40 +1231,20 @@ impl Doctor<'_> {
     }
 
     fn probe_credential_store(&self) -> ProbeResult {
-        let diagnostic = self.workspace.credentials().diagnostic();
-        if !diagnostic.parent_exists {
-            ProbeResult::Warn(format!(
-                "credential directory will be created on first write: {}",
-                diagnostic.display
-            ))
-        } else if !diagnostic.exists {
-            ProbeResult::Warn(format!(
-                "credential store not created yet: {}",
-                diagnostic.display
-            ))
-        } else {
-            match self.workspace.credentials().list() {
-                Ok(Some(keys)) => ProbeResult::Ok(format!(
-                    "{} in {}",
-                    crate::ui::render::count(keys.len(), "credential"),
-                    diagnostic.display
-                )),
-                Ok(None) => ProbeResult::Ok(format!(
-                    "credential store available at {}",
-                    diagnostic.display
-                )),
-                Err(error) => ProbeResult::Err(format!(
-                    "credential store {} unreadable: {error}",
-                    diagnostic.display
-                )),
-            }
-        }
+        let Some(daemon) = self.inventory.daemon.status.as_ref() else {
+            return ProbeResult::Warn("daemon inventory unavailable".into());
+        };
+        ProbeResult::Ok(format!(
+            "{} managed {}",
+            crate::ui::render::count(daemon.credentials.len(), "credential"),
+            "by daemon"
+        ))
     }
 
     fn probe_ssh_agent() -> ProbeResult {
         match std::env::var_os("SSH_AUTH_SOCK") {
             Some(sock) if Path::new(&sock).exists() => {
-                ProbeResult::Ok(omnifs_workspace::display(Path::new(&sock)))
+                ProbeResult::Ok(Path::new(&sock).display().to_string())
             },
             Some(_) => ProbeResult::Warn("SSH_AUTH_SOCK set but socket not found".into()),
             None => ProbeResult::Warn("SSH_AUTH_SOCK unset; git callouts will fail".into()),
@@ -1151,11 +1252,11 @@ impl Doctor<'_> {
     }
 
     fn probe_config_file(&self) -> ProbeResult {
-        let diagnostic = self.workspace.config_diagnostic();
-        if diagnostic.exists {
-            ProbeResult::Ok(diagnostic.display)
+        let path = self.client_filesystems.profile_root().join("config.toml");
+        if path.exists() {
+            ProbeResult::Ok(path.display().to_string())
         } else {
-            ProbeResult::Ok(format!("defaults ({} absent)", diagnostic.display))
+            ProbeResult::Ok(format!("defaults ({} absent)", path.display()))
         }
     }
 
@@ -1185,32 +1286,31 @@ const fn doctor_verdict_label(verdict: DoctorVerdict) -> &'static str {
 #[cfg(test)]
 mod golden {
     use super::*;
-    use crate::test_support::fixture_workspace;
     use tempfile::TempDir;
 
     fn probes() -> Vec<Finding> {
         vec![
             Finding::from_probe(
                 Section::Environment,
-                "docker",
+                Check::Docker,
                 None,
                 ProbeResult::Ok("docker daemon responds".to_string()),
             ),
             Finding::from_probe(
                 Section::Environment,
-                "fuse",
+                Check::Fuse,
                 None,
                 ProbeResult::Skipped("macOS: native mount is NFS loopback"),
             ),
             Finding::from_probe(
                 Section::Environment,
-                "network",
+                Check::Network,
                 None,
                 ProbeResult::Ok("ghcr.io reachable".to_string()),
             ),
             Finding::from_probe(
-                Section::Workspace,
-                "config",
+                Section::Profile,
+                Check::Config,
                 None,
                 ProbeResult::Ok("defaults (~/.omnifs/config.toml absent)".to_string()),
             ),
@@ -1220,7 +1320,7 @@ mod golden {
     fn targeted_finding() -> Finding {
         Finding {
             section: Section::Mounts,
-            check: "credentials".to_string(),
+            check: Check::Credentials,
             target: Some("github".to_string()),
             severity: Severity::Attention,
             message: "token expired".to_string(),
@@ -1248,7 +1348,7 @@ mod golden {
         let inventory = running_inventory();
         let rendered = render_report(&findings, &inventory, DoctorVerdict::Clean, caps(false));
         assert!(rendered.contains("Environment"), "{rendered}");
-        assert!(rendered.contains("Workspace"), "{rendered}");
+        assert!(rendered.contains("Profile"), "{rendered}");
         assert!(rendered.contains("Mounts"), "{rendered}");
         assert!(rendered.contains("Filesystems"), "{rendered}");
         assert!(rendered.contains("Daemon"), "{rendered}");
@@ -1258,7 +1358,7 @@ mod golden {
         );
         // Groups are separated by a blank line, not
         // run together.
-        assert!(rendered.contains("\n\nWorkspace\n"), "{rendered}");
+        assert!(rendered.contains("\n\nProfile\n"), "{rendered}");
         assert!(rendered.contains("\n\nDaemon\n"), "{rendered}");
     }
 
@@ -1299,7 +1399,7 @@ mod golden {
             value: "needs attention".to_owned(),
             fix: fix.map(str::to_owned),
         };
-        let first = warning(Some("omnifs up"));
+        let first = warning(Some("omnifs status"));
         let different = warning(Some("omnifs doctor"));
         assert_eq!(
             verdict_line(&[&first, &different], DoctorVerdict::Warnings, caps(false)),
@@ -1350,9 +1450,9 @@ mod golden {
         let mut failures = warnings;
         failures.findings.push(Finding {
             section: Section::Environment,
-            check: "broken".to_owned(),
+            check: Check::Docker,
             target: None,
-            severity: Severity::Error,
+            severity: Severity::Failure,
             message: "failed to load".to_owned(),
             fix: Some("omnifs logs".to_owned()),
             remediation: None,
@@ -1392,7 +1492,7 @@ mod golden {
             targeted_finding(),
             Finding {
                 section: Section::Environment,
-                check: "network".to_owned(),
+                check: Check::Network,
                 target: None,
                 severity: Severity::Attention,
                 message: "ghcr.io unreachable".to_owned(),
@@ -1405,15 +1505,12 @@ mod golden {
         assert!(remediable_fixes(&probes()).is_empty());
     }
 
-    fn probe_credential_result(root: &std::path::Path) -> ProbeResult {
-        let workspace = fixture_workspace(root);
+    fn probe_credential_result(state: crate::inventory::DaemonHealth) -> ProbeResult {
+        let root = TempDir::new().unwrap();
+        let client_filesystems = ClientFilesystemState::under_root(&root.path().join("client"));
         let doctor = Doctor {
-            workspace: &workspace,
-            inventory: Inventory::test(
-                crate::inventory::DaemonHealth::Stopped,
-                Vec::new(),
-                Vec::new(),
-            ),
+            client_filesystems,
+            inventory: Inventory::test(state, Vec::new(), Vec::new()),
             docker_target: Err("test".to_owned()),
             output: Output::new(crate::ui::output::OutputMode::Human, false),
         };
@@ -1421,48 +1518,45 @@ mod golden {
     }
 
     #[test]
-    fn credential_store_probe_distinguishes_missing_valid_and_invalid_files() {
-        let missing = TempDir::new().unwrap();
-        let result = probe_credential_result(missing.path());
+    fn credential_probe_uses_daemon_inventory_only() {
+        let result = probe_credential_result(crate::inventory::DaemonHealth::Stopped);
         assert!(
-            matches!(result, ProbeResult::Warn(message) if message.contains("not created yet"))
+            matches!(result, ProbeResult::Warn(message) if message.contains("inventory unavailable"))
         );
 
-        let valid = TempDir::new().unwrap();
-        let valid_path = valid.path().join("credentials.json");
-        std::fs::create_dir_all(valid.path()).unwrap();
-        std::fs::write(&valid_path, r#"{"version":1,"entries":{}}"#).unwrap();
-        let result = probe_credential_result(valid.path());
+        let result = probe_credential_result(crate::inventory::DaemonHealth::Running);
         assert!(
-            matches!(result, ProbeResult::Ok(message) if message.contains("0 credentials") && message.contains("credentials.json"))
+            matches!(result, ProbeResult::Ok(message) if message.contains("0 credentials") && message.contains("managed by daemon"))
         );
+    }
 
-        let invalid = TempDir::new().unwrap();
-        let invalid_path = invalid.path().join("credentials.json");
-        std::fs::write(&invalid_path, "not json").unwrap();
-        let result = probe_credential_result(invalid.path());
-        assert!(
-            matches!(result, ProbeResult::Err(message) if message.contains("credentials.json") && message.contains("unreadable"))
-        );
-
-        let unsupported = TempDir::new().unwrap();
-        let unsupported_path = unsupported.path().join("credentials.json");
-        std::fs::write(&unsupported_path, r#"{"version":99,"entries":{}}"#).unwrap();
-        let result = probe_credential_result(unsupported.path());
-        assert!(
-            matches!(result, ProbeResult::Err(message) if message.contains("version") && message.contains("99"))
-        );
-
-        let bad_key = TempDir::new().unwrap();
-        let bad_key_path = bad_key.path().join("credentials.json");
+    #[test]
+    fn dead_process_identity_becomes_a_doctor_remediation() {
+        let root = TempDir::new().unwrap();
+        let endpoint = omnifs_bootstrap::Bootstrap::<Client>::under_root(root.path());
         std::fs::write(
-            &bad_key_path,
-            r#"{"version":1,"entries":{"not-a-credential-key":{"kind":"static-token","access_token":"x","refresh_token":null,"expires_at":null,"token_type":"Bearer","stored_at":"1970-01-01T00:00:00Z","last_validated":null,"scopes":[],"upstream_identity":null,"extras":{}}}}"#,
+            endpoint.process_identity_path(),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "pid": std::process::id(),
+                "instance_token": "stale",
+                "executable": std::env::current_exe().unwrap(),
+                "start_identity": "not-the-current-process"
+            }))
+            .unwrap(),
         )
         .unwrap();
-        let result = probe_credential_result(bad_key.path());
-        assert!(
-            matches!(result, ProbeResult::Err(message) if message.contains("credential") && message.contains("key"))
-        );
+
+        let finding = stale_process_identity_finding(
+            &DaemonProbe::Unreachable {
+                message: "connection refused".to_owned(),
+            },
+            &endpoint,
+        )
+        .expect("stale identity finding");
+        assert!(matches!(
+            finding.remediation,
+            Some(Remediation::CleanStaleInstance { .. })
+        ));
     }
 }

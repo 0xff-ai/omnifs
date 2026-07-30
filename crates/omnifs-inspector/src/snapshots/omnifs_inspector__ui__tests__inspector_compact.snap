@@ -1,0 +1,22 @@
+---
+source: crates/omnifs-inspector/src/ui.rs
+expression: compact_screen
+---
+┌ inspect · activity · replay fixture 1× · 25.0/s · drop 0 ────────────┐
+│                                                                      │
+└ q quit  ? help  v view  tab focus  ↑/↓ navigate  ↵ collapse  space pa┘
+┌ operations · recent (2 / 4096) ──────────────────────────────────────┐
+│  12:00:00.100 linear read /issues/ENG-42  220.0ms                    │
+│› 12:00:00.000 github lookup /repos/omnifs  40.0ms                    │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘

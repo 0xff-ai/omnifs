@@ -11,6 +11,11 @@ pub struct ProviderId([u8; 32]);
 
 impl ProviderId {
     #[must_use]
+    pub const fn from_digest(digest: [u8; 32]) -> Self {
+        Self(digest)
+    }
+
+    #[must_use]
     pub fn from_wasm_bytes(bytes: &[u8]) -> Self {
         Self(*blake3::hash(bytes).as_bytes())
     }

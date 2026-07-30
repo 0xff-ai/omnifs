@@ -2,63 +2,132 @@
 
 use crate::error::{ExitCode, WithExitCode, WithHint};
 use anyhow::anyhow;
+use omnifs_api::{
+    CredentialClientOverrides, CredentialMaterial, CredentialSubmission, SecretBytes,
+};
+use omnifs_auth::CredentialEntry;
 use omnifs_auth::{
     DeviceCodePrompt, LoginRequest, ManualCode, ManualCodeLoginRequest, OAuthClient, OAuthRequest,
     UrlOpener,
 };
-use omnifs_workspace::authn::CredentialId;
-use omnifs_workspace::creds::{CredentialEntry, CredentialStore};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use super::Auth;
 use crate::ui::style;
-use omnifs_workspace::Workspace;
-use omnifs_workspace::authn::SchemeGuidance;
-use omnifs_workspace::provider::Catalog;
+use omnifs_auth::SchemeGuidance;
+use omnifs_core::ProviderId;
+use omnifs_provider::ProviderManifest;
+use secrecy::ExposeSecret;
 
 const MANUAL_PROMPT_CANCELED: &str = "omnifs-manual-oauth-prompt-canceled";
 
 /// Whether to suppress the system browser and whether prompts are allowed.
-/// Bundled so `login` and its two public wrappers keep a readable argument
-/// list (each would otherwise carry `no_browser`/`no_input`/`scopes` as three
-/// separate positional bools/slices).
+/// Bundled so the credential-submission flow keeps a readable argument list
+/// instead of carrying three separate positional bools/slices.
 #[derive(Clone, Copy)]
 pub(crate) struct LoginInteractivity<'a> {
     pub(crate) no_browser: bool,
     pub(crate) no_input: bool,
-    pub(crate) scopes: &'a [String],
+    /// `None` uses the provider or auth-config default. `Some([])` is an
+    /// explicit empty scope set and must not fall back to provider defaults.
+    pub(crate) scopes: Option<&'a [String]>,
 }
 
-pub(crate) async fn login(
-    catalog: &Catalog,
-    mount_auth: crate::auth::MountAuth,
-    store: &dyn CredentialStore,
-    account: Option<&str>,
+/// Run the provider-declared OAuth flow for a daemon credential submission.
+/// This performs only the user-facing flow. The daemon receives the resulting
+/// material and owns all durable credential state and upstream revocation.
+pub(crate) async fn login_for_submission(
+    provider: ProviderId,
+    manifest: &ProviderManifest,
+    auth: &Auth,
+    account_label: &str,
     interactivity: LoginInteractivity<'_>,
     output: &crate::ui::output::Output,
     key_width: usize,
-) -> anyhow::Result<CredentialId> {
+) -> anyhow::Result<CredentialSubmission> {
+    let scheme_key = auth
+        .scheme()
+        .ok_or_else(|| anyhow!("auth config must set a scheme"))?;
+    let auth_manifest = manifest
+        .auth
+        .as_ref()
+        .ok_or_else(|| anyhow!("provider `{}` has no auth manifest", manifest.id))?
+        .wasm_auth_manifest();
+    let scheme = auth_manifest
+        .resolve_oauth_scheme(Some(scheme_key))?
+        .clone();
+    let config = auth.as_oauth().map(super::OAuth::request_config);
+    let mut request = OAuthRequest::from_config(config.as_ref(), scheme)?;
+    if let Some(scopes) = interactivity.scopes {
+        request.override_default_scopes(scopes.to_vec());
+    }
+    let guidance = manifest
+        .auth
+        .as_ref()
+        .map(|auth| auth.guidance_for(scheme_key))
+        .unwrap_or_default();
+    let entry = run_oauth(
+        request,
+        manifest.id.as_str(),
+        &guidance,
+        interactivity,
+        output,
+        key_width,
+    )
+    .await?;
+    let requested_scopes = interactivity
+        .scopes
+        .map(<[String]>::to_vec)
+        .or_else(|| auth.as_oauth().and_then(|oauth| oauth.scopes.clone()));
+    let expires_at_unix = entry.expires_at().map(time::OffsetDateTime::unix_timestamp);
+    let refresh_token = entry
+        .refresh_token()
+        .map(|value| SecretBytes::new(value.expose_secret().as_bytes().to_vec()));
+    Ok(CredentialSubmission {
+        provider,
+        scheme: scheme_key.to_owned(),
+        account_label: account_label.to_owned(),
+        material: CredentialMaterial::OAuth {
+            access_token: SecretBytes::new(
+                entry.access_token().expose_secret().as_bytes().to_vec(),
+            ),
+            refresh_token,
+            expires_at_unix,
+            token_type: entry.token_type().to_owned(),
+            scopes: entry.scopes().to_vec(),
+            upstream_identity: entry.upstream_identity().map(str::to_owned),
+        },
+        overrides: CredentialClientOverrides {
+            client_id: auth.as_oauth().and_then(|oauth| oauth.client_id.clone()),
+            client_secret: None,
+            redirect_uri: auth.as_oauth().and_then(|oauth| oauth.redirect_uri.clone()),
+            scopes: requested_scopes,
+        },
+    })
+}
+
+async fn run_oauth(
+    request: OAuthRequest,
+    mount: &str,
+    guidance: &SchemeGuidance,
+    interactivity: LoginInteractivity<'_>,
+    output: &crate::ui::output::Output,
+    key_width: usize,
+) -> anyhow::Result<CredentialEntry> {
     let LoginInteractivity {
         no_browser,
         no_input,
-        scopes,
+        ..
     } = interactivity;
-    let mount = mount_auth.spec().mount.clone();
-    let (request, target) = mount_auth.oauth_request(account, scopes)?;
-    let guidance = omnifs_workspace::mounts::pinned_manifest(catalog, mount_auth.spec())
-        .ok()
-        .flatten()
-        .and_then(|manifest| manifest.auth)
-        .map(|auth| auth.guidance_for(&request.scheme().key))
-        .unwrap_or_default();
     output.narrate(format!(
         "requesting OAuth for `{mount}` using scheme `{}` ({})",
         request.scheme().key,
         super::explain::label(&request.scheme().flow)
     ));
-    print_oauth_consent_summary(output, &request, &guidance);
+    print_oauth_consent_summary(output, &request, guidance);
     let client = OAuthClient::new()?;
     let printed_urls = Arc::new(Mutex::new(Vec::new()));
     let client = if no_browser {
@@ -83,11 +152,8 @@ pub(crate) async fn login(
             ))
             .with_exit_code(ExitCode::AuthRequired);
         },
-        LoginRequest::ManualCode(request) => login_manual(&client, request, &mount, output).await?,
+        LoginRequest::ManualCode(request) => login_manual(&client, request, mount, output).await?,
         LoginRequest::DeviceCode(request) => {
-            // The callback runs before the await inside login_device_code, so we cannot
-            // borrow &mut output across the future. `present_device_prompt` prints
-            // directly through the raw stderr writer instead.
             let result = client
                 .login_device_code(request, move |prompt| {
                     present_device_prompt(&prompt, no_browser);
@@ -114,27 +180,7 @@ pub(crate) async fn login(
     {
         output.narrate(format!("Open {url}"));
     }
-    store.put(&target, &entry)?;
-    output.narrate(format!(
-        "stored OAuth credential for `{mount}` with scopes: {}",
-        format_scopes(entry.scopes())
-    ));
-    if mount == "github" && entry.scopes().is_empty() {
-        output.narrate(
-            "GitHub granted no scopes. Public resources will work; rerun with `--scope repo` for private repositories.",
-        );
-    }
-    // No upstream identity is available from the OAuth exchange itself (the
-    // flow never probes "who am I"), so the completed-auth row names the
-    // scheme kind rather than fabricating a username; static-token sign-in
-    // does carry a real identity when the provider's validation probe returns
-    // one. Emitted here so `mount add` and `mount reauth` settle the same row
-    // without each re-asserting it.
-    output.ledger_row(
-        &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "signed in", "oauth"),
-        key_width,
-    );
-    Ok(target)
+    Ok(entry)
 }
 
 async fn login_manual(
@@ -172,29 +218,6 @@ async fn login_manual(
         },
         result => result.with_hint(format!("Re-run `omnifs mount reauth {mount}` to retry")),
     }
-}
-
-pub(crate) async fn login_with_workspace(
-    workspace: &Workspace,
-    mount: &str,
-    account: Option<&str>,
-    interactivity: LoginInteractivity<'_>,
-    output: &crate::ui::output::Output,
-    key_width: usize,
-) -> anyhow::Result<CredentialId> {
-    let store = workspace.credentials();
-    let mounts = crate::mount_config::load_registry(workspace)?;
-    let mount_auth = crate::auth::MountAuth::load(workspace.catalog(), &mounts, mount)?;
-    login(
-        workspace.catalog(),
-        mount_auth,
-        store,
-        account,
-        interactivity,
-        output,
-        key_width,
-    )
-    .await
 }
 
 fn present_device_prompt(prompt: &DeviceCodePrompt, no_browser: bool) {
@@ -344,49 +367,5 @@ fn format_scopes(scopes: &[String]) -> String {
         "<none>".to_owned()
     } else {
         scopes.join(", ")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::test_support::{fixture_workspace, install_fixture_provider, spec_with_reference};
-
-    #[test]
-    fn planned_spec_constructs_oauth_without_reloading_workspace_mounts() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let workspace = fixture_workspace(tmp.path());
-        let mounts_dir = tmp.path().join("mounts");
-        let providers_dir = tmp.path().join("providers");
-        std::fs::create_dir_all(&mounts_dir).unwrap();
-        std::fs::create_dir_all(&providers_dir).unwrap();
-        let reference = install_fixture_provider(&providers_dir, "planned-oauth");
-
-        assert!(
-            crate::mount_config::load_registry(&workspace)
-                .unwrap()
-                .iter()
-                .next()
-                .is_none()
-        );
-        let spec = spec_with_reference(
-            &reference,
-            r#"{
-                "mount": "planned-oauth",
-                "auth": { "type": "oauth" }
-            }"#,
-        );
-
-        let mount_auth = crate::auth::MountAuth::from_spec(workspace.catalog(), spec);
-        let (request, target) = mount_auth.oauth_request(None, &[]).unwrap();
-
-        assert_eq!(request.scheme().key, "device");
-        assert_eq!(target.scheme(), "device");
-        assert!(
-            crate::mount_config::load_registry(&workspace)
-                .unwrap()
-                .iter()
-                .next()
-                .is_none()
-        );
     }
 }

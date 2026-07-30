@@ -15,7 +15,7 @@ pub use crate::ops::namespace::{
     ChunkOutcome, DirEntry, DirListing, ListOutcome as NamespaceListOutcome, OpenOutcome,
     ReadBytes, ReadOutcome,
 };
-pub use crate::{ComponentEngine, Engine, EngineError, GitCloner, HostOnline, HostOpen};
+pub use crate::{ComponentEngine, Engine, EngineError, GitCloner, HostOnline};
 /// Stable compiled-component cache shared by test processes.
 ///
 /// Runtime data remains in each fixture's temporary cache directory. Only
@@ -32,61 +32,27 @@ pub fn wasm_cache_dir() -> PathBuf {
     )
 }
 
-pub mod auth {
-    pub use omnifs_auth::{AuthBinding, RefreshOutcome};
-    use omnifs_auth::{CredentialService, OAuthClient};
-    use omnifs_workspace::authn::AuthManifest;
-    use omnifs_workspace::creds::CredentialStore;
-    use omnifs_workspace::mounts::Auth;
-    use std::sync::Arc;
-
-    /// Build a dedicated mount binding around a test store and OAuth client.
-    pub fn binding_with_store_and_http(
-        config: Option<&Auth>,
-        manifest: Option<&AuthManifest>,
-        provider_name: &str,
-        store: Arc<dyn CredentialStore>,
-        oauth_http: reqwest_oauth2::Client,
-    ) -> Option<Arc<AuthBinding>> {
-        let service = Arc::new(CredentialService::new(
-            store,
-            OAuthClient::from_http_client(oauth_http),
-        ));
-        crate::auth::binding_from_config(config, manifest, provider_name, &service)
-            .expect("build test auth binding")
-    }
-}
-
-/// Open an online [`HostOnline`] for tests, using the shared wasm compile cache.
+/// Open a runtime [`HostOnline`] for tests, using the shared Wasmtime cache.
 pub fn open_test_host(
     cache_dir: impl AsRef<std::path::Path>,
-    providers_dir: impl AsRef<std::path::Path>,
-    credentials_file: impl AsRef<std::path::Path>,
     clone_dir: impl AsRef<std::path::Path>,
 ) -> Result<crate::HostOnline, crate::HostError> {
-    use omnifs_workspace::creds::FileStore;
-    use omnifs_workspace::provider::Catalog;
-    use std::sync::Arc;
-    crate::HostOnline::open(crate::HostOpen {
-        cache_dir: cache_dir.as_ref().to_path_buf(),
-        wasm_cache_dir: wasm_cache_dir(),
-        credentials: Arc::new(FileStore::new(credentials_file.as_ref())),
-        catalog: Catalog::open(providers_dir.as_ref()),
-        clone_dir: clone_dir.as_ref().to_path_buf(),
+    crate::HostOnline::open_runtime(crate::HostRuntimeOpen {
+        projection: cache_dir.as_ref().to_path_buf(),
+        wasmtime: wasm_cache_dir(),
+        clones: clone_dir.as_ref().to_path_buf(),
     })
 }
 
-/// Load a complete immutable mount snapshot with provider callout capture
-/// enabled. This keeps live filesystem concurrency fixtures on the same startup
-/// construction path as the daemon while exposing the capture option only in
-/// the test-support surface.
+/// Build a durable mount table with provider callout capture enabled. This
+/// keeps live concurrency fixtures on the daemon's startup path while keeping
+/// the capture option in test support.
 #[doc(hidden)]
 pub fn load_mount_table_for_callout_tests(
     host: &crate::runtime::host::HostOnline,
-    desired: &omnifs_workspace::mounts::Registry,
-    handle: &tokio::runtime::Handle,
+    inputs: Vec<crate::MountBuildInput>,
 ) -> Result<crate::MountTable, crate::RegistryError> {
-    crate::runtime::registry::MountTable::load_online_with_options(host, desired, handle, true)
+    crate::runtime::registry::MountTable::prepare_durable_with_options(host, inputs, true)
 }
 
 pub mod blob {

@@ -14,7 +14,6 @@ use crate::http::{HttpStack, decode_response_headers};
 use crate::log_redaction::{LogUrl, WitHeaders};
 use futures::StreamExt;
 use omnifs_wit::provider::types as wit_types;
-use omnifs_workspace::mounts::Spec;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,13 +39,10 @@ impl Default for BlobLimits {
 }
 
 impl BlobLimits {
-    pub fn from_config(config: &Spec) -> Self {
+    pub fn from_max_fetch_bytes(max_fetch_blob_bytes: Option<u64>) -> Self {
         let defaults = Self::default();
-        let limits = config.limits.as_ref();
         Self {
-            max_fetch_blob_bytes: limits
-                .and_then(|limits| limits.max_fetch_blob_bytes)
-                .unwrap_or(defaults.max_fetch_blob_bytes),
+            max_fetch_blob_bytes: max_fetch_blob_bytes.unwrap_or(defaults.max_fetch_blob_bytes),
         }
     }
 }

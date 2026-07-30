@@ -14,7 +14,6 @@ libc = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 tokio = { workspace = true }
 reqwest = { workspace = true, optional = true }
-reqwest-oauth2 = { package = "reqwest", version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 blake3 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 serde = { workspace = true }
@@ -31,8 +30,8 @@ wasmtime-wasi = { version = "46.0.1", default-features = false, features = ["p2"
 tempfile = { workspace = true, optional = true }
 omnifs-core = { workspace = true }
 omnifs-vfs = { workspace = true }
-omnifs-workspace = { workspace = true, optional = true }
 omnifs-auth = { workspace = true, optional = true }
+omnifs-provider = { workspace = true, optional = true }
 omnifs-api = { workspace = true, optional = true }
 omnifs-wit = { workspace = true, features = ["host-bindings"], optional = true }
 anyhow = { workspace = true, optional = true }
@@ -54,10 +53,9 @@ runtime = [
     "dep:moka",
     "dep:omnifs-api",
     "dep:omnifs-auth",
+    "dep:omnifs-provider",
     "dep:omnifs-wit",
-    "dep:omnifs-workspace",
     "dep:reqwest",
-    "dep:reqwest-oauth2",
     "dep:serde_json",
     "dep:tempfile",
     "dep:time",

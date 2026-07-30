@@ -1,35 +1,28 @@
-//! Integration tests for the workspace broker's home resolution.
+//! Integration tests for profile bootstrap-path resolution.
 
 #![allow(clippy::similar_names)]
 
 mod common;
 
 use common::with_env;
-use omnifs_workspace::{OMNIFS_HOME_ENV, ResolveError, Workspace};
+use omnifs_bootstrap::{Bootstrap, Client, OMNIFS_HOME_ENV, ResolveError};
 
 #[test]
-fn workspace_under_root_owns_component_paths() {
+fn endpoint_under_root_owns_only_bootstrap_paths() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().join("workspace");
-    let workspace = Workspace::under_root(&root);
+    let root = tmp.path().join("profile");
+    let endpoint = Bootstrap::<Client>::under_root(&root);
 
-    assert_eq!(workspace.daemon().record_file(), root.join("daemon.json"));
-    assert_eq!(
-        workspace.filesystem_state().attach_socket(),
-        root.join("filesystems/runtime/local.sock")
-    );
-    let id = "work".parse().unwrap();
-    assert_eq!(
-        workspace.filesystem_state().default_host_location(&id),
-        root.join("filesystems/mounts/work")
-    );
+    assert_eq!(endpoint.bootstrap_dir(), root);
+    assert_eq!(endpoint.control_socket(), root.join("control.sock"));
+    assert_eq!(endpoint.process_identity_path(), root.join("process.json"));
 }
 
 #[test]
-fn workspace_resolve_requires_home_or_omnifs_home() {
+fn endpoint_resolve_requires_home_or_omnifs_home() {
     with_env(&[("HOME", None), (OMNIFS_HOME_ENV, None)], || {
-        let Err(error) = Workspace::resolve() else {
-            panic!("workspace unexpectedly resolved");
+        let Err(error) = Bootstrap::<Client>::for_client() else {
+            panic!("endpoint unexpectedly resolved");
         };
         assert_eq!(error, ResolveError);
     });
@@ -43,8 +36,8 @@ fn workspace_resolve_requires_home_or_omnifs_home() {
             (OMNIFS_HOME_ENV, Some(root.to_str().unwrap())),
         ],
         || {
-            let workspace = Workspace::resolve().unwrap();
-            assert_eq!(workspace.identity().output_home(), root);
+            let endpoint = Bootstrap::<Client>::for_client().unwrap();
+            assert_eq!(endpoint.bootstrap_dir(), root);
         },
     );
 }

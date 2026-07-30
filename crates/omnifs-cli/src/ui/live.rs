@@ -17,7 +17,6 @@ use crossterm::{
 };
 
 use super::output::Output;
-use super::prompt::Canceled;
 use super::render;
 use super::style::{self, Glyph};
 
@@ -354,18 +353,6 @@ impl LiveRegion {
         self.erase();
         self.output
             .ledger_row(&render::LedgerRow::new(glyph, key, value), key_width);
-    }
-
-    /// Race a future against Ctrl-C while a live region may be on screen.
-    /// Callers render their own partial-state summary before propagating the
-    /// resulting error.
-    pub(crate) async fn race<T>(
-        future: impl std::future::Future<Output = T>,
-    ) -> Result<T, Canceled> {
-        tokio::select! {
-            value = future => Ok(value),
-            _ = tokio::signal::ctrl_c() => Err(Canceled),
-        }
     }
 }
 

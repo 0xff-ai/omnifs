@@ -1,7 +1,7 @@
 //! Shared VFS facade: the [`Namespace`] trait and plain answer types.
 //!
 //! Filesystems and the optional wire transport consume this surface. Projection
-//! semantics stay in `omnifs-engine` (`TreeNamespace`). Enable the `wire`
+//! semantics stay in `omnifs-engine` (`EngineNamespace`). Enable the `wire`
 //! feature on this crate for attach transport (`WireNamespace`, `VfsServer`).
 
 use std::path::PathBuf;
@@ -239,6 +239,8 @@ pub enum NsError {
     NotDirectory,
     #[error("is a directory")]
     IsDirectory,
+    #[error("mount credential is unavailable")]
+    AuthRequired,
     #[error("permission denied")]
     Permission,
     #[error("invalid argument")]
@@ -262,9 +264,11 @@ impl NsError {
             Self::RateLimited { .. } | Self::Timeout | Self::Network => NsRetryClass::Retry,
             Self::NotFound | Self::NotDirectory | Self::IsDirectory => NsRetryClass::Gone,
             Self::TooLarge => NsRetryClass::TooLarge,
-            Self::Permission | Self::Invalid | Self::OfflineMiss | Self::Internal { .. } => {
-                NsRetryClass::Terminal
-            },
+            Self::AuthRequired
+            | Self::Permission
+            | Self::Invalid
+            | Self::OfflineMiss
+            | Self::Internal { .. } => NsRetryClass::Terminal,
         }
     }
 }

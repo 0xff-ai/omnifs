@@ -29,7 +29,7 @@ use tokio::sync::Notify;
 use super::body::{BodyId, BodyStore};
 use super::identity::ProjectionId;
 use super::identity::{BlobRequestId, GitId};
-use super::projection::{ProjectionRow, ProjectionStore, ProjectionStoreError};
+use super::projection::{ProjectionStore, ProjectionStoreError};
 use crate::cache::memory::MemoryTier;
 use crate::object_id::ObjectId;
 use crate::view::{
@@ -235,6 +235,18 @@ pub(crate) struct ProjectionTransition {
     pub git: Vec<GitWrite>,
 }
 
+impl ProjectionTransition {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.records.is_empty()
+            && self.dirents.is_empty()
+            && self.objects.is_empty()
+            && self.freshness.is_empty()
+            && self.invalidations.is_empty()
+            && self.blobs.is_empty()
+            && self.git.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 enum DurableFact {
     Lookup(LookupPayload),
@@ -321,7 +333,7 @@ pub struct Caches {
     pub(crate) body: Arc<BodyStore>,
     projection_root: std::path::PathBuf,
     pub(crate) projection_database: OptimisticTxDatabase,
-    projection_owners: Mutex<HashMap<ProjectionId, Weak<MountResources>>>,
+    projection_fences: Mutex<HashMap<ProjectionId, Weak<ResourceFence>>>,
 }
 
 impl Caches {
@@ -343,34 +355,7 @@ impl Caches {
             body,
             projection_root,
             projection_database,
-            projection_owners: Mutex::new(HashMap::new()),
-        }))
-    }
-
-    /// Open the existing global projection database and body store without
-    /// creating, sweeping, or repairing cache state.
-    pub(crate) fn open_existing(dir: &StdPath) -> Result<Arc<Self>, ProjectionError> {
-        let dir =
-            crate::cache::existing_directory(dir).map_err(super::body::BodyStoreError::from)?;
-        let projection_root = crate::cache::existing_directory(&dir.join("projections"))
-            .map_err(super::body::BodyStoreError::from)?;
-        let database_root = crate::cache::existing_directory(&projection_root.join("database"))
-            .map_err(super::body::BodyStoreError::from)?;
-        let version = database_root.join("version");
-        let metadata =
-            std::fs::symlink_metadata(&version).map_err(super::body::BodyStoreError::from)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(ProjectionError::Inconsistent(
-                "projection database version marker is not a regular file".into(),
-            ));
-        }
-        let projection_database = OptimisticTxDatabase::builder(database_root).open()?;
-        let body = Arc::new(BodyStore::open_existing(dir.join("bodies"))?);
-        Ok(Arc::new(Self {
-            body,
-            projection_root,
-            projection_database,
-            projection_owners: Mutex::new(HashMap::new()),
+            projection_fences: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -382,37 +367,34 @@ impl Caches {
         provider_id: ProviderId,
         spec_source: &[u8],
     ) -> anyhow::Result<Arc<MountResources>> {
-        let mut owners = self.projection_owners.lock();
-        if let Some(owner) = owners.get(&projection_id).and_then(Weak::upgrade) {
-            return Ok(owner);
-        }
-        let owner = MountResources::new(self, mount, projection_id, provider_id, spec_source)?;
-        owners.insert(projection_id, Arc::downgrade(&owner));
-        Ok(owner)
+        let resources = self.prepare_mount(mount, projection_id, provider_id, spec_source)?;
+        resources.activate();
+        Ok(resources)
     }
 
-    /// Return the sole owner for one existing projection after validating its
-    /// complete durable fact graph.
-    pub(crate) fn mount_existing(
+    /// Open isolated process-local resources for a candidate generation.
+    ///
+    /// The durable projection is shared, but publication remains fenced until
+    /// the serving cell activates this owner.
+    pub(crate) fn prepare_mount(
         self: &Arc<Self>,
         mount: &MountName,
         projection_id: ProjectionId,
         provider_id: ProviderId,
         spec_source: &[u8],
-    ) -> Result<Arc<MountResources>, ProjectionError> {
-        let mut owners = self.projection_owners.lock();
-        if let Some(owner) = owners.get(&projection_id).and_then(Weak::upgrade) {
-            owner
-                .projection
-                .validate_existing(mount, spec_source, provider_id)?;
-            owner.validate_durable_projection()?;
-            return Ok(owner);
+    ) -> anyhow::Result<Arc<MountResources>> {
+        let fence = self.resource_fence(projection_id);
+        MountResources::new(self, mount, projection_id, provider_id, spec_source, fence)
+    }
+
+    fn resource_fence(&self, projection_id: ProjectionId) -> Arc<ResourceFence> {
+        let mut fences = self.projection_fences.lock();
+        if let Some(fence) = fences.get(&projection_id).and_then(Weak::upgrade) {
+            return fence;
         }
-        let owner =
-            MountResources::new_existing(self, mount, projection_id, provider_id, spec_source)?;
-        owner.validate_durable_projection()?;
-        owners.insert(projection_id, Arc::downgrade(&owner));
-        Ok(owner)
+        let fence = Arc::new(ResourceFence::default());
+        fences.insert(projection_id, Arc::downgrade(&fence));
+        fence
     }
 }
 
@@ -428,6 +410,49 @@ pub struct MountResources {
     pub(crate) blob_handles: dashmap::DashMap<u64, Arc<BlobRecord>>,
     pub(crate) next_blob_id: AtomicU64,
     publication: PublicationReservations,
+    fence: Arc<ResourceFence>,
+    generation: ResourceGeneration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResourceGeneration(u64);
+
+#[derive(Default)]
+struct ResourceFence {
+    active: Mutex<u64>,
+}
+
+impl ResourceFence {
+    fn prepare(&self) -> ResourceGeneration {
+        ResourceGeneration(
+            self.active
+                .lock()
+                .checked_add(1)
+                .expect("resource generation cannot exhaust"),
+        )
+    }
+
+    fn activate(&self, generation: ResourceGeneration) {
+        let mut active = self.active.lock();
+        if *active == generation.0 {
+            return;
+        }
+        assert_eq!(
+            active.checked_add(1),
+            Some(generation.0),
+            "candidate resource generation is not the next generation"
+        );
+        *active = generation.0;
+    }
+
+    fn retire(&self, generation: ResourceGeneration) {
+        let mut active = self.active.lock();
+        if *active == generation.0 {
+            *active = active
+                .checked_add(1)
+                .expect("resource generation cannot exhaust");
+        }
+    }
 }
 
 pub(crate) struct BlobPublicationGuard<'a> {
@@ -501,6 +526,7 @@ impl MountResources {
         projection_id: ProjectionId,
         provider_id: ProviderId,
         spec_source: &[u8],
+        fence: Arc<ResourceFence>,
     ) -> anyhow::Result<Arc<Self>> {
         let projection = ProjectionStore::open(
             &caches.projection_root,
@@ -510,29 +536,16 @@ impl MountResources {
             spec_source,
             provider_id,
         )?;
-        Ok(Self::from_projection(caches, projection))
+        Ok(Self::from_projection(caches, projection, fence))
     }
 
-    fn new_existing(
+    fn from_projection(
         caches: &Caches,
-        mount: &MountName,
-        projection_id: ProjectionId,
-        provider_id: ProviderId,
-        spec_source: &[u8],
-    ) -> Result<Arc<Self>, ProjectionError> {
-        let projection = ProjectionStore::open_existing(
-            &caches.projection_root,
-            &caches.projection_database,
-            projection_id,
-            mount,
-            spec_source,
-            provider_id,
-        )?;
-        Ok(Self::from_projection(caches, projection))
-    }
-
-    fn from_projection(caches: &Caches, projection: ProjectionStore) -> Arc<Self> {
+        projection: ProjectionStore,
+        fence: Arc<ResourceFence>,
+    ) -> Arc<Self> {
         let body = Arc::clone(&caches.body);
+        let generation = fence.prepare();
         Arc::new(Self {
             projection,
             body,
@@ -549,7 +562,17 @@ impl MountResources {
                 active: Mutex::new(HashSet::new()),
                 wake: Notify::new(),
             },
+            fence,
+            generation,
         })
+    }
+
+    pub(crate) fn activate(&self) {
+        self.fence.activate(self.generation);
+    }
+
+    pub(crate) fn retire(&self) {
+        self.fence.retire(self.generation);
     }
 
     pub(crate) async fn reserve(&self, key: PublicationKey) -> PublicationPermit<'_> {
@@ -778,6 +801,10 @@ impl MountResources {
             .collect::<Result<Vec<_>, ProjectionError>>()?;
         let transition_git_paths: HashSet<Path> = git.iter().map(|git| git.path.clone()).collect();
 
+        let active_generation = self.fence.active.lock();
+        if *active_generation != self.generation.0 {
+            return Ok(PublicationOutcome::Fenced);
+        }
         let mut coherence = self.coherence.lock();
         if captured_epoch != coherence.invalidation_epoch {
             return Ok(PublicationOutcome::Fenced);
@@ -1173,23 +1200,6 @@ impl MountResources {
         Ok(Some(GitFact { id, relative_path }))
     }
 
-    pub(crate) fn git_facts(&self) -> Result<Vec<(Path, GitFact)>, ProjectionError> {
-        self.projection
-            .rows()?
-            .into_iter()
-            .filter(|row| row.key.starts_with(b"g:"))
-            .map(|row| {
-                let path = decode_path(&row.key[2..], "Git fact")?;
-                let DurableFact::Git { id, relative_path } = postcard::from_bytes(&row.value)?
-                else {
-                    return Err(inconsistent("Git key contains a non-Git fact"));
-                };
-                validate_git_relative(&relative_path)?;
-                Ok((path, GitFact { id, relative_path }))
-            })
-            .collect()
-    }
-
     /// Whether the indexed view leaf has reached its freshness deadline.
     pub(crate) fn view_expired(
         &self,
@@ -1240,358 +1250,6 @@ impl MountResources {
             return Ok(false);
         }
         Ok(true)
-    }
-
-    /// Validate every row and cross-row relation before an offline mount can
-    /// become visible through the fixed mount table.
-    fn validate_durable_projection(&self) -> Result<(), ProjectionError> {
-        let mut state = ProjectionValidation::default();
-        for row in self.projection.rows()? {
-            state.read_row(row, &self.body)?;
-        }
-        state.finish(&self.body)
-    }
-
-    // --- Invalidation ---------------------------------------------------------
-}
-
-#[derive(Default)]
-struct ProjectionValidation {
-    objects: HashMap<Vec<u8>, (BodyId, u64)>,
-    indexes: HashMap<Path, Vec<u8>>,
-    aliases: HashSet<(Vec<u8>, Path)>,
-    negatives: HashMap<Path, Option<Vec<u8>>>,
-    negative_reverse: HashSet<(Vec<u8>, Path)>,
-    positives: HashSet<Path>,
-    positive_directories: HashSet<Path>,
-    git_paths: HashSet<Path>,
-    complete_listings: HashMap<Path, HashSet<String>>,
-    metas: Vec<(Path, EntryMeta)>,
-}
-
-impl ProjectionValidation {
-    fn read_row(&mut self, row: ProjectionRow, bodies: &BodyStore) -> Result<(), ProjectionError> {
-        let ProjectionRow { key, value } = row;
-        if key.starts_with(b"r:") {
-            return self.read_record(&key, &value, bodies);
-        }
-        if let Some(raw) = key.strip_prefix(b"b:") {
-            let request = std::str::from_utf8(raw)
-                .map_err(|_| inconsistent("blob request key is not UTF-8"))?;
-            if BlobRequestId::from_hex(request).is_none() {
-                return Err(inconsistent(
-                    "blob request key is not canonical lowercase hex",
-                ));
-            }
-            let fact: DurableFact = postcard::from_bytes(&value)?;
-            let DurableFact::Blob(fact) = fact else {
-                return Err(inconsistent("blob request key contains a non-blob fact"));
-            };
-            let body = BodyId::from_digest_bytes(fact.body_id);
-            if fact.metadata.size != fact.length {
-                return Err(inconsistent(
-                    "blob metadata size does not match its body length",
-                ));
-            }
-            bodies.validate(body, Some(fact.length))?;
-            return Ok(());
-        }
-        if let Some(raw) = key.strip_prefix(b"g:") {
-            let path = decode_path(raw, "Git fact")?;
-            let fact: DurableFact = postcard::from_bytes(&value)?;
-            let DurableFact::Git { relative_path, .. } = fact else {
-                return Err(inconsistent("Git key contains a non-Git fact"));
-            };
-            validate_git_relative(&relative_path)?;
-            self.git_paths.insert(path);
-            return Ok(());
-        }
-        if let Some(raw) = key.strip_prefix(b"x:") {
-            let _ = decode_path(raw, "expiry")?;
-            let _: Option<u64> = postcard::from_bytes(&value)?;
-            return Ok(());
-        }
-        if let Some(raw) = key.strip_prefix(b"o:") {
-            let id = decode_object_hex(raw, "object")?;
-            let (body, length, _validator): ([u8; 32], u64, Option<String>) =
-                postcard::from_bytes(&value)?;
-            let body = BodyId::from_digest_bytes(body);
-            bodies.validate(body, Some(length))?;
-            if self.objects.insert(id, (body, length)).is_some() {
-                return Err(inconsistent("duplicate durable object identity"));
-            }
-            return Ok(());
-        }
-        if let Some(raw) = key.strip_prefix(b"i:") {
-            let path = decode_path(raw, "object index")?;
-            validate_object_id(&value, "object index")?;
-            if self.indexes.insert(path, value).is_some() {
-                return Err(inconsistent("duplicate durable object index"));
-            }
-            return Ok(());
-        }
-        if let Some(raw) = key.strip_prefix(b"a:") {
-            let (id, path) = decode_id_path(raw, "object alias")?;
-            if !value.is_empty() {
-                return Err(inconsistent("object alias row must have an empty value"));
-            }
-            if !self.aliases.insert((id, path)) {
-                return Err(inconsistent("duplicate durable object alias"));
-            }
-            return Ok(());
-        }
-        if let Some(raw) = key.strip_prefix(b"n:") {
-            let (id, path) = decode_id_path(raw, "negative reverse")?;
-            if value.as_slice() != path.as_str().as_bytes() {
-                return Err(inconsistent(
-                    "negative reverse value does not match its path",
-                ));
-            }
-            if !self.negative_reverse.insert((id, path)) {
-                return Err(inconsistent("duplicate durable negative reverse relation"));
-            }
-            return Ok(());
-        }
-        Err(inconsistent("durable projection row has an unknown prefix"))
-    }
-
-    fn read_record(
-        &mut self,
-        key: &[u8],
-        value: &[u8],
-        bodies: &BodyStore,
-    ) -> Result<(), ProjectionError> {
-        let (path, kind, aux) = decode_fact_key(key)?;
-        if aux.is_some() && kind != RecordKind::File {
-            return Err(inconsistent("only file facts may use an auxiliary key"));
-        }
-        let fact: DurableFact = postcard::from_bytes(value)?;
-        match (kind, fact) {
-            (RecordKind::Lookup, DurableFact::Lookup(payload)) => match payload {
-                LookupPayload::Positive(meta) => {
-                    self.positives.insert(path.clone());
-                    if meta.is_directory() {
-                        self.positive_directories.insert(path.clone());
-                    }
-                    self.metas.push((path, meta));
-                },
-                LookupPayload::Negative { id } => {
-                    if let Some(id) = &id {
-                        validate_object_id(id, "negative lookup")?;
-                    }
-                    if self.negatives.insert(path, id).is_some() {
-                        return Err(inconsistent("duplicate durable negative lookup"));
-                    }
-                },
-            },
-            (RecordKind::Attr, DurableFact::Attr(payload)) => {
-                self.metas.push((path, payload.meta));
-            },
-            (RecordKind::Dirents, DurableFact::Dirents(payload)) => {
-                if payload.next_cursor.is_some() && !payload.paginated {
-                    return Err(inconsistent("listing cursor requires paginated state"));
-                }
-                if payload.next_cursor.is_some() && payload.exhaustive {
-                    return Err(inconsistent("an exhaustive listing cannot retain a cursor"));
-                }
-                let complete =
-                    payload.exhaustive || (payload.paginated && payload.next_cursor.is_none());
-                let mut names = HashSet::new();
-                for entry in payload.entries {
-                    if !names.insert(entry.name.clone()) {
-                        return Err(inconsistent("durable listing contains a duplicate name"));
-                    }
-                    let child = path.join(&entry.name).map_err(|error| {
-                        inconsistent(format!("durable listing name is invalid: {error}"))
-                    })?;
-                    self.metas.push((child, entry.meta));
-                }
-                if complete {
-                    self.complete_listings.insert(path, names);
-                }
-            },
-            (
-                RecordKind::File,
-                DurableFact::File {
-                    body_id, length, ..
-                },
-            ) => bodies.validate(BodyId::from_digest_bytes(body_id), Some(length))?,
-            _ => {
-                return Err(inconsistent(
-                    "durable fact kind does not match its path key",
-                ));
-            },
-        }
-        Ok(())
-    }
-
-    fn finish(self, bodies: &BodyStore) -> Result<(), ProjectionError> {
-        for (path, id) in &self.indexes {
-            if !self.objects.contains_key(id) {
-                return Err(inconsistent("object index points to a missing object row"));
-            }
-            if !self.aliases.contains(&(id.clone(), path.clone())) {
-                return Err(inconsistent("object index is missing its reverse alias"));
-            }
-        }
-        for (id, path) in &self.aliases {
-            if !self.objects.contains_key(id) {
-                return Err(inconsistent("object alias points to a missing object row"));
-            }
-            if self.indexes.get(path) != Some(id) {
-                return Err(inconsistent(
-                    "object alias disagrees with its forward index",
-                ));
-            }
-        }
-        for (path, id) in &self.negatives {
-            if let Some(id) = id
-                && !self.negative_reverse.contains(&(id.clone(), path.clone()))
-            {
-                return Err(inconsistent(
-                    "negative lookup is missing its reverse relation",
-                ));
-            }
-        }
-        for (id, path) in &self.negative_reverse {
-            if self.negatives.get(path).and_then(Option::as_ref) != Some(id) {
-                return Err(inconsistent(
-                    "negative reverse relation has no matching lookup",
-                ));
-            }
-        }
-        if self
-            .git_paths
-            .iter()
-            .any(|path| self.negatives.contains_key(path))
-        {
-            return Err(inconsistent(
-                "durable Git subtree conflicts with an exact negative lookup",
-            ));
-        }
-        for path in &self.git_paths {
-            if self.positives.contains(path) && !self.positive_directories.contains(path) {
-                return Err(inconsistent(
-                    "durable Git subtree conflicts with an exact file lookup",
-                ));
-            }
-            if !self.positive_directories.contains(path) {
-                return Err(inconsistent(
-                    "durable Git subtree has no exact positive directory identity",
-                ));
-            }
-        }
-        for positive in self.positives.iter().chain(&self.git_paths) {
-            if let Some((parent, name)) = positive.parent_and_name()
-                && let Some(names) = self.complete_listings.get(&parent)
-                && !names.contains(name)
-            {
-                return Err(inconsistent(
-                    "completed listing omits an exact durable positive child",
-                ));
-            }
-        }
-        for negative in self.negatives.keys() {
-            if let Some((parent, name)) = negative.parent_and_name()
-                && self
-                    .complete_listings
-                    .get(&parent)
-                    .is_some_and(|names| names.contains(name))
-            {
-                return Err(inconsistent(
-                    "completed listing contains an exact durable negative child",
-                ));
-            }
-        }
-        for (path, meta) in self.metas {
-            validate_durable_meta(&path, &meta, &self.indexes, &self.objects, bodies)?;
-        }
-        Ok(())
-    }
-}
-
-fn inconsistent(message: impl Into<String>) -> ProjectionError {
-    ProjectionError::Inconsistent(message.into())
-}
-
-fn decode_path(bytes: &[u8], owner: &str) -> Result<Path, ProjectionError> {
-    let value = std::str::from_utf8(bytes)
-        .map_err(|_| inconsistent(format!("{owner} path is not UTF-8")))?;
-    Path::parse(value).map_err(|error| inconsistent(format!("{owner} path is invalid: {error}")))
-}
-
-fn decode_object_hex(bytes: &[u8], owner: &str) -> Result<Vec<u8>, ProjectionError> {
-    let value = std::str::from_utf8(bytes)
-        .map_err(|_| inconsistent(format!("{owner} identity is not UTF-8")))?;
-    let decoded = hex::decode(value)
-        .map_err(|_| inconsistent(format!("{owner} identity is not lowercase hex")))?;
-    if hex::encode(&decoded) != value {
-        return Err(inconsistent(format!(
-            "{owner} identity is not canonical lowercase hex"
-        )));
-    }
-    validate_object_id(&decoded, owner)?;
-    Ok(decoded)
-}
-
-fn validate_object_id(id: &[u8], owner: &str) -> Result<(), ProjectionError> {
-    if ObjectId::from_bytes(id.to_vec()).to_wit().is_none() {
-        return Err(inconsistent(format!(
-            "{owner} contains an invalid object identity"
-        )));
-    }
-    Ok(())
-}
-
-fn decode_id_path(bytes: &[u8], owner: &str) -> Result<(Vec<u8>, Path), ProjectionError> {
-    let split = bytes
-        .iter()
-        .position(|byte| *byte == b':')
-        .ok_or_else(|| inconsistent(format!("{owner} key is missing its path separator")))?;
-    let id = decode_object_hex(&bytes[..split], owner)?;
-    let path = decode_path(&bytes[split + 1..], owner)?;
-    Ok((id, path))
-}
-
-fn validate_durable_meta(
-    path: &Path,
-    meta: &EntryMeta,
-    indexes: &HashMap<Path, Vec<u8>>,
-    objects: &HashMap<Vec<u8>, (BodyId, u64)>,
-    bodies: &BodyStore,
-) -> Result<(), ProjectionError> {
-    let EntryMeta::File { attrs: Some(attrs) } = meta else {
-        return Ok(());
-    };
-    attrs.validate().map_err(inconsistent)?;
-    match attrs.byte_source() {
-        ByteSource::Inline(_) => Err(inconsistent(
-            "durable metadata contains inline bytes outside the global body store",
-        )),
-        ByteSource::Body(body) => {
-            let FileSize::Exact(length) = attrs.size() else {
-                return Err(inconsistent(
-                    "durable body metadata requires an exact length",
-                ));
-            };
-            bodies.validate(body, Some(length))?;
-            Ok(())
-        },
-        ByteSource::Canonical => {
-            let id = indexes
-                .get(path)
-                .ok_or_else(|| inconsistent("canonical metadata has no object index"))?;
-            let (_, object_length) = objects
-                .get(id)
-                .ok_or_else(|| inconsistent("canonical metadata has no object row"))?;
-            if attrs.size() != FileSize::Exact(*object_length) {
-                return Err(inconsistent(
-                    "canonical metadata length disagrees with its object body",
-                ));
-            }
-            Ok(())
-        },
-        ByteSource::Deferred(_) => Ok(()),
     }
 }
 
@@ -2246,6 +1904,50 @@ mod tests {
                 store.current_epoch(),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn successor_generation_fences_retired_projection_writes() {
+        let (_dir, caches, first) = open_store("m");
+        let name = MountName::new("m").unwrap();
+        let source = b"m";
+        let provider_id = ProviderId::from_wasm_bytes(source);
+        let projection_id = ProjectionId::new(source, provider_id);
+        let successor = caches
+            .prepare_mount(&name, projection_id, provider_id, source)
+            .unwrap();
+
+        let old_path = p("/old");
+        assert!(matches!(
+            first
+                .publish(
+                    transition_for_object(b"old", b"old", std::slice::from_ref(&old_path)),
+                    first.current_epoch(),
+                )
+                .unwrap(),
+            PublicationOutcome::Committed { .. }
+        ));
+
+        first.retire();
+        successor.activate();
+        assert!(matches!(
+            first
+                .publish(
+                    transition_for_object(b"late", b"late", &[p("/late")]),
+                    first.current_epoch(),
+                )
+                .unwrap(),
+            PublicationOutcome::Fenced
+        ));
+        assert!(matches!(
+            successor
+                .publish(
+                    transition_for_object(b"next", b"next", &[p("/next")]),
+                    successor.current_epoch(),
+                )
+                .unwrap(),
+            PublicationOutcome::Committed { .. }
+        ));
     }
 
     #[tokio::test]

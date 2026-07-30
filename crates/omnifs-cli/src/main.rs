@@ -1,7 +1,7 @@
 //! omnifs-cli: Command-line interface for omnifs.
 //!
 //! Provides commands to mount and unmount the virtual filesystem,
-//! as well as workspace inspection utilities.
+//! as well as profile inspection utilities.
 
 // The output drift gate. Direct std printing is denied crate-wide so a new
 // command cannot bypass the `ui` toolkit; the anstream print macros are denied
@@ -12,75 +12,39 @@
 mod auth;
 mod capability;
 mod cli;
-mod client;
+mod client_fs_state;
+mod client_state;
 mod commands;
-mod daemon;
-mod daemon_launch;
 mod daemon_teardown;
 mod docker;
 mod error;
-mod fs_container;
+mod filesystem_driver;
 mod guest_image_pull;
 mod host_fs;
 mod image;
-mod inspector;
 mod inventory;
-mod launch;
 mod libkrun_runner;
 mod metrics;
-mod mount_config;
+mod mutation;
 mod process;
-mod provider_bundle;
 mod provider_resolver;
-mod provider_warmup;
-mod stages;
+mod rpc;
 mod status;
-#[cfg(test)]
-mod test_support;
 mod token_source;
 mod ui;
 
 use clap::Parser;
-use cli::{Cli, raw_command_path, raw_output_mode};
+use cli::Cli;
 use error::ExitCode;
-use ui::output::{ErrorEnvelope, ErrorPayload, ErrorVerdict, Output};
+use ui::output::Output;
 
 fn main() {
-    let raw_args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let provisional_mode = raw_output_mode(raw_args.clone());
     // Map clap's parse outcome at the boundary, not per command: a usage error
     // exits 2, while `--help`/`--version` display exits 0. clap picks the right
     // stream (stdout for help/version, stderr for errors).
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
-            let display_error = matches!(
-                error.kind(),
-                clap::error::ErrorKind::DisplayHelp
-                    | clap::error::ErrorKind::DisplayVersion
-                    | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-            );
-            if let Some(mode) = provisional_mode
-                && !display_error
-            {
-                let output = Output::new(mode, false);
-                let envelope = ErrorEnvelope::new(
-                    raw_command_path(raw_args),
-                    ErrorVerdict::Failed,
-                    ErrorPayload {
-                        id: ExitCode::Usage.slug().to_owned(),
-                        exit_code: ExitCode::Usage.code(),
-                        message: error.to_string(),
-                        causes: Vec::new(),
-                        fix: None,
-                        hints: Vec::new(),
-                    },
-                );
-                if output.emit_error(envelope).is_err() {
-                    let _ = error.print();
-                }
-                std::process::exit(ExitCode::Usage.code());
-            }
             let _ = error.print();
             let code = match error.kind() {
                 clap::error::ErrorKind::DisplayHelp
@@ -122,18 +86,25 @@ async fn cli_main(cli: Cli) {
         .runs_daemon()
         .then(omnifs_engine::init_global_from_env)
         .flatten();
-    init_tracing(cli.verbose, inspector.as_ref());
+    if cli.runs_daemon() {
+        if let Err(error) = omnifs_daemon::init_tracing(inspector.as_ref()) {
+            ui::eprint_raw(&format!("Error: initialize daemon logging: {error:#}\n"));
+            std::process::exit(ExitCode::GenericFailure.code());
+        }
+    } else {
+        init_tracing(cli.verbose, inspector.as_ref());
+    }
     let command_path = cli.command_path();
     let output = Output::new(cli.output, cli.quiet)
         .with_command(command_path)
         .with_no_input(cli.no_input)
         .with_yes(cli.yes);
     // Capture the usage label before `run` consumes `cli`. `None` for the
-    // internal `daemon` subcommand, which records `daemon.jsonl` itself.
+    // internal `daemon` subcommand, which records its own usage stream.
     // Subcommands that `std::process::exit` on their own (shell, doctor) record
     // at their exit site; this covers every command that returns to `main`.
     let usage_label = cli.usage_label();
-    match run(cli, output.clone()).await {
+    match Box::pin(run(cli, output.clone())).await {
         Ok(exit_code) => {
             let code = exit_code.code();
             if let Some(cmd) = usage_label {
@@ -180,7 +151,7 @@ async fn cli_main(cli: Cli) {
                     ui::eprint_raw("Error: failed to serialize error document\n");
                 }
             } else {
-                ui::eprint_raw(&error::render(&error));
+                ui::eprint_raw(&ui::render::render_error(&error));
             }
             std::process::exit(exit_code);
         },
@@ -227,5 +198,5 @@ fn init_tracing(verbose: u8, inspector: Option<&std::sync::Arc<omnifs_engine::In
 }
 
 async fn run(cli: Cli, output: Output) -> anyhow::Result<error::ExitCode> {
-    cli.run(output).await
+    Box::pin(cli.run(output)).await
 }

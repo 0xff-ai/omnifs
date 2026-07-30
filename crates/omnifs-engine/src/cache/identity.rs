@@ -1,7 +1,7 @@
 //! Stable, domain-separated identities for host-owned callout storage.
 
+use omnifs_auth::CredentialId;
 use omnifs_core::ProviderId;
-use omnifs_workspace::authn::CredentialId;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -63,10 +63,6 @@ impl BlobRequestId {
                 &body_material,
             ],
         ))
-    }
-
-    pub(crate) fn from_hex(value: &str) -> Option<Self> {
-        parse_hex(value).map(Self)
     }
 
     pub(crate) fn filesystem_name(self) -> String {
@@ -137,19 +133,6 @@ fn encode_headers(headers: &[(String, String)]) -> Vec<u8> {
 fn frame_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
     output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     output.extend_from_slice(bytes);
-}
-
-fn parse_hex(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        return None;
-    }
-    let mut output = [0u8; 32];
-    hex::decode_to_slice(value, &mut output).ok()?;
-    Some(output)
 }
 
 fn hex(bytes: [u8; 32]) -> String {

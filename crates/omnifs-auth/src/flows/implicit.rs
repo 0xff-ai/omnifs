@@ -1,11 +1,11 @@
+use crate::CredentialEntry;
+use crate::OauthScheme;
 use crate::callback::{LoopbackEndpoint, read_client_side_callback};
 use crate::client::OAuthClient;
 use crate::error::AuthError;
 use crate::flows::{credential_entry_from_token, scopes};
 use crate::request::{ClientSideTokenLoginRequest, ConfiguredAuthorizationClient};
 use oauth2::CsrfToken;
-use omnifs_workspace::authn::OauthScheme;
-use omnifs_workspace::creds::CredentialEntry;
 use url::Url;
 
 impl OAuthClient {
