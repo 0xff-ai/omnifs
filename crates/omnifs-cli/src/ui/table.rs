@@ -37,10 +37,6 @@ impl Report {
         self.render_with(RenderOptions { width, color })
     }
 
-    pub(crate) fn print(&self) {
-        anstream::print!("{}", self.render());
-    }
-
     /// Render with explicitly injected terminal capabilities. Tests and
     /// callers that capture output should use this method instead of probing
     /// the process terminal.

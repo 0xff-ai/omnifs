@@ -11,7 +11,7 @@ pub async fn run(output: Output) -> anyhow::Result<ExitCode> {
     if output.is_structured() {
         output.emit_result(report.inventory.verdict(), report.inventory)?;
     } else {
-        crate::ui::print_raw(&format!("{}\n", report.render().render()));
+        output.report(format!("{}\n", report.render().render()));
         if let Some(action) = report.closing_action() {
             output.narrate("");
             output.narrate(ActionLine::from(&action).render());

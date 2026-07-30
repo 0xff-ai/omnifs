@@ -13,7 +13,7 @@ pub async fn run(output: Output) -> Result<ExitCode> {
         output.emit_result(ResultVerdict::Ok, payload)?;
         return Ok(ExitCode::Success);
     }
-    crate::ui::print_raw(&format!(
+    output.report(format!(
         "omnifs {}{}\n",
         env!("CARGO_PKG_VERSION"),
         BUILD_CHANNEL.version_suffix()

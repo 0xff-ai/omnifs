@@ -803,7 +803,7 @@ async fn offer_fix(
                 ledger_row.glyph = Glyph::Fail;
                 ledger_row.value = format!("{}: {error:#}", ledger_row.value);
             }
-            crate::ui::print_raw(&format!(
+            output.report(format!(
                 "{}\n",
                 render::ledger_row_line(&ledger_row, key_width, caps)
             ));
@@ -824,7 +824,7 @@ impl Doctor {
 
         if !structured {
             let caps = render::stdout_capabilities();
-            crate::ui::print_raw(&render_report(
+            self.output.report(render_report(
                 &result.findings,
                 &result.inventory,
                 verdict,

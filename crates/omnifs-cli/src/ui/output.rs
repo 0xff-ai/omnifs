@@ -468,6 +468,18 @@ impl Output {
         self.mode.is_structured()
     }
 
+    /// Print a pre-rendered report to stdout: the command's actual product
+    /// (a table, a receipt, a bare screen), as opposed to stderr narration.
+    /// `--quiet` only suppresses narration, never the product, so a report
+    /// prints under quiet exactly as it does without it. A no-op in
+    /// structured modes, which emit their one JSON/JSONL envelope instead of
+    /// a rendered report.
+    pub(crate) fn report(&self, rendered: impl AsRef<str>) {
+        if self.mode == OutputMode::Human {
+            crate::ui::print_raw(rendered.as_ref());
+        }
+    }
+
     /// Bail with a consistent message when a passthrough command (one that
     /// hands its stdout to something else entirely: a shell-completion
     /// script, a skill install, a raw log stream) is asked for structured

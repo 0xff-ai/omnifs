@@ -551,7 +551,9 @@ async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
     let claim = registry.claim(&args.name)?;
     let spec = required_spec(&claim, &args.name)?;
     let client_owner = client_owner_id()?;
-    let driver = FilesystemDriver::for_spec(&client_state, &spec, output)?;
+    // Cloned rather than moved: the bare-location branch below still needs
+    // `output` to report where the filesystem is available.
+    let driver = FilesystemDriver::for_spec(&client_state, &spec, output.clone())?;
     ensure!(
         driver
             .confirmed(&client_state, client_owner, &spec)
@@ -589,7 +591,7 @@ async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
             command.current_dir(spec.location());
             propagate(command, format!("open shell in filesystem `{}`", spec.id()))
         } else {
-            crate::ui::print_raw(&format!(
+            output.report(format!(
                 "Filesystem `{}` is available at {}.\n",
                 spec.id(),
                 spec.location().display()
@@ -660,7 +662,7 @@ async fn list(output: Output) -> Result<ExitCode> {
     if output.is_structured() {
         output.emit_result(verdict, &result)?;
     } else if result.filesystems.is_empty() {
-        crate::ui::print_raw("No filesystems configured.\n");
+        output.report("No filesystems configured.\n");
         output.narrate(
             crate::ui::access::ActionLine::from(&crate::inventory::NextAction::CreateFilesystem)
                 .render(),
@@ -670,7 +672,7 @@ async fn list(output: Output) -> Result<ExitCode> {
         report.push(crate::ui::table::Block::Resources(
             crate::status::filesystem_table(&filesystems, next_action.as_ref()),
         ));
-        crate::ui::print_raw(&report.render());
+        output.report(report.render());
     }
     Ok(match verdict {
         crate::ui::output::ResultVerdict::Ok => ExitCode::Success,

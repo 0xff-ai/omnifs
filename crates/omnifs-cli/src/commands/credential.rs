@@ -66,7 +66,7 @@ async fn ls(output: Output) -> anyhow::Result<ExitCode> {
     if output.is_structured() {
         output.emit_result(ResultVerdict::Ok, result)?;
     } else {
-        crate::ui::print_raw(&render_credentials(&result));
+        output.report(render_credentials(&result));
     }
     Ok(ExitCode::Success)
 }
