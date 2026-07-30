@@ -1661,6 +1661,13 @@ pub fn resource_snapshot(v: &wire::ResourceSnapshot) -> Result<ResourceSnapshot,
             .iter()
             .map(resource_status)
             .collect::<Result<_, _>>()?,
+        serving_revision: v.serving_revision.map(ResourceRevision::new),
+        providers: v
+            .providers
+            .iter()
+            .map(provider_preparation_progress)
+            .collect::<Result<_, _>>()?,
+        serving: v.serving.as_ref().map(serving_progress).transpose()?,
     })
 }
 
@@ -1670,6 +1677,13 @@ pub fn to_resource_snapshot(v: &ResourceSnapshot) -> wire::ResourceSnapshot {
         desired_digest: v.desired_digest.as_bytes().to_vec().into(),
         resources: v.resources.iter().map(to_resource_definition).collect(),
         resources_status: v.resource_statuses.iter().map(to_resource_status).collect(),
+        serving_revision: v.serving_revision.map(ResourceRevision::get),
+        providers: v
+            .providers
+            .iter()
+            .map(to_provider_preparation_progress)
+            .collect(),
+        serving: v.serving.as_ref().map(to_serving_progress),
     }
 }
 
@@ -1733,15 +1747,27 @@ pub fn action_receipt(v: &wire::ActionReceipt) -> Result<ActionReceipt, FromGrpc
     )?;
     let target = resource_key(&req(v.target.clone(), "action target")?)?;
     validate_action_target(kind, &target)?;
+    let phase = action_phase(
+        wire::ActionPhase::try_from(v.phase).map_err(|_| FromGrpcError::Invalid("action phase"))?,
+    )?;
+    match phase {
+        ActionPhase::Failed if v.error_code.is_none() || v.detail.is_none() => {
+            return Err(FromGrpcError::Invalid("action failure details"));
+        },
+        ActionPhase::Failed => {},
+        _ if v.error_code.is_some() || v.detail.is_some() => {
+            return Err(FromGrpcError::Invalid("action success details"));
+        },
+        _ => {},
+    }
     Ok(ActionReceipt {
         action_id: action_id(&v.action_id)?,
         kind,
         target,
         action_generation: v.action_generation,
-        phase: action_phase(
-            wire::ActionPhase::try_from(v.phase)
-                .map_err(|_| FromGrpcError::Invalid("action phase"))?,
-        )?,
+        phase,
+        error_code: v.error_code.clone(),
+        detail: v.detail.clone(),
     })
 }
 
@@ -1752,6 +1778,8 @@ pub fn to_action_receipt(v: &ActionReceipt) -> wire::ActionReceipt {
         target: Some(to_resource_key(&v.target)),
         action_generation: v.action_generation,
         phase: to_action_phase(v.phase),
+        error_code: v.error_code.clone(),
+        detail: v.detail.clone(),
     }
 }
 
@@ -1929,6 +1957,9 @@ fn provider_preparation_stage(
         wire::ProviderPreparationStage::ProviderPreparationCompiling => {
             Ok(ProviderPreparationStage::Compiling)
         },
+        wire::ProviderPreparationStage::ProviderPreparationRetrying => {
+            Ok(ProviderPreparationStage::Retrying)
+        },
         wire::ProviderPreparationStage::ProviderPreparationReady => {
             Ok(ProviderPreparationStage::Ready)
         },
@@ -1955,6 +1986,9 @@ fn to_provider_preparation_stage(v: ProviderPreparationStage) -> i32 {
         ProviderPreparationStage::Compiling => {
             wire::ProviderPreparationStage::ProviderPreparationCompiling as i32
         },
+        ProviderPreparationStage::Retrying => {
+            wire::ProviderPreparationStage::ProviderPreparationRetrying as i32
+        },
         ProviderPreparationStage::Ready => {
             wire::ProviderPreparationStage::ProviderPreparationReady as i32
         },
@@ -1969,8 +2003,19 @@ fn serving_progress_stage(
 ) -> Result<ServingProgressStage, FromGrpcError> {
     match v {
         wire::ServingProgressStage::ServingQueued => Ok(ServingProgressStage::Queued),
+        wire::ServingProgressStage::ServingWaitingProviders => {
+            Ok(ServingProgressStage::WaitingProviders)
+        },
+        wire::ServingProgressStage::ServingProvidersReady => {
+            Ok(ServingProgressStage::ProvidersReady)
+        },
         wire::ServingProgressStage::ServingBuilding => Ok(ServingProgressStage::Building),
+        wire::ServingProgressStage::ServingBuilt => Ok(ServingProgressStage::Built),
+        wire::ServingProgressStage::ServingPublishing => Ok(ServingProgressStage::Publishing),
         wire::ServingProgressStage::ServingDraining => Ok(ServingProgressStage::Draining),
+        wire::ServingProgressStage::ServingDegraded => Ok(ServingProgressStage::Degraded),
+        wire::ServingProgressStage::ServingRetrying => Ok(ServingProgressStage::Retrying),
+        wire::ServingProgressStage::ServingSuperseded => Ok(ServingProgressStage::Superseded),
         wire::ServingProgressStage::ServingReady => Ok(ServingProgressStage::Ready),
         wire::ServingProgressStage::ServingFailed => Ok(ServingProgressStage::Failed),
         wire::ServingProgressStage::Unspecified => {
@@ -1982,8 +2027,19 @@ fn serving_progress_stage(
 fn to_serving_progress_stage(v: ServingProgressStage) -> i32 {
     match v {
         ServingProgressStage::Queued => wire::ServingProgressStage::ServingQueued as i32,
+        ServingProgressStage::WaitingProviders => {
+            wire::ServingProgressStage::ServingWaitingProviders as i32
+        },
+        ServingProgressStage::ProvidersReady => {
+            wire::ServingProgressStage::ServingProvidersReady as i32
+        },
         ServingProgressStage::Building => wire::ServingProgressStage::ServingBuilding as i32,
+        ServingProgressStage::Built => wire::ServingProgressStage::ServingBuilt as i32,
+        ServingProgressStage::Publishing => wire::ServingProgressStage::ServingPublishing as i32,
         ServingProgressStage::Draining => wire::ServingProgressStage::ServingDraining as i32,
+        ServingProgressStage::Degraded => wire::ServingProgressStage::ServingDegraded as i32,
+        ServingProgressStage::Retrying => wire::ServingProgressStage::ServingRetrying as i32,
+        ServingProgressStage::Superseded => wire::ServingProgressStage::ServingSuperseded as i32,
         ServingProgressStage::Ready => wire::ServingProgressStage::ServingReady as i32,
         ServingProgressStage::Failed => wire::ServingProgressStage::ServingFailed as i32,
     }
@@ -2066,6 +2122,9 @@ fn to_attachment_progress_stage(v: AttachmentProgressStage) -> i32 {
 fn progress_snapshot(v: &wire::ProgressSnapshot) -> Result<ProgressSnapshot, FromGrpcError> {
     resource_count(v.resources.len())?;
     resource_count(v.actions.len())?;
+    resource_count(v.providers.len())?;
+    resource_count(v.credentials.len())?;
+    resource_count(v.attachments.len())?;
     Ok(ProgressSnapshot {
         desired_revision: ResourceRevision::new(v.desired_revision),
         observed_revision: v.observed_revision.map(ResourceRevision::new),
@@ -2079,6 +2138,22 @@ fn progress_snapshot(v: &wire::ProgressSnapshot) -> Result<ProgressSnapshot, Fro
             .iter()
             .map(action_receipt)
             .collect::<Result<_, _>>()?,
+        providers: v
+            .providers
+            .iter()
+            .map(provider_preparation_progress)
+            .collect::<Result<_, _>>()?,
+        serving: v.serving.as_ref().map(serving_progress).transpose()?,
+        credentials: v
+            .credentials
+            .iter()
+            .map(credential_progress)
+            .collect::<Result<_, _>>()?,
+        attachments: v
+            .attachments
+            .iter()
+            .map(attachment_progress)
+            .collect::<Result<_, _>>()?,
     })
 }
 
@@ -2088,6 +2163,14 @@ fn to_progress_snapshot(v: &ProgressSnapshot) -> wire::ProgressSnapshot {
         observed_revision: v.observed_revision.map(ResourceRevision::get),
         resources: v.resources.iter().map(to_resource_status).collect(),
         actions: v.actions.iter().map(to_action_receipt).collect(),
+        providers: v
+            .providers
+            .iter()
+            .map(to_provider_preparation_progress)
+            .collect(),
+        serving: v.serving.as_ref().map(to_serving_progress),
+        credentials: v.credentials.iter().map(to_credential_progress).collect(),
+        attachments: v.attachments.iter().map(to_attachment_progress).collect(),
     }
 }
 
@@ -2114,7 +2197,10 @@ fn provider_preparation_progress(
         detail: v.detail.clone(),
         queued_digests: v.queued_digests,
         active_digests: v.active_digests,
+        queue_position: v.queue_position,
+        completed_digests: v.completed_digests,
         retry_count: v.retry_count,
+        next_retry_unix_ms: v.next_retry_unix_ms,
     })
 }
 
@@ -2132,7 +2218,10 @@ fn to_provider_preparation_progress(
         detail: v.detail.clone(),
         queued_digests: v.queued_digests,
         active_digests: v.active_digests,
+        queue_position: v.queue_position,
+        completed_digests: v.completed_digests,
         retry_count: v.retry_count,
+        next_retry_unix_ms: v.next_retry_unix_ms,
     }
 }
 
@@ -2149,6 +2238,7 @@ fn serving_progress(v: &wire::ServingProgress) -> Result<ServingProgress, FromGr
         detail: v.detail.clone(),
         queued_generations: v.queued_generations,
         retry_count: v.retry_count,
+        next_retry_unix_ms: v.next_retry_unix_ms,
     })
 }
 
@@ -2162,6 +2252,7 @@ fn to_serving_progress(v: &ServingProgress) -> wire::ServingProgress {
         detail: v.detail.clone(),
         queued_generations: v.queued_generations,
         retry_count: v.retry_count,
+        next_retry_unix_ms: v.next_retry_unix_ms,
     }
 }
 
@@ -2179,6 +2270,7 @@ fn credential_progress(v: &wire::CredentialProgress) -> Result<CredentialProgres
         error_code: v.error_code.clone(),
         detail: v.detail.clone(),
         retry_count: v.retry_count,
+        next_retry_unix_ms: v.next_retry_unix_ms,
     })
 }
 
@@ -2189,6 +2281,7 @@ fn to_credential_progress(v: &CredentialProgress) -> wire::CredentialProgress {
         error_code: v.error_code.clone(),
         detail: v.detail.clone(),
         retry_count: v.retry_count,
+        next_retry_unix_ms: v.next_retry_unix_ms,
     }
 }
 
@@ -2206,6 +2299,7 @@ fn attachment_progress(v: &wire::AttachmentProgress) -> Result<AttachmentProgres
         error_code: v.error_code.clone(),
         detail: v.detail.clone(),
         retry_count: v.retry_count,
+        next_retry_unix_ms: v.next_retry_unix_ms,
     })
 }
 
@@ -2216,6 +2310,7 @@ fn to_attachment_progress(v: &AttachmentProgress) -> wire::AttachmentProgress {
         error_code: v.error_code.clone(),
         detail: v.detail.clone(),
         retry_count: v.retry_count,
+        next_retry_unix_ms: v.next_retry_unix_ms,
     }
 }
 
@@ -2850,6 +2945,8 @@ mod tests {
             target,
             action_generation: 2,
             phase: ActionPhase::Accepted,
+            error_code: None,
+            detail: None,
         }
     }
 
@@ -2867,6 +2964,9 @@ mod tests {
             desired_digest: normalized.digest(),
             resources: normalized.resources().to_vec(),
             resource_statuses: vec![],
+            serving_revision: None,
+            providers: vec![],
+            serving: None,
         };
         assert_eq!(
             get_resources_response(&to_get_resources_response(&snapshot)).unwrap(),
@@ -3075,6 +3175,15 @@ mod tests {
             action_receipt(&zero),
             Err(FromGrpcError::Zero("action generation"))
         ));
+        let mut failed = to_action_receipt(&action_receipt_for(ActionKind::RevokeCredential));
+        failed.phase = wire::ActionPhase::ActionFailed as i32;
+        assert!(matches!(
+            action_receipt(&failed),
+            Err(FromGrpcError::Invalid("action failure details"))
+        ));
+        failed.error_code = Some("failed".into());
+        failed.detail = Some("details".into());
+        assert!(action_receipt(&failed).is_ok());
     }
 
     #[test]
@@ -3099,6 +3208,10 @@ mod tests {
             observed_revision: Some(ResourceRevision::new(3)),
             resources: vec![status.clone()],
             actions: vec![action_receipt_for(ActionKind::SetCredentialMaterial)],
+            providers: Vec::new(),
+            serving: None,
+            credentials: Vec::new(),
+            attachments: Vec::new(),
         };
         let attachment_key = ResourceKey::new(ResourceKind::Attachment, new_resource_name("local"));
         let events = vec![
@@ -3115,7 +3228,10 @@ mod tests {
                 detail: None,
                 queued_digests: 3,
                 active_digests: 2,
+                queue_position: Some(1),
+                completed_digests: 4,
                 retry_count: 1,
+                next_retry_unix_ms: Some(42),
             }),
             ProgressEventKind::ServingProgress(ServingProgress {
                 revision: ResourceRevision::new(4),
@@ -3126,6 +3242,7 @@ mod tests {
                 detail: None,
                 queued_generations: 1,
                 retry_count: 2,
+                next_retry_unix_ms: Some(43),
             }),
             ProgressEventKind::CredentialProgress(CredentialProgress {
                 key: status.key.clone(),
@@ -3133,6 +3250,7 @@ mod tests {
                 error_code: None,
                 detail: None,
                 retry_count: 3,
+                next_retry_unix_ms: Some(44),
             }),
             ProgressEventKind::AttachmentProgress(AttachmentProgress {
                 key: attachment_key,
@@ -3140,6 +3258,7 @@ mod tests {
                 error_code: None,
                 detail: None,
                 retry_count: 4,
+                next_retry_unix_ms: Some(45),
             }),
             ProgressEventKind::RevisionReady(ResourceRevision::new(4)),
             ProgressEventKind::RevisionFailed {

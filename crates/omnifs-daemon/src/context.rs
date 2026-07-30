@@ -66,6 +66,10 @@ impl DaemonContext {
         self.attach_socket.clone()
     }
 
+    pub(crate) fn daemon_state_root(&self) -> PathBuf {
+        self.endpoint.bootstrap_dir().join("daemon-state")
+    }
+
     /// Bind the host-native control socket at `<profile>/control.sock`.
     pub(crate) fn bind_control_socket(&self) -> anyhow::Result<UnixListener> {
         self.endpoint

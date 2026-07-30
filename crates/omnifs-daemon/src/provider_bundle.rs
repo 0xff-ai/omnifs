@@ -56,6 +56,10 @@ impl EmbeddedProviders {
         self.entries.iter().find(|entry| entry.manifest.id == name)
     }
 
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &EmbeddedProvider> {
+        self.entries.iter()
+    }
+
     pub(crate) fn metadata(&self) -> Vec<ProviderMetadata> {
         self.entries
             .iter()
@@ -75,6 +79,10 @@ impl EmbeddedProviders {
 impl EmbeddedProvider {
     pub(crate) fn artifact(&self) -> &Artifact {
         &self.artifact
+    }
+
+    pub(crate) fn catalog_name(&self) -> &str {
+        &self.manifest.id
     }
 }
 

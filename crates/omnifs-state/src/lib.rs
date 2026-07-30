@@ -31,10 +31,7 @@ use tokio::sync::watch;
 use credential::{credential_summaries_query, pending_revocations_query, stored_credentials_query};
 use db::{Db, RecoveryTransition};
 use mount::mounts_query;
-use paths::{
-    CLONE_CACHE_DIR, DAEMON_LOG_FILE, PROJECTION_CACHE_DIR, StorePaths, WASMTIME_CACHE_DIR,
-    ensure_private_dir,
-};
+use paths::{DAEMON_LOG_FILE, StorePaths, ensure_private_dir};
 use provider::{
     MAX_PROVIDER_BYTES, PROVIDER_CHUNK_BYTES, provider_metadata_query, providers_query,
 };
@@ -48,6 +45,7 @@ pub use credential::{
     SecretMaterial, StoredCredential, next_submitted,
 };
 pub use mount::{MountDocument, MountLimits, StoredMount};
+pub use paths::DaemonStatePaths;
 pub use provider::{
     ProviderImportDisposition, ProviderImportOutcome, ProviderUpload, StoredProvider,
     StoredProviderMetadata, ValidatedProviderUpload,
@@ -101,7 +99,7 @@ impl Default for StateStoreOptions {
 }
 
 pub struct StateStore {
-    paths: StorePaths,
+    paths: DaemonStatePaths,
     options: StateStoreOptions,
     reads: SqlitePool,
     writer: StateWriter,
@@ -120,7 +118,7 @@ impl StateStore {
         endpoint: &Bootstrap<Daemon>,
         options: StateStoreOptions,
     ) -> anyhow::Result<Self> {
-        Self::open_paths(StorePaths::for_endpoint(endpoint), options).await
+        Self::open_paths(DaemonStatePaths::for_endpoint(endpoint), options).await
     }
 
     /// Archive the authoritative control store as one directory entry and open
@@ -129,7 +127,7 @@ impl StateStore {
         endpoint: &Bootstrap<Daemon>,
         options: StateStoreOptions,
     ) -> anyhow::Result<(Self, ControlStoreRepairDisposition)> {
-        let paths = StorePaths::for_endpoint(endpoint);
+        let paths = DaemonStatePaths::for_endpoint(endpoint);
         ensure_private_dir(paths.root())?;
         let archive = paths.archive_control_store()?;
         let disposition = if archive.is_some() {
@@ -150,7 +148,10 @@ impl StateStore {
         }
     }
 
-    async fn open_paths(paths: StorePaths, options: StateStoreOptions) -> anyhow::Result<Self> {
+    pub async fn open_paths(
+        paths: DaemonStatePaths,
+        options: StateStoreOptions,
+    ) -> anyhow::Result<Self> {
         paths.prepare()?;
         paths.cleanup_staging()?;
 
@@ -186,12 +187,7 @@ impl StateStore {
 
     #[must_use]
     pub fn engine_paths(&self) -> EngineStatePaths {
-        let cache = self.paths.cache();
-        EngineStatePaths {
-            projection: cache.join(PROJECTION_CACHE_DIR),
-            wasmtime: cache.join(WASMTIME_CACHE_DIR),
-            clones: cache.join(CLONE_CACHE_DIR),
-        }
+        self.paths.engine_paths()
     }
 
     pub async fn mount_revision(&self) -> anyhow::Result<MountRevision> {

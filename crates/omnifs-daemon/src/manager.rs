@@ -130,6 +130,7 @@ impl MutationManager {
     /// restart. Provider import carries no mutation identity of its own, so
     /// this runs through the same single-writer task as `apply` without
     /// requiring the mutation lease.
+    #[allow(dead_code, reason = "legacy manager tests retain the pre-cutover path")]
     pub(crate) async fn rebuild_for_provider_repair(
         &self,
         provider: ProviderId,
@@ -214,6 +215,7 @@ enum ManagerCommand {
         id: MutationId,
         reply: oneshot::Sender<Result<(), ManagerError>>,
     },
+    #[allow(dead_code, reason = "legacy manager tests retain the pre-cutover path")]
     RebuildForProviderRepair {
         provider: ProviderId,
         reply: oneshot::Sender<Result<(), ManagerError>>,
@@ -507,6 +509,7 @@ impl ManagerState {
     /// that a repair some mount does not pin need not pay for a rebuild.
     /// Runs with no mutation identity, mirroring
     /// `republish_pending_refreshes`.
+    #[allow(dead_code, reason = "legacy manager tests retain the pre-cutover path")]
     async fn rebuild_for_provider_repair(
         &mut self,
         provider: ProviderId,
@@ -823,8 +826,8 @@ mod tests {
         let host = Arc::new(
             omnifs_engine::HostOnline::open_runtime(omnifs_engine::HostRuntimeOpen {
                 projection: paths.projection_cache().to_path_buf(),
-                wasmtime: paths.wasmtime_cache().to_path_buf(),
                 clones: paths.clone_cache().to_path_buf(),
+                engine: omnifs_engine::ComponentEngine::new(paths.wasmtime_cache()).unwrap(),
             })
             .unwrap(),
         );
@@ -860,8 +863,8 @@ mod tests {
         let host = Arc::new(
             omnifs_engine::HostOnline::open_runtime(omnifs_engine::HostRuntimeOpen {
                 projection: paths.projection_cache().to_path_buf(),
-                wasmtime: paths.wasmtime_cache().to_path_buf(),
                 clones: paths.clone_cache().to_path_buf(),
+                engine: omnifs_engine::ComponentEngine::new(paths.wasmtime_cache()).unwrap(),
             })
             .unwrap(),
         );

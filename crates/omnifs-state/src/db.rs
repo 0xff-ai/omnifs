@@ -134,7 +134,7 @@ impl Db<'_> {
                     "UPDATE recovery_state \
                      SET state = 'ready', detail = NULL, serving_mount_revision = ?1, \
                          failed_mutation_id = NULL, updated_at = unixepoch() \
-                     WHERE singleton = 1",
+                     WHERE singleton = 1 AND serving_mount_revision <= ?1",
                 )
                 .bind(sql_int(revision.get(), "mount revision")?)
                 .execute(&mut *self.0)

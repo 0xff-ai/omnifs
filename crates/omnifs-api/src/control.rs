@@ -101,6 +101,8 @@ pub struct ActionReceipt {
     pub target: ResourceKey,
     pub action_generation: u64,
     pub phase: ActionPhase,
+    pub error_code: Option<String>,
+    pub detail: Option<String>,
 }
 
 /// A credential action request. Material and overrides remain request-only.

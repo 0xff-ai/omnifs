@@ -23,29 +23,37 @@ const PROVIDER_DISK_MULTIPLIER: u64 = 3;
 
 static REPAIR_ARCHIVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Paths owned by one daemon state root.
+///
+/// Constructing this value performs no I/O. [`Self::prepare`] creates and
+/// restricts the directories needed before `SQLite` is opened, including the
+/// required Wasmtime cache directory.
 #[derive(Debug, Clone)]
-pub(crate) struct StorePaths {
+pub struct DaemonStatePaths {
     root: PathBuf,
 }
 
-impl StorePaths {
+pub(crate) type StorePaths = DaemonStatePaths;
+
+impl DaemonStatePaths {
+    #[must_use]
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
     #[must_use]
     pub(crate) fn for_endpoint(endpoint: &Bootstrap<Daemon>) -> Self {
-        Self {
-            root: endpoint.bootstrap_dir().join("daemon-state"),
-        }
+        Self::new(endpoint.bootstrap_dir().join("daemon-state"))
     }
 
     #[cfg(test)]
     #[must_use]
     pub(crate) fn under_root(root: &Path) -> Self {
-        Self {
-            root: root.to_path_buf(),
-        }
+        Self::new(root)
     }
 
     #[must_use]
-    pub(crate) fn root(&self) -> &Path {
+    pub fn root(&self) -> &Path {
         &self.root
     }
 
@@ -80,7 +88,7 @@ impl StorePaths {
         self.root.join(LOG_DIR)
     }
 
-    pub(crate) fn prepare(&self) -> anyhow::Result<()> {
+    pub fn prepare(&self) -> anyhow::Result<()> {
         for path in [
             self.root.clone(),
             self.control_store(),
@@ -90,7 +98,25 @@ impl StorePaths {
         ] {
             ensure_private_dir(&path)?;
         }
+        let engine = self.engine_paths();
+        for path in [
+            engine.projection_cache(),
+            engine.wasmtime_cache(),
+            engine.clone_cache(),
+        ] {
+            ensure_private_dir(path)?;
+        }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn engine_paths(&self) -> crate::EngineStatePaths {
+        let cache = self.cache();
+        crate::EngineStatePaths {
+            projection: cache.join(PROJECTION_CACHE_DIR),
+            wasmtime: cache.join(WASMTIME_CACHE_DIR),
+            clones: cache.join(CLONE_CACHE_DIR),
+        }
     }
 
     pub(crate) fn restrict_database_files(&self) -> anyhow::Result<()> {

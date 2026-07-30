@@ -16,7 +16,9 @@ mod logging;
 mod manager;
 mod progress;
 mod provider_bundle;
+mod provider_preparer;
 mod resource_control;
+mod serving_reconciler;
 
 pub use app::run;
 

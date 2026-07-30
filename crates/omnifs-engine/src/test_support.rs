@@ -39,8 +39,8 @@ pub fn open_test_host(
 ) -> Result<crate::HostOnline, crate::HostError> {
     crate::HostOnline::open_runtime(crate::HostRuntimeOpen {
         projection: cache_dir.as_ref().to_path_buf(),
-        wasmtime: wasm_cache_dir(),
         clones: clone_dir.as_ref().to_path_buf(),
+        engine: crate::ComponentEngine::new(&wasm_cache_dir())?,
     })
 }
 

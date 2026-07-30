@@ -21,6 +21,10 @@ pub struct ProgressSnapshot {
     pub observed_revision: Option<ResourceRevision>,
     pub resources: Vec<ResourceStatus>,
     pub actions: Vec<ActionReceipt>,
+    pub providers: Vec<ProviderPreparationProgress>,
+    pub serving: Option<ServingProgress>,
+    pub credentials: Vec<CredentialProgress>,
+    pub attachments: Vec<AttachmentProgress>,
 }
 
 /// Closed provider-preparation stages.
@@ -31,6 +35,7 @@ pub enum ProviderPreparationStage {
     Fetching,
     Validating,
     Compiling,
+    Retrying,
     Ready,
     Failed,
 }
@@ -40,8 +45,15 @@ pub enum ProviderPreparationStage {
 #[serde(rename_all = "snake_case")]
 pub enum ServingProgressStage {
     Queued,
+    WaitingProviders,
+    ProvidersReady,
     Building,
+    Built,
+    Publishing,
     Draining,
+    Degraded,
+    Retrying,
+    Superseded,
     Ready,
     Failed,
 }
@@ -82,7 +94,10 @@ pub struct ProviderPreparationProgress {
     pub detail: Option<String>,
     pub queued_digests: u32,
     pub active_digests: u32,
+    pub queue_position: Option<u32>,
+    pub completed_digests: u32,
     pub retry_count: u32,
+    pub next_retry_unix_ms: Option<u64>,
 }
 
 /// Progress for one desired serving generation.
@@ -97,6 +112,7 @@ pub struct ServingProgress {
     pub detail: Option<String>,
     pub queued_generations: u32,
     pub retry_count: u32,
+    pub next_retry_unix_ms: Option<u64>,
 }
 
 /// Progress for one credential resource.
@@ -108,6 +124,7 @@ pub struct CredentialProgress {
     pub error_code: Option<String>,
     pub detail: Option<String>,
     pub retry_count: u32,
+    pub next_retry_unix_ms: Option<u64>,
 }
 
 /// Progress for one attachment resource.
@@ -119,6 +136,7 @@ pub struct AttachmentProgress {
     pub error_code: Option<String>,
     pub detail: Option<String>,
     pub retry_count: u32,
+    pub next_retry_unix_ms: Option<u64>,
 }
 
 /// Strict event payloads. None carries credential material, configuration,
@@ -178,6 +196,8 @@ mod tests {
             ),
             action_generation: 1,
             phase: ActionPhase::Ready,
+            error_code: None,
+            detail: None,
         };
         let event = ProgressEvent {
             daemon_instance_id: "daemon".into(),

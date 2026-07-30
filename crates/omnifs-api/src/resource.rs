@@ -1,6 +1,9 @@
 //! Strict resource declarations, normalization, digesting, and pure planning.
 
-use crate::{AttachmentDefinition, CredentialClientOverrides, CredentialMaterial};
+use crate::{
+    AttachmentDefinition, CredentialClientOverrides, CredentialMaterial,
+    ProviderPreparationProgress, ServingProgress,
+};
 use omnifs_core::{
     AttachmentSpec, MutationId, ProviderId, ResourceDigest, ResourceKey, ResourceKind,
     ResourceName, ResourceRevision, validate_account, validate_key_part,
@@ -450,6 +453,9 @@ pub struct ResourceSnapshot {
     pub desired_digest: ResourceDigest,
     pub resources: Vec<ResourceDefinition>,
     pub resource_statuses: Vec<ResourceStatus>,
+    pub serving_revision: Option<ResourceRevision>,
+    pub providers: Vec<ProviderPreparationProgress>,
+    pub serving: Option<ServingProgress>,
 }
 
 /// Request-only secret material paired with one declared credential resource.

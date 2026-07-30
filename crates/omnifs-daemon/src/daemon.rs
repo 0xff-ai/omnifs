@@ -58,6 +58,7 @@ pub(crate) struct Daemon {
     pub(crate) serving: Arc<ServingCell>,
     pub(crate) manager: Arc<crate::manager::MutationManager>,
     pub(crate) resources: Arc<crate::resource_control::ResourceControl>,
+    pub(crate) reconciler: OnceLock<Arc<crate::serving_reconciler::ServingReconciler>>,
     pub(crate) vfs: Arc<omnifs_vfs::VfsServer>,
     pub(crate) bound_tcp: OnceLock<omnifs_vfs::Endpoint>,
     pub(crate) shutdown_tx: tokio::sync::watch::Sender<bool>,
@@ -95,6 +96,7 @@ impl Daemon {
             inspector,
             manager,
             resources,
+            reconciler: OnceLock::new(),
             serving,
             vfs,
             bound_tcp: OnceLock::new(),
@@ -134,22 +136,58 @@ impl Daemon {
     /// stop already sends the signal itself.
     pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
         self.resources.shutdown();
+        info!("stopping serving reconciler");
+        let reconciler_result = match self.reconciler.get() {
+            Some(reconciler) => reconciler.shutdown().await,
+            None => Ok(()),
+        };
+        info!("serving reconciler stopped; stopping mutation manager");
         let manager_result = self
             .manager
             .shutdown()
             .await
             .map_err(|error| anyhow::anyhow!("mutation manager shutdown: {error}"));
+        info!("mutation manager stopped; stopping namespace listeners");
         let retired = self.serving.retire_active();
         self.vfs.shutdown().await;
+        info!("namespace listeners stopped; draining active generation");
         let generation_result = match retired.drain(DRAIN_TIMEOUT).await {
             omnifs_engine::DrainOutcome::Drained => Ok(()),
             omnifs_engine::DrainOutcome::Stuck { active, .. } => Err(anyhow::anyhow!(
                 "active generation retained {active} request(s) after shutdown grace"
             )),
         };
+        info!("active generation drained; closing state store");
         let state_result = self.state.shutdown().await;
+        info!("state store closed");
 
-        crate::first_error([manager_result, generation_result, state_result])
+        crate::first_error([
+            reconciler_result,
+            manager_result,
+            generation_result,
+            state_result,
+        ])
+    }
+
+    pub(crate) fn install_reconciler(
+        &self,
+        reconciler: Arc<crate::serving_reconciler::ServingReconciler>,
+    ) -> anyhow::Result<()> {
+        self.reconciler
+            .set(reconciler)
+            .map_err(|_| anyhow::anyhow!("serving reconciler already installed"))
+    }
+
+    pub(crate) fn provider_imported(&self, outcome: &omnifs_state::ProviderImportOutcome) {
+        let repaired = outcome.disposition == omnifs_state::ProviderImportDisposition::Repaired;
+        let Some(reconciler) = self.reconciler.get() else {
+            tracing::warn!(
+                provider = %outcome.reference.id,
+                "provider preparation owner is unavailable"
+            );
+            return;
+        };
+        reconciler.provider_imported(outcome.reference.id, repaired);
     }
 
     async fn start_listeners(self: &Arc<Self>) -> anyhow::Result<()> {

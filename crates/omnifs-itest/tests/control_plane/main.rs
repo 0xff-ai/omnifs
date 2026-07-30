@@ -58,6 +58,14 @@ impl Drop for Daemon {
 }
 
 impl Daemon {
+    fn spawn_child(home: &std::path::Path) -> std::io::Result<Child> {
+        Command::new(omnifs_bin())
+            .args(live::daemon_args(home))
+            .env("OMNIFS_HOME", home)
+            .env("RUST_LOG", "warn")
+            .spawn()
+    }
+
     fn identity_path(&self) -> PathBuf {
         self.home.path().join("process.json")
     }
@@ -74,11 +82,7 @@ impl Daemon {
     /// its fixed local filesystem socket but launches no runner.
     fn spawn() -> Option<Self> {
         let hermetic = hermetic_home();
-        let child = Command::new(omnifs_bin())
-            .args(live::daemon_args(hermetic.home.path()))
-            .env("OMNIFS_HOME", hermetic.home.path())
-            .env("RUST_LOG", "warn")
-            .spawn();
+        let child = Self::spawn_child(hermetic.home.path());
         let child = match child {
             Ok(child) => child,
             Err(error) => {
@@ -90,6 +94,16 @@ impl Daemon {
             child,
             home: hermetic.home,
         })
+    }
+
+    async fn restart(&mut self) {
+        self.child.kill().expect("stop isolated daemon for restart");
+        self.child
+            .wait()
+            .expect("join isolated daemon before restart");
+        self.child =
+            Self::spawn_child(self.home.path()).expect("restart isolated daemon in same profile");
+        self.wait_serving_async().await;
     }
 
     /// Wait for the daemon to answer on its fixed socket. This fixture intentionally
@@ -190,11 +204,18 @@ async fn declarative_apply_commits_before_reconcile_and_watch_resumes_from_snaps
     let (metadata, _, _) = listed
         .providers
         .iter()
-        .find(|provider| provider.embedded)
+        .find(|provider| {
+            provider.embedded
+                && provider
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.reference.as_ref())
+                    .is_some_and(|reference| reference.name == "dns")
+        })
         .map(grpc::provider_entry)
         .transpose()
         .unwrap()
-        .expect("daemon exposes at least one embedded provider");
+        .expect("daemon exposes the embedded dns provider");
     control
         .import_embedded_provider(wire::ImportEmbeddedProviderRequest {
             name: metadata.reference.name.clone(),
@@ -267,7 +288,12 @@ async fn declarative_apply_commits_before_reconcile_and_watch_resumes_from_snaps
         omnifs_api::ProgressEventKind::Snapshot(ref snapshot)
             if snapshot.desired_revision == receipt.revision
                 && snapshot.resources.iter().all(|status| {
-                    status.phase == omnifs_api::ResourcePhase::Pending
+                    matches!(
+                        status.phase,
+                        omnifs_api::ResourcePhase::Pending
+                            | omnifs_api::ResourcePhase::Preparing
+                            | omnifs_api::ResourcePhase::Ready
+                    )
                 })
     ));
     drop(first);
@@ -288,12 +314,139 @@ async fn declarative_apply_commits_before_reconcile_and_watch_resumes_from_snaps
         .await
         .unwrap()
         .into_inner();
-    assert!(matches!(
-        grpc::progress_event(&resumed.message().await.unwrap().unwrap())
+    let resumed_snapshot =
+        grpc::progress_event(&resumed.message().await.unwrap().unwrap()).unwrap();
+    let (mut saw_provider, mut saw_serving, mut terminal) = match resumed_snapshot.event {
+        omnifs_api::ProgressEventKind::Snapshot(snapshot) => (
+            snapshot.providers.iter().any(|provider| {
+                provider.digest == metadata.reference.id
+                    && matches!(
+                        provider.stage,
+                        omnifs_api::ProviderPreparationStage::Compiling
+                            | omnifs_api::ProviderPreparationStage::Ready
+                    )
+            }),
+            snapshot.serving.is_some(),
+            snapshot.observed_revision == Some(receipt.revision)
+                && snapshot
+                    .resources
+                    .iter()
+                    .all(|status| status.phase == omnifs_api::ResourcePhase::Ready),
+        ),
+        _ => panic!("resumed revision stream must start with a snapshot"),
+    };
+    // Cold Wasmtime compilation time is host-dependent and not a product
+    // deadline. The apply RPC above is the bounded assertion; this is only a
+    // test-runner safety cap while the revision stream reports real stages.
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(3);
+    while !terminal {
+        let message =
+            if let Ok(message) = tokio::time::timeout_at(deadline, resumed.message()).await {
+                message.unwrap().expect("revision stream remains open")
+            } else {
+                let current = control
+                    .get_resources(wire::Empty {})
+                    .await
+                    .expect("read stalled resource status")
+                    .into_inner();
+                panic!("revision reconcile stalled: {current:?}");
+            };
+        let event = grpc::progress_event(&message).unwrap();
+        match event.event {
+            omnifs_api::ProgressEventKind::Snapshot(snapshot)
+            | omnifs_api::ProgressEventKind::Resync(snapshot) => {
+                saw_provider |= snapshot.providers.iter().any(|provider| {
+                    provider.digest == metadata.reference.id
+                        && matches!(
+                            provider.stage,
+                            omnifs_api::ProviderPreparationStage::Compiling
+                                | omnifs_api::ProviderPreparationStage::Ready
+                        )
+                });
+                saw_serving |= snapshot.serving.is_some();
+            },
+            omnifs_api::ProgressEventKind::ProviderPreparation(provider) => {
+                saw_provider |= provider.digest == metadata.reference.id;
+            },
+            omnifs_api::ProgressEventKind::ServingProgress(_) => saw_serving = true,
+            omnifs_api::ProgressEventKind::RevisionReady(revision)
+                if revision == receipt.revision =>
+            {
+                terminal = true;
+            },
+            omnifs_api::ProgressEventKind::RevisionFailed { detail, .. } => {
+                panic!("revision reconcile failed: {detail}");
+            },
+            _ => {},
+        }
+    }
+    assert!(
+        saw_provider,
+        "revision progress names its required provider"
+    );
+    assert!(saw_serving, "revision progress reports serving stages");
+    let ready = control
+        .get_resources(wire::Empty {})
+        .await
+        .unwrap()
+        .into_inner();
+    let ready = grpc::get_resources_response(&ready).unwrap();
+    assert!(
+        ready
+            .resource_statuses
+            .iter()
+            .all(|status| status.phase == omnifs_api::ResourcePhase::Ready)
+    );
+
+    let cache = daemon.home.path().join("daemon-state/cache/wasmtime");
+    assert!(cache.is_dir(), "daemon owns one durable Wasmtime cache");
+    drop(control);
+    daemon.restart().await;
+    let mut restarted = control_client(&daemon.control_socket()).await;
+    let mut recovery = restarted
+        .watch_progress(grpc::to_progress_target(
+            omnifs_api::ProgressTarget::DesiredRevision(receipt.revision),
+        ))
+        .await
+        .expect("watch restarted desired revision")
+        .into_inner();
+    let recovery_deadline = tokio::time::Instant::now() + Duration::from_mins(3);
+    loop {
+        let message = tokio::time::timeout_at(recovery_deadline, recovery.message())
+            .await
+            .expect("restarted revision finishes before safety cap")
             .unwrap()
-            .event,
-        omnifs_api::ProgressEventKind::Snapshot(_)
-    ));
+            .expect("restarted revision stream remains open");
+        match grpc::progress_event(&message).unwrap().event {
+            omnifs_api::ProgressEventKind::Snapshot(snapshot)
+            | omnifs_api::ProgressEventKind::Resync(snapshot)
+                if snapshot.observed_revision == Some(receipt.revision) =>
+            {
+                break;
+            },
+            omnifs_api::ProgressEventKind::RevisionReady(revision)
+                if revision == receipt.revision =>
+            {
+                break;
+            },
+            omnifs_api::ProgressEventKind::RevisionFailed { detail, .. } => {
+                panic!("restarted revision reconcile failed: {detail}");
+            },
+            _ => {},
+        }
+    }
+    let recovered = restarted
+        .get_resources(wire::Empty {})
+        .await
+        .expect("restarted daemon exposes desired and observed status")
+        .into_inner();
+    let recovered = grpc::get_resources_response(&recovered).unwrap();
+    assert_eq!(recovered.revision, receipt.revision);
+    assert_eq!(recovered.serving_revision, Some(receipt.revision));
+    assert_eq!(
+        cache,
+        daemon.home.path().join("daemon-state/cache/wasmtime")
+    );
 }
 
 #[test]

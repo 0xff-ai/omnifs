@@ -3,11 +3,16 @@
 use anyhow::Context as _;
 use omnifs_api::{
     ControlError, ControlErrorCode, DaemonPhase, DaemonRecovery, HealthReport, HealthState,
-    RecoveryId, RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt,
+    ProgressSnapshot, ProviderPreparationProgress, ProviderPreparationStage, RecoveryId,
+    RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt, ResourceDefinition,
 };
-use omnifs_core::{MountRevision, MutationId};
-use omnifs_engine::{HostOnline, HostRuntimeOpen, Inspector, ServingCell, init_global_from_env};
-use omnifs_state::{ControlStoreRepairDisposition, StateStore, StateStoreOptions};
+use omnifs_core::{MountRevision, MutationId, ResourceRevision};
+use omnifs_engine::{
+    ComponentEngine, HostOnline, HostRuntimeOpen, Inspector, ServingCell, init_global_from_env,
+};
+use omnifs_state::{
+    ControlStoreRepairDisposition, DaemonStatePaths, StateStore, StateStoreOptions,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
@@ -16,16 +21,29 @@ use crate::{
     context::DaemonContext,
     control::{ControlServer, RepairCommand},
     daemon::{Daemon, DaemonParts},
-    generation_builder::{GenerationDraft, GenerationParts},
+    generation_builder::empty_generation,
     logging,
     manager::MutationManager,
+    progress::ProgressHub,
     provider_bundle::EmbeddedProviders,
+    provider_preparer::{
+        ProviderPreparationJob, ProviderPreparationPhase, ProviderPreparationStatus,
+        ProviderPreparer, ProviderPreparerHandle, ProviderPriority,
+    },
+    serving_reconciler::ServingReconciler,
 };
 
 /// Distinguishes successive repair offers so a stale one cannot be replayed.
 /// Only distinctness matters: the offer is already behind a uid-verified
 /// socket, and `repair_state` checks `instance_id` separately.
 static RECOVERY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+struct DaemonRuntimeSeed {
+    state_paths: DaemonStatePaths,
+    engine: ComponentEngine,
+    preparer: ProviderPreparerHandle,
+    progress: Arc<ProgressHub>,
+}
 
 fn next_recovery_id() -> RecoveryId {
     let mut id = [0_u8; 16];
@@ -61,7 +79,56 @@ pub async fn run() -> anyhow::Result<()> {
     let control_task = tokio::spawn(Arc::clone(&control).run(control_listener));
     let signal_task = spawn_signal_task(shutdown_tx.clone());
     let inspector = start_inspector();
+    let state_paths = DaemonStatePaths::new(context.daemon_state_root());
+    let progress = ProgressHub::new(
+        context.instance_id(),
+        ProgressSnapshot {
+            desired_revision: ResourceRevision::default(),
+            observed_revision: None,
+            resources: Vec::new(),
+            actions: Vec::new(),
+            providers: Vec::new(),
+            serving: None,
+            credentials: Vec::new(),
+            attachments: Vec::new(),
+        },
+    );
+    let engine = match prepare_component_engine(&state_paths) {
+        Ok(engine) => engine,
+        Err(error) => {
+            control.set_shutting_down();
+            let _ = shutdown_tx.send(true);
+            signal_task.abort();
+            let _ = signal_task.await;
+            let _ = control_task.await;
+            unpublish_process_identity(&context);
+            return Err(error);
+        },
+    };
+    let progress_sink = {
+        let progress = Arc::clone(&progress);
+        Arc::new(move |status: ProviderPreparationStatus| {
+            record_provider_progress(&progress, status);
+        })
+    };
+    let preparer = ProviderPreparer::start(engine.clone(), progress_sink);
+    if let Err(error) = enqueue_embedded(&preparer, &embedded).await {
+        control.set_shutting_down();
+        let _ = shutdown_tx.send(true);
+        signal_task.abort();
+        let _ = signal_task.await;
+        let _ = control_task.await;
+        let _ = preparer.shutdown().await;
+        unpublish_process_identity(&context);
+        return Err(error);
+    }
 
+    let runtime = DaemonRuntimeSeed {
+        state_paths,
+        engine,
+        preparer: preparer.handle(),
+        progress,
+    };
     let (result, ready_daemon) = serve_until_stopped(
         &context,
         &embedded,
@@ -69,6 +136,7 @@ pub async fn run() -> anyhow::Result<()> {
         &shutdown_tx,
         &mut repairs,
         inspector,
+        runtime,
     )
     .await;
 
@@ -89,9 +157,12 @@ pub async fn run() -> anyhow::Result<()> {
         Some(daemon) => daemon.shutdown().await,
         None => Ok(()),
     };
+    info!("stopping provider preparer");
+    let preparer_result = preparer.shutdown().await.map_err(anyhow::Error::from);
+    info!("provider preparer stopped");
     unpublish_process_identity(&context);
 
-    crate::first_error([result, control_result, daemon_result])
+    crate::first_error([result, control_result, daemon_result, preparer_result])
 }
 
 /// Open the store, build the runtime, and serve until stopped, re-entering
@@ -105,8 +176,9 @@ async fn serve_until_stopped(
     shutdown_tx: &tokio::sync::watch::Sender<bool>,
     repairs: &mut tokio::sync::mpsc::Receiver<RepairCommand>,
     inspector: Option<Arc<Inspector>>,
+    runtime: DaemonRuntimeSeed,
 ) -> (anyhow::Result<()>, Option<Arc<Daemon>>) {
-    let mut store = match open_initial_store(context).await {
+    let mut store = match open_initial_store(runtime.state_paths.clone()).await {
         Ok(store) => store,
         Err(failure) => {
             match recover_until_repaired(context, control, shutdown_tx, repairs, failure).await {
@@ -122,6 +194,7 @@ async fn serve_until_stopped(
             inspector.clone(),
             shutdown_tx.clone(),
             store,
+            &runtime,
         )
         .await
         {
@@ -138,6 +211,119 @@ async fn serve_until_stopped(
             RecoveryOutcome::Stop(result) => return (result, None),
         };
     }
+}
+
+fn prepare_component_engine(paths: &DaemonStatePaths) -> anyhow::Result<ComponentEngine> {
+    paths.prepare()?;
+    let engine_paths = paths.engine_paths();
+    ComponentEngine::new(engine_paths.wasmtime_cache())
+        .map_err(|error| anyhow::anyhow!("open required Wasmtime cache: {error}"))
+}
+
+async fn enqueue_embedded(
+    preparer: &ProviderPreparer,
+    embedded: &EmbeddedProviders,
+) -> anyhow::Result<()> {
+    let mut providers: Vec<_> = embedded.entries().collect();
+    // Within the lowest-priority catalog class, start smaller artifacts first.
+    // This bounds how much non-cancelable blocking compilation shutdown must
+    // join if the daemon is stopped just after it becomes ready.
+    providers.sort_by_key(|provider| provider.artifact().bytes().len());
+    for provider in providers {
+        let artifact = provider.artifact();
+        let job = ProviderPreparationJob::new(
+            artifact.id(),
+            provider.catalog_name(),
+            Vec::new(),
+            artifact.bytes().to_vec(),
+        )?;
+        preparer.enqueue(job, ProviderPriority::Embedded).await?;
+    }
+    Ok(())
+}
+
+async fn enqueue_retained_and_desired(
+    state: &StateStore,
+    preparer: &ProviderPreparerHandle,
+) -> anyhow::Result<()> {
+    let desired = state.resource_snapshot().await?;
+    let provider_aliases: std::collections::HashMap<_, _> = desired
+        .resources
+        .resources()
+        .iter()
+        .filter_map(|resource| match resource {
+            ResourceDefinition::Provider(provider) => {
+                Some((provider.name.clone(), provider.artifact))
+            },
+            _ => None,
+        })
+        .collect();
+    let mounted: std::collections::HashSet<_> = desired
+        .resources
+        .resources()
+        .iter()
+        .filter_map(|resource| match resource {
+            ResourceDefinition::Mount(mount) => provider_aliases.get(&mount.provider).copied(),
+            _ => None,
+        })
+        .collect();
+    let mut aliases_by_digest =
+        std::collections::HashMap::<_, Vec<omnifs_core::ResourceName>>::new();
+    for (alias, digest) in provider_aliases {
+        aliases_by_digest.entry(digest).or_default().push(alias);
+    }
+    for metadata in state.list_providers().await? {
+        let provider = state
+            .load_provider(metadata.reference.id)
+            .await?
+            .with_context(|| format!("provider {} disappeared", metadata.reference.id))?;
+        let priority = if mounted.contains(&provider.reference.id) {
+            ProviderPriority::Desired
+        } else {
+            ProviderPriority::Retained
+        };
+        let resource_names = if priority == ProviderPriority::Desired {
+            aliases_by_digest
+                .remove(&provider.reference.id)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let job = ProviderPreparationJob::new(
+            provider.reference.id,
+            provider.reference.meta.name.to_string(),
+            resource_names,
+            provider.bytes,
+        )?;
+        preparer.enqueue(job, priority).await?;
+    }
+    Ok(())
+}
+
+fn record_provider_progress(progress: &ProgressHub, status: ProviderPreparationStatus) {
+    let stage = match status.phase {
+        ProviderPreparationPhase::Queued => ProviderPreparationStage::Queued,
+        ProviderPreparationPhase::Preparing => ProviderPreparationStage::Compiling,
+        ProviderPreparationPhase::Retrying => ProviderPreparationStage::Retrying,
+        ProviderPreparationPhase::Ready => ProviderPreparationStage::Ready,
+        ProviderPreparationPhase::Failed => ProviderPreparationStage::Failed,
+    };
+    progress.record_provider_status(&ProviderPreparationProgress {
+        digest: status.provider_id,
+        catalog_name: status.catalog_name,
+        resource_names: status.resource_names,
+        stage,
+        queue_position: status.queue_position,
+        completed_bytes: status.completed_bytes,
+        total_bytes: Some(status.total_bytes),
+        error_code: status.error_code,
+        detail: status.detail,
+        queued_digests: status.queued_digests,
+        active_digests: status.active_digests,
+        completed_digests: status.completed_digests,
+        retry_count: status.retry_count,
+        next_retry_unix_ms: None,
+    });
 }
 
 fn start_inspector() -> Option<Arc<Inspector>> {
@@ -174,8 +360,8 @@ fn unpublish_process_identity(context: &DaemonContext) {
 /// Open the control store for the very first startup attempt of this
 /// process. Later attempts, after a repair, feed [`build_daemon`] the store
 /// [`recover_until_repaired`] hands back instead of calling this again.
-async fn open_initial_store(context: &DaemonContext) -> Result<StateStore, StartupFailure> {
-    StateStore::open(context.endpoint(), StateStoreOptions::default())
+async fn open_initial_store(paths: DaemonStatePaths) -> Result<StateStore, StartupFailure> {
+    StateStore::open_paths(paths, StateStoreOptions::default())
         .await
         .map_err(StartupFailure::store)
 }
@@ -229,6 +415,7 @@ async fn build_daemon(
     inspector: Option<Arc<Inspector>>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     state: StateStore,
+    runtime: &DaemonRuntimeSeed,
 ) -> Result<
     (
         Arc<Daemon>,
@@ -237,47 +424,35 @@ async fn build_daemon(
     StartupFailure,
 > {
     let state = Arc::new(state);
+    if let Err(error) = enqueue_retained_and_desired(&state, &runtime.preparer).await {
+        return Err(close_failed_state(state, error).await);
+    }
     let paths = state.engine_paths();
     let host = match HostOnline::open_runtime(HostRuntimeOpen {
         projection: paths.projection_cache().to_path_buf(),
-        wasmtime: paths.wasmtime_cache().to_path_buf(),
         clones: paths.clone_cache().to_path_buf(),
+        engine: runtime.engine.clone(),
     }) {
         Ok(host) => Arc::new(host),
         Err(error) => return Err(close_failed_state(state, error.into()).await),
     };
-    let draft = match GenerationDraft::load(&state).await {
-        Ok(draft) => draft,
+    let initial = match empty_generation(&host) {
+        Ok(initial) => initial,
         Err(error) => return Err(close_failed_state(state, error).await),
     };
-    let build = match draft.prepare(&state, &host).await {
-        Ok(build) => build,
-        Err(error) => return Err(close_failed_state(state, error).await),
-    };
-    let GenerationParts {
-        ready,
-        revision,
-        pending_refreshes,
-    } = build.into_parts();
-    let serving = ServingCell::new(context.namespace_epoch().daemon_instance(), ready);
-    if let Err(error) = pending_refreshes.activate(&state).await {
-        return Err(close_failed_state(state, error).await);
-    }
-    if let Err(error) = state.mark_serving(revision).await {
-        return Err(close_failed_state(state, error).await);
-    }
-    let resources = match crate::resource_control::ResourceControl::new(
+    let serving = ServingCell::new(context.namespace_epoch().daemon_instance(), initial);
+    let resources = match crate::resource_control::ResourceControl::new_with_progress(
         Arc::clone(&state),
         context.instance_id(),
+        Some(Arc::clone(&runtime.progress)),
     )
     .await
     {
         Ok(resources) => resources,
         Err(error) => return Err(close_failed_state(state, error).await),
     };
-    // The manager's spawned task owns the only live `HostOnline` handle for
-    // the daemon's lifetime; nothing else needs to anchor it.
-    let manager = MutationManager::spawn(Arc::clone(&state), host, Arc::clone(&serving));
+    let manager =
+        MutationManager::spawn(Arc::clone(&state), Arc::clone(&host), Arc::clone(&serving));
     let daemon = Arc::new(Daemon::new(DaemonParts {
         context,
         embedded,
@@ -289,7 +464,19 @@ async fn build_daemon(
         shutdown_tx,
     }));
     match daemon.start().await {
-        Ok(events) => Ok((daemon, events)),
+        Ok(events) => {
+            let reconciler = ServingReconciler::spawn(
+                Arc::clone(&state),
+                Arc::clone(&host),
+                Arc::clone(&daemon.serving),
+                Arc::clone(&daemon.resources),
+                runtime.preparer.clone(),
+            );
+            if let Err(error) = daemon.install_reconciler(reconciler) {
+                return Err(close_failed_state(state, error).await);
+            }
+            Ok((daemon, events))
+        },
         Err(error) => {
             let failure = runtime_failure(&state, error).await;
             if let Err(shutdown_error) = daemon.shutdown().await {
@@ -450,19 +637,63 @@ fn remove_control_socket(context: &DaemonContext) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use bytes::Bytes;
     use hyper_util::rt::TokioIo;
     use omnifs_api::CONTROL_REQUEST_TIMEOUT_SECS;
     use omnifs_api::RepairDisposition;
     use omnifs_api::grpc::{self, wire};
     use prost::Message as _;
+    use std::sync::Condvar;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+    use tokio::sync::{mpsc, oneshot};
     use tonic::transport::{Channel, Endpoint};
     use tonic::{Code, Request, Status};
     use tower::service_fn;
 
     type ControlClient = wire::control_client::ControlClient<Channel>;
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
+
+    struct BlockedCompiler {
+        released: std::sync::Mutex<bool>,
+        gate: Condvar,
+        started: mpsc::UnboundedSender<omnifs_core::ProviderId>,
+    }
+
+    impl crate::provider_preparer::ProviderCompiler for BlockedCompiler {
+        fn prepare(
+            &self,
+            provider_id: omnifs_core::ProviderId,
+            _bytes: &[u8],
+        ) -> Result<(), String> {
+            let _ = self.started.send(provider_id);
+            let released = self.released.lock().unwrap();
+            let _released = self
+                .gate
+                .wait_while(released, |released| !*released)
+                .unwrap();
+            Ok(())
+        }
+    }
+
+    impl BlockedCompiler {
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.gate.notify_all();
+        }
+    }
+
+    fn startup_job(label: u8, name: &str) -> ProviderPreparationJob {
+        let bytes = vec![label; usize::from(label) + 1];
+        ProviderPreparationJob::new(
+            omnifs_core::ProviderId::from_wasm_bytes(&bytes),
+            name,
+            Vec::new(),
+            bytes,
+        )
+        .unwrap()
+    }
 
     fn unary<T>(message: T) -> Request<T> {
         let mut request = Request::new(message);
@@ -503,6 +734,84 @@ mod tests {
             .await
             .map_err(|_| anyhow::anyhow!("control HTTP/2 setup timed out"))??;
         Ok(ControlClient::new(channel))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn startup_prepares_embedded_before_store_then_accepts_retained_without_waiting_for_compile()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = DaemonStatePaths::new(temp.path().join("daemon-state"));
+        let engine_constructions = AtomicUsize::new(0);
+        let engine = {
+            engine_constructions.fetch_add(1, Ordering::SeqCst);
+            prepare_component_engine(&paths).unwrap()
+        };
+        // The production seed gives these two owners clones of one engine.
+        let _provider_engine = engine.clone();
+        let _host_engine = engine.clone();
+        assert_eq!(engine_constructions.load(Ordering::SeqCst), 1);
+
+        let (started_tx, mut started) = mpsc::unbounded_channel();
+        let compiler = Arc::new(BlockedCompiler {
+            released: std::sync::Mutex::new(false),
+            gate: Condvar::new(),
+            started: started_tx,
+        });
+        let sink: Arc<dyn crate::provider_preparer::ProviderProgressSink> = Arc::new(|_| {});
+        let preparer = ProviderPreparer::start_with_test_compiler(compiler.clone(), sink, 1);
+        let embedded = startup_job(1, "embedded");
+        let retained = startup_job(2, "retained");
+        let embedded_id = omnifs_core::ProviderId::from_wasm_bytes(&[1, 1]);
+        let retained_id = omnifs_core::ProviderId::from_wasm_bytes(&[2, 2, 2]);
+
+        // Control binding precedes cache/engine construction in `run`; model
+        // that already-complete step independently from a blocked compiler.
+        let (control_ready_tx, control_ready) = oneshot::channel();
+        control_ready_tx.send(()).unwrap();
+        preparer
+            .enqueue(embedded.clone(), ProviderPriority::Embedded)
+            .await
+            .unwrap();
+        assert_eq!(started.recv().await, Some(embedded_id));
+
+        let (store_opened_tx, store_opened) = oneshot::channel();
+        let (allow_store_tx, allow_store) = oneshot::channel();
+        let (vfs_ready_tx, vfs_ready) = oneshot::channel();
+        let retained_handle = preparer.handle();
+        let retained_for_store = retained.clone();
+        let store_open = tokio::spawn(async move {
+            store_opened_tx.send(()).unwrap();
+            allow_store.await.unwrap();
+            retained_handle
+                .enqueue(retained_for_store, ProviderPriority::Retained)
+                .await
+                .unwrap();
+            // Binding both VFS listeners must not wait for component compile.
+            vfs_ready_tx.send(()).unwrap();
+        });
+        store_opened.await.unwrap();
+        control_ready.await.unwrap();
+        assert_eq!(
+            preparer.status(embedded_id).unwrap().phase,
+            ProviderPreparationPhase::Preparing
+        );
+
+        allow_store_tx.send(()).unwrap();
+        vfs_ready.await.unwrap();
+        assert_eq!(
+            preparer.status(retained_id).unwrap().phase,
+            ProviderPreparationPhase::Queued
+        );
+        assert_eq!(
+            preparer.status(embedded_id).unwrap().phase,
+            ProviderPreparationPhase::Preparing
+        );
+
+        compiler.release();
+        preparer.wait_ready(embedded_id).await.unwrap();
+        preparer.wait_ready(retained_id).await.unwrap();
+        store_open.await.unwrap();
+        preparer.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -607,7 +916,10 @@ mod tests {
             }))
             .await
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(10), daemon)
+        // Provider preparation uses spawn_blocking. Shutdown cancels queued
+        // work but must join the bounded set already compiling before the
+        // process exits.
+        tokio::time::timeout(std::time::Duration::from_mins(1), daemon)
             .await
             .unwrap()
             .unwrap()

@@ -27,8 +27,8 @@ a terminal result.
 |---|---|---:|---:|---|---|
 | [001](001-add-resource-domain-and-durable-state.md) | Add typed resource domain and durable state | P1 | L | none | DONE |
 | [002](002-add-fast-plan-and-apply-rpc.md) | Add fast typed plan, apply, and progress RPCs | P1 | L | 001 | DONE |
-| [003](003-move-provider-work-to-daemon-reconciliation.md) | Move provider work to daemon-owned reconciliation | P1 | L | 002 | TODO |
-| [004](004-extract-filesystem-runtime-drivers.md) | Extract filesystem runtime drivers | P1 | L | 001 | TODO |
+| [003](003-move-provider-work-to-daemon-reconciliation.md) | Move provider work to daemon-owned reconciliation | P1 | L | 002 | DONE |
+| [004](004-extract-filesystem-runtime-drivers.md) | Extract filesystem runtime drivers | P1 | L | 001 | IN PROGRESS |
 | [005](005-make-daemon-own-attachments.md) | Make the daemon own attachments | P1 | L | 003, 004 | TODO |
 | [006](006-retire-client-filesystem-state-and-narrow-bootstrap.md) | Retire client filesystem state and narrow bootstrap | P1 | L | 005 | TODO |
 | [007](007-add-kcl-plan-and-apply-client.md) | Add KCL plan and apply | P1 | L | 005 | TODO |

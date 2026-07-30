@@ -154,23 +154,6 @@ async fn import_provider_inner(
 /// mount, and an `Unchanged` re-import repaired nothing, so only
 /// `Repaired` warrants this. Best-effort: the import itself already
 /// committed, so a rebuild failure is logged rather than failing the RPC.
-async fn rebuild_after_repair(daemon: &Daemon, outcome: &omnifs_state::ProviderImportOutcome) {
-    if outcome.disposition != omnifs_state::ProviderImportDisposition::Repaired {
-        return;
-    }
-    if let Err(error) = daemon
-        .manager
-        .rebuild_for_provider_repair(outcome.reference.id)
-        .await
-    {
-        tracing::warn!(
-            provider = %outcome.reference.id,
-            %error,
-            "could not rebuild serving generation after provider repair"
-        );
-    }
-}
-
 fn provider_import_response(
     outcome: omnifs_state::ProviderImportOutcome,
 ) -> wire::ImportProviderResponse {
@@ -405,7 +388,7 @@ impl wire::control_server::Control for GrpcControlService {
             .import_provider(upload)
             .await
             .map_err(grpc_internal)?;
-        rebuild_after_repair(&daemon, &outcome).await;
+        daemon.provider_imported(&outcome);
         Ok(Response::new(provider_import_response(outcome)))
     }
 
@@ -435,7 +418,7 @@ impl wire::control_server::Control for GrpcControlService {
             .import_provider(upload)
             .await
             .map_err(grpc_internal)?;
-        rebuild_after_repair(&daemon, &outcome).await;
+        daemon.provider_imported(&outcome);
         Ok(Response::new(provider_import_response(outcome)))
     }
 

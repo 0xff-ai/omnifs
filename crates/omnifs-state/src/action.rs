@@ -183,6 +183,8 @@ impl Db<'_> {
             target: ResourceKey::new(ResourceKind::Credential, request.credential),
             action_generation: accepted_generation,
             phase: ActionPhase::Accepted,
+            error_code: None,
+            detail: None,
         };
         insert_action(self.raw(), request_digest, &receipt).await?;
         prune_terminal_actions(self.raw()).await?;
@@ -206,7 +208,7 @@ impl Db<'_> {
                     phase: current.phase,
                 });
             }
-            validate_transition_fields(phase, error_code.as_deref())?;
+            validate_transition_fields(phase, error_code.as_deref(), detail.as_deref())?;
             sqlx::query(
                 "UPDATE action_receipts \
                  SET phase = ?2, error_code = ?3, detail = ?4, updated_at = unixepoch() \
@@ -214,12 +216,17 @@ impl Db<'_> {
             )
             .bind(action_id.as_bytes().as_slice())
             .bind(action_phase_str(phase))
-            .bind(error_code)
-            .bind(detail)
+            .bind(error_code.as_deref())
+            .bind(detail.as_deref())
             .execute(db.raw())
             .await
             .context("transition action receipt")?;
-            Ok(ActionReceipt { phase, ..current })
+            Ok(ActionReceipt {
+                phase,
+                error_code,
+                detail,
+                ..current
+            })
         })
         .await
     }
@@ -230,7 +237,8 @@ pub(crate) async fn action_receipt(
     action_id: ActionId,
 ) -> anyhow::Result<Option<ActionReceipt>> {
     sqlx::query(
-        "SELECT action_id, kind, target_kind, target_name, action_generation, phase \
+        "SELECT action_id, kind, target_kind, target_name, action_generation, phase, \
+                error_code, detail \
          FROM action_receipts WHERE action_id = ?1",
     )
     .bind(action_id.as_bytes().as_slice())
@@ -246,7 +254,8 @@ pub(crate) async fn pending_actions(
     connection: &mut SqliteConnection,
 ) -> anyhow::Result<Vec<ActionReceipt>> {
     sqlx::query(
-        "SELECT action_id, kind, target_kind, target_name, action_generation, phase \
+        "SELECT action_id, kind, target_kind, target_name, action_generation, phase, \
+                error_code, detail \
          FROM action_receipts \
          WHERE phase IN ('accepted', 'running', 'retrying') \
          ORDER BY created_at, action_id",
@@ -263,7 +272,8 @@ pub(crate) async fn action_receipts(
     connection: &mut SqliteConnection,
 ) -> anyhow::Result<Vec<ActionReceipt>> {
     sqlx::query(
-        "SELECT action_id, kind, target_kind, target_name, action_generation, phase \
+        "SELECT action_id, kind, target_kind, target_name, action_generation, phase, \
+                error_code, detail \
          FROM action_receipts ORDER BY created_at, action_id",
     )
     .fetch_all(connection)
@@ -281,7 +291,7 @@ async fn existing_action(
 ) -> Result<Option<ActionReceipt>, ActionWriteError> {
     let row = sqlx::query(
         "SELECT action_id, kind, target_kind, target_name, action_generation, phase, \
-                request_digest \
+                error_code, detail, request_digest \
          FROM action_receipts WHERE action_id = ?1",
     )
     .bind(action_id.as_bytes().as_slice())
@@ -502,6 +512,8 @@ fn decode_action_receipt(row: &SqliteRow) -> anyhow::Result<ActionReceipt> {
         action_generation: u64::try_from(action_generation)
             .context("stored accepted action generation is negative")?,
         phase: parse_action_phase(&row.text("phase")?)?,
+        error_code: row.optional_text("error_code")?,
+        detail: row.optional_text("detail")?,
     })
 }
 
@@ -566,10 +578,12 @@ const fn is_terminal(phase: ActionPhase) -> bool {
 fn validate_transition_fields(
     phase: ActionPhase,
     error_code: Option<&str>,
+    detail: Option<&str>,
 ) -> Result<(), ActionWriteError> {
-    if matches!(phase, ActionPhase::Failed) != error_code.is_some() {
+    let failed = matches!(phase, ActionPhase::Failed);
+    if failed != error_code.is_some() || failed != detail.is_some() {
         return Err(anyhow::anyhow!(
-            "failed actions require an error code and other phases forbid one"
+            "failed actions require an error code and detail; other phases forbid both"
         )
         .into());
     }

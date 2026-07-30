@@ -15,7 +15,7 @@ use omnifs_state::{
     ActionWriteError, CredentialActionOperation, CredentialActionRequest, CredentialSecretSidecar,
     ResourceApplyError, ResourceApplyRequest as StateApplyRequest, StateStore,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
@@ -25,16 +25,35 @@ pub(crate) struct ResourceControl {
     revision_wakeup: watch::Sender<ResourceRevision>,
     action_wakeup: watch::Sender<Option<ActionId>>,
     progress: Arc<ProgressHub>,
+    publication_fence: Arc<tokio::sync::Mutex<()>>,
     shutting_down: AtomicBool,
 }
 
 impl ResourceControl {
+    #[cfg(test)]
     pub(crate) async fn new(
         state: Arc<StateStore>,
         daemon_instance_id: &str,
     ) -> anyhow::Result<Arc<Self>> {
+        Self::new_with_progress(state, daemon_instance_id, None).await
+    }
+
+    pub(crate) async fn new_with_progress(
+        state: Arc<StateStore>,
+        daemon_instance_id: &str,
+        existing_progress: Option<Arc<ProgressHub>>,
+    ) -> anyhow::Result<Arc<Self>> {
         let current = state.resource_snapshot().await?;
         let actions = state.action_receipts().await?;
+        let serving_revision = if existing_progress.is_some() {
+            None
+        } else {
+            state
+                .serving_state()
+                .await
+                .ok()
+                .map(|serving| ResourceRevision::new(serving.revision.get()))
+        };
         let statuses = current
             .resources
             .resources()
@@ -42,21 +61,48 @@ impl ResourceControl {
             .map(|resource| ResourceStatus {
                 key: resource.key(),
                 desired_revision: current.revision,
-                observed_revision: Some(current.revision),
-                phase: ResourcePhase::Ready,
+                observed_revision: serving_revision
+                    .filter(|revision| *revision >= current.revision),
+                phase: if serving_revision.is_some_and(|revision| revision >= current.revision) {
+                    ResourcePhase::Ready
+                } else {
+                    ResourcePhase::Pending
+                },
                 error_code: None,
                 detail: None,
             })
             .collect();
-        let progress = ProgressHub::new(
-            daemon_instance_id,
-            ProgressSnapshot {
-                desired_revision: current.revision,
-                observed_revision: Some(current.revision),
-                resources: statuses,
-                actions,
-            },
+        let (providers, serving, credentials, attachments) = existing_progress
+            .as_ref()
+            .map(|progress| {
+                let (_, snapshot) = progress.snapshot_for(ProgressTarget::Current);
+                (
+                    snapshot.providers,
+                    snapshot.serving,
+                    snapshot.credentials,
+                    snapshot.attachments,
+                )
+            })
+            .unwrap_or_default();
+        let snapshot = ProgressSnapshot {
+            desired_revision: current.revision,
+            observed_revision: serving_revision,
+            resources: statuses,
+            actions,
+            providers,
+            serving,
+            credentials,
+            attachments,
+        };
+        let progress = existing_progress
+            .unwrap_or_else(|| ProgressHub::new(daemon_instance_id, snapshot.clone()));
+        progress.register_revision_providers(
+            current.revision,
+            revision_provider_membership(&current.resources),
         );
+        if progress.snapshot_for(ProgressTarget::Current).1 != snapshot {
+            progress.publish_snapshot(ProgressTarget::Current, snapshot);
+        }
         let (revision_wakeup, _) = watch::channel(current.revision);
         let (action_wakeup, _) = watch::channel(None);
         Ok(Arc::new(Self {
@@ -64,6 +110,7 @@ impl ResourceControl {
             revision_wakeup,
             action_wakeup,
             progress,
+            publication_fence: Arc::new(tokio::sync::Mutex::new(())),
             shutting_down: AtomicBool::new(false),
         }))
     }
@@ -72,9 +119,14 @@ impl ResourceControl {
         &self.progress
     }
 
+    pub(crate) fn publication_fence(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.publication_fence)
+    }
+
     pub(crate) async fn snapshot(
         &self,
     ) -> Result<omnifs_api::ResourceSnapshot, ResourceControlError> {
+        let _publication_fence = self.publication_fence.lock().await;
         let snapshot = self.state.resource_snapshot().await?;
         let (_, progress) = self.progress.snapshot_for(ProgressTarget::Current);
         Ok(omnifs_api::ResourceSnapshot {
@@ -82,6 +134,9 @@ impl ResourceControl {
             desired_digest: snapshot.desired_digest,
             resources: snapshot.resources.resources().to_vec(),
             resource_statuses: progress.resources,
+            serving_revision: progress.observed_revision,
+            providers: progress.providers,
+            serving: progress.serving,
         })
     }
 
@@ -130,6 +185,10 @@ impl ResourceControl {
         let sidecars = self
             .prepare_apply_credentials(&desired, credential_material)
             .await?;
+        // Serialize only the commit-to-publication decision. Reconciliation
+        // never holds this fence during provider waits, generation builds, or
+        // drains, so Apply cannot inherit runtime work.
+        let _publication_fence = self.publication_fence.lock().await;
         let receipt = self
             .state
             .apply_resources(StateApplyRequest {
@@ -140,22 +199,24 @@ impl ResourceControl {
                 credential_secrets: sidecars,
             })
             .await?;
+        self.progress
+            .register_revision_providers(receipt.revision, revision_provider_membership(&desired));
         self.revision_wakeup.send_replace(receipt.revision);
         if receipt.changed {
             let (_, previous) = self.progress.snapshot_for(ProgressTarget::Current);
-            let snapshot = ProgressSnapshot {
-                desired_revision: receipt.revision,
-                observed_revision: previous.observed_revision,
-                resources: next_resource_statuses(
-                    &current.resources,
-                    &desired,
-                    receipt.revision,
-                    &previous.resources,
-                ),
-                actions: previous.actions,
-            };
-            self.progress
-                .publish_snapshot(ProgressTarget::DesiredRevision(receipt.revision), snapshot);
+            let statuses = next_resource_statuses(
+                &current.resources,
+                &desired,
+                receipt.revision,
+                &previous.resources,
+            );
+            self.progress.update_snapshot(
+                ProgressTarget::DesiredRevision(receipt.revision),
+                |snapshot| {
+                    snapshot.desired_revision = receipt.revision;
+                    snapshot.resources = statuses;
+                },
+            );
         }
         Ok(receipt)
     }
@@ -173,8 +234,8 @@ impl ResourceControl {
                 return Err(ActionWriteError::IdReuse(request.action_id).into());
             }
             return Ok(CredentialReceipt {
+                status: credential_action_status(action.kind, action.phase),
                 action,
-                status: CredentialStatusKind::Active,
             });
         }
         let desired = self.state.resource_snapshot().await?;
@@ -202,8 +263,8 @@ impl ResourceControl {
             .await?;
         self.publish_action(&action);
         Ok(CredentialReceipt {
+            status: credential_action_status(action.kind, action.phase),
             action,
-            status: CredentialStatusKind::Active,
         })
     }
 
@@ -223,22 +284,13 @@ impl ResourceControl {
             .await?;
         self.publish_action(&action);
         Ok(CredentialReceipt {
+            status: credential_action_status(action.kind, action.phase),
             action,
-            status: CredentialStatusKind::RevocationPending,
         })
     }
 
-    fn publish_action(&self, action: &omnifs_api::ActionReceipt) {
-        let (_, mut snapshot) = self.progress.snapshot_for(ProgressTarget::Current);
-        snapshot
-            .actions
-            .retain(|receipt| receipt.action_id != action.action_id);
-        snapshot.actions.push(action.clone());
-        snapshot
-            .actions
-            .sort_by_key(|receipt| *receipt.action_id.as_bytes());
-        self.progress
-            .publish_snapshot(ProgressTarget::Action(action.action_id), snapshot);
+    pub(crate) fn publish_action(&self, action: &omnifs_api::ActionReceipt) {
+        self.progress.record_action_receipt(action.clone());
         self.action_wakeup.send_replace(Some(action.action_id));
     }
 
@@ -349,6 +401,23 @@ impl ResourceControl {
     }
 }
 
+fn credential_action_status(
+    kind: ActionKind,
+    phase: omnifs_api::ActionPhase,
+) -> CredentialStatusKind {
+    use omnifs_api::ActionPhase;
+    match (kind, phase) {
+        (ActionKind::SetCredentialMaterial, ActionPhase::Failed)
+        | (ActionKind::RestartAttachment, _) => CredentialStatusKind::Blocked,
+        (ActionKind::SetCredentialMaterial, _) => CredentialStatusKind::Active,
+        (ActionKind::RevokeCredential, ActionPhase::Ready) => CredentialStatusKind::Deleted,
+        (ActionKind::RevokeCredential, ActionPhase::Failed) => {
+            CredentialStatusKind::RevocationUnknown
+        },
+        (ActionKind::RevokeCredential, _) => CredentialStatusKind::RevocationPending,
+    }
+}
+
 fn credential_target<'a>(
     desired: &'a NormalizedResourceSet,
     name: &ResourceName,
@@ -415,6 +484,39 @@ fn next_resource_statuses(
     statuses
 }
 
+fn revision_provider_membership(
+    desired: &NormalizedResourceSet,
+) -> HashMap<ProviderId, Vec<ResourceName>> {
+    let providers: BTreeMap<_, _> = desired
+        .resources()
+        .iter()
+        .filter_map(|resource| match resource {
+            ResourceDefinition::Provider(provider) => {
+                Some((provider.name.clone(), provider.artifact))
+            },
+            _ => None,
+        })
+        .collect();
+    let mut membership = HashMap::<ProviderId, Vec<ResourceName>>::new();
+    for resource in desired.resources() {
+        let ResourceDefinition::Mount(mount) = resource else {
+            continue;
+        };
+        let Some(provider_id) = providers.get(&mount.provider) else {
+            continue;
+        };
+        membership
+            .entry(*provider_id)
+            .or_default()
+            .push(mount.provider.clone());
+    }
+    for names in membership.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    membership
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ResourceControlError {
     #[error("daemon is shutting down")]
@@ -452,7 +554,7 @@ pub(crate) enum ResourceControlError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_api::{API_VERSION, ProviderDefinition};
+    use omnifs_api::{API_VERSION, ActionPhase, ProviderDefinition};
     use omnifs_core::MutationId;
 
     fn provider_wasm() -> Vec<u8> {
@@ -574,6 +676,30 @@ mod tests {
         assert_eq!(
             statuses[0].observed_revision,
             Some(ResourceRevision::new(1))
+        );
+    }
+
+    #[test]
+    fn credential_action_replay_status_matches_the_durable_terminal_receipt() {
+        assert_eq!(
+            credential_action_status(ActionKind::SetCredentialMaterial, ActionPhase::Ready),
+            CredentialStatusKind::Active
+        );
+        assert_eq!(
+            credential_action_status(ActionKind::SetCredentialMaterial, ActionPhase::Failed),
+            CredentialStatusKind::Blocked
+        );
+        assert_eq!(
+            credential_action_status(ActionKind::RevokeCredential, ActionPhase::Running),
+            CredentialStatusKind::RevocationPending
+        );
+        assert_eq!(
+            credential_action_status(ActionKind::RevokeCredential, ActionPhase::Ready),
+            CredentialStatusKind::Deleted
+        );
+        assert_eq!(
+            credential_action_status(ActionKind::RevokeCredential, ActionPhase::Failed),
+            CredentialStatusKind::RevocationUnknown
         );
     }
 

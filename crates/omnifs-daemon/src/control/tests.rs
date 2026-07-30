@@ -204,8 +204,8 @@ async fn test_daemon_with_limits(
     let host = Arc::new(
         omnifs_engine::HostOnline::open_runtime(omnifs_engine::HostRuntimeOpen {
             projection: paths.projection_cache().to_path_buf(),
-            wasmtime: paths.wasmtime_cache().to_path_buf(),
             clones: paths.clone_cache().to_path_buf(),
+            engine: omnifs_engine::ComponentEngine::new(paths.wasmtime_cache()).unwrap(),
         })
         .unwrap(),
     );

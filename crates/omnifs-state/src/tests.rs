@@ -1,4 +1,5 @@
 use super::*;
+use crate::paths::{CLONE_CACHE_DIR, PROJECTION_CACHE_DIR, WASMTIME_CACHE_DIR};
 use omnifs_api::{
     ActionKind, ActionPhase, AttachmentDefinition, CredentialDefinition, MountResourceDefinition,
     NormalizedResourceSet, ProviderDefinition, ResourceDefinition, ResourceLimits,
@@ -761,6 +762,10 @@ async fn mark_serving_and_recovery_required_round_trip_plain_mutation_ids() {
     let created = mount_outcome(&results[0]);
 
     store.mark_serving(created.revision).await.unwrap();
+    store
+        .mark_serving(MountRevision::new(created.revision.get().saturating_sub(1)))
+        .await
+        .unwrap();
     assert_eq!(
         store.serving_state().await.unwrap(),
         ServingState {
