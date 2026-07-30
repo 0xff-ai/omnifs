@@ -1,5 +1,6 @@
 //! Core omnifs protocol types.
 
+pub mod attachment;
 mod auth_fingerprint;
 mod client_owner_id;
 mod content_type;
@@ -10,8 +11,10 @@ mod mutation;
 pub mod path;
 mod provider;
 mod provider_id;
+pub mod resource;
 mod state_version;
 
+pub use attachment::{AttachmentSpec, AttachmentSpecError, AttachmentVersion};
 pub use auth_fingerprint::{AuthRuntimeFingerprint, AuthRuntimeFingerprintParseError};
 pub use client_owner_id::{ClientOwnerId, ClientOwnerIdError};
 pub use content_type::ContentType;
@@ -24,6 +27,10 @@ pub use provider::{
     validate_key_part,
 };
 pub use provider_id::{ProviderId, ProviderIdHexError};
+pub use resource::{
+    ResourceDigest, ResourceDigestParseError, ResourceKey, ResourceKind, ResourceName,
+    ResourceNameError, ResourceRevision, ResourceRevisionParseError,
+};
 pub use state_version::{
     CredentialGeneration, CredentialVersion, MountRevision, MountVersion, MountVersionParseError,
 };

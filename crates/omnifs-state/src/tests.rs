@@ -1,6 +1,11 @@
 use super::*;
-use omnifs_core::ProviderRef;
+use omnifs_api::{
+    AttachmentDefinition, CredentialDefinition, MountResourceDefinition, NormalizedResourceSet,
+    ProviderDefinition, ResourceDefinition, ResourceLimits,
+};
+use omnifs_core::{AttachmentSpec, ProviderRef, ResourceName};
 use std::os::unix::fs::PermissionsExt as _;
+use std::path::PathBuf;
 
 #[test]
 fn daemon_log_is_owned_by_private_daemon_state() {
@@ -1379,6 +1384,429 @@ async fn upload_and_import(
         .import_provider(upload.finish().await.unwrap())
         .await
         .unwrap()
+}
+
+fn resource_set(provider: ProviderId, mount_config: serde_json::Value) -> NormalizedResourceSet {
+    let provider_name = ResourceName::new("demo").unwrap();
+    let credential_name = ResourceName::new("alice").unwrap();
+    NormalizedResourceSet::new(vec![
+        ResourceDefinition::Provider(ProviderDefinition {
+            name: provider_name.clone(),
+            artifact: provider,
+        }),
+        ResourceDefinition::Credential(CredentialDefinition {
+            name: credential_name.clone(),
+            provider: provider_name.clone(),
+            scheme: "oauth".to_owned(),
+            account: "alice".to_owned(),
+        }),
+        ResourceDefinition::Mount(MountResourceDefinition {
+            name: ResourceName::new("demo-mount").unwrap(),
+            provider: provider_name,
+            credential: Some(credential_name),
+            config: mount_config,
+            limits: Some(ResourceLimits {
+                max_memory_mb: Some(64),
+                max_fetch_blob_bytes: None,
+            }),
+        }),
+        ResourceDefinition::Attachment(AttachmentDefinition {
+            name: ResourceName::new("demo-fs").unwrap(),
+            spec: AttachmentSpec::new(
+                if cfg!(target_os = "linux") {
+                    omnifs_core::fs::Protocol::Fuse
+                } else {
+                    omnifs_core::fs::Protocol::Nfs
+                },
+                omnifs_core::fs::Runtime::Host,
+                PathBuf::from("/tmp/omnifs-resource-test"),
+                None,
+                None,
+            )
+            .unwrap(),
+        }),
+    ])
+    .unwrap()
+}
+
+fn resource_sidecar(provider: ProviderId, material: &[u8]) -> CredentialSecretSidecar {
+    let id = omnifs_auth::CredentialId::new("demo", "oauth", "alice").unwrap();
+    CredentialSecretSidecar {
+        credential: ResourceName::new("alice").unwrap(),
+        document: credential_document(
+            &id,
+            provider,
+            AuthRuntimeFingerprint::from_digest([0x77; 32]),
+            material,
+        ),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resource_snapshot_contains_all_kinds_sorted_and_non_secret() {
+    let (store, provider) = store_with_imported_provider().await;
+    let desired = resource_set(provider.id, serde_json::json!({"b": 2, "a": 1}));
+    let initial = store.resource_snapshot().await.unwrap();
+    let mutation = mutation_id(80);
+    let receipt = store
+        .apply_resources(ResourceApplyRequest {
+            mutation_id: mutation,
+            base_revision: initial.revision,
+            expected_desired_digest: desired.digest(),
+            desired: desired.clone(),
+            credential_secrets: vec![resource_sidecar(provider.id, b"snapshot-secret")],
+        })
+        .await
+        .unwrap();
+    assert!(receipt.changed);
+
+    let snapshot = store.resource_snapshot().await.unwrap();
+    assert_eq!(snapshot.revision, initial.revision.next().unwrap());
+    assert_eq!(snapshot.desired_digest, desired.digest());
+    assert_eq!(snapshot.resources, desired);
+    let kinds = snapshot
+        .resources
+        .resources()
+        .iter()
+        .map(ResourceDefinition::kind)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        vec![
+            omnifs_core::ResourceKind::Provider,
+            omnifs_core::ResourceKind::Credential,
+            omnifs_core::ResourceKind::Mount,
+            omnifs_core::ResourceKind::Attachment,
+        ]
+    );
+    let debug = format!("{snapshot:?}");
+    assert!(!debug.contains("snapshot-secret"));
+    let sidecar_debug = format!("{:?}", resource_sidecar(provider.id, b"sidecar-secret"));
+    assert!(!sidecar_debug.contains("sidecar-secret"));
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)] // one transaction contract with shared setup and row proof
+async fn resource_apply_is_atomic_idempotent_and_stamps_changed_rows() {
+    let (store, provider) = store_with_imported_provider().await;
+    let desired = resource_set(provider.id, serde_json::json!({"a": 1}));
+    let initial = store.resource_snapshot().await.unwrap();
+    let first_id = mutation_id(81);
+    let first = ResourceApplyRequest {
+        mutation_id: first_id,
+        base_revision: initial.revision,
+        expected_desired_digest: desired.digest(),
+        desired: desired.clone(),
+        credential_secrets: vec![resource_sidecar(provider.id, b"first-secret")],
+    };
+    let receipt = store.apply_resources(first).await.unwrap();
+    assert_eq!(
+        (receipt.created, receipt.updated, receipt.deleted),
+        (4, 0, 0)
+    );
+    assert_eq!(receipt.revision, initial.revision.next().unwrap());
+
+    let retry = store
+        .apply_resources(ResourceApplyRequest {
+            mutation_id: first_id,
+            base_revision: initial.revision,
+            expected_desired_digest: desired.digest(),
+            desired: desired.clone(),
+            credential_secrets: vec![resource_sidecar(provider.id, b"different-secret")],
+        })
+        .await
+        .unwrap();
+    assert_eq!(retry, receipt);
+    let stored = store
+        .get_credential(&omnifs_auth::CredentialId::new("demo", "oauth", "alice").unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.summary.last_mutation_id, first_id);
+
+    let mismatch = store
+        .apply_resources(ResourceApplyRequest {
+            mutation_id: first_id,
+            base_revision: receipt.revision,
+            expected_desired_digest: desired.digest(),
+            desired: desired.clone(),
+            credential_secrets: vec![resource_sidecar(provider.id, b"ignored")],
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(mismatch, ResourceApplyError::MutationIdReuse(_)));
+
+    let unchanged = store
+        .apply_resources(ResourceApplyRequest {
+            mutation_id: mutation_id(82),
+            base_revision: receipt.revision,
+            expected_desired_digest: desired.digest(),
+            desired: desired.clone(),
+            credential_secrets: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert!(!unchanged.changed);
+    assert_eq!(unchanged.revision, receipt.revision);
+
+    let mut changed = desired.clone();
+    let mount = changed
+        .resources()
+        .iter()
+        .find_map(|resource| match resource {
+            ResourceDefinition::Mount(mount) => Some(mount.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let mut resources = changed.resources().to_vec();
+    resources.retain(|resource| !matches!(resource, ResourceDefinition::Mount(_)));
+    resources.push(ResourceDefinition::Mount(MountResourceDefinition {
+        config: serde_json::json!({"a": 2}),
+        ..mount
+    }));
+    changed = NormalizedResourceSet::new(resources).unwrap();
+
+    let stale = store
+        .apply_resources(ResourceApplyRequest {
+            mutation_id: mutation_id(83),
+            base_revision: initial.revision,
+            expected_desired_digest: changed.digest(),
+            desired: changed.clone(),
+            credential_secrets: Vec::new(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(stale, ResourceApplyError::StaleRevision { .. }));
+
+    sqlx::query("CREATE TRIGGER fail_mount_resource_update BEFORE UPDATE ON mount_resources BEGIN SELECT RAISE(ABORT, 'test rollback'); END")
+        .execute(&store.reads)
+        .await
+        .unwrap();
+    let rollback = store
+        .apply_resources(ResourceApplyRequest {
+            mutation_id: mutation_id(84),
+            base_revision: receipt.revision,
+            expected_desired_digest: changed.digest(),
+            desired: changed.clone(),
+            credential_secrets: Vec::new(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(rollback, ResourceApplyError::Store(_)));
+    sqlx::query("DROP TRIGGER fail_mount_resource_update")
+        .execute(&store.reads)
+        .await
+        .unwrap();
+    let after_rollback = store.resource_snapshot().await.unwrap();
+    assert_eq!(after_rollback.resources, desired);
+    assert_eq!(after_rollback.revision, receipt.revision);
+
+    let applied = store
+        .apply_resources(ResourceApplyRequest {
+            mutation_id: mutation_id(85),
+            base_revision: receipt.revision,
+            expected_desired_digest: changed.digest(),
+            desired: changed,
+            credential_secrets: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        (applied.created, applied.updated, applied.deleted),
+        (0, 1, 0)
+    );
+    let revision = applied.revision;
+    let row: Vec<u8> = sqlx::query_scalar(
+        "SELECT last_mutation_id FROM mount_resources WHERE name = 'demo-mount'",
+    )
+    .fetch_one(&store.reads)
+    .await
+    .unwrap();
+    assert_eq!(row, mutation_id(85).as_bytes());
+    let provider_row: Vec<u8> =
+        sqlx::query_scalar("SELECT last_mutation_id FROM provider_resources WHERE name = 'demo'")
+            .fetch_one(&store.reads)
+            .await
+            .unwrap();
+    assert_eq!(provider_row, first_id.as_bytes());
+    let credential_row: Vec<u8> = sqlx::query_scalar(
+        "SELECT last_mutation_id FROM credential_resources WHERE name = 'alice'",
+    )
+    .fetch_one(&store.reads)
+    .await
+    .unwrap();
+    assert_eq!(credential_row, first_id.as_bytes());
+    let attachment_row: Vec<u8> = sqlx::query_scalar(
+        "SELECT last_mutation_id FROM attachment_resources WHERE name = 'demo-fs'",
+    )
+    .fetch_one(&store.reads)
+    .await
+    .unwrap();
+    assert_eq!(attachment_row, first_id.as_bytes());
+    assert_eq!(store.resource_snapshot().await.unwrap().revision, revision);
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn corrupt_stored_resource_reports_table_and_name() {
+    let (store, provider) = store_with_imported_provider().await;
+    let desired = resource_set(provider.id, serde_json::json!({}));
+    let initial = store.resource_snapshot().await.unwrap();
+    store
+        .apply_resources(ResourceApplyRequest {
+            mutation_id: mutation_id(86),
+            base_revision: initial.revision,
+            expected_desired_digest: desired.digest(),
+            desired,
+            credential_secrets: vec![resource_sidecar(provider.id, b"corrupt-test")],
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE attachment_resources SET canonical = X'00' WHERE name = 'demo-fs'")
+        .execute(&store.reads)
+        .await
+        .unwrap();
+    let error = store.resource_snapshot().await.unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("decode attachment resource `demo-fs`"));
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)] // one two-open migration scenario with shared legacy state
+async fn legacy_resource_backfill_is_deterministic_and_excludes_deleted_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = StorePaths::under_root(&temp.path().join("state"));
+    let store = StateStore::open_paths(paths.clone(), StateStoreOptions::default())
+        .await
+        .unwrap();
+    let bytes_one = provider_wasm(8);
+    let bytes_two = provider_wasm(9);
+    let id_one = ProviderId::from_wasm_bytes(&bytes_one);
+    let id_two = ProviderId::from_wasm_bytes(&bytes_two);
+    let ref_one = upload_and_import(&store, id_one, &bytes_one)
+        .await
+        .reference;
+    let ref_two = upload_and_import(&store, id_two, &bytes_two)
+        .await
+        .reference;
+    let active = omnifs_auth::CredentialId::new("demo", "oauth", "alice").unwrap();
+    let deleted = omnifs_auth::CredentialId::new("demo", "oauth", "gone").unwrap();
+    store
+        .apply_batch(
+            mutation_id(87),
+            vec![
+                StateOp::SubmitCredential(credential_document(
+                    &active,
+                    id_two,
+                    AuthRuntimeFingerprint::from_digest([0x11; 32]),
+                    b"active",
+                )),
+                StateOp::SubmitCredential(credential_document(
+                    &deleted,
+                    id_one,
+                    AuthRuntimeFingerprint::from_digest([0x12; 32]),
+                    b"deleted",
+                )),
+            ],
+        )
+        .await
+        .unwrap();
+    store
+        .apply_batch(mutation_id(88), vec![StateOp::DeleteCredential(deleted)])
+        .await
+        .unwrap();
+    store
+        .apply_batch(
+            mutation_id(89),
+            vec![
+                StateOp::CreateMount(MountDocument {
+                    name: MountName::new("one").unwrap(),
+                    provider: ref_one,
+                    credential: None,
+                    limits: None,
+                    config: serde_json::json!({}),
+                }),
+                StateOp::CreateMount(MountDocument {
+                    name: MountName::new("two").unwrap(),
+                    provider: ref_two,
+                    credential: Some(active),
+                    limits: None,
+                    config: serde_json::json!({}),
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+
+    sqlx::query("DELETE FROM attachment_resources")
+        .execute(&store.reads)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM mount_resources")
+        .execute(&store.reads)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM credential_resources")
+        .execute(&store.reads)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM provider_resources")
+        .execute(&store.reads)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE resource_state SET initialized = 0")
+        .execute(&store.reads)
+        .await
+        .unwrap();
+    store.shutdown().await.unwrap();
+
+    let reopened = StateStore::open_paths(paths.clone(), StateStoreOptions::default())
+        .await
+        .unwrap();
+    let first = reopened.resource_snapshot().await.unwrap();
+    assert_eq!(
+        first
+            .resources
+            .resources()
+            .iter()
+            .filter(|resource| matches!(resource, ResourceDefinition::Provider(_)))
+            .count(),
+        2
+    );
+    assert_eq!(
+        first
+            .resources
+            .resources()
+            .iter()
+            .filter(|resource| matches!(resource, ResourceDefinition::Credential(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        first
+            .resources
+            .resources()
+            .iter()
+            .filter(|resource| matches!(resource, ResourceDefinition::Mount(_)))
+            .count(),
+        2
+    );
+    assert!(
+        !first
+            .resources
+            .resources()
+            .iter()
+            .any(|resource| matches!(resource, ResourceDefinition::Attachment(_)))
+    );
+    reopened.shutdown().await.unwrap();
+
+    let reopened = StateStore::open_paths(paths, StateStoreOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(reopened.resource_snapshot().await.unwrap(), first);
+    reopened.shutdown().await.unwrap();
 }
 
 fn mutation_id(byte: u8) -> MutationId {

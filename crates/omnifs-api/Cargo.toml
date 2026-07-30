@@ -11,6 +11,7 @@ keywords = ["omnifs", "daemon", "protocol"]
 
 [dependencies]
 omnifs-core = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 prost = { workspace = true }
 tonic = { workspace = true }

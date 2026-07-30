@@ -25,7 +25,7 @@ a terminal result.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |---|---|---:|---:|---|---|
-| [001](001-add-resource-domain-and-durable-state.md) | Add typed resource domain and durable state | P1 | L | none | TODO |
+| [001](001-add-resource-domain-and-durable-state.md) | Add typed resource domain and durable state | P1 | L | none | DONE |
 | [002](002-add-fast-plan-and-apply-rpc.md) | Add fast typed plan, apply, and progress RPCs | P1 | L | 001 | TODO |
 | [003](003-move-provider-work-to-daemon-reconciliation.md) | Move provider work to daemon-owned reconciliation | P1 | L | 002 | TODO |
 | [004](004-extract-filesystem-runtime-drivers.md) | Extract filesystem runtime drivers | P1 | L | 001 | TODO |

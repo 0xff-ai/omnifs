@@ -7,6 +7,7 @@ mod db;
 mod mount;
 mod paths;
 mod provider;
+mod resource;
 mod row;
 mod writer;
 
@@ -48,6 +49,9 @@ pub use mount::{MountDocument, MountLimits, StoredMount};
 pub use provider::{
     ProviderImportDisposition, ProviderImportOutcome, ProviderUpload, StoredProvider,
     StoredProviderMetadata, ValidatedProviderUpload,
+};
+pub use resource::{
+    CredentialSecretSidecar, ResourceApplyError, ResourceApplyRequest, ResourceSnapshot,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -159,9 +163,13 @@ impl StateStore {
         db::check_integrity(&reads).await?;
         paths.restrict_database_files()?;
 
-        let writer_connection = SqliteConnection::connect_with(&connect_options)
+        let mut writer_connection = SqliteConnection::connect_with(&connect_options)
             .await
             .context("open StateStore writer connection")?;
+        Db::new(&mut writer_connection)
+            .initialize_resources()
+            .await
+            .context("initialize desired resources")?;
         let (credential_refresh_wakeup, _wakeup_receiver) = watch::channel(());
 
         Ok(Self {
@@ -193,6 +201,25 @@ impl StateStore {
         Ok(MountRevision::new(
             u64::try_from(revision).context("mount revision is negative")?,
         ))
+    }
+
+    /// Read one exact, non-secret desired-resource head.
+    pub async fn resource_snapshot(&self) -> anyhow::Result<ResourceSnapshot> {
+        resource::snapshot(&self.reads).await
+    }
+
+    /// Atomically replace the complete desired resource set.
+    pub async fn apply_resources(
+        &self,
+        request: ResourceApplyRequest,
+    ) -> Result<omnifs_api::ApplyReceipt, ResourceApplyError> {
+        self.writer
+            .call(move |mut connection| async move {
+                let result = Db::new(&mut connection).apply_resources(request).await;
+                (connection, result)
+            })
+            .await
+            .map_err(ResourceApplyError::Store)?
     }
 
     /// Read one exact durable head for serving-generation preparation.

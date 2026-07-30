@@ -5,13 +5,16 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+mod attachment;
 mod control;
 mod credential;
 mod mount;
+mod resource;
 
 /// Protobuf wire types and strict conversions for the local control API.
 pub mod grpc;
 
+pub use attachment::AttachmentDefinition;
 pub use control::{
     CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MESSAGE_MAX_BYTES, CONTROL_MUTATION_TIMEOUT_SECS,
     CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_SHUTDOWN_DRAIN_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS,
@@ -26,6 +29,12 @@ pub use credential::{
 pub use mount::{
     MountCredential, MountDefinition, MountField, MountHealth, MountLimits, MountOpResult,
     MountPatch, MountRecord,
+};
+pub use resource::{
+    API_VERSION, ApplyReceipt, CredentialDefinition, MountResourceDefinition,
+    NormalizedResourceSet, ProviderDefinition, ResourceChange, ResourceChangeAction,
+    ResourceDeclarations, ResourceDefinition, ResourceDefinitionError, ResourceLimits,
+    ResourcePhase, ResourcePlan, ResourceStatus, plan,
 };
 
 /// JSONL activity-event schema and redaction for the inspector observability

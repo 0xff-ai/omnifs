@@ -3063,6 +3063,7 @@ dependencies = [
 name = "omnifs-api"
 version = "0.2.1"
 dependencies = [
+ "blake3",
  "bytes",
  "omnifs-core",
  "prost",
@@ -3525,7 +3526,9 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "blake3",
+ "hex",
  "libsqlite3-sys",
+ "omnifs-api",
  "omnifs-auth",
  "omnifs-bootstrap",
  "omnifs-core",
