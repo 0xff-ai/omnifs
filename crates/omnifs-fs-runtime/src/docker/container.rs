@@ -17,8 +17,7 @@ use omnifs_api::OMNIFS_ATTACH_ADDR_ENV;
 use omnifs_core::{ClientOwnerId, fs};
 
 use super::{ContainerName, DockerTarget};
-use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
-use omnifs_bootstrap::OMNIFS_HOME_ENV;
+use crate::{BUILD_CHANNEL, BuildChannel, ImageRef};
 
 /// Base container name for the default profile. A non-default profile
 /// (an explicit `OMNIFS_HOME`) disambiguates with an 8-hex-char content hash
@@ -49,7 +48,7 @@ pub(crate) const fn default_filesystem_image_for(channel: BuildChannel) -> &'sta
 /// precedence chain (CLI flag, environment, client config, then default), gated on the
 /// build channel: a release binary defaults to the pinned registry tag, a dev
 /// binary defaults to the local `omnifs-filesystem:dev` tag and never pulls.
-pub(crate) fn resolve_filesystem_image(
+pub fn resolve_filesystem_image(
     image: Option<String>,
     configured: Option<&str>,
 ) -> anyhow::Result<ImageRef> {
@@ -68,8 +67,9 @@ impl DockerTarget {
     pub(crate) fn filesystem_container_name(
         config_dir: &Path,
         id: &fs::Id,
+        is_default_home: bool,
     ) -> anyhow::Result<ContainerName> {
-        container_name_for(config_dir, id, std::env::var_os(OMNIFS_HOME_ENV).is_none())
+        container_name_for(config_dir, id, is_default_home)
     }
 }
 
@@ -174,7 +174,7 @@ pub(crate) fn assert_locked_down(mounts: &[MountPoint], env: &[String]) -> Resul
     if !mounts.is_empty() {
         return Err(format!(
             "filesystem container has {}; the no-credentials contract allows none",
-            crate::ui::render::count(mounts.len(), "mount")
+            count(mounts.len(), "mount")
         ));
     }
     let mut names = std::collections::HashSet::new();
@@ -210,6 +210,14 @@ fn env_var_allowed(var: &str) -> bool {
     name == OMNIFS_ATTACH_ADDR_ENV || IMAGE_DEFAULT_ENV_NAMES.contains(&name)
 }
 
+fn count(value: usize, noun: &str) -> String {
+    if value == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{value} {noun}s")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,7 +225,6 @@ mod tests {
     fn client_owner() -> ClientOwnerId {
         "0123456789abcdef0123456789abcdef".parse().unwrap()
     }
-    use crate::client_fs_state::{ClientConfig, ClientFilesystemAssets};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -277,20 +284,13 @@ mod tests {
     #[test]
     fn filesystem_image_resolution_precedence() {
         with_env(&[(ENV_FILESYSTEM_IMAGE, None)], || {
-            let config = ClientConfig {
-                filesystem: ClientFilesystemAssets {
-                    docker_image: Some("ghcr.io/example/filesystem-config:1.0.0".into()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let image =
-                resolve_filesystem_image(None, config.filesystem.docker_image.as_deref()).unwrap();
+            let configured = Some("ghcr.io/example/filesystem-config:1.0.0");
+            let image = resolve_filesystem_image(None, configured).unwrap();
             assert_eq!(image.as_str(), "ghcr.io/example/filesystem-config:1.0.0");
 
             let image = resolve_filesystem_image(
                 Some("ghcr.io/example/filesystem-flag:2.0.0".into()),
-                config.filesystem.docker_image.as_deref(),
+                configured,
             )
             .unwrap();
             assert_eq!(image.as_str(), "ghcr.io/example/filesystem-flag:2.0.0");
@@ -302,10 +302,7 @@ mod tests {
                 Some("ghcr.io/example/filesystem-env:9.9.9"),
             )],
             || {
-                let config = ClientConfig::default();
-                let image =
-                    resolve_filesystem_image(None, config.filesystem.docker_image.as_deref())
-                        .unwrap();
+                let image = resolve_filesystem_image(None, None).unwrap();
                 assert_eq!(image.as_str(), "ghcr.io/example/filesystem-env:9.9.9");
             },
         );

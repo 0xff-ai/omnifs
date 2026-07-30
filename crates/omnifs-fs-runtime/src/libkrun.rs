@@ -42,6 +42,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
+use omnifs_api::OMNIFS_ATTACH_ADDR_ENV;
 use omnifs_core::fs;
 use omnifs_libkrun::{
     ATTACH_BRIDGE_SOCKET_NAME, CONTROL_SOCKET_NAME, ControlSocket, DIAGNOSTIC_LOG_NAME,
@@ -50,13 +51,13 @@ use omnifs_libkrun::{
 };
 use tokio::io::AsyncReadExt as _;
 
-use crate::client_fs_state::ClientConfig;
-use crate::error::WithHint;
-use crate::filesystem_driver::{Candidate, ensure_identity_unchanged, err_after_rollback};
-use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
+use crate::driver::ensure_identity_unchanged;
 #[cfg(test)]
 use crate::process::is_alive as process_alive;
-use crate::ui::output::Output;
+use crate::{
+    BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, LaunchRequest, RuntimeAdvice, RuntimeEvent,
+    RuntimeEventSink, RuntimeStage, RuntimeState, advise, err_after_rollback,
+};
 
 const SSH_KEY_NAME: &str = "id_ed25519";
 const ROOT_RAW_PART_PREFIX: &str = "root.raw.part.";
@@ -86,6 +87,20 @@ const ATTACH_VSOCK_PORT: u32 = 1024;
 /// dials once the FUSE mount is serving.
 const READY_VSOCK_PORT: u32 = 1025;
 
+fn emit_stage(
+    events: &RuntimeEventSink,
+    spec: &fs::Spec,
+    stage: RuntimeStage,
+    lifecycle_state: RuntimeState,
+) {
+    events.emit(RuntimeEvent::Stage {
+        stage,
+        runtime: fs::Runtime::Libkrun,
+        id: spec.id().clone(),
+        state: lifecycle_state,
+    });
+}
+
 /// A placeholder hostname for the ssh command line. `ProxyCommand` replaces
 /// the transport entirely, so this name is never resolved or dialed.
 const SSH_GUEST_TARGET: &str = "root@omnifs-guest";
@@ -110,7 +125,7 @@ const SEED_CONF_NAME: &str = "omnifs-seed.conf";
 /// ([`audit_seed_staging`]) asserts the staging dir carries exactly this set
 /// before it is burned into the ISO.
 const SEED_CONF_KEYS: [&str; 5] = [
-    "OMNIFS_ATTACH_ADDR",
+    OMNIFS_ATTACH_ADDR_ENV,
     "OMNIFS_CLIENT_OWNER",
     "OMNIFS_FS_ID",
     "OMNIFS_READY_VSOCK_PORT",
@@ -139,7 +154,7 @@ fn check_uds_path_length(path: &Path) -> Result<()> {
 /// The default guest image setting for each build channel: a local path for
 /// dev, the pinned ghcr tag for release. Mirrors
 /// `default_filesystem_image_for`.
-pub(crate) const fn default_guest_image_for(channel: BuildChannel) -> &'static str {
+pub const fn default_guest_image_for(channel: BuildChannel) -> &'static str {
     match channel {
         BuildChannel::Release => GUEST_RELEASE_IMAGE,
         BuildChannel::Dev => DEFAULT_GUEST_IMAGE,
@@ -149,7 +164,7 @@ pub(crate) const fn default_guest_image_for(channel: BuildChannel) -> &'static s
 /// `omnifs fs shell`'s libkrun dispatch calls this before building the ssh
 /// command: `shell_command` itself stays pure construction (no I/O), so the
 /// probe belongs at the one call site that is about to actually run it.
-pub(crate) fn ensure_socat_available() -> Result<()> {
+pub fn ensure_socat_available() -> Result<()> {
     match Command::new("socat")
         .arg("-V")
         .stdout(Stdio::null())
@@ -159,20 +174,20 @@ pub(crate) fn ensure_socat_available() -> Result<()> {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(anyhow::anyhow!(
             "socat is required to reach the libkrun guest over vsock"
-        ))
-        .with_hint("Install it with `brew install socat`"),
+        )),
         Err(error) => Err(error).context("probe for socat on PATH"),
     }
 }
 
 /// The libkrun microVM filesystem runner. Durable client state and explicit
 /// teardown live here; one launch's resources live in [`LibkrunLaunchLease`].
-pub(crate) struct LibkrunRunner {
+pub struct LibkrunRunner {
     dir: PathBuf,
 }
 
 impl LibkrunRunner {
-    pub(crate) fn new(dir: PathBuf) -> Self {
+    #[must_use]
+    pub fn new(dir: PathBuf) -> Self {
         Self { dir }
     }
 
@@ -307,7 +322,7 @@ impl LibkrunRunner {
 
         let conf_path = staging.join(SEED_CONF_NAME);
         let conf = format!(
-            "OMNIFS_ATTACH_ADDR=vsock:{ATTACH_VSOCK_PORT}\n\
+            "{OMNIFS_ATTACH_ADDR_ENV}=vsock:{ATTACH_VSOCK_PORT}\n\
              OMNIFS_CLIENT_OWNER={client_owner}\n\
              OMNIFS_FS_ID={}\n\
              OMNIFS_READY_VSOCK_PORT={READY_VSOCK_PORT}\n\
@@ -419,31 +434,30 @@ fn audit_seed_staging(staging: &Path) -> Result<(), String> {
 /// by the OCI/cache module; this function only chooses the channel-specific
 /// input and validates the result.
 async fn resolve_guest_image(
-    config: &ClientConfig,
+    configured: Option<&str>,
     guest_image_cache: &Path,
-    output: Output,
+    events: RuntimeEventSink,
 ) -> Result<PathBuf> {
     let resolved = std::env::var(ENV_GUEST_IMAGE)
         .ok()
-        .or_else(|| config.filesystem.guest_image.clone())
+        .or_else(|| configured.map(str::to_owned))
         .unwrap_or_else(|| default_guest_image_for(BUILD_CHANNEL).to_string());
     let path = match BUILD_CHANNEL {
         BuildChannel::Dev => PathBuf::from(resolved),
         BuildChannel::Release => {
-            crate::guest_image_pull::ensure_guest_image(
+            crate::guest_image::ensure_guest_image(
                 &ImageRef::new(resolved)?,
                 guest_image_cache,
-                output,
+                events,
             )
             .await?
         },
     };
     if !path.is_file() {
-        return Err(anyhow::anyhow!(
-            "guest image not found at {}",
-            path.display()
-        ))
-        .with_hint("Build it with `just guest-image` (see docs/contracts/60-build-validation.md)");
+        return Err(advise(
+            anyhow::anyhow!("guest image not found at {}", path.display()),
+            RuntimeAdvice::BuildGuestImage,
+        ));
     }
     Ok(path)
 }
@@ -467,6 +481,23 @@ struct LibkrunLaunchLease<'a> {
 }
 
 impl<'a> LibkrunLaunchLease<'a> {
+    fn prepare_runtime_dir(&self) -> Result<()> {
+        let dir = self.runner.dir();
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restrict {} to 0700", dir.display()))?;
+        for path in [
+            self.daemon_attach_socket.as_path(),
+            self.runner.attach_bridge_socket().as_path(),
+            self.runner.ready_socket().as_path(),
+            self.runner.ssh_socket().as_path(),
+            self.runner.control_socket().as_path(),
+        ] {
+            check_uds_path_length(path)?;
+        }
+        Ok(())
+    }
+
     fn new(runner: &'a LibkrunRunner, daemon_attach_socket: &Path, guest_image: PathBuf) -> Self {
         Self {
             runner,
@@ -497,45 +528,47 @@ impl<'a> LibkrunLaunchLease<'a> {
         }
     }
 
-    async fn prepare(
-        runner: &'a LibkrunRunner,
-        ctx: &crate::filesystem_driver::LaunchContext<'_>,
-    ) -> Result<Self> {
-        let config = ctx.client_state.config()?;
-        let guest_image_cache = ctx.client_state.guest_image_cache();
-        let guest_image =
-            resolve_guest_image(&config, &guest_image_cache, ctx.output.clone()).await?;
-        let mut lease = Self::new(runner, ctx.attach_unix()?, guest_image);
-        lease.client_owner = Some(ctx.client_owner);
-        lease.spec = Some(ctx.spec.clone());
+    async fn prepare(runner: &'a LibkrunRunner, request: &LaunchRequest<'_>) -> Result<Self> {
+        let guest_image = resolve_guest_image(
+            request.assets.guest_image.as_deref(),
+            request.paths.guest_image_cache(),
+            request.events.clone(),
+        )
+        .await?;
+        let mut lease = Self::new(runner, request.endpoints.attach_unix()?, guest_image);
+        lease.client_owner = Some(request.client_owner);
+        lease.spec = Some(request.spec.clone());
         Ok(lease)
     }
 
     async fn run(
         mut self,
-        output: &Output,
+        events: &RuntimeEventSink,
         attached: impl Future<Output = Result<()>>,
     ) -> Result<()> {
-        let key_width = Output::ledger_block_width(&["filesystem"]);
-        let mut row = output.progress("filesystem", key_width);
-        match self.run_to_publish(attached, &mut row).await {
+        match self.run_to_publish(attached, events).await {
             Ok(()) => {
-                row.settle_ok("guest ready");
+                if let Some(spec) = &self.spec {
+                    events.emit(RuntimeEvent::MountReady {
+                        runtime: fs::Runtime::Libkrun,
+                        id: spec.id().clone(),
+                        location: spec.location().to_path_buf(),
+                        container: None,
+                    });
+                }
                 Ok(())
             },
             Err(error) => {
-                row.update("cleaning up failed launch");
+                if let Some(spec) = &self.spec {
+                    emit_stage(events, spec, RuntimeStage::Stop, RuntimeState::Stopping);
+                }
                 let cleanup = if self.replaced {
                     self.stop_and_remove().await
                 } else {
                     self.ready_listener.take();
                     Ok(())
                 };
-                let result = err_after_rollback(error, cleanup, "the failed libkrun launch");
-                if let Err(error) = &result {
-                    row.settle_fail(format!("{error:#}"));
-                }
-                result
+                err_after_rollback(error, cleanup, "the failed libkrun launch")
             },
         }
     }
@@ -543,27 +576,25 @@ impl<'a> LibkrunLaunchLease<'a> {
     async fn run_to_publish(
         &mut self,
         attached: impl Future<Output = Result<()>>,
-        row: &mut crate::ui::live::Spinner,
+        events: &RuntimeEventSink,
     ) -> Result<()> {
         let installation = Installation::current()?;
         installation.probe()?;
         self.replace_stale().await?;
 
+        self.prepare_runtime_dir()?;
         let dir = self.runner.dir();
-        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("restrict {} to 0700", dir.display()))?;
 
-        for path in [
-            self.daemon_attach_socket.as_path(),
-            self.runner.attach_bridge_socket().as_path(),
-            self.runner.ready_socket().as_path(),
-            self.runner.ssh_socket().as_path(),
-            self.runner.control_socket().as_path(),
-        ] {
-            check_uds_path_length(path)?;
-        }
-
+        let launch_spec = self
+            .spec
+            .as_ref()
+            .context("libkrun launch has no filesystem identity")?;
+        emit_stage(
+            events,
+            launch_spec,
+            RuntimeStage::MaterializeImage,
+            RuntimeState::Active,
+        );
         self.materialize_root_disk()?;
         let ssh_pubkey = self.runner.ensure_ssh_keypair()?;
         let spec = self
@@ -628,9 +659,25 @@ impl<'a> LibkrunLaunchLease<'a> {
         );
         self.runner.confirm_record(&record)?;
 
-        self.wait_for_ready(row).await?;
-        row.update("attaching to daemon");
-        attached.await
+        self.wait_for_ready(events).await?;
+        let spec = self
+            .spec
+            .as_ref()
+            .context("libkrun launch has no filesystem identity")?;
+        emit_stage(
+            events,
+            spec,
+            RuntimeStage::WaitForVfsSession,
+            RuntimeState::Active,
+        );
+        attached.await?;
+        emit_stage(
+            events,
+            spec,
+            RuntimeStage::WaitForVfsSession,
+            RuntimeState::Ready,
+        );
+        Ok(())
     }
 
     fn materialize_root_disk(&self) -> Result<()> {
@@ -731,7 +778,17 @@ impl<'a> LibkrunLaunchLease<'a> {
         })
     }
 
-    async fn wait_for_ready(&mut self, row: &mut crate::ui::live::Spinner) -> Result<()> {
+    async fn wait_for_ready(&mut self, events: &RuntimeEventSink) -> Result<()> {
+        let spec = self
+            .spec
+            .as_ref()
+            .context("libkrun launch has no filesystem identity")?;
+        emit_stage(
+            events,
+            spec,
+            RuntimeStage::WaitForOsMount,
+            RuntimeState::Active,
+        );
         let listener = self
             .ready_listener
             .take()
@@ -748,7 +805,6 @@ impl<'a> LibkrunLaunchLease<'a> {
                         }
                     }
                     () = tokio::time::sleep(HELPER_POLL_INTERVAL) => {
-                        row.update("booting guest");
                         if let Some(status) = self
                             .child
                             .as_mut()
@@ -766,7 +822,14 @@ impl<'a> LibkrunLaunchLease<'a> {
             }
         };
         if let Ok(result) = tokio::time::timeout(LAUNCH_READY_TIMEOUT, wait).await {
-            result.context("read the libkrun readiness beacon")
+            result.context("read the libkrun readiness beacon")?;
+            emit_stage(
+                events,
+                spec,
+                RuntimeStage::WaitForOsMount,
+                RuntimeState::Ready,
+            );
+            Ok(())
         } else {
             anyhow::bail!(
                 "{} did not appear inside the filesystem within {}s",
@@ -892,20 +955,17 @@ impl<'a> LibkrunLaunchLease<'a> {
 impl LibkrunRunner {
     pub(crate) async fn launch(
         &self,
-        ctx: &crate::filesystem_driver::LaunchContext<'_>,
+        request: &LaunchRequest<'_>,
+        attached: impl Future<Output = Result<()>>,
     ) -> Result<()> {
-        let attached = async {
-            anyhow::ensure!(
-                crate::commands::fs::wait_for_attachment(ctx.spec).await,
-                "filesystem `{}` did not attach to the daemon",
-                ctx.spec.id()
-            );
-            Ok(())
-        };
-        LibkrunLaunchLease::prepare(self, ctx)
-            .await?
-            .run(&ctx.output, attached)
-            .await
+        let lease = LibkrunLaunchLease::prepare(self, request).await?;
+        emit_stage(
+            request.events,
+            request.spec,
+            RuntimeStage::StartVm,
+            RuntimeState::Active,
+        );
+        lease.run(request.events, attached).await
     }
 }
 
@@ -923,7 +983,7 @@ impl LibkrunRunner {
 
     /// Prove a live, identity-matched helper, matching the host and Docker
     /// drivers' `confirmed`.
-    pub(crate) fn confirmed(&self) -> Result<Option<HelperRecord>> {
+    pub fn confirmed(&self) -> Result<Option<HelperRecord>> {
         let Some(record) = self.read_helper_record()? else {
             anyhow::ensure!(
                 !self.has_operational_state(),
@@ -938,7 +998,7 @@ impl LibkrunRunner {
 
     /// The one teardown entry point for a proven identity, matching the host
     /// and Docker drivers' `stop_confirmed`.
-    pub(crate) async fn stop_confirmed(&self, expected: HelperRecord) -> Result<()> {
+    pub async fn stop_confirmed(&self, expected: HelperRecord) -> Result<()> {
         LibkrunLaunchLease::for_confirmed_teardown(self, expected)
             .stop_and_remove()
             .await
@@ -949,7 +1009,7 @@ impl LibkrunRunner {
     /// helper record identity. Not a `&self` method: it enumerates every
     /// filesystem's libkrun runtime, not just one instance's, matching the
     /// host driver's `owned` and Docker's `owned`.
-    pub(crate) fn owned(runtime_root: &Path) -> Vec<Candidate> {
+    pub fn owned(runtime_root: &Path) -> Vec<Candidate> {
         let mut owned = Vec::new();
         let entries = match std::fs::read_dir(runtime_root) {
             Ok(entries) => entries,
@@ -1005,11 +1065,7 @@ impl LibkrunRunner {
 
     /// Pure command construction: no I/O. Callers that are about to actually
     /// run this must probe for `socat` themselves (`ensure_socat_available`).
-    pub(crate) fn shell_command(
-        &self,
-        shell_override: Option<&str>,
-        trailing: &[String],
-    ) -> Command {
+    pub fn shell_command(&self, shell_override: Option<&str>, trailing: &[String]) -> Command {
         let mut cmd = Command::new("ssh");
         cmd.arg("-i")
             .arg(self.ssh_key_path())
@@ -1076,15 +1132,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let custom = temp.path().join("custom.raw");
         std::fs::write(&custom, b"guest image").unwrap();
-        let mut config = ClientConfig::default();
-        config.filesystem.guest_image = Some(custom.to_string_lossy().into_owned());
-        let image = resolve_guest_image(
-            &config,
-            temp.path(),
-            Output::new(crate::ui::output::OutputMode::Human, false),
-        )
-        .await
-        .unwrap();
+        let configured = custom.to_string_lossy().into_owned();
+        let image =
+            resolve_guest_image(Some(&configured), temp.path(), RuntimeEventSink::discard())
+                .await
+                .unwrap();
         assert_eq!(image, custom);
     }
 

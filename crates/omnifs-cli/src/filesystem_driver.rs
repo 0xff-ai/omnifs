@@ -1,307 +1,358 @@
-//! `FilesystemDriver`: the closed three-variant dispatch over the host,
-//! Docker, and libkrun filesystem lifecycle drivers.
-//!
-//! `fs::Runtime` is a closed, persisted 3-variant enum with no plugin or
-//! extension pressure, so this stays a plain enum with methods rather than a
-//! trait object. [`Self::for_spec`] is the one remaining match on
-//! `fs::Runtime`; every other command dispatches by matching this enum's own
-//! variants instead.
+//! CLI adapters for the UI-free filesystem runtime crate.
 
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 
-use anyhow::{Context as _, Result, ensure};
-use omnifs_core::{ClientOwnerId, fs};
+use anyhow::Result;
+use omnifs_core::fs;
+use omnifs_fs_runtime::{
+    Artifact, ContainerState, ImageState, RuntimeAdvice, RuntimeAssets, RuntimeDriver,
+    RuntimeError, RuntimeEvent, RuntimeEventReceiver, RuntimeEventSink, RuntimePaths, RuntimeStage,
+    RuntimeState,
+};
 
 use crate::client_fs_state::ClientFilesystemState;
-use crate::docker::{DockerClient, DockerContainerIdentity, OwnedFilesystemContainer};
-use crate::host_fs::HostDriver;
-use crate::libkrun_runner::LibkrunRunner;
+use crate::error::WithHint as _;
 use crate::ui::output::Output;
 
-/// Everything a filesystem driver's `launch` needs, resolved once by
-/// [`FilesystemDriver::launch`] instead of three divergent positional
-/// argument lists (host and Docker took raw tuples; libkrun had its own
-/// bespoke request type). Each driver reads only the attach address its own
-/// transport uses: host and libkrun dial the daemon's Unix listener, Docker
-/// dials the TCP one.
-pub(crate) struct LaunchContext<'a> {
-    pub(crate) client_state: &'a ClientFilesystemState,
-    pub(crate) client_owner: ClientOwnerId,
-    pub(crate) spec: &'a fs::Spec,
-    pub(crate) output: Output,
-    attach_unix: Option<PathBuf>,
-    attach_tcp: Option<SocketAddr>,
+const EVENT_CAPACITY: usize = 128;
+
+pub(crate) fn runtime_paths(state: &ClientFilesystemState) -> Result<RuntimePaths> {
+    state.runtime_paths()
 }
 
-impl<'a> LaunchContext<'a> {
-    /// `info` is the caller's already-fetched `GetInventory` response's
-    /// `info` field: every launch caller already probes the daemon's
-    /// inventory before deciding to launch at all (to check attachment or
-    /// readiness), so this never re-fetches it.
-    fn resolve(
-        client_state: &'a ClientFilesystemState,
-        client_owner: ClientOwnerId,
-        spec: &'a fs::Spec,
-        output: Output,
-        info: omnifs_api::DaemonInfo,
-    ) -> Self {
-        Self {
-            client_state,
-            client_owner,
-            spec,
-            output,
-            attach_unix: info.attach_unix,
-            attach_tcp: info.attach_tcp,
-        }
+pub(crate) fn runtime_assets(
+    state: &ClientFilesystemState,
+    runtime: fs::Runtime,
+) -> Result<RuntimeAssets> {
+    if runtime == fs::Runtime::Host {
+        return Ok(RuntimeAssets::default());
     }
-
-    pub(crate) fn attach_unix(&self) -> Result<&Path> {
-        self.attach_unix
-            .as_deref()
-            .context("daemon has no Unix filesystem attach listener")
-    }
-
-    pub(crate) fn attach_tcp(&self) -> Result<SocketAddr> {
-        self.attach_tcp
-            .context("daemon has no TCP filesystem attach listener")
-    }
-}
-
-/// The one spec-vs-record identity check the host and libkrun drivers'
-/// `confirmed` both need: a durable record only proves a live instance when
-/// its spec still matches the caller's configured one. Docker's `confirmed`
-/// keeps its own check (a launch-command argv comparison, since a Docker
-/// container carries no persisted `fs::Spec` to compare against directly).
-pub(crate) fn ensure_record_matches(record_spec: &fs::Spec, expected: &fs::Spec) -> Result<()> {
-    ensure!(
-        record_spec == expected,
-        "runner record does not match configured filesystem `{}`",
-        expected.id()
-    );
-    Ok(())
-}
-
-/// The recheck every `stop_confirmed` performs before it touches anything:
-/// a proven identity can go stale between confirmation and teardown, and
-/// acting on a replacement process, container, or helper that reused the
-/// same durable slot would be a correctness bug, not just a stale message.
-/// `noun` names the backend for the one shared phrasing.
-pub(crate) fn ensure_identity_unchanged<T: PartialEq>(
-    current: Option<&T>,
-    expected: &T,
-    noun: &str,
-) -> Result<()> {
-    ensure!(
-        current == Some(expected),
-        "{noun} identity changed; refusing to touch its replacement"
-    );
-    Ok(())
-}
-
-/// Fold a rollback attempt's outcome into the error that triggered it: the
-/// original failure always wins, but a cleanup that also failed is appended
-/// as context rather than silently dropped. `what` names the thing rollback
-/// was cleaning up. Shared by every driver whose `launch` rolls back a
-/// partially started instance on failure; host deliberately never calls this
-/// (it leaves a timed-out runner alive for safe cleanup instead).
-pub(crate) fn err_after_rollback<T>(
-    primary: anyhow::Error,
-    cleanup: Result<()>,
-    what: &str,
-) -> Result<T> {
-    Err(match cleanup {
-        Ok(()) => primary,
-        Err(cleanup_error) => primary.context(format!(
-            "{what} also could not be cleaned up: {cleanup_error:#}"
-        )),
+    let config = state.config()?;
+    Ok(RuntimeAssets {
+        docker_image: config.filesystem.docker_image,
+        guest_image: config.filesystem.guest_image,
     })
 }
 
-/// One filesystem's live driver, bound to a specific configured `spec` at
-/// construction.
-pub(crate) enum FilesystemDriver {
-    Host(HostDriver),
-    Docker(DockerClient),
-    Libkrun(LibkrunRunner),
+pub(crate) fn runtime_driver(
+    state: &ClientFilesystemState,
+    spec: &fs::Spec,
+    events: RuntimeEventSink,
+) -> Result<RuntimeDriver> {
+    RuntimeDriver::new(
+        &runtime_paths(state)?,
+        spec.clone(),
+        runtime_assets(state, spec.runtime())?,
+        events,
+    )
 }
 
-/// A live, identity-matched instance proven by [`FilesystemDriver::confirmed`],
-/// fed back into [`FilesystemDriver::stop_confirmed`] for its one teardown
-/// entry point. Docker keeps its running flag here (unlike host and
-/// libkrun, an identity-matched Docker container can be confirmed while
-/// stopped) so callers that care can distinguish it without a second probe.
-pub(crate) enum Confirmed {
-    Host(
-        omnifs_mtab::RunnerRecord,
-        omnifs_thin::host_control::RunnerPhase,
-    ),
-    Docker(DockerContainerIdentity, bool),
-    Libkrun(omnifs_libkrun::HelperRecord),
+pub(crate) fn into_cli_error(error: RuntimeError) -> anyhow::Error {
+    let advice = error.advice().to_vec();
+    let mut result: anyhow::Result<()> = Err(error.into_source());
+    for item in advice {
+        result = result.with_hint(match item {
+            RuntimeAdvice::Diagnose => "Run `omnifs doctor` to diagnose".to_owned(),
+            RuntimeAdvice::DiagnoseAlternative => "Or run `omnifs doctor` to diagnose".to_owned(),
+            RuntimeAdvice::HostLog(path) => format!("See {}", path.display()),
+            RuntimeAdvice::StartDocker => "Open Docker Desktop (or start the Docker daemon), then \
+                 re-run `omnifs fs attach`"
+                .to_owned(),
+            RuntimeAdvice::BuildFilesystemImage => {
+                "build it with `just filesystem-image`".to_owned()
+            },
+            RuntimeAdvice::ConfigureFilesystemImage => "or set a specific image via the \
+                 OMNIFS_FILESYSTEM_IMAGE env var or the `[filesystem].docker_image` config key"
+                .to_owned(),
+            RuntimeAdvice::BuildGuestImage => "Build it with `just guest-image` (see \
+                 docs/contracts/60-build-validation.md)"
+                .to_owned(),
+        });
+    }
+    result.expect_err("runtime error adapter must remain an error")
 }
 
-impl FilesystemDriver {
-    /// The one remaining match on `fs::Runtime`: every other command
-    /// dispatches through this enum's own variants instead.
-    pub(crate) fn for_spec(
-        client_state: &ClientFilesystemState,
-        spec: &fs::Spec,
-        output: Output,
-    ) -> Result<Self> {
-        match spec.runtime() {
-            fs::Runtime::Host => Ok(Self::Host(HostDriver::new(
-                client_state.state_dir(spec.id()),
-            ))),
-            fs::Runtime::Docker => Ok(Self::Docker(DockerClient::for_filesystem(
-                client_state,
-                spec.id(),
-                output,
-            )?)),
-            fs::Runtime::Libkrun => Ok(Self::Libkrun(LibkrunRunner::new(
-                client_state.libkrun_root(spec.id()),
-            ))),
+/// Owns the bounded runtime event receiver and renders facts through the
+/// invocation's existing output mode.
+pub(crate) struct RuntimeEventRenderer {
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl RuntimeEventRenderer {
+    pub(crate) fn start(output: Output) -> (RuntimeEventSink, Self) {
+        let (events, receiver) = RuntimeEventSink::bounded(EVENT_CAPACITY);
+        let task = tokio::spawn(render_events(output, receiver));
+        (events, Self { task })
+    }
+
+    pub(crate) async fn finish(self) {
+        let _ = self.task.await;
+    }
+}
+
+async fn render_events(output: Output, mut receiver: RuntimeEventReceiver) {
+    let mut renderer = EventRenderState {
+        output,
+        progress: HashMap::new(),
+        vm_progress: None,
+    };
+    while let Some(event) = receiver.recv().await {
+        renderer.render(event);
+    }
+}
+
+struct EventRenderState {
+    output: Output,
+    progress: HashMap<Artifact, crate::ui::live::Spinner>,
+    vm_progress: Option<crate::ui::live::Spinner>,
+}
+
+impl EventRenderState {
+    fn render(&mut self, event: RuntimeEvent) {
+        match event {
+            RuntimeEvent::Stage {
+                stage,
+                runtime,
+                id,
+                state,
+            } => self.render_stage(stage, runtime, &id, state),
+            RuntimeEvent::Image {
+                artifact: _,
+                reference,
+                state,
+            } => self.render_image(&reference, state),
+            RuntimeEvent::Download {
+                artifact,
+                completed_bytes,
+                total_bytes,
+                source,
+            } => self.render_download(artifact, completed_bytes, total_bytes, &source),
+            RuntimeEvent::DownloadFinished {
+                artifact,
+                reference,
+                completed_bytes,
+            } => self.render_download_finished(artifact, &reference, completed_bytes),
+            RuntimeEvent::DownloadFailed {
+                artifact,
+                reference,
+            } => self.render_download_failed(artifact, reference.as_deref()),
+            RuntimeEvent::ImageRetry {
+                artifact,
+                path,
+                reason,
+            } => self.render_image_retry(artifact, &path, &reason),
+            RuntimeEvent::Container { name, image, state } => {
+                self.render_container(&name, image.as_deref(), state);
+            },
+            RuntimeEvent::MountReady {
+                runtime,
+                id,
+                location,
+                container,
+            } => self.render_mount_ready(runtime, &id, &location, container.as_deref()),
+            RuntimeEvent::Failed { message, .. } => self.render_failed(message),
         }
     }
 
-    /// Prove a live, identity-matched instance, matching `spec`.
-    pub(crate) async fn confirmed(
-        &self,
-        client_state: &ClientFilesystemState,
-        client_owner: ClientOwnerId,
-        spec: &fs::Spec,
-    ) -> Result<Option<Confirmed>> {
-        match self {
-            Self::Host(runner) => Ok(runner
-                .confirmed(spec)
-                .await?
-                .map(|(record, phase)| Confirmed::Host(record, phase))),
-            Self::Docker(client) => Ok(client
-                .confirmed(client_state.profile_root(), client_owner, spec)
-                .await?
-                .map(|(identity, running)| Confirmed::Docker(identity, running))),
-            Self::Libkrun(runner) => {
-                let Some(record) = runner.confirmed()? else {
-                    return Ok(None);
-                };
-                ensure_record_matches(&record.spec, spec)?;
-                Ok(Some(Confirmed::Libkrun(record)))
+    fn render_stage(
+        &mut self,
+        stage: RuntimeStage,
+        runtime: fs::Runtime,
+        id: &fs::Id,
+        lifecycle_state: RuntimeState,
+    ) {
+        match (stage, lifecycle_state) {
+            (
+                RuntimeStage::StartProcess | RuntimeStage::StartContainer | RuntimeStage::StartVm,
+                RuntimeState::Pending,
+            ) => self
+                .output
+                .narrate(format!("Starting {runtime} filesystem `{id}`")),
+            (RuntimeStage::StartContainer, RuntimeState::Active) => {
+                self.output.narrate("Connecting to Docker");
             },
+            (RuntimeStage::StartVm, RuntimeState::Active) => {
+                self.vm_progress.get_or_insert_with(|| {
+                    self.output
+                        .progress("filesystem", Output::ledger_block_width(&["filesystem"]))
+                });
+            },
+            (RuntimeStage::MaterializeImage, RuntimeState::Active) => {
+                self.update_vm_progress("materializing guest image");
+            },
+            (RuntimeStage::WaitForOsMount, RuntimeState::Active) => {
+                self.update_vm_progress("booting guest");
+            },
+            (RuntimeStage::WaitForVfsSession, RuntimeState::Active) => {
+                self.update_vm_progress("attaching to daemon");
+            },
+            (RuntimeStage::WaitForVfsSession, RuntimeState::Ready) => {
+                if let Some(row) = self.vm_progress.take() {
+                    row.settle_ok("guest ready");
+                }
+            },
+            (RuntimeStage::Stop, RuntimeState::Stopping) if runtime == fs::Runtime::Libkrun => {
+                self.update_vm_progress("cleaning up failed launch");
+            },
+            _ => {},
         }
     }
 
-    /// The one teardown entry point for a proven identity.
-    pub(crate) async fn stop_confirmed(
-        &self,
-        client_state: &ClientFilesystemState,
-        client_owner: ClientOwnerId,
-        spec: &fs::Spec,
-        confirmed: Confirmed,
-    ) -> Result<()> {
-        match (self, confirmed) {
-            (Self::Host(runner), Confirmed::Host(record, _phase)) => {
-                runner.stop_confirmed(&record).await
-            },
-            (Self::Docker(client), Confirmed::Docker(identity, _running)) => {
-                client
-                    .stop_confirmed(&identity, client_state.profile_root(), client_owner, spec)
-                    .await
-            },
-            (Self::Libkrun(runner), Confirmed::Libkrun(record)) => {
-                runner.stop_confirmed(record).await
-            },
-            _ => anyhow::bail!(
-                "confirmed identity belongs to a different filesystem driver than `{}`",
-                spec.id()
-            ),
+    fn update_vm_progress(&mut self, message: &str) {
+        if let Some(row) = self.vm_progress.as_mut() {
+            row.update(message);
         }
     }
 
-    /// Launch and block until ready, uniformly across all three drivers.
-    /// `info` is the caller's already-fetched daemon inventory info; see
-    /// [`LaunchContext::resolve`].
-    pub(crate) async fn launch(
-        &self,
-        client_state: &ClientFilesystemState,
-        client_owner: ClientOwnerId,
-        spec: &fs::Spec,
-        output: Output,
-        info: omnifs_api::DaemonInfo,
-    ) -> Result<()> {
-        let ctx = LaunchContext::resolve(client_state, client_owner, spec, output, info);
-        ctx.output.narrate(format!(
-            "Starting {} filesystem `{}`",
-            spec.runtime(),
-            spec.id()
+    fn render_image(&self, reference: &str, state: ImageState) {
+        match state {
+            ImageState::Present { age: Some(age) } => self
+                .output
+                .narrate(format!("Image `{reference}` present (built {age} ago)")),
+            ImageState::Present { age: None } => {
+                self.output.narrate(format!("Image `{reference}` present"));
+            },
+            ImageState::Missing => self.output.narrate(format!("Image `{reference}` missing")),
+        }
+    }
+
+    fn render_download(
+        &mut self,
+        artifact: Artifact,
+        completed_bytes: u64,
+        total_bytes: Option<u64>,
+        source: &str,
+    ) {
+        let label = artifact_label(artifact);
+        let row = self.progress.entry(artifact).or_insert_with(|| {
+            self.output
+                .progress(label, Output::ledger_block_width(&[label]))
+        });
+        if let Some(total) = total_bytes {
+            row.update_bytes_with(completed_bytes, total, format_args!("from {source}"));
+        } else {
+            row.update(&format!(
+                "{} from {source}",
+                crate::ui::live::human_bytes(completed_bytes)
+            ));
+        }
+    }
+
+    fn render_download_finished(
+        &mut self,
+        artifact: Artifact,
+        reference: &str,
+        completed_bytes: Option<u64>,
+    ) {
+        let row = self.progress.remove(&artifact).unwrap_or_else(|| {
+            let label = artifact_label(artifact);
+            self.output
+                .progress(label, Output::ledger_block_width(&[label]))
+        });
+        match (artifact, completed_bytes) {
+            (Artifact::GuestImage, Some(bytes)) => row.settle_ok(format!(
+                "{}, verified (cached for next time)",
+                crate::ui::live::human_bytes(bytes)
+            )),
+            _ => row.settle_ok(format!("{reference} ready")),
+        }
+    }
+
+    fn render_image_retry(&self, artifact: Artifact, path: &std::path::Path, reason: &str) {
+        let label = artifact_label(artifact);
+        let mut row = self
+            .output
+            .progress(label, Output::ledger_block_width(&[label]));
+        row.update("retrying");
+        row.settle_warn(format!(
+            "cached image at {} is corrupt ({reason}); retrying",
+            path.display()
         ));
-        match self {
-            Self::Host(runner) => runner.launch(&ctx).await,
-            Self::Docker(client) => client.launch(&ctx).await,
-            Self::Libkrun(runner) => runner.launch(&ctx).await,
+    }
+
+    fn render_download_failed(&mut self, artifact: Artifact, reference: Option<&str>) {
+        let row = self.progress.remove(&artifact).unwrap_or_else(|| {
+            let label = artifact_label(artifact);
+            self.output
+                .progress(label, Output::ledger_block_width(&[label]))
+        });
+        match reference {
+            Some(reference) => row.settle_fail(format!("{reference} pull failed")),
+            None => row.settle_fail("download failed"),
+        }
+    }
+
+    fn render_container(&self, name: &str, image: Option<&str>, state: ContainerState) {
+        match state {
+            ContainerState::Absent => self
+                .output
+                .narrate(format!("No existing container `{name}`")),
+            ContainerState::RemovingExisting => self.output.narrate(format!(
+                "Removing existing container `{name}` (1s stop timeout)"
+            )),
+            ContainerState::Creating => self.output.narrate(format!(
+                "Creating filesystem container `{name}` from image `{}`",
+                image.unwrap_or_default()
+            )),
+            ContainerState::Starting => self
+                .output
+                .narrate(format!("Starting filesystem container `{name}`")),
+            ContainerState::StoppingConfirmed => self
+                .output
+                .narrate(format!("Stopping confirmed filesystem container `{name}`")),
+        }
+    }
+
+    fn render_mount_ready(
+        &self,
+        runtime: fs::Runtime,
+        id: &fs::Id,
+        location: &std::path::Path,
+        container: Option<&str>,
+    ) {
+        if runtime == fs::Runtime::Libkrun {
+            return;
+        }
+        let detail = container.map_or_else(
+            || format!("{id} mounted at {}", location.display()),
+            |container| format!("{id} running in `{container}`"),
+        );
+        self.output.ledger_row(
+            &crate::ui::render::LedgerRow::new(crate::ui::style::Glyph::Done, "filesystem", detail),
+            Output::ledger_block_width(&["filesystem"]),
+        );
+    }
+
+    fn render_failed(&mut self, message: String) {
+        for (_, row) in self.progress.drain() {
+            row.settle_fail("download failed");
+        }
+        if let Some(row) = self.vm_progress.take() {
+            row.settle_fail(message);
         }
     }
 }
 
-/// One filesystem instance found by [`owned_filesystems`]'s combined scan
-/// across the three backends, or one entry that scan could not identify or
-/// confirm. Doctor's stray-filesystem check is the only consumer. A single
-/// flat enum rather than three backend-specific `Valid`/`Invalid` scan
-/// results each wrapped again here: every backend yields this type directly,
-/// so an unreadable or unconfirmable entry (`Invalid`) has one shape and one
-/// finding path regardless of which backend found it.
-pub(crate) enum Candidate {
-    Host {
-        state_dir: PathBuf,
-        record: omnifs_mtab::RunnerRecord,
-        confirmed: Result<omnifs_thin::host_control::RunnerPhase, String>,
-    },
-    Docker(OwnedFilesystemContainer),
-    Libkrun {
-        id: fs::Id,
-        state_dir: PathBuf,
-        confirmed: Result<Option<omnifs_libkrun::HelperRecord>, String>,
-    },
-    /// One scan entry that could not be identified or read, naming the
-    /// owning backend so a caller need not re-derive it.
-    Invalid {
-        backend: &'static str,
-        target: Option<String>,
-        error: String,
-    },
-    /// A whole backend's listing call failed, naming which one so the
-    /// caller can label its finding without re-deriving it.
-    ListingFailed {
-        backend: &'static str,
-        error: String,
-    },
+const fn artifact_label(artifact: Artifact) -> &'static str {
+    match artifact {
+        Artifact::FilesystemImage => "filesystem image",
+        Artifact::GuestImage => "guest image",
+    }
 }
 
-/// List every filesystem instance any of the three backends owns. Host and
-/// libkrun scan their own runtime roots directly; Docker's scan reuses an
-/// already-connected client (or is skipped entirely when Docker itself is
-/// unreachable, since a stray container cannot be confirmed without one).
-/// Each backend's listing failure becomes its own candidate rather than
-/// aborting the other two backends' scans.
-pub(crate) async fn owned_filesystems(
-    client_state: &ClientFilesystemState,
-    docker: Option<&DockerClient>,
-) -> Vec<Candidate> {
-    let mut candidates = Vec::new();
-    match crate::host_fs::owned(client_state).await {
-        Ok(mut owned) => candidates.append(&mut owned),
-        Err(error) => candidates.push(Candidate::ListingFailed {
-            backend: "host",
-            error: format!("{error:#}"),
-        }),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_runtime_does_not_read_filesystem_image_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let state = ClientFilesystemState::under_root(&profile.join("client"));
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("config.toml"), "not valid toml = [").unwrap();
+
+        assert!(runtime_assets(&state, fs::Runtime::Host).is_ok());
+        assert!(runtime_assets(&state, fs::Runtime::Docker).is_err());
     }
-    if let Some(docker) = docker {
-        match docker.owned(client_state.profile_root()).await {
-            Ok(mut owned) => candidates.append(&mut owned),
-            Err(error) => candidates.push(Candidate::ListingFailed {
-                backend: "docker",
-                error: format!("{error:#}"),
-            }),
-        }
-    }
-    candidates.append(&mut LibkrunRunner::owned(&client_state.runtime_root()));
-    candidates
 }

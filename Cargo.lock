@@ -3130,15 +3130,12 @@ dependencies = [
  "anyhow",
  "arboard",
  "atomic-write-file",
- "bollard",
  "bytes",
  "clap",
  "clap_complete",
  "crossterm",
  "fs2",
- "futures-util",
  "getrandom 0.3.4",
- "hex",
  "hyper-util",
  "insta",
  "omnifs-api",
@@ -3147,6 +3144,7 @@ dependencies = [
  "omnifs-core",
  "omnifs-daemon",
  "omnifs-engine",
+ "omnifs-fs-runtime",
  "omnifs-inspector",
  "omnifs-itest",
  "omnifs-libkrun",
@@ -3160,7 +3158,6 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tabled",
  "tempfile",
  "thiserror 2.0.18",
@@ -3174,7 +3171,6 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width 0.2.0",
  "webbrowser",
- "zstd",
 ]
 
 [[package]]
@@ -3264,6 +3260,32 @@ dependencies = [
  "url",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "omnifs-fs-runtime"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "bollard",
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "omnifs-api",
+ "omnifs-core",
+ "omnifs-libkrun",
+ "omnifs-mtab",
+ "omnifs-nfs",
+ "omnifs-thin",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "zstd",
 ]
 
 [[package]]

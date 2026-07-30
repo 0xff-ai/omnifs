@@ -28,6 +28,7 @@ omnifs-api = { version = "0.2.1", path = "crates/omnifs-api" }
 omnifs-auth = { version = "0.2.1", path = "crates/omnifs-auth" }
 omnifs-bootstrap = { version = "0.2.1", path = "crates/omnifs-bootstrap" }
 omnifs-engine = { version = "0.2.1", path = "crates/omnifs-engine", default-features = false }
+omnifs-fs-runtime = { version = "0.2.1", path = "crates/omnifs-fs-runtime" }
 omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse", default-features = false }
 omnifs-inspector = { version = "0.2.1", path = "crates/omnifs-inspector" }
 omnifs-libkrun = { version = "0.2.1", path = "crates/omnifs-libkrun" }

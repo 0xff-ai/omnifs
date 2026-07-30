@@ -32,8 +32,7 @@ use anyhow::{Context as _, Result};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
-use crate::image::ImageRef;
-use crate::ui::output::Output;
+use crate::{Artifact, ImageRef, RuntimeEvent, RuntimeEventSink};
 
 const ACCEPT_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 
@@ -107,7 +106,7 @@ struct TokenResponse {
 pub(crate) async fn ensure_guest_image(
     image: &ImageRef,
     images_dir: &Path,
-    output: Output,
+    events: RuntimeEventSink,
 ) -> Result<PathBuf> {
     let oci_ref = OciRef::parse(image.as_str())?;
     std::fs::create_dir_all(images_dir)
@@ -122,7 +121,7 @@ pub(crate) async fn ensure_guest_image(
     let client = reqwest::Client::new();
 
     if !zst_path.is_file() {
-        download_and_verify(&client, &oci_ref, &zst_path, output.clone()).await?;
+        download_and_verify(&client, &oci_ref, &zst_path, events.clone()).await?;
     }
 
     match decompress(&zst_path, &raw_path) {
@@ -133,15 +132,13 @@ pub(crate) async fn ensure_guest_image(
             // leaving the caller stuck on a permanently corrupt cache entry.
             // Its own standalone single-row block: no sibling ledger row
             // ever prints alongside a guest image pull.
-            let mut retry =
-                output.progress("guest image", Output::ledger_block_width(&["guest image"]));
-            retry.update("retrying");
-            retry.settle_warn(format!(
-                "cached image at {} is corrupt ({decompress_error:#}); retrying",
-                zst_path.display()
-            ));
+            events.emit(RuntimeEvent::ImageRetry {
+                artifact: Artifact::GuestImage,
+                path: zst_path.clone(),
+                reason: format!("{decompress_error:#}"),
+            });
             let _ = std::fs::remove_file(&zst_path);
-            download_and_verify(&client, &oci_ref, &zst_path, output).await?;
+            download_and_verify(&client, &oci_ref, &zst_path, events).await?;
             decompress(&zst_path, &raw_path)?;
             Ok(raw_path)
         },
@@ -200,10 +197,8 @@ async fn download_and_verify(
     client: &reqwest::Client,
     oci_ref: &OciRef,
     dest: &Path,
-    output: Output,
+    events: RuntimeEventSink,
 ) -> Result<()> {
-    // Its own standalone single-row block; see the retry path above.
-    let mut row = output.progress("guest image", Output::ledger_block_width(&["guest image"]));
     let result: Result<u64> = async {
         let token = fetch_pull_token(client, oci_ref).await?;
         let manifest = fetch_manifest(client, oci_ref, &token).await?;
@@ -236,11 +231,12 @@ async fn download_and_verify(
             file.write_all(&chunk)
                 .with_context(|| format!("write {}", tmp_path.display()))?;
             downloaded += chunk.len() as u64;
-            row.update_bytes_with(
-                downloaded,
-                blob.size,
-                format_args!("from {}", oci_ref.registry),
-            );
+            events.emit(RuntimeEvent::Download {
+                artifact: Artifact::GuestImage,
+                completed_bytes: downloaded,
+                total_bytes: Some(blob.size),
+                source: oci_ref.registry.clone(),
+            });
         }
         file.flush()
             .with_context(|| format!("flush {}", tmp_path.display()))?;
@@ -265,14 +261,18 @@ async fn download_and_verify(
 
     match result {
         Ok(downloaded) => {
-            row.settle_ok(format!(
-                "{}, verified (cached for next time)",
-                crate::ui::live::human_bytes(downloaded)
-            ));
+            events.emit(RuntimeEvent::DownloadFinished {
+                artifact: Artifact::GuestImage,
+                reference: oci_ref.reference.clone(),
+                completed_bytes: Some(downloaded),
+            });
             Ok(())
         },
         Err(error) => {
-            row.settle_fail("download failed");
+            events.emit(RuntimeEvent::DownloadFailed {
+                artifact: Artifact::GuestImage,
+                reference: None,
+            });
             Err(error)
         },
     }

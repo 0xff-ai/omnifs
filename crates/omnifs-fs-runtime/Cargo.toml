@@ -1,0 +1,35 @@
+[package]
+name = "omnifs-fs-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Host, Docker, and libkrun filesystem runtime mechanisms for omnifs"
+
+[dependencies]
+omnifs-api = { workspace = true }
+omnifs-core = { workspace = true }
+omnifs-libkrun = { workspace = true }
+omnifs-mtab = { workspace = true }
+omnifs-nfs = { workspace = true }
+omnifs-thin = { workspace = true }
+anyhow = { workspace = true }
+bollard = { workspace = true }
+futures-util = "0.3"
+getrandom = "0.3"
+hex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -7,7 +7,7 @@ use std::fmt;
 /// binaries default to the registry image for their version; dev binaries
 /// default to the locally built dev image and never pull.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuildChannel {
+pub enum BuildChannel {
     Release,
     Dev,
 }
@@ -15,7 +15,7 @@ pub(crate) enum BuildChannel {
 impl BuildChannel {
     /// Why a missing registry-less image is never pulled. Only a dev binary
     /// defaults to a local image, so release errors must not call it a dev build.
-    pub(crate) const fn pull_refusal_reason(self) -> &'static str {
+    pub const fn pull_refusal_reason(self) -> &'static str {
         match self {
             Self::Dev => {
                 "this omnifs binary is a dev build; it uses the locally built filesystem image \
@@ -28,14 +28,14 @@ impl BuildChannel {
         }
     }
 
-    pub(crate) const fn word(self) -> &'static str {
+    pub const fn word(self) -> &'static str {
         match self {
             Self::Dev => "dev",
             Self::Release => "release",
         }
     }
 
-    pub(crate) const fn version_suffix(self) -> &'static str {
+    pub const fn version_suffix(self) -> &'static str {
         match self {
             Self::Dev => " (dev build)",
             Self::Release => "",
@@ -43,16 +43,16 @@ impl BuildChannel {
     }
 }
 
-pub(crate) const BUILD_CHANNEL: BuildChannel = match option_env!("OMNIFS_RELEASE") {
+pub const BUILD_CHANNEL: BuildChannel = match option_env!("OMNIFS_RELEASE") {
     Some(_) => BuildChannel::Release,
     None => BuildChannel::Dev,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ImageRef(String);
+pub struct ImageRef(String);
 
 impl ImageRef {
-    pub(crate) fn new(image: impl Into<String>) -> anyhow::Result<Self> {
+    pub fn new(image: impl Into<String>) -> anyhow::Result<Self> {
         let image = image.into();
         if image.trim().is_empty() {
             anyhow::bail!("image reference must not be empty");
@@ -60,13 +60,13 @@ impl ImageRef {
         Ok(Self(image))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Whether this reference names a registry host. Bare references such as
     /// `omnifs-filesystem:dev` are local build products.
-    pub(crate) fn has_registry(&self) -> bool {
+    pub fn has_registry(&self) -> bool {
         match self.0.split_once('/') {
             None => false,
             Some((first, _)) => first.contains('.') || first.contains(':') || first == "localhost",

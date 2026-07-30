@@ -1,5 +1,6 @@
 //! Named filesystem configuration and lifecycle.
 
+use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -7,11 +8,15 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, ensure};
 use clap::{Args, Subcommand};
 use omnifs_core::{ClientOwnerId, fs};
+use omnifs_fs_runtime::{
+    AttachEndpoints, ConfirmedRuntime, RuntimeEvent, RuntimeEventSink, RuntimeStage, RuntimeState,
+    ensure_socat_available, err_after_rollback,
+};
 use serde::Serialize;
 
 use crate::client_fs_state::ClientFilesystemState;
 use crate::error::{ExitCode, WithHint};
-use crate::filesystem_driver::{Confirmed, FilesystemDriver};
+use crate::filesystem_driver::{RuntimeEventRenderer, into_cli_error, runtime_driver};
 use crate::rpc::RpcClient;
 use crate::ui::output::{Output, ResultVerdict};
 
@@ -456,15 +461,16 @@ async fn ensure_not_attached(spec: &fs::Spec) -> Result<()> {
 async fn runtime_running(
     client_state: &ClientFilesystemState,
     spec: &fs::Spec,
-    output: Output,
+    _output: Output,
 ) -> Result<bool> {
-    let driver = FilesystemDriver::for_spec(client_state, spec, output)?;
+    let driver = runtime_driver(client_state, spec, RuntimeEventSink::discard())?;
     match driver
-        .confirmed(client_state, client_owner_id()?, spec)
-        .await?
+        .confirmed(client_owner_id()?)
+        .await
+        .map_err(into_cli_error)?
     {
         None => Ok(false),
-        Some(Confirmed::Docker(_, false)) => Err(anyhow!(
+        Some(ConfirmedRuntime::Docker(_, false)) => Err(anyhow!(
             "filesystem `{}` has a stopped Docker container",
             spec.id()
         ))
@@ -482,11 +488,66 @@ async fn launch_and_confirm(
     info: omnifs_api::DaemonInfo,
 ) -> Result<()> {
     let client_owner = client_owner_id()?;
-    let driver = FilesystemDriver::for_spec(client_state, spec, output.clone())?;
-    driver
-        .launch(client_state, client_owner, spec, output.clone(), info)
-        .await?;
-    if wait_for_attachment(spec).await {
+    let (events, renderer) = RuntimeEventRenderer::start(output.clone());
+    let driver = match runtime_driver(client_state, spec, events.clone()) {
+        Ok(driver) => driver,
+        Err(error) => {
+            drop(events);
+            renderer.finish().await;
+            return Err(error);
+        },
+    };
+    let endpoints = AttachEndpoints::new(info.attach_unix, info.attach_tcp);
+    let session_spec = spec.clone();
+    let session_events = events.clone();
+    let launched = Box::pin(driver.launch(client_owner, &endpoints, async move {
+        if !wait_for_attachment(&session_spec).await {
+            let message = format!(
+                "filesystem `{}` did not attach to the daemon",
+                session_spec.id()
+            );
+            session_events.emit(RuntimeEvent::Failed {
+                stage: RuntimeStage::WaitForVfsSession,
+                message: message.clone(),
+            });
+            anyhow::bail!(message);
+        }
+        Ok(())
+    }))
+    .await;
+    let attached = if launched.is_ok() && spec.runtime() != fs::Runtime::Libkrun {
+        events.emit(RuntimeEvent::Stage {
+            stage: RuntimeStage::WaitForVfsSession,
+            runtime: spec.runtime(),
+            id: spec.id().clone(),
+            state: RuntimeState::Active,
+        });
+        let attached = wait_for_attachment(spec).await;
+        if attached {
+            events.emit(RuntimeEvent::Stage {
+                stage: RuntimeStage::WaitForVfsSession,
+                runtime: spec.runtime(),
+                id: spec.id().clone(),
+                state: RuntimeState::Ready,
+            });
+        } else {
+            events.emit(RuntimeEvent::Failed {
+                stage: RuntimeStage::WaitForVfsSession,
+                message: format!(
+                    "filesystem `{}` mounted but did not attach to the daemon",
+                    spec.id()
+                ),
+            });
+        }
+        attached
+    } else {
+        launched.is_ok()
+    };
+    drop(driver);
+    drop(events);
+    renderer.finish().await;
+    launched.map_err(into_cli_error)?;
+    if attached {
         return Ok(());
     }
 
@@ -495,7 +556,7 @@ async fn launch_and_confirm(
         spec.id()
     );
     let cleanup = stop_runtime(client_state, spec, output).await;
-    crate::filesystem_driver::err_after_rollback(attach_error, cleanup, "the failed filesystem")
+    err_after_rollback(attach_error, cleanup, "the failed filesystem")
 }
 
 async fn stop_runtime(
@@ -504,13 +565,36 @@ async fn stop_runtime(
     output: Output,
 ) -> Result<()> {
     let client_owner = client_owner_id()?;
-    let driver = FilesystemDriver::for_spec(client_state, spec, output)?;
-    let Some(confirmed) = driver.confirmed(client_state, client_owner, spec).await? else {
+    let (events, renderer) = RuntimeEventRenderer::start(output);
+    let driver = match runtime_driver(client_state, spec, events.clone()) {
+        Ok(driver) => driver,
+        Err(error) => {
+            drop(events);
+            renderer.finish().await;
+            return Err(error);
+        },
+    };
+    let confirmed = driver.confirmed(client_owner).await;
+    let confirmed = match confirmed {
+        Ok(confirmed) => confirmed,
+        Err(error) => {
+            drop(driver);
+            drop(events);
+            renderer.finish().await;
+            return Err(into_cli_error(error));
+        },
+    };
+    let Some(confirmed) = confirmed else {
+        drop(driver);
+        drop(events);
+        renderer.finish().await;
         return Ok(());
     };
-    driver
-        .stop_confirmed(client_state, client_owner, spec, confirmed)
-        .await
+    let stopped = driver.stop_confirmed(client_owner, confirmed).await;
+    drop(driver);
+    drop(events);
+    renderer.finish().await;
+    stopped.map_err(into_cli_error)
 }
 
 pub(crate) fn client_owner_id() -> Result<ClientOwnerId> {
@@ -549,15 +633,16 @@ async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
     let client_owner = client_owner_id()?;
     // Cloned rather than moved: the bare-location branch below still needs
     // `output` to report where the filesystem is available.
-    let driver = FilesystemDriver::for_spec(&client_state, &spec, output.clone())?;
+    let driver = runtime_driver(&client_state, &spec, RuntimeEventSink::discard())?;
     let confirmed = driver
-        .confirmed(&client_state, client_owner, &spec)
-        .await?
+        .confirmed(client_owner)
+        .await
+        .map_err(into_cli_error)?
         .with_context(|| format!("filesystem `{}` is detached", spec.id()))?;
     ensure_attached(&spec).await?;
 
-    let (command, label) = match (&driver, confirmed) {
-        (FilesystemDriver::Host(_), Confirmed::Host(_, phase)) => {
+    let (command, label) = match confirmed {
+        ConfirmedRuntime::Host(_, phase) => {
             ensure!(
                 phase == omnifs_thin::host_control::RunnerPhase::Mounted,
                 "filesystem `{}` is not mounted; runner phase is {phase:?}",
@@ -585,24 +670,30 @@ async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
                 Ok(ExitCode::Success)
             };
         },
-        (FilesystemDriver::Docker(client), Confirmed::Docker(_, _)) => (
-            client.shell_command(args.shell.as_deref(), &args.command),
+        ConfirmedRuntime::Docker(_, _) => (
+            driver
+                .shell_command(
+                    std::io::stdin().is_terminal(),
+                    args.shell.as_deref(),
+                    &args.command,
+                )
+                .context("Docker runtime did not provide a shell command")?,
             format!(
                 "open shell in filesystem container `{}`",
-                client.container_name()
+                driver
+                    .container_name()
+                    .context("Docker runtime has no container identity")?
             ),
         ),
-        (FilesystemDriver::Libkrun(runner), Confirmed::Libkrun(_)) => {
-            crate::libkrun_runner::ensure_socat_available()?;
+        ConfirmedRuntime::Libkrun(_) => {
+            ensure_socat_available().with_hint("Install it with `brew install socat`")?;
             (
-                runner.shell_command(args.shell.as_deref(), &args.command),
+                driver
+                    .shell_command(false, args.shell.as_deref(), &args.command)
+                    .context("libkrun runtime did not provide a shell command")?,
                 format!("open shell in filesystem `{}`", spec.id()),
             )
         },
-        _ => anyhow::bail!(
-            "confirmed identity belongs to a different filesystem driver than `{}`",
-            spec.id()
-        ),
     };
     propagate(command, label)
 }

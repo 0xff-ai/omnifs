@@ -19,6 +19,7 @@ omnifs-daemon = { workspace = true }
 omnifs-bootstrap = { workspace = true }
 omnifs-api = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
+omnifs-fs-runtime = { workspace = true }
 omnifs-nfs = { workspace = true }
 omnifs-thin = { workspace = true }
 omnifs-mtab = { workspace = true }
@@ -42,8 +43,6 @@ atomic-write-file = { workspace = true }
 fs2 = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
-hex = { workspace = true }
-sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "0.8"
@@ -52,11 +51,8 @@ anstream = "1"
 owo-colors = "4"
 arboard = { version = "3", default-features = false }
 time = { workspace = true }
-bollard = { workspace = true }
-futures-util = "0.3"
 webbrowser = { workspace = true }
 crossterm = "0.28"
-zstd = { workspace = true }
 unicode-width = { workspace = true }
 getrandom = "0.3"
 tabled = { version = "0.20", features = ["ansi"] }

@@ -20,27 +20,27 @@ use bollard::query_parameters::{
 use futures_util::TryStreamExt;
 use omnifs_core::{ClientOwnerId, fs};
 
-pub(crate) use self::container::resolve_filesystem_image;
+pub use self::container::resolve_filesystem_image;
 use self::container::{
     FILESYSTEM_HOME_LABEL, FILESYSTEM_ID_LABEL, assert_locked_down, filesystem_command,
 };
-use crate::client_fs_state::ClientFilesystemState;
-use crate::error::WithHint;
-use crate::filesystem_driver::{Candidate, ensure_identity_unchanged, err_after_rollback};
-use crate::image::{BUILD_CHANNEL, BuildChannel, ImageRef};
-use crate::ui::output::Output;
+use crate::driver::ensure_identity_unchanged;
+use crate::{
+    BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, LaunchRequest, RuntimeAdvice, RuntimeEvent,
+    RuntimeEventSink, RuntimeStage, RuntimeState, advise, err_after_rollback,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ContainerName(String);
+pub struct ContainerName(String);
 
 impl ContainerName {
-    pub(crate) fn new(name: impl Into<String>) -> anyhow::Result<Self> {
+    pub fn new(name: impl Into<String>) -> anyhow::Result<Self> {
         let name = name.into();
         validate_container_name(&name)?;
         Ok(Self(name))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -72,24 +72,24 @@ fn validate_container_name(name: &str) -> anyhow::Result<()> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DockerTarget {
+pub struct DockerTarget {
     container_name: ContainerName,
     image: ImageRef,
 }
 
 impl DockerTarget {
-    pub(crate) fn new(container_name: String, image: String) -> anyhow::Result<Self> {
+    pub fn new(container_name: String, image: String) -> anyhow::Result<Self> {
         Ok(Self {
             container_name: ContainerName::new(container_name)?,
             image: ImageRef::new(image)?,
         })
     }
 
-    pub(crate) fn container_name(&self) -> &ContainerName {
+    pub fn container_name(&self) -> &ContainerName {
         &self.container_name
     }
 
-    pub(crate) fn image(&self) -> &ImageRef {
+    pub fn image(&self) -> &ImageRef {
         &self.image
     }
 
@@ -97,13 +97,14 @@ impl DockerTarget {
     /// through the flag > env > config > default precedence chain, and the
     /// profile's stable container name. The one recipe every Docker
     /// construction path shares.
-    pub(crate) fn for_filesystem(
-        client_state: &ClientFilesystemState,
+    pub fn for_filesystem(
+        profile_root: &std::path::Path,
+        is_default_profile: bool,
         id: &fs::Id,
+        configured_image: Option<&str>,
     ) -> Result<Self> {
-        let config = client_state.config()?;
-        let image = resolve_filesystem_image(None, config.filesystem.docker_image.as_deref())?;
-        let name = Self::filesystem_container_name(client_state.profile_root(), id)?;
+        let image = resolve_filesystem_image(None, configured_image)?;
+        let name = Self::filesystem_container_name(profile_root, id, is_default_profile)?;
         Self::new(name.as_str().to_owned(), image.as_str().to_owned())
     }
 }
@@ -114,25 +115,31 @@ struct LayerProgress {
     total: u64,
 }
 
-pub(crate) struct DockerClient {
+pub struct DockerClient {
     docker: Docker,
     target: DockerTarget,
-    output: Output,
+    events: RuntimeEventSink,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DockerContainerIdentity {
-    pub(crate) id: String,
+pub struct DockerContainerIdentity {
+    pub id: String,
 }
 
 /// One container [`DockerClient::owned`] proved carries both an immutable ID
 /// and a filesystem identity label. Validated at construction so a caller
 /// never re-checks either field's presence downstream.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct OwnedFilesystemContainer {
-    pub(crate) identity: DockerContainerIdentity,
-    pub(crate) filesystem_id: String,
-    pub(crate) names: Vec<String>,
+pub struct OwnedFilesystemContainer {
+    pub identity: DockerContainerIdentity,
+    pub filesystem_id: String,
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageInspection {
+    Present,
+    Missing,
 }
 
 /// How long [`DockerClient::launch`] waits for the FUSE mount to appear
@@ -145,23 +152,27 @@ impl DockerClient {
     /// from wherever the Docker runtime lands, then launch the filesystem
     /// container and block until ready, matching the host and libkrun
     /// drivers' `launch` contract.
-    pub(crate) async fn launch(
-        &self,
-        ctx: &crate::filesystem_driver::LaunchContext<'_>,
-    ) -> Result<()> {
-        self.narrate_connecting();
+    pub(crate) async fn launch(&self, request: &LaunchRequest<'_>) -> Result<()> {
+        self.events.emit(RuntimeEvent::Stage {
+            stage: RuntimeStage::StartContainer,
+            runtime: fs::Runtime::Docker,
+            id: request.spec.id().clone(),
+            state: RuntimeState::Active,
+        });
         self.ping()
             .await
             .context("Docker daemon did not respond (is Docker running?)")
-            .with_hint(
-                "Open Docker Desktop (or start the Docker daemon), then re-run `omnifs fs attach`",
-            )
-            .with_hint("Or run `omnifs doctor` to diagnose")?;
+            .map_err(|error| {
+                advise(
+                    advise(error, RuntimeAdvice::DiagnoseAlternative),
+                    RuntimeAdvice::StartDocker,
+                )
+            })?;
         #[cfg(target_os = "linux")]
         let expected_ip = self.filesystem_attach_bind_ip().await?;
         #[cfg(not(target_os = "linux"))]
         let expected_ip = Ipv4Addr::LOCALHOST;
-        let addr = ctx.attach_tcp()?;
+        let addr = request.endpoints.attach_tcp()?;
         let expected_ip = IpAddr::V4(expected_ip);
         anyhow::ensure!(
             addr.ip() == expected_ip,
@@ -169,9 +180,9 @@ impl DockerClient {
              {expected_ip}; restart the daemon"
         );
         self.launch_container(
-            ctx.client_state.profile_root(),
-            ctx.client_owner,
-            ctx.spec,
+            request.paths.profile_root(),
+            request.client_owner,
+            request.spec,
             addr.port(),
         )
         .await
@@ -214,15 +225,12 @@ impl DockerClient {
                 .await;
             return err_after_rollback(mount_error, cleanup, "the failed filesystem container");
         }
-        let key_width = Output::ledger_block_width(&["filesystem"]);
-        self.output.ledger_row(
-            &crate::ui::render::LedgerRow::new(
-                crate::ui::style::Glyph::Done,
-                "filesystem",
-                format!("{} running in `{}`", spec.id(), self.container_name()),
-            ),
-            key_width,
-        );
+        self.events.emit(RuntimeEvent::MountReady {
+            runtime: fs::Runtime::Docker,
+            id: spec.id().clone(),
+            location: spec.location().to_path_buf(),
+            container: Some(self.container_name().to_string()),
+        });
         Ok(())
     }
 
@@ -251,7 +259,7 @@ impl DockerClient {
     /// launch command, regardless of whether the container is running.
     /// Callers that only care about a running instance filter the returned
     /// flag themselves, matching the host and libkrun drivers' `confirmed`.
-    pub(crate) async fn confirmed(
+    pub async fn confirmed(
         &self,
         expected_home: &std::path::Path,
         client_owner: ClientOwnerId,
@@ -354,7 +362,7 @@ impl DockerClient {
     /// construction. Canonical names are still validated by doctor, since
     /// that check needs the resolved `DockerTarget` for the label's claimed
     /// filesystem id, not just the raw listing.
-    pub(crate) async fn owned(&self, expected_home: &std::path::Path) -> Result<Vec<Candidate>> {
+    pub async fn owned(&self, expected_home: &std::path::Path) -> Result<Vec<Candidate>> {
         let mut filters = HashMap::new();
         filters.insert(
             "label".to_owned(),
@@ -409,7 +417,7 @@ impl DockerClient {
 
     /// The one teardown entry point for a proven identity: reconfirm the
     /// container still matches `expected`, then stop and remove it.
-    pub(crate) async fn stop_confirmed(
+    pub async fn stop_confirmed(
         &self,
         expected: &DockerContainerIdentity,
         expected_home: &std::path::Path,
@@ -425,16 +433,15 @@ impl DockerClient {
         self.stop_and_remove_id(&expected.id).await
     }
 
-    pub(crate) fn shell_command(
+    pub fn shell_command(
         &self,
+        interactive: bool,
         shell_override: Option<&str>,
         trailing: &[String],
     ) -> Command {
-        use std::io::IsTerminal as _;
-
         let mut command = Command::new("docker");
         command.arg("exec").arg("-i");
-        if std::io::stdin().is_terminal() {
+        if interactive {
             command.arg("-t");
         }
         command
@@ -451,12 +458,12 @@ impl DockerClient {
 }
 
 impl DockerClient {
-    pub(crate) fn connect_for(target: &DockerTarget, output: Output) -> Result<Self> {
+    pub fn connect_for(target: &DockerTarget, events: RuntimeEventSink) -> Result<Self> {
         Ok(Self {
             docker: Docker::connect_with_local_defaults()
                 .context("connect to Docker daemon (is it running?)")?,
             target: target.clone(),
-            output,
+            events,
         })
     }
 
@@ -464,34 +471,31 @@ impl DockerClient {
     /// wants the connected client directly rather than resolving the
     /// target and connecting as two separate steps.
     pub(crate) fn for_filesystem(
-        client_state: &ClientFilesystemState,
+        profile_root: &std::path::Path,
+        is_default_profile: bool,
         id: &fs::Id,
-        output: Output,
+        configured_image: Option<&str>,
+        events: RuntimeEventSink,
     ) -> Result<Self> {
-        let target = DockerTarget::for_filesystem(client_state, id)?;
-        Self::connect_for(&target, output)
+        let target =
+            DockerTarget::for_filesystem(profile_root, is_default_profile, id, configured_image)?;
+        Self::connect_for(&target, events)
     }
 
     /// This runtime's own container identity, so lifecycle operations do not
     /// thread the name back in from each caller.
-    pub(crate) fn container_name(&self) -> &ContainerName {
+    pub fn container_name(&self) -> &ContainerName {
         self.target.container_name()
     }
 
     /// This runtime's own image, so
     /// the Docker runner can embed it in the container body without
     /// duplicating it in the caller.
-    pub(crate) fn image(&self) -> &ImageRef {
+    pub fn image(&self) -> &ImageRef {
         self.target.image()
     }
 
-    /// Narrate the connection attempt before it starts, matching the
-    /// pre-ping narration launch used to open with.
-    fn narrate_connecting(&self) {
-        self.output.narrate("Connecting to Docker");
-    }
-
-    pub(crate) async fn ping(&self) -> Result<()> {
+    pub async fn ping(&self) -> Result<()> {
         self.docker.ping().await.map(|_| ()).map_err(Into::into)
     }
 
@@ -520,11 +524,14 @@ impl DockerClient {
 
     /// Inspect an image by name. Returns the bollard result directly so callers
     /// can match on 404 vs other errors.
-    pub(crate) async fn inspect_image(
-        &self,
-        image: &str,
-    ) -> std::result::Result<bollard::models::ImageInspect, bollard::errors::Error> {
-        self.docker.inspect_image(image).await
+    pub async fn inspect_image(&self, image: &str) -> Result<ImageInspection> {
+        match self.docker.inspect_image(image).await {
+            Ok(_) => Ok(ImageInspection::Present),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(ImageInspection::Missing),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn pull_image_with_progress(&self, image: &str) -> Result<()> {
@@ -537,10 +544,6 @@ impl DockerClient {
             ..Default::default()
         };
         let source = image.split('/').next().unwrap_or(image);
-        // Its own standalone single-row block: no sibling ledger row prints
-        // alongside a filesystem image pull, so the width is just its own key.
-        let key_width = Output::ledger_block_width(&["filesystem image"]);
-        let mut row = self.output.progress("filesystem image", key_width);
         let mut layers: HashMap<String, LayerProgress> = HashMap::new();
         let mut stream = self.docker.create_image(Some(opts), None, None);
         let result: Result<()> = async {
@@ -570,13 +573,12 @@ impl DockerClient {
                     let total = layers
                         .values()
                         .fold(0_u64, |sum, layer| sum.saturating_add(layer.total));
-                    if total > 0 {
-                        row.update_bytes_with(current, total, format_args!("from {source}"));
-                    } else if let Some(status) = info.status.as_deref() {
-                        row.update(status);
-                    }
-                } else if let Some(status) = info.status {
-                    row.update(&status);
+                    self.events.emit(RuntimeEvent::Download {
+                        artifact: crate::Artifact::FilesystemImage,
+                        completed_bytes: current,
+                        total_bytes: (total > 0).then_some(total),
+                        source: source.to_owned(),
+                    });
                 }
             }
             Ok(())
@@ -584,11 +586,18 @@ impl DockerClient {
         .await;
         match result {
             Ok(()) => {
-                row.settle_ok(format!("{image} ready"));
+                self.events.emit(RuntimeEvent::DownloadFinished {
+                    artifact: crate::Artifact::FilesystemImage,
+                    reference: image.to_owned(),
+                    completed_bytes: None,
+                });
                 Ok(())
             },
             Err(error) => {
-                row.settle_fail(format!("{image} pull failed"));
+                self.events.emit(RuntimeEvent::DownloadFailed {
+                    artifact: crate::Artifact::FilesystemImage,
+                    reference: Some(image.to_owned()),
+                });
                 Err(error)
             },
         }
@@ -605,16 +614,22 @@ impl DockerClient {
             .await
         {
             Ok(_) => {
-                self.output.narrate(format!(
-                    "Removing existing container `{name}` (1s stop timeout)"
-                ));
+                self.events.emit(RuntimeEvent::Container {
+                    name: name.to_string(),
+                    image: None,
+                    state: crate::ContainerState::RemovingExisting,
+                });
                 self.stop_and_remove(name.as_str()).await?;
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
-            }) => self
-                .output
-                .narrate(format!("No existing container `{name}`")),
+            }) => {
+                self.events.emit(RuntimeEvent::Container {
+                    name: name.to_string(),
+                    image: None,
+                    state: crate::ContainerState::Absent,
+                });
+            },
             Err(error) => {
                 return Err(error).with_context(|| format!("inspect container `{name}`"));
             },
@@ -623,8 +638,11 @@ impl DockerClient {
     }
 
     async fn stop_and_remove_id(&self, id: &str) -> Result<()> {
-        self.output
-            .narrate(format!("Stopping confirmed filesystem container `{id}`"));
+        self.events.emit(RuntimeEvent::Container {
+            name: id.to_owned(),
+            image: None,
+            state: crate::ContainerState::StoppingConfirmed,
+        });
         self.stop_and_remove(id).await
     }
 
@@ -664,11 +682,11 @@ impl DockerClient {
         self.ensure_image().await?;
         self.remove().await?;
 
-        self.output.narrate(format!(
-            "Creating filesystem container `{}` from image `{}`",
-            self.container_name(),
-            self.image()
-        ));
+        self.events.emit(RuntimeEvent::Container {
+            name: self.container_name().to_string(),
+            image: Some(self.image().to_string()),
+            state: crate::ContainerState::Creating,
+        });
         self.docker
             .create_container(
                 Some(CreateContainerOptions {
@@ -679,10 +697,11 @@ impl DockerClient {
             )
             .await
             .with_context(|| format!("create filesystem container `{}`", self.container_name()))?;
-        self.output.narrate(format!(
-            "Starting filesystem container `{}`",
-            self.container_name()
-        ));
+        self.events.emit(RuntimeEvent::Container {
+            name: self.container_name().to_string(),
+            image: Some(self.image().to_string()),
+            state: crate::ContainerState::Starting,
+        });
         self.docker
             .start_container(
                 self.container_name().as_str(),
@@ -758,17 +777,15 @@ impl DockerClient {
             Ok(inspect) => {
                 // Surface the dev image's age so a stale local build is
                 // visible; release channel keeps the terse `present`.
-                match (BUILD_CHANNEL, image_age_words(inspect.created.as_deref())) {
-                    (BuildChannel::Dev, Some(age)) => {
-                        self.output.narrate(format!(
-                            "Image `{}` present (built {age} ago)",
-                            self.image()
-                        ));
-                    },
-                    _ => self
-                        .output
-                        .narrate(format!("Image `{}` present", self.image())),
-                }
+                let age = match (BUILD_CHANNEL, image_age_words(inspect.created.as_deref())) {
+                    (BuildChannel::Dev, age) => age,
+                    (BuildChannel::Release, _) => None,
+                };
+                self.events.emit(RuntimeEvent::Image {
+                    artifact: crate::Artifact::FilesystemImage,
+                    reference: self.image().to_string(),
+                    state: crate::ImageState::Present { age },
+                });
                 Ok(())
             },
             Err(bollard::errors::Error::DockerResponseServerError {
@@ -776,19 +793,27 @@ impl DockerClient {
             }) if !self.image().has_registry() => {
                 // A registry-less reference is a local build product. Never
                 // reach for a registry: refuse and point at the dev build.
-                self.output
-                    .narrate(format!("Image `{}` missing", self.image()));
+                self.events.emit(RuntimeEvent::Image {
+                    artifact: crate::Artifact::FilesystemImage,
+                    reference: self.image().to_string(),
+                    state: crate::ImageState::Missing,
+                });
                 let image = self.image();
-                Err(anyhow!(BUILD_CHANNEL.pull_refusal_reason()))
-                    .context(format!("image `{image}` is not present locally"))
-                    .with_hint("build it with `just filesystem-image`")
-                    .with_hint("or set a specific image via the OMNIFS_FILESYSTEM_IMAGE env var or the `[filesystem].docker_image` config key")
+                let error = anyhow!(BUILD_CHANNEL.pull_refusal_reason())
+                    .context(format!("image `{image}` is not present locally"));
+                Err(advise(
+                    advise(error, RuntimeAdvice::ConfigureFilesystemImage),
+                    RuntimeAdvice::BuildFilesystemImage,
+                ))
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..
             }) => {
-                self.output
-                    .narrate(format!("Image `{}` missing", self.image()));
+                self.events.emit(RuntimeEvent::Image {
+                    artifact: crate::Artifact::FilesystemImage,
+                    reference: self.image().to_string(),
+                    state: crate::ImageState::Missing,
+                });
                 self.pull_image_with_progress(self.image().as_str())
                     .await
                     .map_err(|pull_err| {

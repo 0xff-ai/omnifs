@@ -6,15 +6,15 @@
 use anyhow::Context as _;
 use omnifs_bootstrap::Client;
 use omnifs_core::fs;
+use omnifs_fs_runtime::{
+    Candidate, DockerClient, DockerContainerIdentity, DockerTarget, HostDriver, ImageInspection,
+    ImageRef, LibkrunRunner, OwnedFilesystemContainer, RuntimeEventSink, owned_filesystems,
+};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use crate::client_fs_state::{Claim, ClientFilesystemState, Registry};
-use crate::docker::{
-    DockerClient, DockerContainerIdentity, DockerTarget, OwnedFilesystemContainer,
-};
-use crate::filesystem_driver::Candidate;
-use crate::image::ImageRef;
+use crate::filesystem_driver::{RuntimeEventRenderer, runtime_paths};
 use crate::inventory::{AuthState, DaemonHealth, DaemonProbe, Inventory, MountStatus, Severity};
 use crate::ui::output::{Output, ResultVerdict};
 use crate::ui::prompt::Confirm;
@@ -59,7 +59,14 @@ fn resolve_filesystem_target(
             || fs::Id::new("doctor").expect("static filesystem id"),
             |spec| spec.id().clone(),
         );
-    DockerTarget::for_filesystem(client_filesystems, &id)
+    let config = client_filesystems.config()?;
+    let paths = runtime_paths(client_filesystems)?;
+    DockerTarget::for_filesystem(
+        paths.profile_root(),
+        paths.is_default_profile(),
+        &id,
+        config.filesystem.docker_image.as_deref(),
+    )
 }
 
 struct Doctor {
@@ -246,18 +253,30 @@ impl Remediation {
             } => {
                 let registry = client_filesystems.registry();
                 let _guard = claim_for_teardown(&registry, record.spec.id()).await?;
-                crate::host_fs::HostDriver::new(state_dir.clone())
-                    .stop_confirmed(record)
-                    .await
+                let paths = runtime_paths(client_filesystems)?.attachment(record.spec.id());
+                HostDriver::new(
+                    state_dir.clone(),
+                    paths.host_log().to_path_buf(),
+                    paths.executable().to_path_buf(),
+                    RuntimeEventSink::discard(),
+                )
+                .stop_confirmed(record)
+                .await
             },
             Self::CleanStaleHostRecord {
                 state_dir, record, ..
             } => {
                 let registry = client_filesystems.registry();
                 let _guard = claim_for_teardown(&registry, record.spec.id()).await?;
-                crate::host_fs::HostDriver::new(state_dir.clone())
-                    .cleanup_stale(record)
-                    .await
+                let paths = runtime_paths(client_filesystems)?.attachment(record.spec.id());
+                HostDriver::new(
+                    state_dir.clone(),
+                    paths.host_log().to_path_buf(),
+                    paths.executable().to_path_buf(),
+                    RuntimeEventSink::discard(),
+                )
+                .cleanup_stale(record)
+                .await
             },
             Self::StopDockerFilesystem {
                 target,
@@ -265,26 +284,58 @@ impl Remediation {
                 profile_root,
                 spec,
             } => {
-                let registry = client_filesystems.registry();
-                let _guard = claim_for_teardown(&registry, spec.id()).await?;
-                DockerClient::connect_for(target, output.clone())?
-                    .stop_confirmed(
-                        identity,
-                        profile_root,
-                        crate::commands::fs::client_owner_id()?,
-                        spec,
-                    )
-                    .await
+                stop_docker_filesystem(
+                    client_filesystems,
+                    output,
+                    target,
+                    identity,
+                    profile_root,
+                    spec,
+                )
+                .await
             },
             Self::StopLibkrunFilesystem { state_dir, record } => {
                 let registry = client_filesystems.registry();
                 let _guard = claim_for_teardown(&registry, record.spec.id()).await?;
-                crate::libkrun_runner::LibkrunRunner::new(state_dir.clone())
+                LibkrunRunner::new(state_dir.clone())
                     .stop_confirmed(record.clone())
                     .await
             },
         }
     }
+}
+
+async fn stop_docker_filesystem(
+    client_filesystems: &ClientFilesystemState,
+    output: &Output,
+    target: &DockerTarget,
+    identity: &DockerContainerIdentity,
+    profile_root: &Path,
+    spec: &fs::Spec,
+) -> anyhow::Result<()> {
+    let registry = client_filesystems.registry();
+    let _guard = claim_for_teardown(&registry, spec.id()).await?;
+    let (events, renderer) = RuntimeEventRenderer::start(output.clone());
+    let client = match DockerClient::connect_for(target, events.clone()) {
+        Ok(client) => client,
+        Err(error) => {
+            drop(events);
+            renderer.finish().await;
+            return Err(error);
+        },
+    };
+    let stopped = client
+        .stop_confirmed(
+            identity,
+            profile_root,
+            crate::commands::fs::client_owner_id()?,
+            spec,
+        )
+        .await;
+    drop(client);
+    drop(events);
+    renderer.finish().await;
+    stopped
 }
 
 /// Claim the registry lock for `id` and prove the daemon is stopped, in one
@@ -970,8 +1021,18 @@ impl Doctor {
         docker: Option<&DockerClient>,
         daemon_health: DaemonHealth,
     ) -> Vec<Finding> {
-        let candidates =
-            crate::filesystem_driver::owned_filesystems(&self.client_filesystems, docker).await;
+        let paths = match runtime_paths(&self.client_filesystems) {
+            Ok(paths) => paths,
+            Err(error) => {
+                return vec![Finding::from_probe(
+                    Section::Filesystems,
+                    Check::FilesystemState,
+                    None,
+                    ProbeResult::Err(format!("{error:#}")),
+                )];
+            },
+        };
+        let candidates = owned_filesystems(&paths, docker).await;
         let client_owner = doctor_client_owner();
         let mut client_owner_reported = false;
         let mut findings = Vec::new();
@@ -1133,7 +1194,8 @@ impl Doctor {
                 )];
             },
         };
-        let client = match DockerClient::connect_for(&candidate.target, self.output.clone()) {
+        let client = match DockerClient::connect_for(&candidate.target, RuntimeEventSink::discard())
+        {
             Ok(client) => client,
             Err(error) => {
                 return vec![docker_ownership_finding(
@@ -1201,7 +1263,14 @@ impl Doctor {
         candidate: OwnedFilesystemContainer,
     ) -> anyhow::Result<DockerCandidate> {
         let id = fs::Id::new(candidate.filesystem_id)?;
-        let target = DockerTarget::for_filesystem(&self.client_filesystems, &id)?;
+        let config = self.client_filesystems.config()?;
+        let paths = runtime_paths(&self.client_filesystems)?;
+        let target = DockerTarget::for_filesystem(
+            paths.profile_root(),
+            paths.is_default_profile(),
+            &id,
+            config.filesystem.docker_image.as_deref(),
+        )?;
         let canonical_name = format!("/{}", target.container_name());
         anyhow::ensure!(
             candidate.names.iter().any(|name| name == &canonical_name),
@@ -1278,7 +1347,7 @@ impl Doctor {
             Ok(target) => target,
             Err(error) => return (None, ProbeResult::Err(error.clone())),
         };
-        let runtime = match DockerClient::connect_for(target, self.output.clone()) {
+        let runtime = match DockerClient::connect_for(target, RuntimeEventSink::discard()) {
             Ok(runtime) => runtime,
             Err(error) => return (None, ProbeResult::Err(format!("connect: {error}"))),
         };
@@ -1317,15 +1386,11 @@ impl Doctor {
 
     async fn probe_image_cached(&self, runtime: &DockerClient, image: &ImageRef) -> ProbeResult {
         match runtime.inspect_image(image.as_str()).await {
-            Ok(_) => ProbeResult::Ok(format!("{image} cached")),
-            Err(bollard::errors::Error::DockerResponseServerError {
-                status_code: 404, ..
-            }) if image.has_registry() => ProbeResult::Warn(format!(
+            Ok(ImageInspection::Present) => ProbeResult::Ok(format!("{image} cached")),
+            Ok(ImageInspection::Missing) if image.has_registry() => ProbeResult::Warn(format!(
                 "{image} not cached (will pull on the next Docker `omnifs fs attach`)"
             )),
-            Err(bollard::errors::Error::DockerResponseServerError {
-                status_code: 404, ..
-            }) => ProbeResult::Err(format!(
+            Ok(ImageInspection::Missing) => ProbeResult::Err(format!(
                 "{image} not present locally; a dev image is never pulled, so `omnifs fs attach` \
                  cannot start (build it with `just filesystem-image`)"
             )),

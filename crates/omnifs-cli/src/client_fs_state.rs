@@ -108,28 +108,26 @@ impl ClientFilesystemState {
     }
 
     #[must_use]
-    pub(crate) fn state_dir(&self, id: &fs::Id) -> PathBuf {
-        self.state_root().join(id.as_str())
-    }
-
-    #[must_use]
-    pub(crate) fn host_log(&self, id: &fs::Id) -> PathBuf {
-        self.cache_dir.join(format!("filesystem-{id}.log"))
-    }
-
-    #[must_use]
     pub(crate) fn runtime_root(&self) -> PathBuf {
         self.root.join(FILESYSTEMS_DIR).join(RUNTIME_DIR)
     }
 
     #[must_use]
-    pub(crate) fn libkrun_root(&self, id: &fs::Id) -> PathBuf {
-        self.runtime_root().join(id.as_str()).join("libkrun")
-    }
-
-    #[must_use]
     pub(crate) fn guest_image_cache(&self) -> PathBuf {
         self.cache_dir.join(GUEST_IMAGES_DIR)
+    }
+
+    pub(crate) fn runtime_paths(&self) -> anyhow::Result<omnifs_fs_runtime::RuntimePaths> {
+        Ok(omnifs_fs_runtime::RuntimePaths::new(
+            self.profile_root().to_path_buf(),
+            std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
+            self.state_root(),
+            self.cache_dir.clone(),
+            self.runtime_root(),
+            self.guest_image_cache(),
+            std::env::current_exe()
+                .map_err(|error| anyhow::anyhow!("resolve the omnifs executable: {error}"))?,
+        ))
     }
 
     #[must_use]
