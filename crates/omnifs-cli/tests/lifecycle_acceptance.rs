@@ -570,7 +570,7 @@ async fn no_input_setup_boots_and_orients_without_mounting_or_attaching() {
     assert!(stderr.contains("Next:"), "{stderr}");
     assert!(stderr.contains("omnifs mount add"), "{stderr}");
     assert!(stderr.contains("omnifs status"), "{stderr}");
-    assert!(stderr.contains("omnifs fs list"), "{stderr}");
+    assert!(stderr.contains("omnifs fs ls"), "{stderr}");
 
     let mounts = fixture.run(&["--output", "json", "mount", "ls"]);
     assert_success(&mounts, "mount ls");

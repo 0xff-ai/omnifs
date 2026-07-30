@@ -9,7 +9,7 @@ use anyhow::{Context as _, anyhow, bail};
 use omnifs_api::ProviderMetadata;
 use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef, ProviderVersion};
 use omnifs_provider::ProviderManifest;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -256,75 +256,6 @@ fn is_digest_prefix(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// One provider choice prepared for `mount add`'s interactive picker.
-/// Terminal code receives the value, hint, and mounted-ness separately so it
-/// does not know manifest policy. `mounted` is data, not a filter: an
-/// already-configured provider stays in the list (a second mount of the same
-/// provider under a different name is legitimate), marked instead of hidden.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProviderOption {
-    pub(crate) name: String,
-    pub(crate) hint: String,
-    pub(crate) sorts_first: bool,
-    pub(crate) mounted: bool,
-}
-
-pub(crate) fn provider_options(
-    embedded: &[ProviderMetadata],
-    mounted: &BTreeSet<String>,
-) -> Vec<ProviderOption> {
-    let mut options = embedded
-        .iter()
-        .filter_map(|entry| {
-            let manifest = ProviderManifest::from_bytes(&entry.manifest).ok()?;
-            Some(ProviderOption {
-                mounted: mounted.contains(&manifest.id),
-                sorts_first: sorts_first(&manifest),
-                hint: manifest
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| manifest.display_name.clone()),
-                name: manifest.id.clone(),
-            })
-        })
-        .collect::<Vec<_>>();
-    options.sort_by(|left, right| {
-        right
-            .sorts_first
-            .cmp(&left.sorts_first)
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    options
-}
-
-/// Whether a provider sorts ahead of its peers in the picker: mount creation
-/// can proceed without an interactive config prompt or an unavailable
-/// ambient credential. OAuth is intentionally included here because an
-/// interactive mount can complete its browser flow interactively; `--yes`
-/// keeps its stricter ambient-only policy.
-fn sorts_first(manifest: &ProviderManifest) -> bool {
-    if manifest.requires_mount_input() {
-        return false;
-    }
-    if manifest.auth.is_none() {
-        return true;
-    }
-    if matches!(
-        manifest
-            .auth
-            .as_ref()
-            .and_then(|auth| auth.default_scheme()),
-        Some((_, omnifs_auth::AuthScheme::Oauth(_)))
-    ) {
-        return true;
-    }
-    let auth_manifest = manifest
-        .auth
-        .as_ref()
-        .map(omnifs_provider::ProviderAuthManifest::wasm_auth_manifest);
-    !crate::commands::mount::detect::detect(auth_manifest.as_ref()).is_empty()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,48 +287,5 @@ mod tests {
             reference.meta.version.as_ref().map(ProviderVersion::as_str),
             Some("1.2.3")
         );
-    }
-
-    #[test]
-    fn provider_options_marks_mounted_providers_instead_of_hiding_them() {
-        let embedded = vec![embedded_provider("dns"), embedded_provider("github")];
-        let mut mounted = BTreeSet::new();
-        mounted.insert("github".to_owned());
-        let options = provider_options(&embedded, &mounted);
-        assert_eq!(options.len(), 2, "a configured provider stays in the list");
-        let github = options
-            .iter()
-            .find(|option| option.name == "github")
-            .unwrap();
-        assert!(github.mounted);
-        let dns = options.iter().find(|option| option.name == "dns").unwrap();
-        assert!(!dns.mounted);
-    }
-
-    fn embedded_provider(id: &str) -> ProviderMetadata {
-        let manifest = ProviderManifest {
-            id: id.to_owned(),
-            display_name: id.to_owned(),
-            description: None,
-            provider: format!("{id}.wasm"),
-            default_mount: id.to_owned(),
-            version: None,
-            wit_package: None,
-            sdk_version: None,
-            refresh_interval_secs: 0,
-            capabilities: Vec::new(),
-            limits: omnifs_provider::LimitDeclarations::default(),
-            auth: None,
-            config: None,
-        };
-        let bytes = serde_json::to_vec(&manifest).unwrap();
-        ProviderMetadata {
-            reference: omnifs_api::ProviderReference {
-                id: ProviderId::from_wasm_bytes(bytes.as_slice()),
-                name: manifest.id,
-                version: None,
-            },
-            manifest: bytes,
-        }
     }
 }

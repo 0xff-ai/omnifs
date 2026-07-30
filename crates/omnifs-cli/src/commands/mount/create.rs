@@ -158,6 +158,28 @@ fn init_interactive(prompt: PromptMode) -> bool {
     prompt.interactive()
 }
 
+fn provider_sorts_first(manifest: &ProviderManifest) -> bool {
+    if manifest.requires_mount_input() {
+        return false;
+    }
+    if manifest.auth.is_none()
+        || matches!(
+            manifest
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.default_scheme()),
+            Some((_, omnifs_auth::AuthScheme::Oauth(_)))
+        )
+    {
+        return true;
+    }
+    let auth = manifest
+        .auth
+        .as_ref()
+        .map(ProviderAuthManifest::wasm_auth_manifest);
+    !crate::commands::mount::detect::detect(auth.as_ref()).is_empty()
+}
+
 #[allow(clippy::too_many_lines)] // one linear spec-assembly path
 pub(crate) async fn assemble_mount_build(
     args: &AddArgs,
@@ -186,38 +208,38 @@ pub(crate) async fn assemble_mount_build(
             .iter()
             .map(|mount| mount.provider.name.clone())
             .collect();
-        let options = crate::provider_resolver::provider_options(&embedded, &mounted);
-        // `provider_options` only ever returns an option whose manifest bytes
-        // already parsed once; re-parsing those same bytes here is a pure
-        // function of them and cannot fail differently, so `manifests` stays
-        // index-aligned with `options`.
-        let manifests: Vec<ProviderManifest> = options
+        let mut options: Vec<_> = embedded
             .iter()
-            .filter_map(|option| {
-                embedded
-                    .iter()
-                    .find(|entry| entry.reference.name == option.name)
-                    .and_then(|entry| ProviderManifest::from_bytes(&entry.manifest).ok())
+            .filter_map(|entry| ProviderManifest::from_bytes(&entry.manifest).ok())
+            .map(|manifest| {
+                let is_mounted = mounted.contains(&manifest.id);
+                (manifest, is_mounted)
             })
             .collect();
-        let rows: Vec<_> = manifests
+        options.sort_by(|(left, _), (right, _)| {
+            provider_sorts_first(right)
+                .cmp(&provider_sorts_first(left))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let rows: Vec<_> = options
             .iter()
-            .map(crate::provider_catalog::provider_catalog_row)
+            .map(|(manifest, _)| crate::provider_catalog::provider_catalog_row(manifest))
             .collect();
         let aligned = crate::provider_catalog::align_provider_catalog_rows(&rows);
-        let choices = options.into_iter().zip(manifests.iter()).zip(aligned).map(
-            |((option, manifest), mut label)| {
-                if option.mounted {
+        let choices = options
+            .into_iter()
+            .zip(aligned)
+            .map(|((manifest, mounted), mut label)| {
+                if mounted {
                     label.push_str("  ");
                     label.push_str(&crate::ui::style::dim(
                         "mounted",
                         crate::ui::style::Stream::Stderr,
                     ));
                 }
-                let detail = crate::capability::consent_detail(manifest);
-                (option.name, label, detail)
-            },
-        );
+                let detail = crate::capability::consent_detail(&manifest);
+                (manifest.id, label, detail)
+            });
         Some(
             crate::ui::prompt::Select::new("Which provider?")
                 .detailed_options(choices)
