@@ -218,6 +218,12 @@ pub struct HermeticHome {
 /// Build a hermetic profile root and create the filesystem mount point.
 #[must_use]
 pub fn hermetic_home() -> HermeticHome {
+    // macOS exposes a long per-user TMPDIR. Nested runtime and control socket
+    // names can exceed sockaddr_un::sun_path there, so live lanes keep the
+    // path string under the short `/tmp` alias.
+    #[cfg(target_os = "macos")]
+    let home = tempfile::tempdir_in("/tmp").expect("home tempdir");
+    #[cfg(not(target_os = "macos"))]
     let home = tempfile::tempdir().expect("home tempdir");
     let mount_point = home.path().join("mnt");
     std::fs::create_dir_all(&mount_point).expect("mount point");

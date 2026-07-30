@@ -252,12 +252,18 @@ impl Fixture {
             String::from_utf8_lossy(&out.stderr),
         );
         let out = self.run(&["fs", "attach", "--name", "itest-host"]);
+        let host_log = std::fs::read_to_string(
+            self.home_path()
+                .join("client/cache/filesystem-itest-host.log"),
+        )
+        .unwrap_or_else(|error| format!("<host filesystem log unavailable: {error}>"));
         assert!(
             out.status.success(),
-            "host filesystem attach failed (exit {})\nstdout: {}\nstderr: {}",
+            "host filesystem attach failed (exit {})\nstdout: {}\nstderr: {}\nhost log:\n{}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
+            host_log,
         );
         let out = self.run(&[
             "fs",
@@ -308,18 +314,17 @@ impl Fixture {
         let deadline = Instant::now() + timeout;
         loop {
             let output = self.run(&["fs", "ls", "--output", "json"]);
-            if output.status.success()
-                && serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                    .ok()
-                    .is_some_and(|value| {
-                        value["result"]["filesystems"]
-                            .as_array()
-                            .is_some_and(|filesystems| {
-                                filesystems.iter().any(|filesystem| {
-                                    filesystem["id"] == id && filesystem["state"] == "attached"
-                                })
+            if serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .ok()
+                .is_some_and(|value| {
+                    value["result"]["filesystems"]
+                        .as_array()
+                        .is_some_and(|filesystems| {
+                            filesystems.iter().any(|filesystem| {
+                                filesystem["id"] == id && filesystem["state"] == "attached"
                             })
-                    })
+                        })
+                })
             {
                 return;
             }
@@ -514,6 +519,26 @@ fn assert_serves(container: &str) {
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello, world!");
+    }
+}
+
+fn wait_until_serves(container: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let out = Command::new("docker")
+            .args(["exec", container, "cat", "/omnifs/test/hello/message"])
+            .output()
+            .expect("docker exec resumed filesystem read");
+        if out.status.success() && out.stdout == b"Hello, world!" {
+            assert_serves(container);
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "filesystem container `{container}` did not resume serving within {timeout:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -933,5 +958,8 @@ fn kill_and_reattach_fuse_semantics() {
         id_2, id_3,
         "daemon restart must preserve the existing filesystem container"
     );
-    assert_serves(&container);
+    // VFS reconnect and serving-generation publication are separate daemon
+    // facts. The session can reattach while its desired provider is still
+    // being prepared from the durable cache after restart.
+    wait_until_serves(&container, Duration::from_mins(1));
 }

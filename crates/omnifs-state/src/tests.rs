@@ -329,6 +329,10 @@ async fn mount_crud_applies_batches_and_advances_global_revision() {
             .last_mutation_id,
         create_id
     );
+    let resources = store.resource_snapshot().await.unwrap();
+    assert!(resources.resources.resources().iter().any(
+        |resource| matches!(resource, ResourceDefinition::Mount(mount) if mount.name.as_str() == "demo")
+    ));
 
     let mut updated = document.clone();
     updated.config = serde_json::json!({"a": 3});
@@ -360,6 +364,15 @@ async fn mount_crud_applies_batches_and_advances_global_revision() {
     assert_eq!(removed.revision, MountRevision::new(3));
     assert!(store.get_mount(&document.name).await.unwrap().is_none());
     assert!(store.list_mounts().await.unwrap().is_empty());
+    assert!(
+        store
+            .resource_snapshot()
+            .await
+            .unwrap()
+            .resources
+            .resources()
+            .is_empty()
+    );
 
     store.shutdown().await.unwrap();
 }
@@ -1488,6 +1501,24 @@ async fn resource_snapshot_contains_all_kinds_sorted_and_non_secret() {
     assert!(!debug.contains("snapshot-secret"));
     let sidecar_debug = format!("{:?}", resource_sidecar(provider.id, b"sidecar-secret"));
     assert!(!sidecar_debug.contains("sidecar-secret"));
+    store
+        .apply_batch(
+            mutation_id(81),
+            vec![StateOp::CreateMount(MountDocument {
+                name: MountName::new("legacy-only").unwrap(),
+                provider,
+                credential: None,
+                limits: None,
+                config: serde_json::json!({}),
+            })],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.resource_snapshot().await.unwrap().resources,
+        desired,
+        "legacy batches cannot rewrite desired state after declarative apply"
+    );
     store.shutdown().await.unwrap();
 }
 

@@ -133,6 +133,46 @@ impl Db<'_> {
         .await
     }
 
+    /// Keep the temporary imperative mutation surface restart-safe until its
+    /// Plan 009 removal. Once any declarative apply receipt exists, that API
+    /// owns desired state and legacy batches must not rewrite it.
+    pub(crate) async fn sync_legacy_resources_if_unclaimed(
+        &mut self,
+        mutation_id: MutationId,
+    ) -> anyhow::Result<()> {
+        let receipt_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM apply_receipts")
+            .fetch_one(self.raw())
+            .await
+            .context("count declarative resource receipts")?;
+        if receipt_count != 0 {
+            return Ok(());
+        }
+
+        let desired = NormalizedResourceSet::new(legacy_resource_definitions(self.raw()).await?)
+            .context("normalize legacy resource mirror")?;
+        let current = read_resource_snapshot(self.raw()).await?;
+        if current.desired_digest == desired.digest() {
+            return Ok(());
+        }
+        let revision = current
+            .revision
+            .next()
+            .context("legacy resource mirror revision exhausted")?;
+        let changes = plan(&current.resources, &desired);
+        apply_resource_row_changes(self.raw(), &changes, &desired, revision, mutation_id).await?;
+        sqlx::query(
+            "UPDATE resource_state \
+             SET revision = ?1, desired_digest = ?2, updated_at = unixepoch() \
+             WHERE singleton = 1 AND initialized = 1",
+        )
+        .bind(sql_int(revision.get(), "resource revision")?)
+        .bind(desired.digest().as_bytes().as_slice())
+        .execute(self.raw())
+        .await
+        .context("advance mirrored legacy resource state")?;
+        Ok(())
+    }
+
     async fn apply_resources_in_transaction(
         &mut self,
         request: ResourceApplyRequest,
@@ -174,36 +214,14 @@ impl Db<'_> {
             .next()
             .context("resource revision exhausted")?;
 
-        for kind in [
-            ResourceKind::Mount,
-            ResourceKind::Attachment,
-            ResourceKind::Credential,
-            ResourceKind::Provider,
-        ] {
-            for change in changes
-                .iter()
-                .filter(|change| change.action == ResourceChangeAction::Delete)
-                .filter(|change| change.key.kind == kind)
-            {
-                delete_resource(self.raw(), &change.key.name, kind).await?;
-            }
-        }
-
-        let changed_keys: BTreeSet<_> = changes
-            .iter()
-            .filter(|change| {
-                matches!(
-                    change.action,
-                    ResourceChangeAction::Create | ResourceChangeAction::Update
-                )
-            })
-            .map(|change| change.key.clone())
-            .collect();
-        for resource in request.desired.resources() {
-            if changed_keys.contains(&resource.key()) {
-                write_resource(self.raw(), resource, revision, request.mutation_id).await?;
-            }
-        }
+        apply_resource_row_changes(
+            self.raw(),
+            &changes,
+            &request.desired,
+            revision,
+            request.mutation_id,
+        )
+        .await?;
         for sidecar in request.credential_secrets {
             self.submit_credential_row(sidecar.document, request.mutation_id)
                 .await
@@ -393,6 +411,48 @@ async fn read_attachment_resources(
             "attachment resource `{name_text}` name does not match canonical bytes"
         );
         resources.push(ResourceDefinition::Attachment(definition));
+    }
+    Ok(())
+}
+
+async fn apply_resource_row_changes(
+    connection: &mut SqliteConnection,
+    changes: &[omnifs_api::ResourceChange],
+    desired: &NormalizedResourceSet,
+    revision: ResourceRevision,
+    mutation_id: MutationId,
+) -> anyhow::Result<()> {
+    let changed_keys: BTreeSet<_> = changes
+        .iter()
+        .filter(|change| {
+            matches!(
+                change.action,
+                ResourceChangeAction::Create | ResourceChangeAction::Update
+            )
+        })
+        .map(|change| change.key.clone())
+        .collect();
+    // Normalized resources are dependency ordered. Upsert new parents and
+    // retarget children before deleting obsolete rows, so provider or
+    // credential renames never violate the foreign-key graph mid-transaction.
+    for resource in desired.resources() {
+        if changed_keys.contains(&resource.key()) {
+            write_resource(connection, resource, revision, mutation_id).await?;
+        }
+    }
+    for kind in [
+        ResourceKind::Mount,
+        ResourceKind::Attachment,
+        ResourceKind::Credential,
+        ResourceKind::Provider,
+    ] {
+        for change in changes
+            .iter()
+            .filter(|change| change.action == ResourceChangeAction::Delete)
+            .filter(|change| change.key.kind == kind)
+        {
+            delete_resource(connection, &change.key.name, kind).await?;
+        }
     }
     Ok(())
 }

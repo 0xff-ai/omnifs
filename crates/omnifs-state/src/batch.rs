@@ -100,6 +100,7 @@ impl Db<'_> {
         if touches_mounts {
             self.advance_mount_revision(revision).await?;
         }
+        self.sync_legacy_resources_if_unclaimed(mutation_id).await?;
         Ok(outcomes)
     }
 
