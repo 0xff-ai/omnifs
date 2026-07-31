@@ -295,7 +295,7 @@ pub(crate) async fn wait_for_revision(
         .await
         .with_context(|| format!("watch desired revision {revision}"))?;
     let mut latest_snapshot = None;
-    let mut renderer = ProgressRenderer::new(output);
+    let mut renderer = ProgressRenderer::default();
     loop {
         let event = next_event(&mut watch, revision_follow_hint(revision)).await?;
         let Some(event) = event else {
@@ -354,7 +354,7 @@ async fn wait_for_action(
         .watch_progress(ProgressTarget::Action(action_id))
         .await
         .with_context(|| format!("watch action {action_id}"))?;
-    let mut renderer = ProgressRenderer::new(output);
+    let mut renderer = ProgressRenderer::default();
     loop {
         let event = next_event(&mut watch, action_follow_hint(action_id)).await?;
         let Some(event) = event else {
@@ -401,7 +401,7 @@ async fn follow_current(
         .watch_progress(ProgressTarget::Current)
         .await
         .context("watch current daemon progress")?;
-    let mut renderer = ProgressRenderer::new(output);
+    let mut renderer = ProgressRenderer::default();
     loop {
         let event = tokio::select! {
         signal = tokio::signal::ctrl_c() => {
@@ -455,24 +455,27 @@ fn action_follow_hint(action_id: ActionId) -> String {
 }
 
 fn random_mutation_id() -> anyhow::Result<MutationId> {
+    Ok(MutationId::from_bytes(random_id_bytes()?))
+}
+
+pub(crate) fn random_action_id() -> anyhow::Result<ActionId> {
+    Ok(ActionId::from_bytes(random_id_bytes()?))
+}
+
+fn random_id_bytes() -> anyhow::Result<[u8; 16]> {
     let mut bytes = [0_u8; 16];
     fill(&mut bytes)
         .map_err(|error| anyhow::anyhow!(error))
-        .context("generate resource mutation id")?;
-    Ok(MutationId::from_bytes(bytes))
+        .context("generate operation id")?;
+    Ok(bytes)
 }
 
+#[derive(Default)]
 struct ProgressRenderer {
     last_stage: BTreeMap<String, &'static str>,
 }
 
 impl ProgressRenderer {
-    fn new(_output: &Output) -> Self {
-        Self {
-            last_stage: BTreeMap::new(),
-        }
-    }
-
     fn should_render(&mut self, key: String, stage: &'static str) -> bool {
         self.last_stage.insert(key, stage) != Some(stage)
     }

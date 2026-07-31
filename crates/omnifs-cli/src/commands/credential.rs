@@ -275,7 +275,7 @@ async fn submit_material_action(
     material: CredentialMaterial,
     overrides: CredentialClientOverrides,
 ) -> anyhow::Result<ExitCode> {
-    let action_id = random_action_id()?;
+    let action_id = resource_flow::random_action_id()?;
     let follow = action_follow(action_id);
     output.narrate(format!(
         "Credential action `{action_id}` will continue in the daemon."
@@ -328,7 +328,7 @@ pub(crate) async fn revoke_named(name: ResourceName, output: Output) -> anyhow::
         Decision::DryRun => unreachable!("credential revoke has no dry-run mode"),
     }
 
-    let action_id = random_action_id()?;
+    let action_id = resource_flow::random_action_id()?;
     let follow = action_follow(action_id);
     output.narrate(format!(
         "Credential action `{action_id}` will continue in the daemon."
@@ -711,14 +711,6 @@ fn env_secret(variable: &str, value: std::ffi::OsString) -> anyhow::Result<Secre
         "environment variable ${variable} is empty"
     );
     Ok(SecretString::from(value.to_owned()))
-}
-
-fn random_action_id() -> anyhow::Result<ActionId> {
-    let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| anyhow!(error))
-        .context("generate credential action id")?;
-    Ok(ActionId::from_bytes(bytes))
 }
 
 fn action_follow(action_id: ActionId) -> String {

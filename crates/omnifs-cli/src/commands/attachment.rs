@@ -13,8 +13,8 @@ use omnifs_api::{
 };
 use omnifs_bootstrap::Profile;
 use omnifs_core::{
-    ATTACHMENT_GUEST_LOCATION, ActionId, AttachmentProtocol, AttachmentRuntime, AttachmentSpec,
-    ResourceKind, ResourceName, ResourceRevision,
+    ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceKind,
+    ResourceName, ResourceRevision,
 };
 use serde::Serialize;
 use std::fmt::{self, Write as _};
@@ -22,7 +22,7 @@ use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::commands::daemon_start;
+use crate::commands::{daemon_start, resource_flow};
 use crate::error::{ErrorVerdict, ExitCode, WithHint as _};
 use crate::rpc::RpcClient;
 use crate::ui::output::{Output, ResultVerdict};
@@ -339,7 +339,7 @@ async fn restart(args: NameArgs, output: Output) -> Result<ExitCode> {
         .with_context(|| format!("Attachment {name} is not desired"))?;
     let receipt = rpc
         .restart_attachment(&RestartAttachmentRequest {
-            action_id: random_action_id()?,
+            action_id: resource_flow::random_action_id()?,
             base_action_generation: status.action_generation,
             attachment: name,
         })
@@ -603,12 +603,6 @@ const fn attachment_phase(phase: omnifs_api::AttachmentPhase) -> &'static str {
         omnifs_api::AttachmentPhase::Failed => "failed",
         omnifs_api::AttachmentPhase::Deleting => "deleting",
     }
-}
-
-fn random_action_id() -> Result<ActionId> {
-    let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes).context("generate Attachment action id")?;
-    Ok(ActionId::from_bytes(bytes))
 }
 
 #[cfg(test)]
