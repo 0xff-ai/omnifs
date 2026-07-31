@@ -7,7 +7,9 @@ Credential, Mount, and Attachment resource set in SQLite. Clients read the
 current revision, submit a full candidate set to `PlanResources`, and commit
 it through `ApplyResources` with the base revision, expected digest, and a
 client-generated mutation ID. The durable receipt makes a lost reply safe to
-retry.
+retry. One versioned `resource_state` row stores the canonical complete set,
+its digest, and its revision. There are no per-kind desired tables, backfill
+readers, or compatibility migrations.
 
 `ApplyResources` ends after validation, one SQLite transaction, and a
 non-blocking reconcile wakeup. Provider fetch or compilation, credential
@@ -50,5 +52,6 @@ action ID owns the supplied material.
 Interactive commands and KCL automation converge on the same typed plan,
 apply, and progress path. KCL runs in process and serves only as temporary
 client interchange before strict Rust validation. The CLI owns prompts, local
-provider path resolution, secret collection, and rendering. It does not own
-desired state or filesystem runtime lifecycle.
+provider path resolution, secret collection, and rendering. Users author KCL
+directly; the CLI does not keep a second KCL renderer or schema asset. It does
+not own desired state or filesystem runtime lifecycle.

@@ -21,6 +21,14 @@ the CLI hides the work or returns at once. Mutation commands wait by default
 on `WatchProgress` and show typed stages until their revision or action reaches
 a terminal result.
 
+All numbered plans are complete. A post-cutover dry-down then removed the
+temporary compatibility work that the staged rollout needed: the legacy
+filesystem scanner, state backfills and incremental migrations, per-kind
+desired tables, generated KCL config and schema output, and duplicate planning
+and mount models. The numbered plans remain the record of the rollout gates;
+`AGENTS.md`, `docs/contracts/`, and `docs/architecture/` describe the final
+system.
+
 ## Execution order and status
 
 | Plan | Title | Priority | Effort | Depends on | Status |
@@ -69,8 +77,9 @@ control and CLI files and should run after its prerequisites are integrated.
 ## Step-by-step execution
 
 1. **Plan 001, define the target state.** Add strict resource and Attachment
-   types, deterministic digests, desired-state and receipt tables, and
-   migration tests. Keep old callers through explicit temporary conversions.
+   types, deterministic digests, desired-state storage, and durable receipts.
+   The final pre-alpha schema stores the complete desired set in one current
+   row and carries no compatibility reader.
 
 2. **Plan 002, add the fast commit boundary.** Add typed get, plan, and apply
    RPCs. Make apply end at one SQLite commit plus a non-blocking reconcile
@@ -94,8 +103,8 @@ control and CLI files and should run after its prerequisites are integrated.
 
 6. **Plan 006, delete the former client owner and narrow bootstrap.** **DONE.** Replace
    `Bootstrap<R>` with `Profile`, pass an explicit root into state, resolve one
-   daemon profile, add a read-only legacy scanner, and delete
-   `client_fs_state.rs`, its registry, claims, paths, config, and tests.
+   daemon profile, and delete `client_fs_state.rs`, its registry, claims,
+   paths, config, tests, and the temporary read-only scanner.
 
 7. **Plan 007, add KCL automation.** **DONE.** After every resource has a real progress
    publisher, evaluate KCL on the client, convert its result to strict Rust
@@ -186,9 +195,9 @@ that plan.
 - [x] `client_fs_state.rs`, active JSON registry, and per-ID claims removed
 - [x] Normal lifecycle creates no `client/filesystems` paths
 - [x] Metrics reads narrow profile config without constructing filesystem state
-- [x] Legacy client specs have one named read-only scanner
-- [x] Doctor holds the profile spawn lock and exact identity across legacy
-  runtime repair
+- [x] No legacy client desired-state reader remains
+- [x] Doctor holds the profile spawn lock and exact identity across
+  daemon-owned stray runtime repair
 - [x] Final cutover removes `client_state.rs`, `client_dir.rs`, owner ID, and
   mutation journal
 
@@ -199,7 +208,7 @@ that plan.
 - [x] No implicit remote package fetch
 - [x] Strict Rust types remain authoritative
 - [x] Local provider paths resolve only on the client
-- [x] `config init`, `config export`, `plan`, and `apply`
+- [x] Directly authored KCL works with `plan` and `apply`
 - [x] Interactive provider, mount, credential, and attachment commands
 - [x] One shared plan, consent, and receipt path
 - [x] Human and JSONL mutations stream progress and wait by default
@@ -216,9 +225,8 @@ that plan.
 
 ### Cutover
 
-- [x] Existing daemon mounts and credentials migrate deterministically
-- [x] Legacy detached client specs never auto-launch
-- [x] Legacy client specs are never edited or deleted by migration
+- [x] The current SQLite schema has no compatibility migrations or backfills
+- [x] Client-owned detached specs have no production reader
 - [x] Client mutation journal removed
 - [x] Mutation lease and six imperative ops removed
 - [x] Current docs and `AGENTS.md` updated only after code lands

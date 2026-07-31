@@ -1,5 +1,9 @@
 # Plan 006: Retire client filesystem state and narrow bootstrap
 
+> **Post-cutover note**: Complete. The temporary read-only legacy scanner was
+> removed after the ownership cutover; no client filesystem desired-state
+> reader remains.
+
 > **Executor instructions**: Read this plan in full before editing. Plans 001
 > through 005 must already be integrated. This plan deletes a former state
 > owner, so map every production caller before deleting the module. Run each

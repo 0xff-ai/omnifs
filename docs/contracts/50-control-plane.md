@@ -13,7 +13,7 @@ Read this before touching `omnifs-cli`, `omnifs-api`, `omnifs-bootstrap`, `omnif
 
 There is no shared workspace store. `omnifs-bootstrap::Profile` resolves one profile root from `OMNIFS_HOME` or `$HOME/.omnifs`, owns only fixed pre-RPC paths, and exposes `SpawnLock` and exact `DaemonIdentity` operations.
 
-The CLI owns user-facing commands, OAuth and static-auth UX, profile config, metrics, daemon spawn, and resource authoring. Interactive provider, mount, credential, and attachment commands edit the complete desired resource set through `PlanResources` and `ApplyResources`, then follow `WatchProgress` or a durable action stream. KCL `plan` and `apply --yes` are the automation path; `credential set --from-env` is the only narrow secret automation command. It sends every write through typed local RPC and keeps no desired-state journal. A strict read-only scanner may report legacy detached filesystem specs; it never launches, edits, or deletes them.
+The CLI owns user-facing commands, OAuth and static-auth UX, profile config, metrics, daemon spawn, and resource authoring. Interactive provider, mount, credential, and attachment commands edit the complete desired resource set through `PlanResources` and `ApplyResources`, then follow `WatchProgress` or a durable action stream. KCL `plan` and `apply --yes` are the automation path; `credential set --from-env` is the only narrow secret automation command. It sends every write through typed local RPC and keeps no desired-state journal or legacy desired-state reader.
 
 The daemon owns providers, credentials, mounts, desired resources, Attachment runtime state and lifecycle, SQLite state and cache, attach endpoints, live VFS sessions, and raw log bytes. Its durable state is under `<profile>/daemon-state/`: `control-store/state.sqlite3`, `cache/`, `runtime/attachments/`, `staging/`, `logs/`, and the engine projection, Wasmtime, clone, and guest-image caches. The daemon never reads client files or chooses client configuration.
 
@@ -77,7 +77,7 @@ CLI dogfood metrics are local client files under `<profile>/metrics/`, controlle
 - Reintroduce `omnifs-workspace`, a shared workspace API, client-side mount desired state, Git refs, immutable mount snapshots, `daemon.json`, or JSON credential storage.
 - Add `up`, an imperative mutation path separate from the resource planner, or an offline product mode. `omnifs apply` is the KCL complete-set apply command.
 - Send credentials through filesystem attach/TCP or expose them in RPC replies, status, inventory, logs, tracing, metrics, Debug, Inspector, or receipts.
-- Make the daemon read legacy detached specs or config, make normal lifecycle write a client-owned filesystem tree, or make the CLI read daemon SQLite tables and logs directly.
+- Make the daemon read client-owned desired state or config, make normal lifecycle write a client-owned filesystem tree, or make the CLI read daemon SQLite tables and logs directly.
 - Add a remote control endpoint or TCP authentication mode. TCP attach remains local loopback or the detected Docker bridge without auth.
 - Clear observed Attachment identity or a deletion tombstone before exact runtime and session teardown is proved.
 
@@ -86,7 +86,6 @@ CLI dogfood metrics are local client files under `<profile>/metrics/`, controlle
 - `crates/omnifs-bootstrap/src/lib.rs`
 - `crates/omnifs-api/src/control.rs`
 - `crates/omnifs-cli/src/rpc.rs`
-- `crates/omnifs-cli/src/legacy_filesystems.rs`
 - `crates/omnifs-inspector/src/lib.rs`
 - `crates/omnifs-daemon/src/app.rs`
 - `crates/omnifs-daemon/src/control.rs` and `crates/omnifs-daemon/src/control/`

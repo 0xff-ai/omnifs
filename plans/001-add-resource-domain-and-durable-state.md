@@ -1,5 +1,9 @@
 # Plan 001: Add the typed resource domain and durable desired state
 
+> **Post-cutover note**: Complete. The final pre-alpha store squashes the
+> rollout migrations and backfill into one current schema and one canonical
+> complete-set `resource_state` row.
+
 > **Executor instructions**: Follow this plan step by step. Run every
 > verification command and confirm the expected result before moving to the
 > next step. If anything in the "STOP conditions" section occurs, stop and

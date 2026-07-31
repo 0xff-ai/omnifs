@@ -1,5 +1,9 @@
 # Plan 009: Remove the legacy control plane and finish the migration
 
+> **Post-cutover note**: Complete. The final dry-down also removed the
+> temporary legacy scanner and all compatibility migrations, backfills, and
+> per-kind desired-state tables.
+
 > **Executor instructions**: This is the deletion and contract-update plan.
 > Confirm every new path is live before deleting an old one. Run the broad and
 > live gates. Stop if any production caller still uses a legacy symbol. Update

@@ -40,14 +40,14 @@ action.
 KCL is the automation surface:
 
 ```bash
-omnifs config init > omnifs.k
 omnifs plan omnifs.k
 omnifs apply omnifs.k --yes
 ```
 
-The client evaluates KCL in process and converts its result to strict Rust
-resource types. KCL never contains secrets. Static-token automation uses only
-`omnifs credential set NAME --from-env VARIABLE`.
+Author `omnifs.k` as the desired resource set. The client evaluates it in
+process and converts its result to strict Rust resource types. KCL never
+contains secrets. Static-token automation uses only `omnifs credential set
+NAME --from-env VARIABLE`.
 
 ## Attachments
 

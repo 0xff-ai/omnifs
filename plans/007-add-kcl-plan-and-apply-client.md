@@ -1,5 +1,9 @@
 # Plan 007: Add the KCL plan and apply client
 
+> **Post-cutover note**: Complete. KCL remains an in-process input for `plan`
+> and `apply`. The unused generated schema asset and `config init|export`
+> renderer were removed; users author the desired file directly.
+
 > **Executor instructions**: Start with the feasibility gate. Do not add KCL
 > through a subprocess or substitute another language if the named Rust API is
 > blocked. Stop and report under the conditions below. Update this plan's
