@@ -23,7 +23,8 @@ pub use self::container::resolve_filesystem_image;
 use self::container::{
     FILESYSTEM_HOME_LABEL, FILESYSTEM_ID_LABEL, assert_locked_down, filesystem_command,
 };
-use crate::fs_runtime::driver::{LaunchRequest, ensure_identity_unchanged, err_after_rollback};
+use crate::fs_runtime::driver::{LaunchRequest, err_after_rollback};
+use crate::fs_runtime::identity::ensure_identity_unchanged;
 use crate::fs_runtime::{
     BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, RuntimeEvent, RuntimeEventSink, RuntimeStage,
     RuntimeState,

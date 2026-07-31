@@ -527,31 +527,6 @@ pub async fn owned_filesystems(
     candidates
 }
 
-pub(crate) fn ensure_record_matches(
-    record_filesystem: &ResourceName,
-    record_spec: &FilesystemSpec,
-    expected_filesystem: &ResourceName,
-    expected_spec: &FilesystemSpec,
-) -> Result<()> {
-    ensure!(
-        record_filesystem == expected_filesystem && record_spec == expected_spec,
-        "runner record does not match configured Filesystem `{expected_filesystem}`",
-    );
-    Ok(())
-}
-
-pub(crate) fn ensure_identity_unchanged<T: PartialEq>(
-    current: Option<&T>,
-    expected: &T,
-    noun: &str,
-) -> Result<()> {
-    ensure!(
-        current == Some(expected),
-        "{noun} identity changed; refusing to touch its replacement"
-    );
-    Ok(())
-}
-
 pub fn err_after_rollback<T>(primary: anyhow::Error, cleanup: Result<()>, what: &str) -> Result<T> {
     Err(match cleanup {
         Ok(()) => primary,
@@ -757,32 +732,6 @@ mod tests {
         assert_eq!(filesystem.libkrun_root(), root.join("state/work/libkrun"));
         assert_eq!(filesystem.guest_image_cache(), root.join("guest-images"));
         assert_eq!(filesystem.executable(), root.join("omnifs"));
-    }
-
-    #[test]
-    fn record_and_runtime_identity_rechecks_fail_closed() {
-        let recorded = spec(
-            FilesystemRuntime::Host,
-            FilesystemProtocol::Nfs,
-            "/tmp/recorded",
-        );
-        let configured = spec(
-            FilesystemRuntime::Host,
-            FilesystemProtocol::Nfs,
-            "/tmp/configured",
-        );
-        assert!(
-            ensure_record_matches(&name(), &recorded, &name(), &configured)
-                .unwrap_err()
-                .to_string()
-                .contains("runner record does not match")
-        );
-        assert!(
-            ensure_identity_unchanged(Some(&2_u8), &1_u8, "runner")
-                .unwrap_err()
-                .to_string()
-                .contains("refusing to touch its replacement")
-        );
     }
 
     #[test]

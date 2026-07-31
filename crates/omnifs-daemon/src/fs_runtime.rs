@@ -11,6 +11,7 @@ mod driver;
 mod events;
 mod guest_image;
 mod host;
+mod identity;
 mod image;
 mod libkrun;
 mod process;

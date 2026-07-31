@@ -1,6 +1,7 @@
 //! Host filesystem launch, runner probing, and control.
 
-use crate::fs_runtime::driver::{LaunchRequest, ensure_identity_unchanged, ensure_record_matches};
+use crate::fs_runtime::driver::LaunchRequest;
+use crate::fs_runtime::identity::{ensure_identity_unchanged, ensure_record_matches};
 use crate::fs_runtime::{Candidate, RuntimeEvent, RuntimeEventSink, RuntimeStage, RuntimeState};
 use anyhow::{Context as _, Result, ensure};
 use omnifs_core::{FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName};

@@ -51,7 +51,8 @@ use omnifs_libkrun::{
 };
 use tokio::io::AsyncReadExt as _;
 
-use crate::fs_runtime::driver::{LaunchRequest, ensure_identity_unchanged, err_after_rollback};
+use crate::fs_runtime::driver::{LaunchRequest, err_after_rollback};
+use crate::fs_runtime::identity::ensure_identity_unchanged;
 use crate::fs_runtime::process::is_alive as process_alive;
 use crate::fs_runtime::{
     BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, RuntimeEvent, RuntimeEventSink, RuntimeStage,
