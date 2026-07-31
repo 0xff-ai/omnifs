@@ -729,7 +729,7 @@ mod tests {
         let attachment = paths.attachment(&name);
         assert_eq!(attachment.state_dir(), root.join("state/work"));
         assert_eq!(attachment.host_log(), root.join("logs/work.log"));
-        assert_eq!(attachment.libkrun_root(), root.join("runtime/work/libkrun"));
+        assert_eq!(attachment.libkrun_root(), root.join("state/work/libkrun"));
         assert_eq!(attachment.guest_image_cache(), root.join("guest-images"));
         assert_eq!(attachment.executable(), root.join("omnifs"));
     }
