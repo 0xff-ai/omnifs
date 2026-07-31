@@ -210,13 +210,7 @@ pub struct RuntimeDriver {
 
 /// A live instance whose exact runtime identity was proved.
 pub enum ConfirmedRuntime {
-    Host(
-        omnifs_mtab::RunnerRecord,
-        // The crate fold made this field's non-use provable (previously the
-        // pub API of a separate crate hid it from dead-code analysis).
-        // Retained verbatim pending a decision on removal.
-        #[allow(dead_code)] omnifs_thin::host_control::RunnerPhase,
-    ),
+    Host(omnifs_mtab::RunnerRecord),
     Docker(DockerContainerIdentity, bool),
     Libkrun(omnifs_libkrun::HelperRecord, bool),
 }
@@ -225,7 +219,7 @@ impl ConfirmedRuntime {
     #[must_use]
     pub fn runtime_instance(&self) -> &str {
         match self {
-            Self::Host(record, _) => &record.instance_id,
+            Self::Host(record) => &record.instance_id,
             Self::Docker(identity, _) => &identity.runtime_instance,
             Self::Libkrun(record, _) => &record.instance_id,
         }
@@ -239,7 +233,7 @@ impl ConfirmedRuntime {
     #[must_use]
     pub const fn is_running(&self) -> bool {
         match self {
-            Self::Host(_, _) => true,
+            Self::Host(_) => true,
             Self::Docker(_, running) | Self::Libkrun(_, running) => *running,
         }
     }
@@ -308,21 +302,6 @@ impl RuntimeDriver {
         })
     }
 
-    // The crate fold made these accessors' non-use provable (previously the
-    // pub API of a separate crate hid them from dead-code analysis).
-    // Retained verbatim pending a decision on removal.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn spec(&self) -> &FilesystemSpec {
-        &self.spec
-    }
-
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn filesystem(&self) -> &ResourceName {
-        &self.filesystem
-    }
-
     pub async fn confirmed(
         &self,
         runtime_instance: &str,
@@ -333,12 +312,12 @@ impl RuntimeDriver {
                 .await
                 .and_then(|value| {
                     value
-                        .map(|(record, phase)| {
+                        .map(|(record, _phase)| {
                             ensure!(
                                 record.instance_id == runtime_instance,
                                 "host runtime instance changed before exact confirmation"
                             );
-                            Ok(ConfirmedRuntime::Host(record, phase))
+                            Ok(ConfirmedRuntime::Host(record))
                         })
                         .transpose()
                 }),
@@ -390,7 +369,7 @@ impl RuntimeDriver {
             state: RuntimeState::Stopping,
         });
         let result: anyhow::Result<()> = match (&self.backend, confirmed) {
-            (Backend::Host(runner), ConfirmedRuntime::Host(record, _)) => {
+            (Backend::Host(runner), ConfirmedRuntime::Host(record)) => {
                 runner.stop_confirmed(&record).await
             },
             (Backend::Docker(client), ConfirmedRuntime::Docker(identity, _)) => {
@@ -487,15 +466,6 @@ impl RuntimeDriver {
                 Some(client.shell_command(interactive, shell_override, trailing))
             },
             Backend::Libkrun(runner) => Some(runner.shell_command(shell_override, trailing)),
-        }
-    }
-
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn container_name(&self) -> Option<&str> {
-        match &self.backend {
-            Backend::Docker(client) => Some(client.container_name().as_str()),
-            Backend::Host(_) | Backend::Libkrun(_) => None,
         }
     }
 }

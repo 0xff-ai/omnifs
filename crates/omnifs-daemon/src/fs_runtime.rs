@@ -1,6 +1,6 @@
 //! Out-of-process filesystem runtime mechanisms.
 //!
-//! This crate owns exact host-process, Docker-container, and libkrun-helper
+//! This module owns exact host-process, Docker-container, and libkrun-helper
 //! identity, launch, probe, stop, and stale-cleanup operations. Callers own
 //! desired state, retry policy, daemon RPC, profile resolution, and terminal
 //! output. Every path enters through [`RuntimePaths`], while exact runtime
