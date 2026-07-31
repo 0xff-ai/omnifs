@@ -653,15 +653,18 @@ async function applyDevConfig(
   const code = await child.exited;
   const envelope = JSON.parse(stdout) as {
     verdict: string;
-    result?: { committedRevision: number };
+    result?: { receipt?: { revision: number } };
     error?: {
       id: string;
       message: string;
-      details?: { committedRevision: number };
+      details?: { receipt?: { revision: number } };
     };
   };
-  if (code === 0 && envelope.result) {
-    return String(envelope.result.committedRevision);
+  const revision =
+    envelope.result?.receipt?.revision ??
+    envelope.error?.details?.receipt?.revision;
+  if (code === 0 && revision !== undefined) {
+    return String(revision);
   }
   // A declaration may need credential material before the revision can
   // serve. Apply has still committed the exact desired set. Continue only
@@ -669,10 +672,10 @@ async function applyDevConfig(
   // then follow the same revision below.
   if (
     envelope.error?.id === "reconcile-failed" &&
-    envelope.error.details?.committedRevision !== undefined &&
+    revision !== undefined &&
     credentialNames.some((name) => envelope.error?.message.includes(name))
   ) {
-    return String(envelope.error.details.committedRevision);
+    return String(revision);
   }
   throw new Error(
     `declarative apply failed with status ${code}: ${stdout.trim()}`,
