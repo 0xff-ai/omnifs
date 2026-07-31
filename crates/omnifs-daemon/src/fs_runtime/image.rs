@@ -48,6 +48,22 @@ pub const BUILD_CHANNEL: BuildChannel = match option_env!("OMNIFS_RELEASE") {
     None => BuildChannel::Dev,
 };
 
+/// The explicit > env > config > default precedence chain shared by every
+/// runtime image resolver: an explicit override wins if given, else the
+/// named environment variable, else the profile's configured value, else the
+/// build-channel default.
+pub(crate) fn resolve_image_reference(
+    explicit: Option<String>,
+    env_var: &str,
+    configured: Option<&str>,
+    default: &'static str,
+) -> String {
+    explicit
+        .or_else(|| std::env::var(env_var).ok())
+        .or_else(|| configured.map(str::to_owned))
+        .unwrap_or_else(|| default.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageRef(String);
 

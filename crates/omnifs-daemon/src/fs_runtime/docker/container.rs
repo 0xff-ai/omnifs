@@ -55,10 +55,12 @@ pub fn resolve_filesystem_image(
     image: Option<String>,
     configured: Option<&str>,
 ) -> anyhow::Result<ImageRef> {
-    let image = image
-        .or_else(|| std::env::var(ENV_FILESYSTEM_IMAGE).ok())
-        .or_else(|| configured.map(str::to_owned))
-        .unwrap_or_else(|| default_filesystem_image_for(BUILD_CHANNEL).to_string());
+    let image = crate::fs_runtime::image::resolve_image_reference(
+        image,
+        ENV_FILESYSTEM_IMAGE,
+        configured,
+        default_filesystem_image_for(BUILD_CHANNEL),
+    );
     ImageRef::new(image)
 }
 

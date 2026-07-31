@@ -478,10 +478,12 @@ async fn resolve_guest_image(
 /// submitted it. Materialization and validation remain daemon-owned.
 #[must_use]
 pub fn resolve_guest_image_reference(configured: Option<&str>) -> String {
-    std::env::var(ENV_GUEST_IMAGE)
-        .ok()
-        .or_else(|| configured.map(str::to_owned))
-        .unwrap_or_else(|| default_guest_image_for(BUILD_CHANNEL).to_string())
+    crate::fs_runtime::image::resolve_image_reference(
+        None,
+        ENV_GUEST_IMAGE,
+        configured,
+        default_guest_image_for(BUILD_CHANNEL),
+    )
 }
 
 /// Owns one Libkrun launch from replacement through readiness publication.
