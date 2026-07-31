@@ -54,8 +54,8 @@ use tokio::io::AsyncReadExt as _;
 use crate::fs_runtime::driver::{LaunchRequest, ensure_identity_unchanged, err_after_rollback};
 use crate::fs_runtime::process::is_alive as process_alive;
 use crate::fs_runtime::{
-    BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, RuntimeAdvice, RuntimeEvent,
-    RuntimeEventSink, RuntimeStage, RuntimeState, advise,
+    BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, RuntimeEvent, RuntimeEventSink, RuntimeStage,
+    RuntimeState,
 };
 
 const SSH_KEY_NAME: &str = "id_ed25519";
@@ -462,9 +462,9 @@ async fn resolve_guest_image(
         },
     };
     if !path.is_file() {
-        return Err(advise(
-            anyhow::anyhow!("guest image not found at {}", path.display()),
-            RuntimeAdvice::BuildGuestImage,
+        return Err(anyhow::anyhow!(
+            "guest image not found at {}; run `just guest-image` to build it",
+            path.display()
         ));
     }
     Ok(path)

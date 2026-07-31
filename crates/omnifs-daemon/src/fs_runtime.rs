@@ -15,8 +15,6 @@ mod image;
 mod libkrun;
 mod process;
 
-use std::path::PathBuf;
-
 pub use docker::{
     DockerClient, DockerContainerIdentity, DockerTarget, ImageInspection, OwnedFilesystemContainer,
     resolve_filesystem_image,
@@ -38,59 +36,14 @@ pub(crate) use events::{
 #[error("{source:#}")]
 pub struct RuntimeError {
     stage: RuntimeStage,
-    advice: Vec<RuntimeAdvice>,
     #[source]
     source: anyhow::Error,
-}
-
-/// Machine-readable remediation facts. The caller owns their wording.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeAdvice {
-    Diagnose,
-    DiagnoseAlternative,
-    HostLog(PathBuf),
-    StartDocker,
-    BuildFilesystemImage,
-    ConfigureFilesystemImage,
-    BuildGuestImage,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("{source}")]
-struct AdvisedError {
-    advice: Vec<RuntimeAdvice>,
-    #[source]
-    source: anyhow::Error,
-}
-
-pub(crate) fn advise(source: anyhow::Error, advice: RuntimeAdvice) -> anyhow::Error {
-    match source.downcast::<AdvisedError>() {
-        Ok(mut advised) => {
-            advised.advice.insert(0, advice);
-            anyhow::Error::new(advised)
-        },
-        Err(source) => anyhow::Error::new(AdvisedError {
-            advice: vec![advice],
-            source,
-        }),
-    }
 }
 
 impl RuntimeError {
     #[must_use]
     pub fn new(stage: RuntimeStage, source: anyhow::Error) -> Self {
-        match source.downcast::<AdvisedError>() {
-            Ok(advised) => Self {
-                stage,
-                advice: advised.advice,
-                source: advised.source,
-            },
-            Err(source) => Self {
-                stage,
-                advice: Vec::new(),
-                source,
-            },
-        }
+        Self { stage, source }
     }
 
     #[must_use]
@@ -104,38 +57,7 @@ impl RuntimeError {
     }
 
     #[must_use]
-    pub fn advice(&self) -> &[RuntimeAdvice] {
-        &self.advice
-    }
-
-    #[must_use]
     pub fn into_source(self) -> anyhow::Error {
         self.source
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn runtime_error_keeps_structured_advice_in_emission_order() {
-        let source = advise(
-            advise(
-                anyhow::anyhow!("Docker is unavailable"),
-                RuntimeAdvice::DiagnoseAlternative,
-            ),
-            RuntimeAdvice::StartDocker,
-        );
-        let error = RuntimeError::new(RuntimeStage::StartContainer, source);
-
-        assert_eq!(
-            error.advice(),
-            &[
-                RuntimeAdvice::StartDocker,
-                RuntimeAdvice::DiagnoseAlternative,
-            ]
-        );
-        assert_eq!(error.to_string(), "Docker is unavailable");
     }
 }

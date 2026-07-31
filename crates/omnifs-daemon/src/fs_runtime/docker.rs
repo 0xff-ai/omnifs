@@ -25,8 +25,8 @@ use self::container::{
 };
 use crate::fs_runtime::driver::{LaunchRequest, ensure_identity_unchanged, err_after_rollback};
 use crate::fs_runtime::{
-    BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, RuntimeAdvice, RuntimeEvent,
-    RuntimeEventSink, RuntimeStage, RuntimeState, advise,
+    BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, RuntimeEvent, RuntimeEventSink, RuntimeStage,
+    RuntimeState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -161,13 +161,7 @@ impl DockerClient {
         });
         self.ping()
             .await
-            .context("Docker daemon did not respond (is Docker running?)")
-            .map_err(|error| {
-                advise(
-                    advise(error, RuntimeAdvice::DiagnoseAlternative),
-                    RuntimeAdvice::StartDocker,
-                )
-            })?;
+            .context("Docker daemon did not respond (is Docker running?)")?;
         #[cfg(target_os = "linux")]
         let expected_ip = self.filesystem_attach_bind_ip().await?;
         #[cfg(not(target_os = "linux"))]
@@ -830,12 +824,13 @@ impl DockerClient {
                     state: crate::fs_runtime::ImageState::Missing,
                 });
                 let image = self.image();
-                let error = anyhow!(BUILD_CHANNEL.pull_refusal_reason())
-                    .context(format!("image `{image}` is not present locally"));
-                Err(advise(
-                    advise(error, RuntimeAdvice::ConfigureFilesystemImage),
-                    RuntimeAdvice::BuildFilesystemImage,
-                ))
+                Err(
+                    anyhow!(BUILD_CHANNEL.pull_refusal_reason()).context(format!(
+                        "image `{image}` is not present locally; run `just filesystem-image` to \
+                     build it, or set `OMNIFS_FILESYSTEM_IMAGE` (or the profile's configured \
+                     filesystem image)"
+                    )),
+                )
             },
             Err(bollard::errors::Error::DockerResponseServerError {
                 status_code: 404, ..

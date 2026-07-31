@@ -1,9 +1,7 @@
 //! Host filesystem launch, runner probing, and control.
 
 use crate::fs_runtime::driver::{LaunchRequest, ensure_identity_unchanged, ensure_record_matches};
-use crate::fs_runtime::{
-    Candidate, RuntimeAdvice, RuntimeEvent, RuntimeEventSink, RuntimeStage, RuntimeState, advise,
-};
+use crate::fs_runtime::{Candidate, RuntimeEvent, RuntimeEventSink, RuntimeStage, RuntimeState};
 use anyhow::{Context as _, Result, ensure};
 use omnifs_core::{FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName};
 use omnifs_mtab::{RunnerClaim, RunnerRecord};
@@ -82,12 +80,10 @@ impl HostDriver {
         let mount_point = spec.location();
         let Some(record) = RunnerRecord::read(&self.state_dir)? else {
             if omnifs_nfs::mount_is_active_checked(mount_point)? {
-                return Err(advise(
-                    anyhow::anyhow!(
-                        "host filesystem state exists at {} without a runner record",
-                        mount_point.display()
-                    ),
-                    RuntimeAdvice::Diagnose,
+                return Err(anyhow::anyhow!(
+                    "host filesystem state exists at {} without a runner record; run `omnifs \
+                     doctor` to diagnose",
+                    mount_point.display()
                 ));
             }
             return Ok(None);
@@ -98,12 +94,12 @@ impl HostDriver {
             .await
             .with_context(|| {
                 format!(
-                    "host filesystem at {} could not confirm runner {}",
+                    "host filesystem at {} could not confirm runner {}; run `omnifs doctor` to \
+                     diagnose",
                     mount_point.display(),
                     record.instance_id
                 )
-            })
-            .map_err(|error| advise(error, RuntimeAdvice::Diagnose))?;
+            })?;
         Ok(Some((record, state.phase)))
     }
 
@@ -341,12 +337,10 @@ impl PendingHostFilesystem {
                         .try_wait()
                         .context("inspect host filesystem process")?
                     {
-                        return Err(advise(
-                            anyhow::anyhow!(
-                                "host filesystem `{}` exited with {status}",
-                                wait.filesystem
-                            ),
-                            RuntimeAdvice::HostLog(wait.pending.log_path.clone()),
+                        return Err(anyhow::anyhow!(
+                            "host filesystem `{}` exited with {status}; see {}",
+                            wait.filesystem,
+                            wait.pending.log_path.display()
                         ));
                     }
                     match RunnerRecord::read(&wait.pending.state_dir) {
@@ -362,12 +356,10 @@ impl PendingHostFilesystem {
                                 match state.phase {
                                     RunnerPhase::Mounted => return Ok(Some(())),
                                     RunnerPhase::Failed { message } => {
-                                        return Err(advise(
-                                            anyhow::anyhow!(
-                                                "host filesystem `{}` failed: {message}",
-                                                wait.filesystem
-                                            ),
-                                            RuntimeAdvice::HostLog(wait.pending.log_path.clone()),
+                                        return Err(anyhow::anyhow!(
+                                            "host filesystem `{}` failed: {message}; see {}",
+                                            wait.filesystem,
+                                            wait.pending.log_path.display()
                                         ));
                                     },
                                     RunnerPhase::Preflight
@@ -379,13 +371,11 @@ impl PendingHostFilesystem {
                             }
                         },
                         Ok(Some(record)) => {
-                            return Err(advise(
-                                anyhow::anyhow!(
-                                    "host filesystem state at {} belongs to runner {}",
-                                    wait.pending.state_dir.display(),
-                                    record.instance_id
-                                ),
-                                RuntimeAdvice::Diagnose,
+                            return Err(anyhow::anyhow!(
+                                "host filesystem state at {} belongs to runner {}; run `omnifs \
+                                 doctor` to diagnose",
+                                wait.pending.state_dir.display(),
+                                record.instance_id
                             ));
                         },
                         Ok(None) => {},
@@ -423,13 +413,11 @@ fn mount_startup_timeout(
     log_path: &Path,
 ) -> anyhow::Error {
     let phase = phase_label(last_phase);
-    advise(
-        anyhow::anyhow!(
-            "host filesystem `{filesystem}` did not confirm mount startup within {}s; \
-             last proved phase was {phase}; runner {instance_id} was left alive for safe cleanup",
-            STARTUP_TIMEOUT.as_secs(),
-        ),
-        RuntimeAdvice::HostLog(log_path.to_path_buf()),
+    anyhow::anyhow!(
+        "host filesystem `{filesystem}` did not confirm mount startup within {}s; last proved \
+         phase was {phase}; runner {instance_id} was left alive for safe cleanup; see {}",
+        STARTUP_TIMEOUT.as_secs(),
+        log_path.display(),
     )
 }
 
