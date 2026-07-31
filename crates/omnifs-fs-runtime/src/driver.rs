@@ -655,6 +655,7 @@ mod tests {
             .backend,
             Backend::Docker(_)
         ));
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         assert!(matches!(
             RuntimeDriver::new(
                 &paths,
@@ -670,6 +671,20 @@ mod tests {
             .backend,
             Backend::Libkrun(_)
         ));
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        assert!(
+            RuntimeDriver::new(
+                &paths,
+                name(),
+                spec(
+                    AttachmentRuntime::Libkrun,
+                    AttachmentProtocol::Fuse,
+                    ATTACHMENT_GUEST_LOCATION,
+                ),
+                events,
+            )
+            .is_err()
+        );
     }
 
     #[test]
