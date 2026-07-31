@@ -13,13 +13,17 @@ use tracing::info;
 pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     crate::init_tracing();
     let crate::RunnerArgs {
-        client_owner,
+        attachment,
         spec,
+        runtime_instance,
         state_dir,
         attach,
         port,
         host_control,
     } = args;
+    let filesystem = spec
+        .to_fs_spec(&attachment)
+        .context("convert the attachment to the filesystem runner spec")?;
     anyhow::ensure!(port == 0, "--port is valid only with --protocol nfs");
     let mount_point = spec.location().to_path_buf();
 
@@ -39,19 +43,20 @@ pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     let mut lifecycle = {
         let _runtime_guard = rt.enter();
         Lifecycle::prepare(LifecycleConfig {
-            spec: &spec,
+            spec: &filesystem,
             state_dir: state_dir.as_deref(),
             runner_control,
         })?
     };
-    preflight(&spec, state_dir.as_deref()).context("check the FUSE mount location")?;
+    preflight(&filesystem, state_dir.as_deref()).context("check the FUSE mount location")?;
     lifecycle.phase.send_replace(RunnerPhase::Attaching);
 
     let namespace = rt
         .block_on(WireNamespace::attach_with_teardown(
             target,
-            client_owner,
+            attachment,
             spec.clone(),
+            runtime_instance,
             handle.clone(),
             lifecycle.wire_teardown_tx.clone(),
         ))
@@ -93,7 +98,7 @@ pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
             let _ = mount_done_tx.send(result);
         })
         .context("start the FUSE mount owner")?;
-    let result = rt.block_on(coordinate_mount(&spec, &mut lifecycle, mount_done_rx));
+    let result = rt.block_on(coordinate_mount(&filesystem, &mut lifecycle, mount_done_rx));
     mount_thread
         .join()
         .map_err(|_| anyhow::anyhow!("FUSE mount owner panicked"))?;

@@ -1,27 +1,28 @@
-//! Named filesystem configuration and lifecycle.
+//! Transitional filesystem commands backed by daemon-owned Attachments.
 
+use std::fmt::Write as _;
 use std::io::IsTerminal as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use clap::{Args, Subcommand};
-use omnifs_core::{ClientOwnerId, fs};
-use omnifs_fs_runtime::{
-    AttachEndpoints, ConfirmedRuntime, RuntimeEvent, RuntimeEventSink, RuntimeStage, RuntimeState,
-    ensure_socat_available, err_after_rollback,
+use omnifs_api::{
+    API_VERSION, ActionPhase, ApplyResourcesRequest, AttachmentAccess, AttachmentDefinition,
+    AttachmentProgress, AttachmentProgressStage, GetAttachmentAccessRequest, ProgressEventKind,
+    ProgressSnapshot, ProgressTarget, ResourceDeclarations, ResourceDefinition, ResourcePhase,
+    RestartAttachmentRequest,
+};
+use omnifs_bootstrap::{Bootstrap, Client};
+use omnifs_core::{
+    ActionId, AttachmentSpec, MutationId, ResourceKind, ResourceName, ResourceRevision, fs,
 };
 use serde::Serialize;
 
-use crate::client_fs_state::ClientFilesystemState;
-use crate::error::{ExitCode, WithHint};
-use crate::filesystem_driver::{RuntimeEventRenderer, into_cli_error, runtime_driver};
+use crate::client_fs_state::{ClientFilesystemState, Registry};
+use crate::error::{ExitCode, WithExitCode as _, WithHint as _};
 use crate::rpc::RpcClient;
 use crate::ui::output::{Output, ResultVerdict};
-
-const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
-const POLL: Duration = Duration::from_millis(200);
 
 #[derive(Args, Debug)]
 pub struct FsArgs {
@@ -31,19 +32,19 @@ pub struct FsArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum FsCommand {
-    /// Create a named filesystem configuration
+    /// Create or update a desired filesystem Attachment
     Create(CreateArgs),
-    /// Remove a detached filesystem configuration
+    /// Remove a desired filesystem Attachment
     Rm(NameArgs),
-    /// Start and mount a configured filesystem
+    /// Ensure a desired filesystem Attachment is ready
     Attach(NameArgs),
-    /// Unmount and stop a configured filesystem
+    /// Remove a desired filesystem Attachment
     Detach(NameArgs),
-    /// Detach and attach a configured filesystem
+    /// Restart a desired filesystem Attachment
     Restart(NameArgs),
-    /// Enter or locate a running filesystem
+    /// Enter or locate a ready filesystem Attachment
     Shell(ShellArgs),
-    /// List configured filesystems and daemon attachment state
+    /// List desired Attachments and read-only legacy filesystem specs
     Ls,
 }
 
@@ -89,31 +90,41 @@ pub struct ShellArgs {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ActionResult {
-    filesystem: fs::Spec,
+    attachment: AttachmentDefinition,
     state: &'static str,
+    revision: Option<ResourceRevision>,
+    action_id: Option<ActionId>,
+    committed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct ListResult {
-    filesystems: Vec<ListRow>,
+    attachments: Vec<ListRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ListRow {
-    #[serde(flatten)]
-    spec: fs::Spec,
-    state: &'static str,
+    name: String,
+    protocol: fs::Protocol,
+    runtime: fs::Runtime,
+    location: PathBuf,
+    state: String,
+    legacy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 impl FsArgs {
     pub async fn run(self, output: Output) -> Result<ExitCode> {
         match self.command {
-            FsCommand::Create(args) => args.run(&output),
-            FsCommand::Rm(args) => rm(args, output).await,
-            FsCommand::Attach(args) => Box::pin(attach(args, output)).await,
-            FsCommand::Detach(args) => detach(args, output).await,
-            FsCommand::Restart(args) => Box::pin(restart(args, output)).await,
+            FsCommand::Create(args) => args.run(output).await,
+            FsCommand::Rm(args) => remove(args, output, "removed").await,
+            FsCommand::Attach(args) => attach(args, output).await,
+            FsCommand::Detach(args) => remove(args, output, "detached").await,
+            FsCommand::Restart(args) => restart(args, output).await,
             FsCommand::Shell(args) => shell(args, output).await,
             FsCommand::Ls => list(output).await,
         }
@@ -121,15 +132,17 @@ impl FsArgs {
 }
 
 impl CreateArgs {
-    fn run(self, output: &Output) -> Result<ExitCode> {
-        let client_state = ClientFilesystemState::resolve()?;
-        let spec = resolve_spec(&client_state, self)?;
-        client_state.registry().claim(spec.id())?.create(&spec)?;
-        finish_action(output, spec, "configured")
+    async fn run(self, output: Output) -> Result<ExitCode> {
+        let definition = resolve_definition(self)?;
+        crate::commands::daemon_start::start(&output).await?;
+        let rpc = RpcClient::resolve()?;
+        let revision = upsert_attachment(&rpc, definition.clone()).await?;
+        wait_for_revision(&rpc, revision, &output).await?;
+        finish_action(&output, definition, "ready", Some(revision), None, true)
     }
 }
 
-fn resolve_spec(client_state: &ClientFilesystemState, args: CreateArgs) -> Result<fs::Spec> {
+fn resolve_definition(args: CreateArgs) -> Result<AttachmentDefinition> {
     let (protocol, runtime) = resolve_pair(args.protocol, args.runtime)?;
     ensure!(
         supports(protocol, runtime),
@@ -137,10 +150,9 @@ fn resolve_spec(client_state: &ClientFilesystemState, args: CreateArgs) -> Resul
         std::env::consts::OS,
         std::env::consts::ARCH
     );
+    let name = ResourceName::new(args.name.as_str())?;
     let location = match runtime {
-        fs::Runtime::Host => args
-            .location
-            .unwrap_or_else(|| client_state.default_host_location(&args.name)),
+        fs::Runtime::Host => args.location.unwrap_or(default_host_location(&name)?),
         fs::Runtime::Docker | fs::Runtime::Libkrun => {
             ensure!(
                 args.location.is_none(),
@@ -149,7 +161,45 @@ fn resolve_spec(client_state: &ClientFilesystemState, args: CreateArgs) -> Resul
             PathBuf::from(fs::GUEST_LOCATION)
         },
     };
-    fs::Spec::new(args.name, protocol, runtime, location).map_err(Into::into)
+    let assets = legacy_profile_assets()?;
+    let docker_image = if runtime == fs::Runtime::Docker {
+        Some(
+            omnifs_fs_runtime::resolve_filesystem_image(
+                None,
+                assets.filesystem.docker_image.as_deref(),
+            )?
+            .to_string(),
+        )
+    } else {
+        None
+    };
+    let libkrun_guest_image = (runtime == fs::Runtime::Libkrun).then(|| {
+        omnifs_fs_runtime::resolve_guest_image_reference(assets.filesystem.guest_image.as_deref())
+    });
+    let spec = AttachmentSpec::new(
+        protocol,
+        runtime,
+        location,
+        docker_image,
+        libkrun_guest_image,
+    )?;
+    Ok(AttachmentDefinition { name, spec })
+}
+
+fn legacy_profile_assets() -> Result<crate::client_fs_state::ClientConfig> {
+    let root = crate::client_dir::client_root()?;
+    ClientFilesystemState::under_root(&root).config()
+}
+
+fn default_host_location(name: &ResourceName) -> Result<PathBuf> {
+    Ok(default_host_location_under(
+        Bootstrap::<Client>::for_client()?.bootstrap_dir(),
+        name,
+    ))
+}
+
+fn default_host_location_under(profile: &Path, name: &ResourceName) -> PathBuf {
+    profile.join("attachments").join(name.as_str())
 }
 
 fn resolve_pair(
@@ -232,9 +282,6 @@ pub(crate) fn default_runtime(protocol: fs::Protocol) -> Option<fs::Runtime> {
     }
 }
 
-/// Every filesystem this platform recommends by default. Shared by `omnifs
-/// setup`'s filesystem quick-start offer and `mount add`'s adaptive closing
-/// hint, so both point at the same recommendation.
 pub(crate) fn recommended_filesystems() -> Vec<(fs::Protocol, fs::Runtime)> {
     available_filesystems()
         .into_iter()
@@ -242,10 +289,6 @@ pub(crate) fn recommended_filesystems() -> Vec<(fs::Protocol, fs::Runtime)> {
         .collect()
 }
 
-/// The id `omnifs setup`'s filesystem quick-start would offer first, if this
-/// platform recommends any filesystem at all. Shared with `mount add`'s
-/// adaptive closing hint, which names the same id when no host filesystem is
-/// attached yet.
 pub(crate) fn recommended_filesystem_id() -> Result<Option<fs::Id>> {
     recommended_filesystems()
         .into_iter()
@@ -255,39 +298,19 @@ pub(crate) fn recommended_filesystem_id() -> Result<Option<fs::Id>> {
         .map_err(Into::into)
 }
 
-/// The location a filesystem would be attached at, whether or not it has
-/// been configured yet: the existing configured spec's location if one is
-/// already claimed under `id`, else the runtime's default. Shared by
-/// [`ensure_setup_filesystem`] (which creates the spec at this same location
-/// when none exists yet) and setup's quick-start prompt
-/// ([`preview_filesystem_location`]), which previews it before the user
-/// accepts.
-fn default_location_for(
-    client_state: &ClientFilesystemState,
-    runtime: fs::Runtime,
-    id: &fs::Id,
-) -> PathBuf {
+fn default_location_for(runtime: fs::Runtime, name: &ResourceName) -> Result<PathBuf> {
     match runtime {
-        fs::Runtime::Host => client_state.default_host_location(id),
-        fs::Runtime::Docker | fs::Runtime::Libkrun => PathBuf::from(fs::GUEST_LOCATION),
+        fs::Runtime::Host => default_host_location(name),
+        fs::Runtime::Docker | fs::Runtime::Libkrun => Ok(PathBuf::from(fs::GUEST_LOCATION)),
     }
 }
 
-/// The location `omnifs setup`'s quick-start filesystem prompt would attach
-/// `protocol`/`runtime` at, without creating or attaching anything. Read-only
-/// preview built from the same claim-or-default logic
-/// [`ensure_setup_filesystem`] uses when it actually creates the spec, so the
-/// question text and the settled fact never disagree with each other.
 pub(crate) fn preview_filesystem_location(
-    client_state: &ClientFilesystemState,
     protocol: fs::Protocol,
     runtime: fs::Runtime,
 ) -> Result<PathBuf> {
-    let id = fs::Id::new(format!("{protocol}-{runtime}"))?;
-    if let Some(spec) = client_state.registry().claim(&id)?.get()? {
-        return Ok(spec.location().to_path_buf());
-    }
-    Ok(default_location_for(client_state, runtime, &id))
+    let name = ResourceName::new(format!("{protocol}-{runtime}"))?;
+    default_location_for(runtime, &name)
 }
 
 pub(crate) async fn ensure_setup_filesystem(
@@ -295,420 +318,483 @@ pub(crate) async fn ensure_setup_filesystem(
     runtime: fs::Runtime,
     output: Output,
 ) -> Result<()> {
-    let client_state = ClientFilesystemState::resolve()?;
-    let id = fs::Id::new(format!("{protocol}-{runtime}"))?;
-    let registry = client_state.registry();
-    let claim = registry.claim(&id)?;
-    let spec = if let Some(spec) = claim.get()? {
+    crate::commands::daemon_start::start(&output).await?;
+    let name = ResourceName::new(format!("{protocol}-{runtime}"))?;
+    let rpc = RpcClient::resolve()?;
+    let snapshot = rpc.resources().await?;
+    let existing = attachment_definition(&snapshot.resources, &name).cloned();
+    let definition = if let Some(existing) = existing {
         ensure!(
-            spec.protocol() == protocol && spec.runtime() == runtime,
-            "configured filesystem `{id}` does not match setup's {protocol}/{runtime} choice"
+            existing.spec.protocol() == protocol && existing.spec.runtime() == runtime,
+            "desired attachment `{name}` does not match setup's {protocol}/{runtime} choice"
         );
-        spec
+        existing
     } else {
-        let location = default_location_for(&client_state, runtime, &id);
-        let spec = fs::Spec::new(id, protocol, runtime, location)?;
-        claim.create(&spec)?;
-        spec
+        let config = legacy_profile_assets()?;
+        let docker_image = if runtime == fs::Runtime::Docker {
+            Some(
+                omnifs_fs_runtime::resolve_filesystem_image(
+                    None,
+                    config.filesystem.docker_image.as_deref(),
+                )?
+                .to_string(),
+            )
+        } else {
+            None
+        };
+        let libkrun_guest_image = (runtime == fs::Runtime::Libkrun).then(|| {
+            omnifs_fs_runtime::resolve_guest_image_reference(
+                config.filesystem.guest_image.as_deref(),
+            )
+        });
+        AttachmentDefinition {
+            name: name.clone(),
+            spec: AttachmentSpec::new(
+                protocol,
+                runtime,
+                default_location_for(runtime, &name)?,
+                docker_image,
+                libkrun_guest_image,
+            )?,
+        }
     };
-    let inventory = RpcClient::resolve()?.inventory().await?;
-    if inventory.attachments.contains(&spec) {
-        return Ok(());
-    }
-    if runtime_running(&client_state, &spec, output.clone()).await? {
-        ensure!(
-            wait_for_attachment(&spec).await,
-            "filesystem `{}` is running but did not attach to the daemon",
-            spec.id()
-        );
-        return Ok(());
-    }
-    Box::pin(launch_and_confirm(
-        &client_state,
-        &spec,
-        output,
-        inventory.info,
-    ))
-    .await
-}
-
-async fn rm(args: NameArgs, output: Output) -> Result<ExitCode> {
-    let client_state = ClientFilesystemState::resolve()?;
-    let registry = client_state.registry();
-    let claim = registry.claim(&args.name)?;
-    let spec = required_spec(&claim, &args.name)?;
-    ensure_not_attached(&spec).await?;
-    ensure!(
-        !runtime_running(&client_state, &spec, output.clone()).await?,
-        "filesystem `{}` is still running; detach it first",
-        spec.id()
-    );
-    claim.remove()?;
-    finish_action(&output, spec, "removed")
+    let revision = upsert_attachment_from_snapshot(&rpc, snapshot.resources, definition).await?;
+    wait_for_revision(&rpc, revision, &output).await
 }
 
 async fn attach(args: NameArgs, output: Output) -> Result<ExitCode> {
-    let client_state = ClientFilesystemState::resolve()?;
-    let registry = client_state.registry();
-    let claim = registry.claim(&args.name)?;
-    let spec = required_spec(&claim, &args.name)?;
-    ensure!(
-        supports(spec.protocol(), spec.runtime()),
-        "{}/{} is not supported on this platform",
-        spec.protocol(),
-        spec.runtime()
-    );
     crate::commands::daemon_start::start(&output).await?;
-    let inventory = RpcClient::resolve()?
-        .inventory()
-        .await
-        .context("daemon did not become ready before attaching a filesystem")?;
-    if let Some(attached) = inventory
-        .attachments
-        .iter()
-        .find(|row| row.id() == spec.id())
-    {
-        if attached != &spec {
-            return Err(anyhow!(
-                "filesystem `{}` is attached with different settings",
-                spec.id()
-            ))
-            .with_hint("omnifs doctor");
-        }
-        return finish_action(&output, spec, "already_attached");
-    }
-    ensure!(
-        !runtime_running(&client_state, &spec, output.clone()).await?,
-        "filesystem `{}` already has a running {} instance",
-        spec.id(),
-        spec.runtime()
-    );
-    Box::pin(launch_and_confirm(
-        &client_state,
-        &spec,
-        output.clone(),
-        inventory.info,
-    ))
-    .await?;
-    finish_action(&output, spec, "attached")
+    let name = resource_name(&args.name)?;
+    let rpc = RpcClient::resolve()?;
+    let snapshot = rpc.resources().await?;
+    let Some(definition) = attachment_definition(&snapshot.resources, &name).cloned() else {
+        return missing_desired_attachment(&args.name);
+    };
+    wait_for_revision(&rpc, snapshot.revision, &output).await?;
+    finish_action(
+        &output,
+        definition,
+        "ready",
+        Some(snapshot.revision),
+        None,
+        false,
+    )
 }
 
-async fn detach(args: NameArgs, output: Output) -> Result<ExitCode> {
-    let client_state = ClientFilesystemState::resolve()?;
-    let registry = client_state.registry();
-    let claim = registry.claim(&args.name)?;
-    let spec = required_spec(&claim, &args.name)?;
-    stop_runtime(&client_state, &spec, output.clone()).await?;
-    ensure!(
-        !runtime_running(&client_state, &spec, output.clone()).await?,
-        "filesystem `{}` still has a running {} instance",
-        spec.id(),
-        spec.runtime()
-    );
-    finish_action(&output, spec, "detached")
+async fn remove(args: NameArgs, output: Output, state: &'static str) -> Result<ExitCode> {
+    crate::commands::daemon_start::start(&output).await?;
+    let name = resource_name(&args.name)?;
+    let rpc = RpcClient::resolve()?;
+    let snapshot = rpc.resources().await?;
+    let Some(definition) = attachment_definition(&snapshot.resources, &name).cloned() else {
+        return missing_desired_attachment(&args.name);
+    };
+    let resources = snapshot
+        .resources
+        .into_iter()
+        .filter(|resource| resource.key() != definition.key())
+        .collect();
+    let revision = apply_complete_set(&rpc, resources).await?;
+    wait_for_revision(&rpc, revision, &output).await?;
+    finish_action(&output, definition, state, Some(revision), None, true)
 }
 
 async fn restart(args: NameArgs, output: Output) -> Result<ExitCode> {
-    let client_state = ClientFilesystemState::resolve()?;
-    let registry = client_state.registry();
-    let claim = registry.claim(&args.name)?;
-    let spec = required_spec(&claim, &args.name)?;
-    ensure!(
-        supports(spec.protocol(), spec.runtime()),
-        "{}/{} is not supported on this platform",
-        spec.protocol(),
-        spec.runtime()
-    );
     crate::commands::daemon_start::start(&output).await?;
-    let inventory = RpcClient::resolve()?
-        .inventory()
-        .await
-        .context("daemon did not become ready before restarting a filesystem")?;
-    stop_runtime(&client_state, &spec, output.clone()).await?;
-    Box::pin(launch_and_confirm(
-        &client_state,
-        &spec,
-        output.clone(),
-        inventory.info,
-    ))
-    .await?;
-    finish_action(&output, spec, "attached")
+    let name = resource_name(&args.name)?;
+    let rpc = RpcClient::resolve()?;
+    let status = rpc
+        .attachment_status(name.clone())
+        .await?
+        .with_context(|| format!("attachment `{name}` is not desired"))?;
+    let request = RestartAttachmentRequest {
+        action_id: random_action_id()?,
+        base_action_generation: status.action_generation,
+        attachment: name,
+    };
+    let receipt = rpc.restart_attachment(&request).await?;
+    wait_for_action(&rpc, receipt.action_id, &output).await?;
+    finish_action(
+        &output,
+        status.definition,
+        "ready",
+        None,
+        Some(receipt.action_id),
+        true,
+    )
 }
 
-fn required_spec(claim: &crate::client_fs_state::Claim<'_>, id: &fs::Id) -> Result<fs::Spec> {
-    claim
-        .get()?
-        .with_context(|| format!("filesystem `{id}` is not configured"))
+fn resource_name(id: &fs::Id) -> Result<ResourceName> {
+    ResourceName::new(id.as_str()).map_err(Into::into)
 }
 
-async fn ensure_not_attached(spec: &fs::Spec) -> Result<()> {
-    let inventory = RpcClient::resolve()?
-        .inventory()
-        .await
-        .context("cannot prove the daemon attachment state")
-        .with_hint("omnifs doctor")?;
-    ensure!(
-        !inventory
-            .attachments
-            .iter()
-            .any(|row| row.id() == spec.id()),
-        "filesystem `{}` is attached; detach it first",
-        spec.id()
-    );
-    Ok(())
-}
-
-async fn runtime_running(
-    client_state: &ClientFilesystemState,
-    spec: &fs::Spec,
-    _output: Output,
-) -> Result<bool> {
-    let driver = runtime_driver(client_state, spec, RuntimeEventSink::discard())?;
-    match driver
-        .confirmed(client_owner_id()?)
-        .await
-        .map_err(into_cli_error)?
-    {
-        None => Ok(false),
-        Some(ConfirmedRuntime::Docker(_, false)) => Err(anyhow!(
-            "filesystem `{}` has a stopped Docker container",
-            spec.id()
+fn missing_desired_attachment<T>(id: &fs::Id) -> Result<T> {
+    let legacy = legacy_registry()?
+        .list()?
+        .into_iter()
+        .find(|spec| spec.id() == id);
+    let result = Err(anyhow!("attachment `{id}` is not desired"));
+    if let Some(spec) = legacy {
+        result.with_hint(format!(
+            "Legacy detached config exists at {}. Import it explicitly with `omnifs fs create --name {} --protocol {} --runtime {}{}`",
+            spec.location().display(),
+            spec.id(),
+            spec.protocol(),
+            spec.runtime(),
+            if spec.runtime() == fs::Runtime::Host {
+                format!(" --location {}", spec.location().display())
+            } else {
+                String::new()
+            }
         ))
-        .with_hint("omnifs doctor"),
-        Some(_) => Ok(true),
-    }
-}
-
-/// `info` is the caller's already-fetched `GetInventory` response's `info`
-/// field; see `filesystem_driver.rs::LaunchContext::resolve`.
-async fn launch_and_confirm(
-    client_state: &ClientFilesystemState,
-    spec: &fs::Spec,
-    output: Output,
-    info: omnifs_api::DaemonInfo,
-) -> Result<()> {
-    let client_owner = client_owner_id()?;
-    let (events, renderer) = RuntimeEventRenderer::start(output.clone());
-    let driver = match runtime_driver(client_state, spec, events.clone()) {
-        Ok(driver) => driver,
-        Err(error) => {
-            drop(events);
-            renderer.finish().await;
-            return Err(error);
-        },
-    };
-    let endpoints = AttachEndpoints::new(info.attach_unix, info.attach_tcp);
-    let session_spec = spec.clone();
-    let session_events = events.clone();
-    let launched = Box::pin(driver.launch(client_owner, &endpoints, async move {
-        if !wait_for_attachment(&session_spec).await {
-            let message = format!(
-                "filesystem `{}` did not attach to the daemon",
-                session_spec.id()
-            );
-            session_events.emit(RuntimeEvent::Failed {
-                stage: RuntimeStage::WaitForVfsSession,
-                message: message.clone(),
-            });
-            anyhow::bail!(message);
-        }
-        Ok(())
-    }))
-    .await;
-    let attached = if launched.is_ok() && spec.runtime() != fs::Runtime::Libkrun {
-        events.emit(RuntimeEvent::Stage {
-            stage: RuntimeStage::WaitForVfsSession,
-            runtime: spec.runtime(),
-            id: spec.id().clone(),
-            state: RuntimeState::Active,
-        });
-        let attached = wait_for_attachment(spec).await;
-        if attached {
-            events.emit(RuntimeEvent::Stage {
-                stage: RuntimeStage::WaitForVfsSession,
-                runtime: spec.runtime(),
-                id: spec.id().clone(),
-                state: RuntimeState::Ready,
-            });
-        } else {
-            events.emit(RuntimeEvent::Failed {
-                stage: RuntimeStage::WaitForVfsSession,
-                message: format!(
-                    "filesystem `{}` mounted but did not attach to the daemon",
-                    spec.id()
-                ),
-            });
-        }
-        attached
     } else {
-        launched.is_ok()
-    };
-    drop(driver);
-    drop(events);
-    renderer.finish().await;
-    launched.map_err(into_cli_error)?;
-    if attached {
-        return Ok(());
+        result.with_hint(format!("Create it with `omnifs fs create --name {id}`"))
     }
-
-    let attach_error = anyhow::anyhow!(
-        "filesystem `{}` mounted but did not attach to the daemon",
-        spec.id()
-    );
-    let cleanup = stop_runtime(client_state, spec, output).await;
-    err_after_rollback(attach_error, cleanup, "the failed filesystem")
 }
 
-async fn stop_runtime(
-    client_state: &ClientFilesystemState,
-    spec: &fs::Spec,
-    output: Output,
-) -> Result<()> {
-    let client_owner = client_owner_id()?;
-    let (events, renderer) = RuntimeEventRenderer::start(output);
-    let driver = match runtime_driver(client_state, spec, events.clone()) {
-        Ok(driver) => driver,
-        Err(error) => {
-            drop(events);
-            renderer.finish().await;
-            return Err(error);
+fn legacy_registry() -> Result<Registry> {
+    let root = crate::client_dir::client_root()?;
+    Ok(ClientFilesystemState::under_root(&root).registry())
+}
+
+async fn upsert_attachment(
+    rpc: &RpcClient,
+    definition: AttachmentDefinition,
+) -> Result<ResourceRevision> {
+    let snapshot = rpc.resources().await?;
+    upsert_attachment_from_snapshot(rpc, snapshot.resources, definition).await
+}
+
+async fn upsert_attachment_from_snapshot(
+    rpc: &RpcClient,
+    mut resources: Vec<ResourceDefinition>,
+    definition: AttachmentDefinition,
+) -> Result<ResourceRevision> {
+    resources.retain(|resource| resource.key() != definition.key());
+    resources.push(ResourceDefinition::Attachment(definition));
+    apply_complete_set(rpc, resources).await
+}
+
+async fn apply_complete_set(
+    rpc: &RpcClient,
+    resources: Vec<ResourceDefinition>,
+) -> Result<ResourceRevision> {
+    let declarations = ResourceDeclarations {
+        api_version: API_VERSION.to_owned(),
+        resources,
+    };
+    let plan = rpc.plan_resources(&declarations).await?;
+    if plan
+        .changes
+        .iter()
+        .all(|change| change.action == omnifs_api::ResourceChangeAction::Unchanged)
+    {
+        return Ok(plan.base_revision);
+    }
+    let request = ApplyResourcesRequest {
+        mutation_id: random_mutation_id()?,
+        base_revision: plan.base_revision,
+        expected_desired_digest: plan.desired_digest,
+        declarations: ResourceDeclarations {
+            api_version: API_VERSION.to_owned(),
+            resources: plan.normalized,
         },
+        credential_material: Vec::new(),
     };
-    let confirmed = driver.confirmed(client_owner).await;
-    let confirmed = match confirmed {
-        Ok(confirmed) => confirmed,
-        Err(error) => {
-            drop(driver);
-            drop(events);
-            renderer.finish().await;
-            return Err(into_cli_error(error));
-        },
-    };
-    let Some(confirmed) = confirmed else {
-        drop(driver);
-        drop(events);
-        renderer.finish().await;
-        return Ok(());
-    };
-    let stopped = driver.stop_confirmed(client_owner, confirmed).await;
-    drop(driver);
-    drop(events);
-    renderer.finish().await;
-    stopped.map_err(into_cli_error)
+    Ok(rpc.apply_resources(&request).await?.revision)
 }
 
-pub(crate) fn client_owner_id() -> Result<ClientOwnerId> {
-    crate::client_state::ClientState::resolve()?.owner_id()
+fn random_mutation_id() -> Result<MutationId> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).context("generate resource mutation id")?;
+    Ok(MutationId::from_bytes(bytes))
 }
 
-pub(crate) async fn wait_for_attachment(spec: &fs::Spec) -> bool {
-    // A resolve failure is not transient (it never depends on daemon state),
-    // so it short-circuits the wait instead of polling for something that
-    // cannot change.
-    let Ok(rpc) = RpcClient::resolve() else {
-        return false;
-    };
-    // The client is built once and its connection reused across ticks
-    // instead of reconnecting every 200ms. An inventory-fetch failure is
-    // transient and treated the same as "not attached yet": keep polling
-    // rather than aborting, so `check` never actually returns `Err`.
-    crate::process::poll_until(ATTACH_TIMEOUT, POLL, || async {
-        let attached = match rpc.inventory().await {
-            Ok(inventory) => inventory.attachments.contains(spec),
-            Err(_) => false,
-        };
-        Ok(attached.then_some(()))
+fn random_action_id() -> Result<ActionId> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).context("generate attachment action id")?;
+    Ok(ActionId::from_bytes(bytes))
+}
+
+fn attachment_definition<'a>(
+    resources: &'a [ResourceDefinition],
+    name: &ResourceName,
+) -> Option<&'a AttachmentDefinition> {
+    resources.iter().find_map(|resource| match resource {
+        ResourceDefinition::Attachment(definition) if &definition.name == name => Some(definition),
+        _ => None,
     })
-    .await
-    .unwrap_or(None)
-    .is_some()
+}
+
+async fn wait_for_revision(
+    rpc: &RpcClient,
+    revision: ResourceRevision,
+    output: &Output,
+) -> Result<()> {
+    let mut watch = rpc
+        .watch_progress(ProgressTarget::DesiredRevision(revision))
+        .await?;
+    loop {
+        let event = tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("listen for Ctrl-C while following resource revision")?;
+                return Err(anyhow!(
+                    "revision {} is committed and daemon work continues; follow it with `omnifs status --follow --revision {}`",
+                    revision.get(),
+                    revision.get()
+                ))
+                .with_exit_code(ExitCode::Canceled);
+            }
+            event = watch.next() => event?,
+        };
+        let Some(event) = event else {
+            return Err(anyhow!(
+                "progress stream closed before revision {} reached a terminal state; daemon work continues",
+                revision.get()
+            ))
+            .with_hint(format!(
+                "omnifs status --follow --revision {}",
+                revision.get()
+            ));
+        };
+        match event.event {
+            ProgressEventKind::Snapshot(snapshot) | ProgressEventKind::Resync(snapshot) => {
+                match revision_snapshot_outcome(&snapshot, revision)? {
+                    Some(()) => return Ok(()),
+                    None => render_snapshot_attachments(output, &snapshot),
+                }
+            },
+            ProgressEventKind::AttachmentProgress(progress) => {
+                render_attachment_progress(output, &progress);
+            },
+            ProgressEventKind::RevisionReady(ready) if ready == revision => return Ok(()),
+            ProgressEventKind::RevisionFailed {
+                revision: failed,
+                error_code,
+                detail,
+            } if failed == revision => {
+                anyhow::bail!(
+                    "revision {} failed ({error_code}): {detail}",
+                    revision.get()
+                );
+            },
+            ProgressEventKind::RevisionSuperseded {
+                revision: replaced,
+                replaced_by,
+            } if replaced == revision => {
+                return Err(anyhow!(
+                    "revision {} was superseded by revision {}; daemon work continues",
+                    replaced.get(),
+                    replaced_by.get()
+                ))
+                .with_hint(format!(
+                    "omnifs status --follow --revision {}",
+                    replaced_by.get()
+                ));
+            },
+            _ => {},
+        }
+    }
+}
+
+fn revision_snapshot_outcome(
+    snapshot: &ProgressSnapshot,
+    revision: ResourceRevision,
+) -> Result<Option<()>> {
+    if snapshot.desired_revision > revision {
+        return Err(anyhow!(
+            "revision {} was superseded by revision {}",
+            revision.get(),
+            snapshot.desired_revision.get()
+        ))
+        .with_hint(format!(
+            "omnifs status --follow --revision {}",
+            snapshot.desired_revision.get()
+        ));
+    }
+    if let Some(status) = snapshot.resources.iter().find(|status| {
+        status.desired_revision == revision
+            && matches!(status.phase, ResourcePhase::Failed | ResourcePhase::Blocked)
+    }) {
+        anyhow::bail!(
+            "{} failed{}{}",
+            status.key,
+            status
+                .error_code
+                .as_deref()
+                .map(|code| format!(" ({code})"))
+                .unwrap_or_default(),
+            status
+                .detail
+                .as_deref()
+                .map(|detail| format!(": {detail}"))
+                .unwrap_or_default()
+        );
+    }
+    let ready = snapshot
+        .observed_revision
+        .is_some_and(|observed| observed >= revision)
+        && snapshot
+            .resources
+            .iter()
+            .filter(|status| status.desired_revision == revision)
+            .all(|status| status.phase == ResourcePhase::Ready);
+    Ok(ready.then_some(()))
+}
+
+async fn wait_for_action(rpc: &RpcClient, action_id: ActionId, output: &Output) -> Result<()> {
+    let mut watch = rpc
+        .watch_progress(ProgressTarget::Action(action_id))
+        .await?;
+    loop {
+        let event = tokio::select! {
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("listen for Ctrl-C while following attachment action")?;
+                return Err(anyhow!(
+                    "action {action_id} is accepted and daemon work continues; follow it with `omnifs status --follow --action {action_id}`"
+                ))
+                .with_exit_code(ExitCode::Canceled);
+            }
+            event = watch.next() => event?,
+        };
+        let Some(event) = event else {
+            return Err(anyhow!(
+                "progress stream closed before action {action_id} reached a terminal state; daemon work continues"
+            ))
+            .with_hint(format!("omnifs status --follow --action {action_id}"));
+        };
+        match event.event {
+            ProgressEventKind::Snapshot(snapshot) | ProgressEventKind::Resync(snapshot) => {
+                if let Some(receipt) = snapshot
+                    .actions
+                    .iter()
+                    .find(|receipt| receipt.action_id == action_id)
+                {
+                    match receipt.phase {
+                        ActionPhase::Ready => return Ok(()),
+                        ActionPhase::Failed => {
+                            anyhow::bail!(
+                                "attachment action {action_id} failed{}{}",
+                                receipt
+                                    .error_code
+                                    .as_deref()
+                                    .map(|code| format!(" ({code})"))
+                                    .unwrap_or_default(),
+                                receipt
+                                    .detail
+                                    .as_deref()
+                                    .map(|detail| format!(": {detail}"))
+                                    .unwrap_or_default()
+                            );
+                        },
+                        ActionPhase::Accepted | ActionPhase::Running | ActionPhase::Retrying => {},
+                    }
+                }
+                render_snapshot_attachments(output, &snapshot);
+            },
+            ProgressEventKind::AttachmentProgress(progress) => {
+                render_attachment_progress(output, &progress);
+            },
+            ProgressEventKind::ActionCompleted(receipt) if receipt.action_id == action_id => {
+                return Ok(());
+            },
+            ProgressEventKind::ActionFailed {
+                receipt,
+                error_code,
+                detail,
+            } if receipt.action_id == action_id => {
+                anyhow::bail!("attachment action {action_id} failed ({error_code}): {detail}");
+            },
+            _ => {},
+        }
+    }
+}
+
+fn render_snapshot_attachments(output: &Output, snapshot: &ProgressSnapshot) {
+    for progress in &snapshot.attachments {
+        render_attachment_progress(output, progress);
+    }
+}
+
+fn render_attachment_progress(output: &Output, progress: &AttachmentProgress) {
+    let bytes = match progress.total_bytes {
+        Some(total) => format!(" {}/{} bytes", progress.completed_bytes, total),
+        None if progress.completed_bytes > 0 => format!(" {} bytes", progress.completed_bytes),
+        None => String::new(),
+    };
+    let retry = if progress.retry_count > 0 {
+        format!(" retry {}", progress.retry_count)
+    } else {
+        String::new()
+    };
+    output.narrate(format!(
+        "{}: {} on {}{}{} ({} queued, {} active)",
+        progress.key.name,
+        attachment_stage(progress.stage),
+        progress.runtime,
+        bytes,
+        retry,
+        progress.queued_attachments,
+        progress.active_attachments
+    ));
+}
+
+const fn attachment_stage(stage: AttachmentProgressStage) -> &'static str {
+    match stage {
+        AttachmentProgressStage::Queued => "queued",
+        AttachmentProgressStage::WaitingForNamespace => "waiting for namespace",
+        AttachmentProgressStage::PullingImage => "pulling image",
+        AttachmentProgressStage::Materializing => "materializing image",
+        AttachmentProgressStage::Starting => "starting runtime",
+        AttachmentProgressStage::Mounting => "mounting",
+        AttachmentProgressStage::Stopping => "stopping runtime",
+        AttachmentProgressStage::Retrying => "retrying",
+        AttachmentProgressStage::Deleting => "deleting",
+        AttachmentProgressStage::Ready => "ready",
+        AttachmentProgressStage::Failed => "failed",
+    }
 }
 
 async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
     output.require_human("fs shell")?;
-    let client_state = ClientFilesystemState::resolve()?;
-    let registry = client_state.registry();
-    let claim = registry.claim(&args.name)?;
-    let spec = required_spec(&claim, &args.name)?;
-    let client_owner = client_owner_id()?;
-    // Cloned rather than moved: the bare-location branch below still needs
-    // `output` to report where the filesystem is available.
-    let driver = runtime_driver(&client_state, &spec, RuntimeEventSink::discard())?;
-    let confirmed = driver
-        .confirmed(client_owner)
-        .await
-        .map_err(into_cli_error)?
-        .with_context(|| format!("filesystem `{}` is detached", spec.id()))?;
-    ensure_attached(&spec).await?;
-
-    let (command, label) = match confirmed {
-        ConfirmedRuntime::Host(_, phase) => {
-            ensure!(
-                phase == omnifs_thin::host_control::RunnerPhase::Mounted,
-                "filesystem `{}` is not mounted; runner phase is {phase:?}",
-                spec.id()
-            );
-            return if let Some(program) = args.command.first() {
+    crate::commands::daemon_start::start(&output).await?;
+    let name = resource_name(&args.name)?;
+    let rpc = RpcClient::resolve()?;
+    let access = rpc
+        .attachment_access(&GetAttachmentAccessRequest {
+            attachment: name.clone(),
+            interactive: std::io::stdin().is_terminal(),
+            shell: args.shell.clone(),
+            command: args.command.clone(),
+        })
+        .await?;
+    match access {
+        AttachmentAccess::HostPath(path) => {
+            if let Some(program) = args.command.first() {
                 let mut command = Command::new(program);
-                command
-                    .args(&args.command[1..])
-                    .current_dir(spec.location());
-                propagate(
-                    command,
-                    format!("run command in filesystem `{}`", spec.id()),
-                )
+                command.args(&args.command[1..]).current_dir(&path);
+                propagate(command, format!("run command in attachment `{name}`"))
             } else if let Some(shell) = args.shell.as_deref() {
                 let mut command = Command::new(shell);
-                command.current_dir(spec.location());
-                propagate(command, format!("open shell in filesystem `{}`", spec.id()))
+                command.current_dir(&path);
+                propagate(command, format!("open shell in attachment `{name}`"))
             } else {
                 output.report(format!(
-                    "Filesystem `{}` is available at {}.\n",
-                    spec.id(),
-                    spec.location().display()
+                    "Attachment `{name}` is available at {}.\n",
+                    path.display()
                 ));
                 Ok(ExitCode::Success)
-            };
+            }
         },
-        ConfirmedRuntime::Docker(_, _) => (
-            driver
-                .shell_command(
-                    std::io::stdin().is_terminal(),
-                    args.shell.as_deref(),
-                    &args.command,
-                )
-                .context("Docker runtime did not provide a shell command")?,
-            format!(
-                "open shell in filesystem container `{}`",
-                driver
-                    .container_name()
-                    .context("Docker runtime has no container identity")?
-            ),
-        ),
-        ConfirmedRuntime::Libkrun(_) => {
-            ensure_socat_available().with_hint("Install it with `brew install socat`")?;
-            (
-                driver
-                    .shell_command(false, args.shell.as_deref(), &args.command)
-                    .context("libkrun runtime did not provide a shell command")?,
-                format!("open shell in filesystem `{}`", spec.id()),
-            )
+        AttachmentAccess::Command(invocation) => {
+            let mut command = Command::new(invocation.program);
+            command.args(invocation.args);
+            if let Some(current_dir) = invocation.current_dir {
+                command.current_dir(current_dir);
+            }
+            propagate(command, format!("open attachment `{name}`"))
         },
-    };
-    propagate(command, label)
-}
-
-async fn ensure_attached(spec: &fs::Spec) -> Result<()> {
-    let inventory = RpcClient::resolve()?
-        .inventory()
-        .await
-        .context("cannot verify filesystem attachment state")?;
-    ensure!(
-        inventory.attachments.contains(spec),
-        "filesystem `{}` is detached",
-        spec.id()
-    );
-    Ok(())
+    }
 }
 
 fn propagate(mut command: Command, context: String) -> Result<ExitCode> {
@@ -721,47 +807,106 @@ fn propagate(mut command: Command, context: String) -> Result<ExitCode> {
 }
 
 async fn list(output: Output) -> Result<ExitCode> {
-    let inventory = crate::inventory::Inventory::collect_rpc().await?;
-    // Read before `filesystems` moves out of `inventory` below: both derive
-    // from the whole inventory (mounts and daemon health included), the
-    // same verdict and next action `omnifs status` itself would report,
-    // rather than a filesystems-only view re-derived here.
-    let verdict = inventory.verdict();
-    let next_action = inventory.next_action();
-    let filesystems = inventory.filesystems;
-    let rows = filesystems
+    crate::commands::daemon_start::start(&output).await?;
+    let rpc = RpcClient::resolve()?;
+    let snapshot = rpc.resources().await?;
+    let mut rows = snapshot
+        .resources
         .iter()
-        .map(|filesystem| ListRow {
-            spec: filesystem.spec.clone(),
-            state: filesystem.state.label(),
+        .filter_map(|resource| match resource {
+            ResourceDefinition::Attachment(definition) => {
+                let status = snapshot.resource_statuses.iter().find(|status| {
+                    status.key.kind == ResourceKind::Attachment
+                        && status.key.name == definition.name
+                });
+                Some(ListRow {
+                    name: definition.name.to_string(),
+                    protocol: definition.spec.protocol(),
+                    runtime: definition.spec.runtime(),
+                    location: definition.spec.location().to_path_buf(),
+                    state: status.map_or_else(
+                        || "pending".to_owned(),
+                        |status| resource_phase(status.phase).to_owned(),
+                    ),
+                    legacy: false,
+                    detail: status.and_then(|status| status.detail.clone()),
+                })
+            },
+            _ => None,
         })
         .collect::<Vec<_>>();
-    let result = ListResult { filesystems: rows };
-    if output.is_structured() {
-        output.emit_result(verdict, &result)?;
-    } else if result.filesystems.is_empty() {
-        output.report("No filesystems configured.\n");
-        output.narrate(
-            crate::ui::access::ActionLine::from(&crate::inventory::NextAction::CreateFilesystem)
-                .render(),
-        );
-    } else {
-        let mut report = crate::ui::table::Report::new();
-        report.push(crate::ui::table::Block::Resources(
-            crate::status::filesystem_table(&filesystems, next_action.as_ref()),
-        ));
-        output.report(report.render());
+    for spec in legacy_registry()?.list()? {
+        if rows.iter().any(|row| row.name == spec.id().as_str()) {
+            continue;
+        }
+        rows.push(ListRow {
+            name: spec.id().to_string(),
+            protocol: spec.protocol(),
+            runtime: spec.runtime(),
+            location: spec.location().to_path_buf(),
+            state: "legacy detached config".to_owned(),
+            legacy: true,
+            detail: Some(format!(
+                "Import explicitly with `omnifs fs create --name {} --protocol {} --runtime {}`",
+                spec.id(),
+                spec.protocol(),
+                spec.runtime()
+            )),
+        });
     }
-    Ok(match verdict {
-        crate::ui::output::ResultVerdict::Ok => ExitCode::Success,
-        crate::ui::output::ResultVerdict::Degraded => ExitCode::Degraded,
-    })
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+    let result = ListResult { attachments: rows };
+    if output.is_structured() {
+        output.emit_result(ResultVerdict::Ok, &result)?;
+    } else if result.attachments.is_empty() {
+        output.report("No attachments desired and no legacy filesystem specs found.\n");
+    } else {
+        let mut rendered = String::from("NAME\tPROTOCOL\tRUNTIME\tSTATE\tLOCATION\n");
+        for row in &result.attachments {
+            let _ = writeln!(
+                rendered,
+                "{}\t{}\t{}\t{}\t{}",
+                row.name,
+                row.protocol,
+                row.runtime,
+                row.state,
+                row.location.display()
+            );
+            if let Some(detail) = &row.detail {
+                let _ = writeln!(rendered, "  {detail}");
+            }
+        }
+        output.report(rendered);
+    }
+    Ok(ExitCode::Success)
 }
 
-fn finish_action(output: &Output, spec: fs::Spec, state: &'static str) -> Result<ExitCode> {
+const fn resource_phase(phase: ResourcePhase) -> &'static str {
+    match phase {
+        ResourcePhase::Pending => "pending",
+        ResourcePhase::Preparing => "preparing",
+        ResourcePhase::Ready => "ready",
+        ResourcePhase::Retrying => "retrying",
+        ResourcePhase::Failed => "failed",
+        ResourcePhase::Blocked => "blocked",
+        ResourcePhase::Deleting => "deleting",
+    }
+}
+
+fn finish_action(
+    output: &Output,
+    attachment: AttachmentDefinition,
+    state: &'static str,
+    revision: Option<ResourceRevision>,
+    action_id: Option<ActionId>,
+    committed: bool,
+) -> Result<ExitCode> {
     let result = ActionResult {
-        filesystem: spec,
+        attachment,
         state,
+        revision,
+        action_id,
+        committed,
     };
     if output.is_structured() {
         output.emit_result(ResultVerdict::Ok, &result)?;
@@ -769,28 +914,28 @@ fn finish_action(output: &Output, spec: fs::Spec, state: &'static str) -> Result
         let rows = [
             crate::ui::render::LedgerRow::new(
                 crate::ui::style::Glyph::Done,
-                "filesystem",
-                result.filesystem.id().to_string(),
+                "attachment",
+                result.attachment.name.to_string(),
             ),
             crate::ui::render::LedgerRow::new(
                 crate::ui::style::Glyph::Done,
                 "protocol",
-                result.filesystem.protocol().to_string(),
+                result.attachment.spec.protocol().to_string(),
             ),
             crate::ui::render::LedgerRow::new(
                 crate::ui::style::Glyph::Done,
                 "runtime",
-                result.filesystem.runtime().to_string(),
+                result.attachment.spec.runtime().to_string(),
             ),
             crate::ui::render::LedgerRow::new(
                 crate::ui::style::Glyph::Done,
                 "location",
-                result.filesystem.location().display().to_string(),
+                result.attachment.spec.location().display().to_string(),
             ),
             crate::ui::render::LedgerRow::new(
                 crate::ui::style::Glyph::Done,
                 "state",
-                state.replace('_', " "),
+                state.to_owned(),
             ),
         ];
         let width = crate::ui::render::ledger_key_width(&rows);
@@ -798,30 +943,19 @@ fn finish_action(output: &Output, spec: fs::Spec, state: &'static str) -> Result
             output.ledger_row(row, width);
         }
         match state {
-            "configured" => output.outro(format!(
-                "Filesystem `{}` is configured but detached. Attach it: `omnifs fs attach --name {}`",
-                result.filesystem.id(),
-                result.filesystem.id()
-            )),
-            "attached" | "already_attached"
-                if result.filesystem.runtime() == fs::Runtime::Host =>
-            {
+            "ready" if result.attachment.spec.runtime() == fs::Runtime::Host => {
                 output.outro(format!(
                     "Files are at {}.",
-                    result.filesystem.location().display()
+                    result.attachment.spec.location().display()
                 ));
             },
-            "attached" | "already_attached" => output.outro(format!(
+            "ready" => output.outro(format!(
                 "Enter it: `omnifs fs shell --name {}`",
-                result.filesystem.id()
+                result.attachment.name
             )),
-            "detached" => output.outro(format!(
-                "Filesystem `{}` is detached; its configuration remains.",
-                result.filesystem.id()
-            )),
-            "removed" => output.outro(format!(
-                "Filesystem `{}` configuration removed.",
-                result.filesystem.id()
+            "detached" | "removed" => output.outro(format!(
+                "Attachment `{}` is no longer desired.",
+                result.attachment.name
             )),
             _ => {},
         }
@@ -898,5 +1032,43 @@ mod tests {
             _ => None,
         };
         assert_eq!(platform_default(), expected);
+    }
+
+    #[test]
+    fn host_default_is_profile_owned_without_client_filesystem_state() {
+        let profile = Path::new("/tmp/omnifs-profile");
+        let name = ResourceName::new("local").unwrap();
+        assert_eq!(
+            default_host_location_under(profile, &name),
+            profile.join("attachments/local")
+        );
+    }
+
+    #[test]
+    fn legacy_specs_only_produce_an_import_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ClientFilesystemState::under_root(dir.path());
+        let spec = fs::Spec::new(
+            fs::Id::new("old").unwrap(),
+            fs::Protocol::Nfs,
+            fs::Runtime::Host,
+            dir.path().join("mount"),
+        )
+        .unwrap();
+        let registry = state.registry();
+        let claim = registry.claim(spec.id()).unwrap();
+        claim.create(&spec).unwrap();
+        drop(claim);
+
+        let listed = state.registry().list().unwrap();
+        assert_eq!(listed, vec![spec]);
+        assert!(
+            dir.path()
+                .join("filesystems")
+                .join("runtime")
+                .read_dir()
+                .is_err(),
+            "a legacy read must not launch or create runtime state"
+        );
     }
 }

@@ -6,13 +6,15 @@ use omnifs_api::{
     ActionKind, ApplyReceipt, ApplyResourcesRequest, CredentialReceipt, CredentialStatusKind,
     NormalizedResourceSet, ProgressSnapshot, ProgressTarget, ResourceChangeAction,
     ResourceDeclarations, ResourceDefinition, ResourceDefinitionError, ResourcePhase, ResourcePlan,
-    ResourceStatus, RevokeCredentialRequest, SetCredentialMaterialRequest, plan,
+    ResourceStatus, RestartAttachmentRequest, RevokeCredentialRequest,
+    SetCredentialMaterialRequest, plan,
 };
 use omnifs_core::{
     ActionId, ProviderId, ResourceKey, ResourceKind, ResourceName, ResourceRevision,
 };
 use omnifs_state::{
-    ActionWriteError, CredentialActionOperation, CredentialActionRequest, CredentialSecretSidecar,
+    ActionWriteError, AttachmentActionRequest, AttachmentInstance, AttachmentPhase,
+    CredentialActionOperation, CredentialActionRequest, CredentialSecretSidecar,
     ResourceApplyError, ResourceApplyRequest as StateApplyRequest, StateStore,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -23,6 +25,7 @@ use tokio::sync::watch;
 pub(crate) struct ResourceControl {
     state: Arc<StateStore>,
     revision_wakeup: watch::Sender<ResourceRevision>,
+    namespace_wakeup: watch::Sender<Option<ResourceRevision>>,
     action_wakeup: watch::Sender<Option<ActionId>>,
     progress: Arc<ProgressHub>,
     publication_fence: Arc<tokio::sync::Mutex<()>>,
@@ -54,7 +57,8 @@ impl ResourceControl {
                 .ok()
                 .map(|serving| ResourceRevision::new(serving.revision.get()))
         };
-        let statuses = current
+        let attachment_instances = state.attachment_instances().await?;
+        let mut statuses = current
             .resources
             .resources()
             .iter()
@@ -71,7 +75,20 @@ impl ResourceControl {
                 error_code: None,
                 detail: None,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        reconstruct_attachment_statuses(
+            &current.resources,
+            current.revision,
+            serving_revision,
+            &attachment_instances,
+            &mut statuses,
+        );
+        // A persisted serving revision is not enough to claim the full
+        // revision is observed. Deletion tombstones and non-ready attachment
+        // instances remain work until the supervisor proves their exact
+        // runtime state.
+        let observed_revision =
+            startup_observed_revision(serving_revision, current.revision, &statuses);
         let (providers, serving, credentials, attachments) = existing_progress
             .as_ref()
             .map(|progress| {
@@ -86,7 +103,7 @@ impl ResourceControl {
             .unwrap_or_default();
         let snapshot = ProgressSnapshot {
             desired_revision: current.revision,
-            observed_revision: serving_revision,
+            observed_revision,
             resources: statuses,
             actions,
             providers,
@@ -104,10 +121,12 @@ impl ResourceControl {
             progress.publish_snapshot(ProgressTarget::Current, snapshot);
         }
         let (revision_wakeup, _) = watch::channel(current.revision);
+        let (namespace_wakeup, _) = watch::channel(serving_revision);
         let (action_wakeup, _) = watch::channel(None);
         Ok(Arc::new(Self {
             state,
             revision_wakeup,
+            namespace_wakeup,
             action_wakeup,
             progress,
             publication_fence: Arc::new(tokio::sync::Mutex::new(())),
@@ -289,6 +308,23 @@ impl ResourceControl {
         })
     }
 
+    pub(crate) async fn restart_attachment(
+        &self,
+        request: RestartAttachmentRequest,
+    ) -> Result<omnifs_api::ActionReceipt, ResourceControlError> {
+        self.ensure_admitted()?;
+        let action = self
+            .state
+            .accept_attachment_action(AttachmentActionRequest {
+                action_id: request.action_id,
+                attachment: request.attachment,
+                base_action_generation: request.base_action_generation,
+            })
+            .await?;
+        self.publish_action(&action);
+        Ok(action)
+    }
+
     pub(crate) fn publish_action(&self, action: &omnifs_api::ActionReceipt) {
         self.progress.record_action_receipt(action.clone());
         self.action_wakeup.send_replace(Some(action.action_id));
@@ -380,6 +416,12 @@ impl ResourceControl {
         self.revision_wakeup.subscribe()
     }
 
+    pub(crate) fn subscribe_namespace_revisions(
+        &self,
+    ) -> watch::Receiver<Option<ResourceRevision>> {
+        self.namespace_wakeup.subscribe()
+    }
+
     #[allow(
         dead_code,
         reason = "Plan 003 action reconciliation consumes this wakeup"
@@ -390,6 +432,94 @@ impl ResourceControl {
 
     pub(crate) fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
+    }
+
+    /// Publish that the provider-backed namespace for one desired revision is
+    /// serving. Attachment statuses stay pending until their separate runtime
+    /// owner records exact VFS sessions.
+    ///
+    /// Returns true when the revision contains attachment work and therefore
+    /// is not terminal yet.
+    pub(crate) fn mark_namespace_ready(&self, revision: ResourceRevision) -> bool {
+        let mut has_attachment = false;
+        let updated = self
+            .progress
+            .update_revision_snapshot(revision, |snapshot| {
+                has_attachment = snapshot.resources.iter().any(|status| {
+                    status.desired_revision == revision
+                        && status.key.kind == ResourceKind::Attachment
+                });
+                for status in &mut snapshot.resources {
+                    if status.desired_revision != revision
+                        || status.key.kind == ResourceKind::Attachment
+                    {
+                        continue;
+                    }
+                    status.phase = ResourcePhase::Ready;
+                    status.observed_revision = Some(revision);
+                    status.error_code = None;
+                    status.detail = None;
+                }
+                if !has_attachment {
+                    snapshot.observed_revision = Some(revision);
+                }
+            });
+        if updated {
+            self.namespace_wakeup.send_replace(Some(revision));
+        }
+        has_attachment
+    }
+
+    pub(crate) fn mark_attachment_ready(
+        &self,
+        revision: ResourceRevision,
+        name: &ResourceName,
+    ) -> bool {
+        self.finish_attachment_status(revision, name, false)
+    }
+
+    pub(crate) fn clear_deleted_attachment(
+        &self,
+        revision: ResourceRevision,
+        name: &ResourceName,
+    ) -> bool {
+        self.finish_attachment_status(revision, name, true)
+    }
+
+    fn finish_attachment_status(
+        &self,
+        revision: ResourceRevision,
+        name: &ResourceName,
+        deleted: bool,
+    ) -> bool {
+        let key = ResourceKey::new(ResourceKind::Attachment, name.clone());
+        let mut terminal = false;
+        let updated = self
+            .progress
+            .update_revision_snapshot(revision, |snapshot| {
+                if deleted {
+                    snapshot.resources.retain(|status| status.key != key);
+                    snapshot.attachments.retain(|progress| progress.key != key);
+                } else if let Some(status) = snapshot
+                    .resources
+                    .iter_mut()
+                    .find(|status| status.key == key && status.desired_revision == revision)
+                {
+                    status.phase = ResourcePhase::Ready;
+                    status.observed_revision = Some(revision);
+                    status.error_code = None;
+                    status.detail = None;
+                }
+                terminal = snapshot
+                    .resources
+                    .iter()
+                    .filter(|status| status.desired_revision == revision)
+                    .all(|status| status.phase == ResourcePhase::Ready);
+                if terminal {
+                    snapshot.observed_revision = Some(revision);
+                }
+            });
+        updated && terminal
     }
 
     fn ensure_admitted(&self) -> Result<(), ResourceControlError> {
@@ -459,11 +589,14 @@ fn next_resource_statuses(
     let mut statuses = Vec::with_capacity(changes.len());
     for change in changes {
         let old = previous.get(&change.key).copied();
+        if change.action == ResourceChangeAction::Unchanged
+            && let Some(status) = old
+        {
+            statuses.push(status.clone());
+            continue;
+        }
         let (phase, observed_revision) = match change.action {
-            ResourceChangeAction::Unchanged => old
-                .map_or((ResourcePhase::Pending, None), |status| {
-                    (status.phase, status.observed_revision)
-                }),
+            ResourceChangeAction::Unchanged => (ResourcePhase::Pending, None),
             ResourceChangeAction::Create | ResourceChangeAction::Update => {
                 (ResourcePhase::Pending, None)
             },
@@ -482,6 +615,117 @@ fn next_resource_statuses(
         });
     }
     statuses
+}
+
+/// Rebuild attachment resource status from the durable observed rows before
+/// the daemon starts reconciliation. This includes deletion tombstones, which
+/// no longer have a desired resource row but still block revision readiness
+/// until the exact runtime has been removed.
+fn reconstruct_attachment_statuses(
+    desired: &NormalizedResourceSet,
+    revision: ResourceRevision,
+    serving_revision: Option<ResourceRevision>,
+    instances: &[AttachmentInstance],
+    statuses: &mut Vec<ResourceStatus>,
+) {
+    let by_name: BTreeMap<_, _> = instances
+        .iter()
+        .map(|instance| (instance.name.clone(), instance))
+        .collect();
+    let desired_names: BTreeSet<_> = desired
+        .resources()
+        .iter()
+        .filter_map(|resource| match resource {
+            ResourceDefinition::Attachment(definition) => Some(definition.name.clone()),
+            _ => None,
+        })
+        .collect();
+
+    for status in statuses.iter_mut() {
+        if status.key.kind != ResourceKind::Attachment {
+            continue;
+        }
+        let Some(instance) = by_name.get(&status.key.name) else {
+            continue;
+        };
+        let (phase, observed_revision) = attachment_status_phase(
+            instance,
+            serving_revision,
+            revision,
+            desired_names.contains(&status.key.name),
+        );
+        status.phase = phase;
+        status.observed_revision = observed_revision;
+        status.error_code = instance.last_error_code.clone();
+        status.detail = instance.last_error_detail.clone();
+    }
+
+    // Deletion rows are intentionally absent from the desired set. Keep a
+    // status entry so a restarted daemon cannot publish RevisionReady before
+    // its supervisor has proved the exact runtime is gone.
+    for instance in instances {
+        if desired_names.contains(&instance.name) || !instance.deleting {
+            continue;
+        }
+        let (phase, observed_revision) =
+            attachment_status_phase(instance, serving_revision, revision, false);
+        statuses.push(ResourceStatus {
+            key: ResourceKey::new(ResourceKind::Attachment, instance.name.clone()),
+            desired_revision: revision,
+            observed_revision,
+            phase,
+            error_code: instance.last_error_code.clone(),
+            detail: instance.last_error_detail.clone(),
+        });
+    }
+}
+
+fn attachment_status_phase(
+    instance: &AttachmentInstance,
+    serving_revision: Option<ResourceRevision>,
+    revision: ResourceRevision,
+    desired_exists: bool,
+) -> (ResourcePhase, Option<ResourceRevision>) {
+    if !desired_exists {
+        let phase = match instance.phase {
+            AttachmentPhase::Retrying => ResourcePhase::Retrying,
+            AttachmentPhase::Failed => ResourcePhase::Failed,
+            _ => ResourcePhase::Deleting,
+        };
+        return (phase, None);
+    }
+
+    let phase = match instance.phase {
+        AttachmentPhase::Ready
+            if instance.desired_version.is_some()
+                && instance.observed_version == instance.desired_version
+                && serving_revision.is_some_and(|serving| serving >= revision) =>
+        {
+            ResourcePhase::Ready
+        },
+        AttachmentPhase::Retrying => ResourcePhase::Retrying,
+        AttachmentPhase::Failed => ResourcePhase::Failed,
+        AttachmentPhase::Pending | AttachmentPhase::WaitingForNamespace => ResourcePhase::Pending,
+        AttachmentPhase::Starting | AttachmentPhase::Stopping | AttachmentPhase::Ready => {
+            ResourcePhase::Preparing
+        },
+        AttachmentPhase::Deleting => ResourcePhase::Preparing,
+    };
+    let observed_revision = (phase == ResourcePhase::Ready).then_some(revision);
+    (phase, observed_revision)
+}
+
+fn startup_observed_revision(
+    serving_revision: Option<ResourceRevision>,
+    revision: ResourceRevision,
+    statuses: &[ResourceStatus],
+) -> Option<ResourceRevision> {
+    serving_revision.filter(|_| {
+        statuses
+            .iter()
+            .filter(|status| status.desired_revision == revision)
+            .all(|status| status.phase == ResourcePhase::Ready)
+    })
 }
 
 fn revision_provider_membership(
@@ -676,6 +920,95 @@ mod tests {
         assert_eq!(
             statuses[0].observed_revision,
             Some(ResourceRevision::new(1))
+        );
+    }
+
+    #[test]
+    fn resource_status_diff_keeps_unchanged_work_out_of_the_new_revision() {
+        let retained = ProviderId::from_digest([3; 32]);
+        let added = ProviderId::from_digest([4; 32]);
+        let retained_name = ResourceName::new("retained").unwrap();
+        let current =
+            NormalizedResourceSet::new(vec![ResourceDefinition::Provider(ProviderDefinition {
+                name: retained_name.clone(),
+                artifact: retained,
+            })])
+            .unwrap();
+        let desired = NormalizedResourceSet::new(vec![
+            ResourceDefinition::Provider(ProviderDefinition {
+                name: retained_name.clone(),
+                artifact: retained,
+            }),
+            ResourceDefinition::Provider(ProviderDefinition {
+                name: ResourceName::new("added").unwrap(),
+                artifact: added,
+            }),
+        ])
+        .unwrap();
+        let statuses = next_resource_statuses(
+            &current,
+            &desired,
+            ResourceRevision::new(2),
+            &[ResourceStatus {
+                key: ResourceKey::new(ResourceKind::Provider, retained_name.clone()),
+                desired_revision: ResourceRevision::new(1),
+                observed_revision: Some(ResourceRevision::new(1)),
+                phase: ResourcePhase::Ready,
+                error_code: None,
+                detail: None,
+            }],
+        );
+
+        let retained = statuses
+            .iter()
+            .find(|status| status.key.name == retained_name)
+            .unwrap();
+        assert_eq!(retained.desired_revision, ResourceRevision::new(1));
+        assert_eq!(retained.phase, ResourcePhase::Ready);
+        let added = statuses
+            .iter()
+            .find(|status| status.key.name.as_str() == "added")
+            .unwrap();
+        assert_eq!(added.desired_revision, ResourceRevision::new(2));
+        assert_eq!(added.phase, ResourcePhase::Pending);
+    }
+
+    #[test]
+    fn startup_reconstructs_failed_deletion_tombstone_before_namespace_ready() {
+        let name = ResourceName::new("gone").unwrap();
+        let mut tombstone = AttachmentInstance::pending(name.clone());
+        tombstone.phase = AttachmentPhase::Failed;
+        tombstone.deleting = true;
+        tombstone.last_error_code = Some("attachment_delete_probe_failed".to_owned());
+        tombstone.last_error_detail = Some("runtime still present".to_owned());
+        let mut statuses = Vec::new();
+
+        reconstruct_attachment_statuses(
+            &NormalizedResourceSet::empty(),
+            ResourceRevision::new(7),
+            Some(ResourceRevision::new(7)),
+            &[tombstone],
+            &mut statuses,
+        );
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(
+            statuses[0].key,
+            ResourceKey::new(ResourceKind::Attachment, name)
+        );
+        assert_eq!(statuses[0].phase, ResourcePhase::Failed);
+        assert_eq!(statuses[0].observed_revision, None);
+        assert_eq!(
+            statuses[0].error_code.as_deref(),
+            Some("attachment_delete_probe_failed")
+        );
+        assert_eq!(
+            startup_observed_revision(
+                Some(ResourceRevision::new(7)),
+                ResourceRevision::new(7),
+                &statuses
+            ),
+            None
         );
     }
 

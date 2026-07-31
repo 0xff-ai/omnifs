@@ -6,7 +6,7 @@
 //! the standard toolbox (the `fuse-docker` conformance column, reusing the
 //! shared matrix machinery from `omnifs_itest::matrix` rather than forking
 //! it), plus the surrounding lifecycle, timing, and security guarantees:
-//! `omnifs fs {create,attach,detach,ls}`, explicit filesystem teardown before
+//! `omnifs fs {create,restart,detach,ls}`, explicit desired teardown before
 //! `omnifs down`, a cold-start budget, cross-mount byte identity,
 //! kill/reattach behavior, and
 //! the no-credentials contract.
@@ -121,12 +121,25 @@ fn docker_output(args: &[&str]) -> Option<String> {
     }
 }
 
+fn docker_logs(name: &str) -> String {
+    let Ok(output) = Command::new("docker")
+        .args(["logs", "--tail", "60", name])
+        .output()
+    else {
+        return "<docker logs unavailable>".to_owned();
+    };
+    let mut logs = String::from_utf8_lossy(&output.stdout).into_owned();
+    logs.push_str(&String::from_utf8_lossy(&output.stderr));
+    logs
+}
+
 // ===========================================================================
 // Fixture: a hermetic workspace driving the real `omnifs` CLI end to end.
 // ===========================================================================
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
-/// as a contributor would: daemon start, `fs create/attach/detach/ls`, `down`. No test
+/// as a contributor would: daemon start, desired Attachment apply and
+/// progress watch, `fs restart/detach/ls`, `down`. No test
 /// touches the user's real `~/.omnifs` or default ports.
 struct Fixture {
     home: TempDir,
@@ -254,7 +267,7 @@ impl Fixture {
         let out = self.run(&["fs", "attach", "--name", "itest-host"]);
         let host_log = std::fs::read_to_string(
             self.home_path()
-                .join("client/cache/filesystem-itest-host.log"),
+                .join("daemon-state/logs/attachments/itest-host.log"),
         )
         .unwrap_or_else(|error| format!("<host filesystem log unavailable: {error}>"));
         assert!(
@@ -275,12 +288,27 @@ impl Fixture {
             "--runtime",
             "docker",
         ]);
+        let daemon_log =
+            std::fs::read_to_string(self.home_path().join("daemon-state/logs/daemon.log"))
+                .unwrap_or_else(|error| format!("<daemon log unavailable: {error}>"));
+        let container_logs = self
+            .containers()
+            .into_iter()
+            .map(|name| {
+                let log = docker_logs(&name);
+                format!("--- docker logs {name} (tail) ---\n{log}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             out.status.success(),
-            "Docker filesystem create failed (exit {})\nstdout: {}\nstderr: {}",
+            "Docker filesystem create failed (exit {})\nstdout: {}\nstderr: {}\n\
+             daemon log:\n{}\n{}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
+            daemon_log,
+            container_logs,
         );
 
         let message = self.mount_point.join("test/hello/message");
@@ -317,20 +345,68 @@ impl Fixture {
             if serde_json::from_slice::<serde_json::Value>(&output.stdout)
                 .ok()
                 .is_some_and(|value| {
-                    value["result"]["filesystems"]
+                    value["result"]["attachments"]
                         .as_array()
                         .is_some_and(|filesystems| {
                             filesystems.iter().any(|filesystem| {
-                                filesystem["id"] == id && filesystem["state"] == "attached"
+                                filesystem["name"] == id && filesystem["state"] == "ready"
                             })
                         })
                 })
             {
                 return;
             }
+            if Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            let daemon_log =
+                std::fs::read_to_string(self.home_path().join("daemon-state/logs/daemon.log"))
+                    .unwrap_or_else(|error| format!("<daemon log unavailable: {error}>"));
+            let status = self.run(&["status", "--output", "json"]);
+            let container_logs = self
+                .containers()
+                .into_iter()
+                .map(|name| {
+                    let log = docker_logs(&name);
+                    format!("--- docker logs {name} (tail) ---\n{log}")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            panic!(
+                "filesystem `{id}` did not reattach within {}s\nstdout: {}\nstderr: {}\n\
+                 full status stdout: {}\nfull status stderr: {}\ndaemon log:\n{}\n{}",
+                timeout.as_secs(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+                String::from_utf8_lossy(&status.stdout),
+                String::from_utf8_lossy(&status.stderr),
+                daemon_log,
+                container_logs,
+            );
+        }
+    }
+
+    fn wait_for_vfs_session(&self, id: &str, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let output = self.run(&["status", "--output", "json"]);
+            if serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .ok()
+                .and_then(|value| {
+                    value["result"]["daemon"]["status"]["attachments"]
+                        .as_array()
+                        .cloned()
+                })
+                .is_some_and(|attachments| {
+                    attachments.iter().any(|attachment| attachment["id"] == id)
+                })
+            {
+                return;
+            }
             assert!(
                 Instant::now() < deadline,
-                "filesystem `{id}` did not reattach within {}s\nstdout: {}\nstderr: {}",
+                "filesystem `{id}` did not establish a VFS session within {}s\nstdout: {}\nstderr: {}",
                 timeout.as_secs(),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
@@ -353,7 +429,7 @@ impl Fixture {
             return;
         }
         for name in self.containers() {
-            let logs = docker_output(&["logs", "--tail", "60", &name]).unwrap_or_default();
+            let logs = docker_logs(&name);
             eprintln!("--- docker logs {name} (tail) ---\n{logs}\n---");
         }
         panic!(
@@ -471,15 +547,18 @@ fn container_state(name: &str) -> Option<String> {
     docker_output(&["inspect", "-f", "{{.State.Status}}", name])
 }
 
-fn wait_for_container_state(name: &str, want: &str, timeout: Duration) {
+fn wait_for_container_replacement(name: &str, previous_id: &str, timeout: Duration) -> String {
     let deadline = Instant::now() + timeout;
     loop {
-        if container_state(name).as_deref() == Some(want) {
-            return;
+        if container_state(name).as_deref() == Some("running")
+            && let Some(id) = docker_output(&["inspect", "-f", "{{.Id}}", name])
+            && id != previous_id
+        {
+            return id;
         }
         assert!(
             Instant::now() < deadline,
-            "container `{name}` never reached state `{want}` within {timeout:?} (last seen: {:?})",
+            "container `{name}` was not replaced within {timeout:?} (last seen: {:?})",
             container_state(name)
         );
         std::thread::sleep(Duration::from_millis(100));
@@ -743,8 +822,8 @@ fn fuse_docker_lifecycle_and_matrix() {
     );
     let status_text = String::from_utf8_lossy(&status_out.stdout);
     assert!(
-        status_text.contains("attached"),
-        "fs ls must report an attached Docker filesystem: {status_text}"
+        status_text.contains("ready"),
+        "fs ls must report a ready Docker attachment: {status_text}"
     );
 
     let container = fixture.container_name();
@@ -804,12 +883,12 @@ fn fuse_docker_lifecycle_and_matrix() {
         mismatches.join("\n  ")
     );
 
-    // Detaching Docker leaves the host filesystem serving every mount; attaching
-    // it again restores the same whole-namespace view.
-    let detached = fixture.run(&["fs", "detach", "--name", "itest-docker"]);
+    // Restarting Docker leaves the host filesystem serving every mount and
+    // restores the same whole-namespace view.
+    let detached = fixture.filesystem_restart();
     assert!(
         detached.status.success(),
-        "detaching Docker filesystem failed (exit {})\nstdout: {}\nstderr: {}",
+        "restarting Docker filesystem failed (exit {})\nstdout: {}\nstderr: {}",
         detached.status,
         String::from_utf8_lossy(&detached.stdout),
         String::from_utf8_lossy(&detached.stderr),
@@ -825,15 +904,15 @@ fn fuse_docker_lifecycle_and_matrix() {
         );
     }
     let reattached = fixture.filesystem_attach();
-    fixture.assert_filesystem_action_ok(&reattached, "reattach after detach");
+    fixture.assert_filesystem_action_ok(&reattached, "ensure after restart");
     assert_serves(&fixture.container_name());
 
-    // Filesystem runners have independent lifecycles. Detach Docker and the
-    // host runner explicitly, then stop the daemon with `omnifs down`.
+    // Remove both desired Attachments explicitly, then stop the daemon with
+    // `omnifs down`. The daemon owns runtime teardown before rows vanish.
     let detached = fixture.run(&["fs", "detach", "--name", "itest-docker"]);
     assert!(
         detached.status.success(),
-        "detaching Docker filesystem before down failed (exit {})\nstdout: {}\nstderr: {}",
+        "removing Docker attachment before down failed (exit {})\nstdout: {}\nstderr: {}",
         detached.status,
         String::from_utf8_lossy(&detached.stdout),
         String::from_utf8_lossy(&detached.stderr),
@@ -841,7 +920,7 @@ fn fuse_docker_lifecycle_and_matrix() {
     let detached = fixture.run(&["fs", "detach", "--name", "itest-host"]);
     assert!(
         detached.status.success(),
-        "detaching host filesystem before down failed (exit {})\nstdout: {}\nstderr: {}",
+        "removing host attachment before down failed (exit {})\nstdout: {}\nstderr: {}",
         detached.status,
         String::from_utf8_lossy(&detached.stdout),
         String::from_utf8_lossy(&detached.stderr),
@@ -856,7 +935,7 @@ fn fuse_docker_lifecycle_and_matrix() {
     );
     assert!(
         fixture.containers().is_empty(),
-        "filesystem detach must remove the filesystem container before omnifs down"
+        "attachment removal must stop and remove the filesystem container before omnifs down"
     );
 }
 
@@ -866,10 +945,9 @@ fn fuse_docker_lifecycle_and_matrix() {
 
 /// (e) Two failure modes, both real, deliberately kept apart:
 ///
-/// 1. **Kill the container.** The FUSE mount lives entirely inside the
-///    container's own mount namespace, so killing it leaves nothing to clean
-///    up host-side; the only observable effect is the container going away.
-///    Docker filesystem restart creates a fresh container that serves.
+/// 1. **Kill the container.** The daemon observes that its exact runtime
+///    stopped, removes that retained identity, and creates a fresh container
+///    from the durable desired Attachment without a client command.
 /// 2. **Kill the daemon, leaving the container alive.** The VFS wire client
 ///    reconnects with backoff forever (`omnifs-vfs`) to the fixed attach
 ///    endpoint. The same container therefore reattaches without replacement.
@@ -902,15 +980,8 @@ fn kill_and_reattach_fuse_semantics() {
         kill_status.is_ok_and(|status| status.success()),
         "docker kill must succeed"
     );
-    wait_for_container_state(&container, "exited", Duration::from_secs(10));
-
-    let up2 = fixture.filesystem_restart();
-    fixture.assert_filesystem_action_ok(&up2, "restart after a killed container");
-    let id_2 = container_id(&container);
-    assert_ne!(
-        id_1, id_2,
-        "filesystem restart must create a genuinely fresh container, not reuse the killed one"
-    );
+    let id_2 = wait_for_container_replacement(&container, &id_1, Duration::from_secs(15));
+    fixture.wait_for_filesystem_attachment("itest-docker", Duration::from_secs(15));
     assert_serves(&container);
 
     // Failure mode 2: SIGKILL the daemon, container untouched.
@@ -951,7 +1022,7 @@ fn kill_and_reattach_fuse_semantics() {
     // Daemon readiness precedes surviving filesystems finishing their
     // independent reconnect backoff. The runner reattaches without another
     // lifecycle command or replacement.
-    fixture.wait_for_filesystem_attachment("itest-docker", Duration::from_secs(15));
+    fixture.wait_for_vfs_session("itest-docker", Duration::from_secs(15));
 
     let id_3 = container_id(&container);
     assert_eq!(

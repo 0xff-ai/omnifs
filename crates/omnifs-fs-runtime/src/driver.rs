@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context as _, Result, ensure};
-use omnifs_core::{ClientOwnerId, fs};
+use omnifs_core::{AttachmentSpec, ResourceName, fs};
 
 use crate::docker::{DockerClient, DockerContainerIdentity, OwnedFilesystemContainer};
 use crate::host::HostDriver;
@@ -21,6 +21,20 @@ pub struct RuntimePaths {
     runtime_root: PathBuf,
     guest_image_cache: PathBuf,
     executable: PathBuf,
+    layout: RuntimePathLayout,
+}
+
+/// The owner-specific arrangement of otherwise identical runtime artifacts.
+#[derive(Debug, Clone, Copy)]
+enum RuntimePathLayout {
+    LegacyFilesystem,
+    DaemonAttachment,
+}
+
+fn short_attachment_hash(id: &fs::Id) -> String {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(id.as_str().as_bytes());
+    hex::encode(&digest[..8])
 }
 
 impl RuntimePaths {
@@ -43,15 +57,53 @@ impl RuntimePaths {
             runtime_root,
             guest_image_cache,
             executable,
+            layout: RuntimePathLayout::LegacyFilesystem,
+        }
+    }
+
+    /// Construct daemon-owned attachment paths. The caller supplies daemon
+    /// state roots, so this crate never resolves a profile or creates a
+    /// fallback client layout.
+    #[must_use]
+    pub fn daemon_owned(
+        profile_root: PathBuf,
+        is_default_profile: bool,
+        attachments_root: PathBuf,
+        attachment_logs_root: PathBuf,
+        guest_image_cache: PathBuf,
+        executable: PathBuf,
+    ) -> Self {
+        Self {
+            profile_root,
+            is_default_profile,
+            state_root: attachments_root.clone(),
+            host_log_root: attachment_logs_root,
+            runtime_root: attachments_root,
+            guest_image_cache,
+            executable,
+            layout: RuntimePathLayout::DaemonAttachment,
         }
     }
 
     #[must_use]
     pub fn attachment(&self, id: &fs::Id) -> AttachmentRuntimePaths {
+        let state_dir = self.state_root.join(id.as_str());
         AttachmentRuntimePaths {
             profile_root: self.profile_root.clone(),
-            state_dir: self.state_root.join(id.as_str()),
-            host_log: self.host_log_root.join(format!("filesystem-{id}.log")),
+            state_dir: state_dir.clone(),
+            host_log: match self.layout {
+                RuntimePathLayout::LegacyFilesystem => {
+                    self.host_log_root.join(format!("filesystem-{id}.log"))
+                },
+                RuntimePathLayout::DaemonAttachment => self.host_log_root.join(format!("{id}.log")),
+            },
+            host_control_socket: match self.layout {
+                RuntimePathLayout::LegacyFilesystem => state_dir.join("control.sock"),
+                RuntimePathLayout::DaemonAttachment => self
+                    .profile_root
+                    .join(".r")
+                    .join(format!("{}.sock", short_attachment_hash(id))),
+            },
             libkrun_root: self.runtime_root.join(id.as_str()).join("libkrun"),
             guest_image_cache: self.guest_image_cache.clone(),
             executable: self.executable.clone(),
@@ -85,6 +137,7 @@ pub struct AttachmentRuntimePaths {
     profile_root: PathBuf,
     state_dir: PathBuf,
     host_log: PathBuf,
+    host_control_socket: PathBuf,
     libkrun_root: PathBuf,
     guest_image_cache: PathBuf,
     executable: PathBuf,
@@ -104,6 +157,11 @@ impl AttachmentRuntimePaths {
     #[must_use]
     pub fn host_log(&self) -> &Path {
         &self.host_log
+    }
+
+    #[must_use]
+    pub fn host_control_socket(&self) -> &Path {
+        &self.host_control_socket
     }
 
     #[must_use]
@@ -158,7 +216,9 @@ impl AttachEndpoints {
 /// supplied by the caller.
 pub struct LaunchRequest<'a> {
     pub spec: &'a fs::Spec,
-    pub client_owner: ClientOwnerId,
+    pub attachment: &'a ResourceName,
+    pub attachment_spec: &'a AttachmentSpec,
+    pub runtime_instance: &'a str,
     pub paths: &'a AttachmentRuntimePaths,
     pub assets: &'a RuntimeAssets,
     pub endpoints: &'a AttachEndpoints,
@@ -175,6 +235,8 @@ enum Backend {
 /// dispatch.
 pub struct RuntimeDriver {
     spec: fs::Spec,
+    attachment: ResourceName,
+    attachment_spec: AttachmentSpec,
     paths: AttachmentRuntimePaths,
     assets: RuntimeAssets,
     events: RuntimeEventSink,
@@ -191,6 +253,30 @@ pub enum ConfirmedRuntime {
     Libkrun(omnifs_libkrun::HelperRecord),
 }
 
+impl ConfirmedRuntime {
+    #[must_use]
+    pub fn runtime_instance(&self) -> &str {
+        match self {
+            Self::Host(record, _) => &record.instance_id,
+            Self::Docker(identity, _) => &identity.runtime_instance,
+            Self::Libkrun(record) => &record.instance_id,
+        }
+    }
+
+    /// Whether the proved runtime can still establish a VFS session.
+    ///
+    /// Host and libkrun confirmation includes a live control or process check.
+    /// Docker retains stopped containers, so its exact identity and liveness
+    /// remain separate facts.
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
+        match self {
+            Self::Host(_, _) | Self::Libkrun(_) => true,
+            Self::Docker(_, running) => *running,
+        }
+    }
+}
+
 impl RuntimeDriver {
     /// The only match on the persisted runtime enum.
     pub fn new(
@@ -200,10 +286,19 @@ impl RuntimeDriver {
         events: RuntimeEventSink,
     ) -> Result<Self> {
         let attachment = paths.attachment(spec.id());
+        let attachment_name = ResourceName::new(spec.id().as_str())?;
+        let attachment_spec = AttachmentSpec::new(
+            spec.protocol(),
+            spec.runtime(),
+            spec.location().to_path_buf(),
+            assets.docker_image.clone(),
+            assets.guest_image.clone(),
+        )?;
         let backend = match spec.runtime() {
-            fs::Runtime::Host => Backend::Host(HostDriver::new(
+            fs::Runtime::Host => Backend::Host(HostDriver::new_with_control_socket(
                 attachment.state_dir().to_path_buf(),
                 attachment.host_log().to_path_buf(),
+                attachment.host_control_socket().to_path_buf(),
                 attachment.executable().to_path_buf(),
                 events.clone(),
             )),
@@ -240,6 +335,8 @@ impl RuntimeDriver {
         };
         Ok(Self {
             spec,
+            attachment: attachment_name,
+            attachment_spec,
             paths: attachment,
             assets,
             events,
@@ -252,24 +349,54 @@ impl RuntimeDriver {
         &self.spec
     }
 
+    #[must_use]
+    pub fn attachment(&self) -> &ResourceName {
+        &self.attachment
+    }
+
+    #[must_use]
+    pub fn attachment_spec(&self) -> &AttachmentSpec {
+        &self.attachment_spec
+    }
+
     pub async fn confirmed(
         &self,
-        client_owner: ClientOwnerId,
+        runtime_instance: &str,
     ) -> std::result::Result<Option<ConfirmedRuntime>, RuntimeError> {
         let result = match &self.backend {
-            Backend::Host(runner) => runner
-                .confirmed(&self.spec)
-                .await
-                .map(|value| value.map(|(record, phase)| ConfirmedRuntime::Host(record, phase))),
+            Backend::Host(runner) => runner.confirmed(&self.spec).await.and_then(|value| {
+                value
+                    .map(|(record, phase)| {
+                        ensure!(
+                            record.instance_id == runtime_instance,
+                            "host runtime instance changed before exact confirmation"
+                        );
+                        Ok(ConfirmedRuntime::Host(record, phase))
+                    })
+                    .transpose()
+            }),
             Backend::Docker(client) => client
-                .confirmed(self.paths.profile_root(), client_owner, &self.spec)
+                .confirmed(
+                    self.paths.profile_root(),
+                    &self.attachment,
+                    &self.attachment_spec,
+                    runtime_instance,
+                )
                 .await
                 .map(|value| {
                     value.map(|(identity, running)| ConfirmedRuntime::Docker(identity, running))
                 }),
-            Backend::Libkrun(runner) => runner
-                .confirmed()
-                .map(|record| record.map(ConfirmedRuntime::Libkrun)),
+            Backend::Libkrun(runner) => runner.confirmed().and_then(|record| {
+                record
+                    .map(|record| {
+                        ensure!(
+                            record.instance_id == runtime_instance,
+                            "libkrun runtime instance changed before exact confirmation"
+                        );
+                        Ok(ConfirmedRuntime::Libkrun(record))
+                    })
+                    .transpose()
+            }),
         };
         result.map_err(|source| {
             let error = RuntimeError::new(RuntimeStage::Probe, source);
@@ -283,7 +410,7 @@ impl RuntimeDriver {
 
     pub async fn stop_confirmed(
         &self,
-        client_owner: ClientOwnerId,
+        runtime_instance: &str,
         confirmed: ConfirmedRuntime,
     ) -> std::result::Result<(), RuntimeError> {
         self.events.emit(RuntimeEvent::Stage {
@@ -301,8 +428,9 @@ impl RuntimeDriver {
                     .stop_confirmed(
                         &identity,
                         self.paths.profile_root(),
-                        client_owner,
-                        &self.spec,
+                        &self.attachment,
+                        &self.attachment_spec,
+                        runtime_instance,
                     )
                     .await
             },
@@ -335,13 +463,15 @@ impl RuntimeDriver {
 
     pub async fn launch(
         &self,
-        client_owner: ClientOwnerId,
+        runtime_instance: &str,
         endpoints: &AttachEndpoints,
         attached: impl Future<Output = Result<()>>,
     ) -> std::result::Result<(), RuntimeError> {
         let request = LaunchRequest {
             spec: &self.spec,
-            client_owner,
+            attachment: &self.attachment,
+            attachment_spec: &self.attachment_spec,
+            runtime_instance,
             paths: &self.paths,
             assets: &self.assets,
             endpoints,
@@ -505,6 +635,55 @@ mod tests {
     }
 
     #[test]
+    fn legacy_paths_keep_filesystem_named_host_logs() {
+        let root = Path::new("/tmp/omnifs-runtime");
+        let paths = paths(root);
+        let attachment = paths.attachment(&fs::Id::new("work").unwrap());
+        assert_eq!(attachment.state_dir(), root.join("state/work"));
+        assert_eq!(attachment.host_log(), root.join("logs/filesystem-work.log"));
+        assert_eq!(
+            attachment.host_control_socket(),
+            root.join("state/work/control.sock")
+        );
+        assert_eq!(attachment.libkrun_root(), root.join("runtime/work/libkrun"));
+        assert_eq!(attachment.guest_image_cache(), root.join("guest-images"));
+    }
+
+    #[test]
+    fn daemon_owned_paths_stay_under_attachment_state() {
+        let root = Path::new("/tmp/omnifs-daemon");
+        let paths = RuntimePaths::daemon_owned(
+            root.to_path_buf(),
+            false,
+            root.join("runtime/attachments"),
+            root.join("logs/attachments"),
+            root.join("cache/guest-images"),
+            root.join("omnifs"),
+        );
+        let attachment = paths.attachment(&fs::Id::new("work").unwrap());
+        assert_eq!(
+            attachment.state_dir(),
+            root.join("runtime/attachments/work")
+        );
+        assert_eq!(
+            attachment.host_log(),
+            root.join("logs/attachments/work.log")
+        );
+        assert_eq!(
+            attachment.host_control_socket(),
+            root.join(".r/00e13ed7af55b276.sock")
+        );
+        assert_eq!(
+            attachment.libkrun_root(),
+            root.join("runtime/attachments/work/libkrun")
+        );
+        assert_eq!(
+            attachment.guest_image_cache(),
+            root.join("cache/guest-images")
+        );
+    }
+
+    #[test]
     fn dispatches_each_closed_runtime_variant() {
         let temp = tempfile::tempdir().unwrap();
         let paths = paths(temp.path());
@@ -542,6 +721,16 @@ mod tests {
             .backend,
             Backend::Libkrun(_)
         ));
+    }
+
+    #[test]
+    fn stopped_docker_identity_is_not_a_running_runtime() {
+        let identity = DockerContainerIdentity {
+            id: "container".to_owned(),
+            runtime_instance: "instance".to_owned(),
+        };
+        assert!(!ConfirmedRuntime::Docker(identity.clone(), false).is_running());
+        assert!(ConfirmedRuntime::Docker(identity, true).is_running());
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::path::Path;
 
 use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, MountPoint};
 use omnifs_api::OMNIFS_ATTACH_ADDR_ENV;
-use omnifs_core::{ClientOwnerId, fs};
+use omnifs_core::{AttachmentSpec, ResourceName, fs};
 
 use super::{ContainerName, DockerTarget};
 use crate::{BUILD_CHANNEL, BuildChannel, ImageRef};
@@ -102,8 +102,9 @@ impl DockerTarget {
     pub(crate) fn build_filesystem_container_body(
         &self,
         home: &Path,
-        client_owner: ClientOwnerId,
-        spec: &fs::Spec,
+        attachment: &ResourceName,
+        spec: &AttachmentSpec,
+        runtime_instance: &str,
         attach_port: u16,
         add_host_gateway: bool,
     ) -> ContainerCreateBody {
@@ -112,7 +113,7 @@ impl DockerTarget {
             FILESYSTEM_HOME_LABEL.to_string(),
             home.display().to_string(),
         );
-        labels.insert(FILESYSTEM_ID_LABEL.to_string(), spec.id().to_string());
+        labels.insert(FILESYSTEM_ID_LABEL.to_string(), attachment.to_string());
 
         let extra_hosts =
             add_host_gateway.then(|| vec!["host.docker.internal:host-gateway".to_string()]);
@@ -132,7 +133,7 @@ impl DockerTarget {
         let env = vec![format!(
             "{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:{attach_port}"
         )];
-        let cmd = filesystem_command(client_owner, spec);
+        let cmd = filesystem_command(attachment, spec, runtime_instance);
 
         ContainerCreateBody {
             image: Some(self.image().as_str().to_string()),
@@ -145,19 +146,29 @@ impl DockerTarget {
     }
 }
 
-pub(crate) fn filesystem_command(client_owner: ClientOwnerId, spec: &fs::Spec) -> Vec<String> {
-    vec![
-        "--client-owner".to_owned(),
-        client_owner.to_string(),
+pub(crate) fn filesystem_command(
+    attachment: &ResourceName,
+    spec: &AttachmentSpec,
+    runtime_instance: &str,
+) -> Vec<String> {
+    let mut command = vec![
         "--name".to_owned(),
-        spec.id().to_string(),
+        attachment.to_string(),
         "--protocol".to_owned(),
         spec.protocol().to_string(),
         "--runtime".to_owned(),
         spec.runtime().to_string(),
         "--location".to_owned(),
         spec.location().display().to_string(),
-    ]
+    ];
+    if let Some(image) = spec.docker_image() {
+        command.extend(["--docker-image".to_owned(), image.to_owned()]);
+    }
+    if let Some(image) = spec.libkrun_guest_image() {
+        command.extend(["--libkrun-guest-image".to_owned(), image.to_owned()]);
+    }
+    command.extend(["--runtime-instance".to_owned(), runtime_instance.to_owned()]);
+    command
 }
 
 /// Env var names the filesystem container's image may set on its own (its
@@ -222,8 +233,8 @@ fn count(value: usize, noun: &str) -> String {
 mod tests {
     use super::*;
 
-    fn client_owner() -> ClientOwnerId {
-        "0123456789abcdef0123456789abcdef".parse().unwrap()
+    fn attachment() -> ResourceName {
+        "work".parse().unwrap()
     }
     use std::sync::Mutex;
 
@@ -339,8 +350,9 @@ mod tests {
     fn container_body_carries_no_binds_and_the_attach_address() {
         let body = target("omnifs-filesystem:dev").build_filesystem_container_body(
             Path::new("/home/u/.omnifs"),
-            client_owner(),
-            &spec(),
+            &attachment(),
+            &AttachmentSpec::from_fs_spec(&spec()).unwrap(),
+            "runtime",
             54321,
             true,
         );
@@ -380,15 +392,53 @@ mod tests {
             labels.get(FILESYSTEM_ID_LABEL).map(String::as_str),
             Some("work")
         );
-        assert_eq!(body.cmd, Some(filesystem_command(client_owner(), &spec())));
+        assert_eq!(
+            body.cmd,
+            Some(filesystem_command(
+                &attachment(),
+                &AttachmentSpec::from_fs_spec(&spec()).unwrap(),
+                "runtime"
+            ))
+        );
+    }
+
+    #[test]
+    fn container_command_preserves_exact_docker_image() {
+        let spec = AttachmentSpec::new(
+            fs::Protocol::Fuse,
+            fs::Runtime::Docker,
+            fs::GUEST_LOCATION.into(),
+            Some("omnifs-filesystem:exact".to_owned()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            filesystem_command(&attachment(), &spec, "runtime"),
+            vec![
+                "--name",
+                "work",
+                "--protocol",
+                "fuse",
+                "--runtime",
+                "docker",
+                "--location",
+                "/omnifs",
+                "--docker-image",
+                "omnifs-filesystem:exact",
+                "--runtime-instance",
+                "runtime",
+            ]
+        );
     }
 
     #[test]
     fn macos_omits_add_host_gateway() {
         let body = target("omnifs-filesystem:dev").build_filesystem_container_body(
             Path::new("/home/u/.omnifs"),
-            client_owner(),
-            &spec(),
+            &attachment(),
+            &AttachmentSpec::from_fs_spec(&spec()).unwrap(),
+            "runtime",
             1,
             false,
         );

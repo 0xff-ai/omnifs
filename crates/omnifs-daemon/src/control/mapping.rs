@@ -226,16 +226,19 @@ pub(crate) fn resource_control_error(
         },
         ResourceControlError::Action(
             omnifs_state::ActionWriteError::ResourceNotFound(_)
+            | omnifs_state::ActionWriteError::AttachmentResourceNotFound(_)
             | omnifs_state::ActionWriteError::ActionUnavailable(_)
             | omnifs_state::ActionWriteError::NotFound(_),
         ) => ControlErrorCode::ActionUnavailable,
         ResourceControlError::Action(
             omnifs_state::ActionWriteError::GenerationConflict { .. }
+            | omnifs_state::ActionWriteError::AttachmentGenerationConflict { .. }
             | omnifs_state::ActionWriteError::Terminal { .. },
         ) => ControlErrorCode::Conflict,
-        ResourceControlError::Action(omnifs_state::ActionWriteError::Busy { .. }) => {
-            ControlErrorCode::Busy
-        },
+        ResourceControlError::Action(
+            omnifs_state::ActionWriteError::Busy { .. }
+            | omnifs_state::ActionWriteError::AttachmentBusy { .. },
+        ) => ControlErrorCode::Busy,
         ResourceControlError::Apply(omnifs_state::ResourceApplyError::Store(_))
         | ResourceControlError::Action(omnifs_state::ActionWriteError::Store(_))
         | ResourceControlError::Other(_) => ControlErrorCode::Internal,

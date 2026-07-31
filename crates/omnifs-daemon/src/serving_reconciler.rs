@@ -617,11 +617,13 @@ async fn finish_publication(
             Some(post_publish_errors.join("; ")),
         );
     }
-    mark_revision_ready(resources, revision);
-    resources.progress().publish(
-        ProgressTarget::DesiredRevision(revision),
-        ProgressEventKind::RevisionReady(revision),
-    );
+    let has_attachment_work = resources.mark_namespace_ready(revision);
+    if !has_attachment_work {
+        resources.progress().publish(
+            ProgressTarget::DesiredRevision(revision),
+            ProgressEventKind::RevisionReady(revision),
+        );
+    }
 
     let state = Arc::clone(state);
     let resources = Arc::clone(resources);
@@ -981,22 +983,6 @@ fn mark_resources_preparing(resources: &ResourceControl, revision: ResourceRevis
                 };
                 status.error_code = None;
                 status.detail = None;
-            }
-        });
-}
-
-fn mark_revision_ready(resources: &ResourceControl, revision: ResourceRevision) {
-    resources
-        .progress()
-        .update_revision_snapshot(revision, |snapshot| {
-            snapshot.observed_revision = Some(revision);
-            for status in &mut snapshot.resources {
-                if status.desired_revision == revision {
-                    status.phase = ResourcePhase::Ready;
-                    status.observed_revision = Some(revision);
-                    status.error_code = None;
-                    status.detail = None;
-                }
             }
         });
 }

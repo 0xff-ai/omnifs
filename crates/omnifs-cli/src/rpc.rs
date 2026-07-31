@@ -5,15 +5,17 @@ use bytes::Bytes;
 use hyper_util::rt::TokioIo;
 use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
-    ApplyReceipt, ApplyResourcesRequest, CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MUTATION_TIMEOUT_SECS,
-    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES,
-    CredentialKey, CredentialReceipt, CredentialStatus, DaemonInventory, MountRecord, MutationOp,
-    MutationOpResult, ProgressEvent, ProgressTarget, ProviderImportReceipt, ProviderMetadata,
-    ResourceDeclarations, ResourcePlan, ResourceSnapshot, RevokeCredentialRequest, ServingOutcome,
+    ActionReceipt, ApplyReceipt, ApplyResourcesRequest, AttachmentAccess, AttachmentStatus,
+    CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MUTATION_TIMEOUT_SECS, CONTROL_REQUEST_TIMEOUT_SECS,
+    CONTROL_SHUTDOWN_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES, CredentialKey,
+    CredentialReceipt, CredentialStatus, DaemonInventory, GetAttachmentAccessRequest, MountRecord,
+    MutationOp, MutationOpResult, ProgressEvent, ProgressTarget, ProviderImportReceipt,
+    ProviderMetadata, ResourceDeclarations, ResourcePlan, ResourceSnapshot,
+    RestartAttachmentRequest, RevokeCredentialRequest, ServingOutcome,
     SetCredentialMaterialRequest,
 };
 use omnifs_bootstrap::{Bootstrap, Client};
-use omnifs_core::{MountName, MutationId, ProviderId};
+use omnifs_core::{MountName, MutationId, ProviderId, ResourceName};
 use prost::Message as _;
 use std::time::Duration;
 use tokio::net::UnixStream;
@@ -388,6 +390,50 @@ impl RpcClient {
         )
         .into_inner();
         grpc::apply_resources_response(&response).map_err(Into::into)
+    }
+
+    #[allow(dead_code, reason = "Plan 008 attachment commands consume this RPC")]
+    pub(crate) async fn attachment_status(
+        &self,
+        name: ResourceName,
+    ) -> anyhow::Result<Option<AttachmentStatus>> {
+        let response = bounded_unary!(
+            self,
+            get_attachment_status,
+            wire::GetAttachmentStatusRequest {
+                attachment_name: name.to_string(),
+            }
+        )
+        .into_inner();
+        grpc::get_attachment_status_response(&response).map_err(Into::into)
+    }
+
+    #[allow(dead_code, reason = "Plan 008 attachment commands consume this RPC")]
+    pub(crate) async fn restart_attachment(
+        &self,
+        request: &RestartAttachmentRequest,
+    ) -> anyhow::Result<ActionReceipt> {
+        let response = bounded_unary!(
+            self,
+            restart_attachment,
+            grpc::to_restart_attachment_request(request)
+        )
+        .into_inner();
+        grpc::restart_attachment_response(&response).map_err(Into::into)
+    }
+
+    #[allow(dead_code, reason = "Plan 008 attachment commands consume this RPC")]
+    pub(crate) async fn attachment_access(
+        &self,
+        request: &GetAttachmentAccessRequest,
+    ) -> anyhow::Result<AttachmentAccess> {
+        let response = bounded_unary!(
+            self,
+            get_attachment_access,
+            grpc::to_get_attachment_access_request(request)
+        )
+        .into_inner();
+        grpc::get_attachment_access_response(&response).map_err(Into::into)
     }
 
     #[allow(dead_code, reason = "Plan 008 credential commands consume this RPC")]

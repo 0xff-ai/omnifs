@@ -15,7 +15,10 @@ mod provider_id;
 pub mod resource;
 mod state_version;
 
-pub use attachment::{AttachmentSpec, AttachmentSpecError, AttachmentVersion};
+pub use attachment::{
+    AttachmentSpec, AttachmentSpecError, AttachmentVersion, RuntimeInstanceId,
+    RuntimeInstanceIdError,
+};
 pub use auth_fingerprint::{AuthRuntimeFingerprint, AuthRuntimeFingerprintParseError};
 pub use client_owner_id::{ClientOwnerId, ClientOwnerIdError};
 pub use content_type::ContentType;

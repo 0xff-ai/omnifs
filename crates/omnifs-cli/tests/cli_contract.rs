@@ -90,97 +90,8 @@ fn fs_help_uses_named_instance_lifecycle_commands() {
 }
 
 #[test]
-fn fs_create_persists_one_resolved_spec_without_starting_a_runtime() {
+fn fs_create_rejects_guest_locations_without_writing_client_state() {
     let fixture = Fixture::new();
-    let location = fixture.home_path().join("named-host-mount");
-    let args = vec![
-        "fs".to_owned(),
-        "create".to_owned(),
-        "--name".to_owned(),
-        "main".to_owned(),
-        "--protocol".to_owned(),
-        "nfs".to_owned(),
-        "--runtime".to_owned(),
-        "host".to_owned(),
-        "--location".to_owned(),
-        location.display().to_string(),
-        "--output".to_owned(),
-        "json".to_owned(),
-    ];
-    let created = fixture.run_owned(&args);
-    assert_eq!(exit_code(&created), 0, "{created:?}");
-
-    let spec_path = fixture
-        .home_path()
-        .join("client/filesystems/specs/main.json");
-    let bytes = std::fs::read(&spec_path).expect("persisted filesystem spec");
-    let spec: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(
-        spec,
-        serde_json::json!({
-            "id": "main",
-            "protocol": "nfs",
-            "runtime": "host",
-            "location": location,
-        })
-    );
-    assert!(
-        !fixture
-            .home_path()
-            .join("client/filesystems/state/main/runner.json")
-            .exists(),
-        "create must not launch a host runner"
-    );
-
-    let listed = fixture.run(&["fs", "ls", "--output", "json"]);
-    assert_eq!(exit_code(&listed), 0, "{listed:?}");
-    let listed = stdout_json(&listed);
-    assert_eq!(listed["result"]["filesystems"][0]["id"], "main");
-    assert_eq!(listed["result"]["filesystems"][0]["state"], "detached");
-
-    let duplicate = fixture.run_owned(&args);
-    assert_ne!(exit_code(&duplicate), 0, "{duplicate:?}");
-    assert!(
-        String::from_utf8_lossy(&duplicate.stdout).contains("already exists"),
-        "{duplicate:?}"
-    );
-    assert_eq!(std::fs::read(&spec_path).unwrap(), bytes);
-}
-
-#[test]
-fn fs_create_freezes_host_defaults_and_rejects_guest_locations() {
-    let fixture = Fixture::new();
-    let host = fixture.run(&[
-        "fs",
-        "create",
-        "--name",
-        "host-default",
-        "--protocol",
-        "nfs",
-        "--runtime",
-        "host",
-        "--output",
-        "json",
-    ]);
-    assert_eq!(exit_code(&host), 0, "{host:?}");
-    let host_spec: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(
-            fixture
-                .home_path()
-                .join("client/filesystems/specs/host-default.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        host_spec["location"],
-        fixture
-            .home_path()
-            .join("client/filesystems/mounts/host-default")
-            .display()
-            .to_string()
-    );
-
     let guest = fixture.run(&[
         "fs",
         "create",
@@ -199,10 +110,54 @@ fn fs_create_freezes_host_defaults_and_rejects_guest_locations() {
         "{guest:?}"
     );
     assert!(
-        !fixture
-            .home_path()
-            .join("client/filesystems/specs/guest.json")
-            .exists()
+        !fixture.home_path().join("client/filesystems").exists(),
+        "validation must not create client-owned filesystem state"
+    );
+}
+
+#[test]
+fn legacy_detached_specs_are_read_only_and_never_launched() {
+    let fixture = Fixture::new();
+    let specs = fixture.home_path().join("client/filesystems/specs");
+    std::fs::create_dir_all(&specs).expect("legacy spec directory");
+    let location = fixture.home_path().join("legacy-mount");
+    std::fs::write(
+        specs.join("legacy.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "id": "legacy",
+            "protocol": "nfs",
+            "runtime": "host",
+            "location": location,
+        }))
+        .expect("legacy spec json"),
+    )
+    .expect("write legacy spec");
+
+    let listed = fixture.run(&["fs", "ls", "--output", "json"]);
+    assert_eq!(exit_code(&listed), 0, "{listed:?}");
+    let listed = stdout_json(&listed);
+    assert_eq!(listed["result"]["attachments"][0]["name"], "legacy");
+    assert_eq!(listed["result"]["attachments"][0]["legacy"], true);
+    assert_eq!(
+        listed["result"]["attachments"][0]["state"],
+        "legacy detached config"
+    );
+
+    let attach = fixture.run(&["fs", "attach", "--name", "legacy"]);
+    assert_ne!(
+        exit_code(&attach),
+        0,
+        "legacy specs require explicit import"
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&attach.stdout),
+        String::from_utf8_lossy(&attach.stderr)
+    );
+    assert!(combined.contains("Import it explicitly"), "{combined}");
+    assert!(
+        !location.exists(),
+        "listing/attach must not launch a legacy runtime"
     );
 }
 

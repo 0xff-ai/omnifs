@@ -59,9 +59,13 @@ fn append(state: &ClientFilesystemState, file: &str, value: &impl Serialize) {
 }
 
 pub(crate) fn record_cli_exit(cmd: &str, exit: i32) {
-    let Ok(state) = ClientFilesystemState::resolve() else {
+    let Ok(root) = crate::client_dir::client_root() else {
         return;
     };
+    // Metrics need only the profile config and profile-local metrics
+    // directory. A normal CLI invocation must not prepare the retired
+    // client-owned filesystem tree as a side effect.
+    let state = ClientFilesystemState::under_root(&root);
     if !enabled(&state) {
         return;
     }

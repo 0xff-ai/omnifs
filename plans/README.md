@@ -29,7 +29,7 @@ a terminal result.
 | [002](002-add-fast-plan-and-apply-rpc.md) | Add fast typed plan, apply, and progress RPCs | P1 | L | 001 | DONE |
 | [003](003-move-provider-work-to-daemon-reconciliation.md) | Move provider work to daemon-owned reconciliation | P1 | L | 002 | DONE |
 | [004](004-extract-filesystem-runtime-drivers.md) | Extract filesystem runtime drivers | P1 | L | 001 | DONE |
-| [005](005-make-daemon-own-attachments.md) | Make the daemon own attachments | P1 | L | 003, 004 | TODO |
+| [005](005-make-daemon-own-attachments.md) | Make the daemon own attachments | P1 | L | 003, 004 | DONE |
 | [006](006-retire-client-filesystem-state-and-narrow-bootstrap.md) | Retire client filesystem state and narrow bootstrap | P1 | L | 005 | TODO |
 | [007](007-add-kcl-plan-and-apply-client.md) | Add KCL plan and apply | P1 | L | 005 | TODO |
 | [008](008-switch-to-interactive-resource-porcelain.md) | Switch to interactive resource porcelain | P1 | L | 005, 006, 007 | TODO |
@@ -87,7 +87,7 @@ control and CLI files and should run after its prerequisites are integrated.
    guest-image code to `omnifs-fs-runtime`. Remove UI, client path, and desired
    state inputs from those mechanics. Keep the CLI as the temporary caller.
 
-5. **Plan 005, switch runtime ownership.** Add `AttachmentSupervisor`, move
+5. **Plan 005, switch runtime ownership.** **DONE.** Add `AttachmentSupervisor`, move
    runtime paths to daemon state, switch VFS identity to Attachment plus
    runtime instance, remove client owner identity from runtime surfaces, and
    make current `fs` commands thin daemon RPC and progress-stream adapters.

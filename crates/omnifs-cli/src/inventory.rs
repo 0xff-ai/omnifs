@@ -543,7 +543,10 @@ pub(crate) enum NextAction {
 impl Inventory {
     pub(crate) async fn collect_rpc() -> Result<Self> {
         let endpoint = Bootstrap::<Client>::for_client()?;
-        let configured_filesystems = ClientFilesystemState::resolve()?.registry().list()?;
+        let client_root = crate::client_dir::client_root()?;
+        let configured_filesystems = ClientFilesystemState::under_root(&client_root)
+            .registry()
+            .list()?;
         let rpc = crate::rpc::RpcClient::resolve()?;
         let (daemon, mounts, daemon_status, daemon_known, active_mutation) =
             match rpc.inventory().await {

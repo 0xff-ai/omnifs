@@ -1,3 +1,8 @@
+#![allow(
+    dead_code,
+    reason = "Plan 006 removes the superseded client owner identity after the attachment cutover"
+)]
+
 //! CLI-private identity and the single-record mutation journal.
 
 use anyhow::Context as _;

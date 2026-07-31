@@ -1,3 +1,8 @@
+#![allow(
+    dead_code,
+    reason = "Plan 006 removes the superseded client filesystem registry after the attachment cutover"
+)]
+
 //! CLI-owned filesystem configuration and runner state.
 //!
 //! Filesystem specs describe client-launched runtimes. They are deliberately

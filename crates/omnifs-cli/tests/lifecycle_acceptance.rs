@@ -506,7 +506,7 @@ async fn provenance_converges_for_committed_and_not_committed_batches() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn down_stops_daemon_but_keeps_cli_filesystem_specs() {
+async fn down_stops_runtime_but_preserves_desired_attachment_across_restart() {
     let fixture = Fixture::new();
     let location = fixture.home_path().join("mount-point");
     std::fs::create_dir_all(&location).expect("mount point");
@@ -515,6 +515,7 @@ async fn down_stops_daemon_but_keeps_cli_filesystem_specs() {
     let protocol = "nfs";
     #[cfg(not(target_os = "macos"))]
     let protocol = "fuse";
+    let mut daemon = fixture.start_daemon().await;
     let create = fixture.run(&[
         "--output",
         "json",
@@ -530,7 +531,17 @@ async fn down_stops_daemon_but_keeps_cli_filesystem_specs() {
         &location_arg,
     ]);
     assert_success(&create, "fs create");
-    let mut daemon = fixture.start_daemon().await;
+    let create_json: serde_json::Value = serde_json::from_slice(&create.stdout)
+        .expect("fs create --output json must produce valid JSON");
+    assert_eq!(create_json["result"]["attachment"]["name"], "kept");
+    assert_eq!(create_json["result"]["state"], "ready");
+    assert!(
+        !fixture
+            .home_path()
+            .join("client/filesystems/specs/kept.json")
+            .exists(),
+        "normal lifecycle must not write a client filesystem spec"
+    );
     // Keep ownership of the daemon child while `down` runs. An exited child is
     // still visible as a zombie until this test reaps it, which proves teardown
     // uses the exact process identity rather than `kill -0` alone.
@@ -538,22 +549,24 @@ async fn down_stops_daemon_but_keeps_cli_filesystem_specs() {
     assert_success(&down, "down");
     daemon.reap_if_exited();
     assert!(daemon.child.is_none(), "daemon child did not exit");
+    assert!(!fixture.home_path().join("client/filesystems").exists());
+
+    let mut restarted = fixture.start_daemon().await;
+    let restored = fixture.run(&["--output", "json", "fs", "attach", "--name", "kept"]);
+    assert_success(&restored, "wait for restored attachment");
     let listed = fixture.run(&["--output", "json", "fs", "ls"]);
     assert_success(&listed, "fs ls");
     let json: serde_json::Value = serde_json::from_slice(&listed.stdout)
         .expect("fs ls --output json must produce valid JSON");
-    let filesystems = json["result"]["filesystems"]
+    let attachments = json["result"]["attachments"]
         .as_array()
-        .expect("fs ls result.filesystems array");
-    assert_eq!(filesystems.len(), 1);
-    assert_eq!(filesystems[0]["id"], "kept");
-    assert_eq!(filesystems[0]["state"], "detached");
-    assert!(
-        fixture
-            .home_path()
-            .join("client/filesystems/specs/kept.json")
-            .is_file()
-    );
+        .expect("fs ls result.attachments array");
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0]["name"], "kept");
+    assert_eq!(attachments[0]["state"], "ready");
+
+    assert!(!fixture.home_path().join("client/filesystems").exists());
+    restarted.stop().await;
 }
 
 /// `--no-input setup` boots the daemon and prints the provider catalog and
@@ -590,9 +603,9 @@ async fn no_input_setup_boots_and_orients_without_mounting_or_attaching() {
     let filesystems_json: serde_json::Value = serde_json::from_slice(&filesystems.stdout)
         .expect("fs ls --output json must produce valid JSON");
     assert_eq!(
-        filesystems_json["result"]["filesystems"]
+        filesystems_json["result"]["attachments"]
             .as_array()
-            .expect("fs ls result.filesystems array")
+            .expect("fs ls result.attachments array")
             .len(),
         0,
         "a --no-input run must not attach anything"

@@ -35,7 +35,7 @@ use tonic::{Request, Response, Status};
 use tower::limit::ConcurrencyLimitLayer;
 use tracing::{info, warn};
 
-use crate::daemon::{DRAIN_TIMEOUT, Daemon};
+use crate::daemon::Daemon;
 use mapping::{manager_error, resource_control_error};
 use service::GrpcControlService;
 

@@ -15,7 +15,10 @@ mod resource;
 /// Protobuf wire types and strict conversions for the local control API.
 pub mod grpc;
 
-pub use attachment::AttachmentDefinition;
+pub use attachment::{
+    AttachmentAccess, AttachmentCommand, AttachmentDefinition, AttachmentPhase, AttachmentStatus,
+    GetAttachmentAccessRequest, RestartAttachmentRequest,
+};
 pub use control::{
     ActionKind, ActionPhase, ActionReceipt, CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MESSAGE_MAX_BYTES,
     CONTROL_MUTATION_TIMEOUT_SECS, CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_RESOURCE_MAX_COUNT,

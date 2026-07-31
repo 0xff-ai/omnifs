@@ -7,7 +7,7 @@ mod lifecycle;
 pub mod nfs;
 
 use clap::Args;
-use omnifs_core::{ClientOwnerId, fs};
+use omnifs_core::{AttachmentSpec, ResourceName, RuntimeInstanceId, fs};
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]
@@ -35,12 +35,9 @@ impl HostControlArgs {
 
 #[derive(Debug, Args)]
 pub struct RunFsArgs {
-    /// Stable identity of the CLI installation that owns this filesystem.
+    /// Desired attachment name.
     #[arg(long)]
-    client_owner: ClientOwnerId,
-    /// Stable configured filesystem name.
-    #[arg(long)]
-    name: fs::Id,
+    name: ResourceName,
     /// OS filesystem protocol to serve.
     #[arg(long)]
     protocol: fs::Protocol,
@@ -50,6 +47,15 @@ pub struct RunFsArgs {
     /// Mount location resolved in the persisted filesystem spec.
     #[arg(long)]
     location: PathBuf,
+    /// Docker image reference retained in the exact desired attachment spec.
+    #[arg(long)]
+    docker_image: Option<String>,
+    /// Libkrun guest image reference retained in the exact desired attachment spec.
+    #[arg(long)]
+    libkrun_guest_image: Option<String>,
+    /// Random identity of this launched runtime instance.
+    #[arg(long)]
+    runtime_instance: RuntimeInstanceId,
     /// Directory for local mount and runner state.
     #[arg(long)]
     state_dir: Option<PathBuf>,
@@ -64,10 +70,17 @@ pub struct RunFsArgs {
 }
 
 pub fn run(args: RunFsArgs) -> anyhow::Result<()> {
-    let spec = fs::Spec::new(args.name, args.protocol, args.runtime, args.location)?;
+    let spec = AttachmentSpec::new(
+        args.protocol,
+        args.runtime,
+        args.location,
+        args.docker_image,
+        args.libkrun_guest_image,
+    )?;
     let args = RunnerArgs {
-        client_owner: args.client_owner,
+        attachment: args.name,
         spec,
+        runtime_instance: args.runtime_instance.into_string(),
         state_dir: args.state_dir,
         attach: args.attach,
         port: args.port,
@@ -83,8 +96,9 @@ pub fn run(args: RunFsArgs) -> anyhow::Result<()> {
 }
 
 struct RunnerArgs {
-    client_owner: ClientOwnerId,
-    spec: fs::Spec,
+    attachment: ResourceName,
+    spec: AttachmentSpec,
+    runtime_instance: String,
     state_dir: Option<PathBuf>,
     attach: Option<PathBuf>,
     port: u16,

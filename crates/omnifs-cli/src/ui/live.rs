@@ -1,3 +1,8 @@
+#![allow(
+    dead_code,
+    reason = "Plan 008 replaces the former client runtime spinner with streamed daemon progress"
+)]
+
 //! The transient spinner layer: one pending operation's frame, drawn only on
 //! a real TTY and never left in scrollback. [`Spinner`] owns redraw
 //! throttling (an appearance delay so a fast operation never flashes, then a

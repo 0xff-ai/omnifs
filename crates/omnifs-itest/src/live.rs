@@ -156,9 +156,10 @@ pub fn thin_runner_bin() -> PathBuf {
 
 /// Build the flat internal argv for a directly spawned host runner.
 ///
-/// Product lifecycle uses hidden `omnifs run-fs`; live protocol tests spawn
-/// the slim binary to isolate the wire boundary, so they must supply the same
-/// private control identity and process-group shape as the host launcher.
+/// Product lifecycle uses hidden `omnifs run-fs`; a few protocol conformance
+/// lanes spawn the slim binary to isolate the wire boundary. Their operational
+/// records still live under daemon state so these tests cannot recreate the
+/// retired client-owned filesystem tree.
 pub fn thin_host_runner_command(
     id: &str,
     protocol: &str,
@@ -170,7 +171,8 @@ pub fn thin_host_runner_command(
 
     static INSTANCE: AtomicU64 = AtomicU64::new(1);
     let instance = format!("{:032x}", INSTANCE.fetch_add(1, Ordering::Relaxed));
-    let control = state_dir.join(format!("control-{instance}.sock"));
+    let profile = state_dir.ancestors().nth(4).unwrap_or(state_dir);
+    let control = profile.join(".r").join(format!("{}.sock", &instance[16..]));
     let mut command = Command::new(thin_runner_bin());
     command
         .args(["--name", id, "--protocol", protocol, "--runtime", "host"])
@@ -241,9 +243,8 @@ pub fn daemon_args(_home: &Path) -> Vec<OsString> {
 /// provider mounted, torn down on drop.
 pub struct NativeDaemon {
     daemon: Child,
-    filesystem: Child,
     pub mount_point: PathBuf,
-    _home: TempDir,
+    home: TempDir,
     /// Cross-process NFS serialization lock, held for the lane's lifetime.
     /// `None` when the caller holds the lock externally (the perf lane spans two
     /// sequential lanes under one lock, so no per-lane bring-up owns its own).
@@ -252,13 +253,15 @@ pub struct NativeDaemon {
 
 impl Drop for NativeDaemon {
     fn drop(&mut self) {
-        sigterm(&self.filesystem);
-        wait_briefly(&mut self.filesystem);
+        if matches!(self.daemon.try_wait(), Ok(None)) {
+            let _ = Command::new(omnifs_bin())
+                .args(["fs", "detach", "--name", "native"])
+                .env("OMNIFS_HOME", self.home.path())
+                .output();
+        }
         self.detach_mount();
         sigterm(&self.daemon);
         wait_briefly(&mut self.daemon);
-        let _ = self.filesystem.kill();
-        let _ = self.filesystem.wait();
         let _ = self.daemon.kill();
         let _ = self.daemon.wait();
     }
@@ -298,7 +301,7 @@ impl NativeDaemon {
 /// attached over one shared namespace. Torn down on drop.
 pub struct MultiFilesystemDaemon {
     daemon: Child,
-    filesystems: Vec<Child>,
+    attachment_names: Vec<String>,
     pub mount_points: Vec<PathBuf>,
     home: TempDir,
     /// Cross-process NFS serialization lock, held for the lane's lifetime.
@@ -307,21 +310,19 @@ pub struct MultiFilesystemDaemon {
 
 impl Drop for MultiFilesystemDaemon {
     fn drop(&mut self) {
-        for filesystem in &self.filesystems {
-            sigterm(filesystem);
-        }
-        for filesystem in &mut self.filesystems {
-            wait_briefly(filesystem);
+        if matches!(self.daemon.try_wait(), Ok(None)) {
+            for name in &self.attachment_names {
+                let _ = Command::new(omnifs_bin())
+                    .args(["fs", "detach", "--name", name])
+                    .env("OMNIFS_HOME", self.home.path())
+                    .output();
+            }
         }
         for mount_point in &self.mount_points {
             detach_mount_any(mount_point);
         }
         sigterm(&self.daemon);
         wait_briefly(&mut self.daemon);
-        for filesystem in &mut self.filesystems {
-            let _ = filesystem.kill();
-            let _ = filesystem.wait();
-        }
         let _ = self.daemon.kill();
         let _ = self.daemon.wait();
     }
@@ -428,46 +429,25 @@ pub fn start_multi_filesystem_daemon(kinds: &[&str]) -> Option<MultiFilesystemDa
     }
     seed_test_namespace(&control_socket);
 
-    let attach_socket = home.path().join("daemon-state/local.sock");
-    let mut filesystems = Vec::with_capacity(kinds.len());
+    let mut attachment_names = Vec::with_capacity(kinds.len());
     for ((index, kind), mount_point) in kinds.iter().enumerate().zip(&mount_points) {
         let id = format!("live-{index}");
-        let state_dir = home.path().join(format!("client/filesystems/state/{id}"));
-        let mut command = match *kind {
-            "fuse" | "nfs" => {
-                thin_host_runner_command(&id, kind, mount_point, &state_dir, Some(&attach_socket))
-            },
+        match *kind {
+            "fuse" | "nfs" => ensure_host_attachment(home.path(), &id, kind, mount_point),
             other => panic!("unsupported filesystem kind `{other}`"),
-        };
-        command
-            .env("OMNIFS_HOME", home.path())
-            .env("RUST_LOG", "warn");
-        match command.spawn() {
-            Ok(child) => filesystems.push(child),
-            Err(error) => {
-                for filesystem in &mut filesystems {
-                    let _ = filesystem.kill();
-                    let _ = filesystem.wait();
-                }
-                let _ = daemon.kill();
-                let _ = daemon.wait();
-                eprintln!("skip: spawn omnifs-thin {kind} failed: {error}");
-                return None;
-            },
         }
+        attachment_names.push(id);
     }
 
     let mut daemon = MultiFilesystemDaemon {
         daemon,
-        filesystems,
+        attachment_names,
         mount_points,
         home,
         _nfs_lock: nfs_lock,
     };
 
-    // Wait for every filesystem to serve the projected tree. A non-zero exit
-    // before serving is a hard failure (bad CLI parse or bind collision); a
-    // clean exit is a skip.
+    // Wait for every daemon-owned Attachment to serve the projected tree.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let all_serving = daemon
@@ -491,18 +471,6 @@ pub fn start_multi_filesystem_daemon(kinds: &[&str]) -> Option<MultiFilesystemDa
             },
             Ok(None) => {},
             Err(error) => panic!("poll daemon child status: {error}"),
-        }
-        for filesystem in &mut daemon.filesystems {
-            match filesystem.try_wait() {
-                Ok(Some(status)) => {
-                    eprintln!(
-                        "skip: filesystem runner exited ({status}) before every mount served"
-                    );
-                    return None;
-                },
-                Ok(None) => {},
-                Err(error) => panic!("poll filesystem child status: {error}"),
-            }
         }
         if Instant::now() >= deadline {
             eprintln!("skip: not every filesystem served within 30s");
@@ -689,7 +657,7 @@ fn wire_filesystem(
 
     // The out-of-process renderer attaches over the requested transport and
     // mounts the tree: `--attach <socket>` for Unix, or the VFS TCP env pair.
-    let state_dir = home_path.join("client/filesystems/state/wire");
+    let state_dir = home_path.join("daemon-state/runtime/attachments/wire");
     let attach_socket = home_path.join("daemon-state/local.sock");
     let mut filesystem_cmd = thin_host_runner_command(
         "wire",
@@ -809,6 +777,39 @@ pub fn control_ready(socket: &Path) -> bool {
 
 fn control_socket_ready(socket: &Path) -> bool {
     control_ready(socket)
+}
+
+/// Apply one daemon-owned host Attachment and wait for its revision to reach
+/// the ready phase. Live acceptance fixtures use this path instead of taking
+/// ownership of a runner process themselves.
+fn ensure_host_attachment(home: &Path, name: &str, protocol: &str, location: &Path) {
+    let location = location
+        .to_str()
+        .unwrap_or_else(|| panic!("attachment location is not UTF-8: {}", location.display()));
+    let output = Command::new(omnifs_bin())
+        .args([
+            "fs",
+            "create",
+            "--name",
+            name,
+            "--protocol",
+            protocol,
+            "--runtime",
+            "host",
+            "--location",
+            location,
+        ])
+        .env("OMNIFS_HOME", home)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|error| panic!("spawn daemon-owned attachment {name}: {error}"));
+    assert!(
+        output.status.success(),
+        "daemon-owned attachment {name} failed (exit {})\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 pub fn control_status(socket: &Path) -> DaemonStatus {
@@ -1061,42 +1062,16 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
     }
     seed_test_namespace(&control_socket);
 
-    let attach_socket = hermetic.home.path().join("daemon-state/local.sock");
     #[cfg(target_os = "linux")]
-    let mut filesystem_command = thin_host_runner_command(
-        "native",
-        "fuse",
-        &mount_point,
-        &hermetic.home.path().join("client/filesystems/state/native"),
-        Some(&attach_socket),
-    );
+    let protocol = "fuse";
     #[cfg(not(target_os = "linux"))]
-    let mut filesystem_command = thin_host_runner_command(
-        "native",
-        "nfs",
-        &mount_point,
-        &hermetic.home.path().join("client/filesystems/state/native"),
-        Some(&attach_socket),
-    );
-    let filesystem = filesystem_command
-        .env("OMNIFS_HOME", hermetic.home.path())
-        .env("RUST_LOG", "warn")
-        .spawn();
-    let filesystem = match filesystem {
-        Ok(filesystem) => filesystem,
-        Err(error) => {
-            let _ = daemon.kill();
-            let _ = daemon.wait();
-            eprintln!("skip: spawn local filesystem runner failed: {error}");
-            return None;
-        },
-    };
+    let protocol = "nfs";
+    ensure_host_attachment(hermetic.home.path(), "native", protocol, &mount_point);
 
     let mut daemon = NativeDaemon {
         daemon,
-        filesystem,
         mount_point: mount_point.clone(),
-        _home: hermetic.home,
+        home: hermetic.home,
         _nfs_lock: nfs_lock,
     };
 
@@ -1107,9 +1082,9 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
         if message.is_file() {
             return Some(daemon);
         }
-        match daemon.filesystem.try_wait() {
+        match daemon.daemon.try_wait() {
             Ok(Some(status)) => {
-                eprintln!("skip: filesystem runner exited ({status}) before the mount was active");
+                eprintln!("skip: daemon exited ({status}) before the mount was active");
                 return None;
             },
             Ok(None) => {},

@@ -6,15 +6,16 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 
-type PollFuture<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<Option<T>>> + 'a>>;
+type PollFuture<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<Option<T>>> + Send + 'a>>;
 
 pub(crate) async fn poll_until<T, Fut>(
     timeout: Duration,
     interval: Duration,
-    mut check: impl FnMut() -> Fut,
+    mut check: impl FnMut() -> Fut + Send,
 ) -> anyhow::Result<Option<T>>
 where
-    Fut: Future<Output = anyhow::Result<Option<T>>>,
+    T: Send,
+    Fut: Future<Output = anyhow::Result<Option<T>>> + Send,
 {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -32,8 +33,12 @@ pub(crate) async fn poll_until_mut<S, T>(
     timeout: Duration,
     interval: Duration,
     state: &mut S,
-    mut check: impl for<'a> FnMut(&'a mut S) -> PollFuture<'a, T>,
-) -> anyhow::Result<Option<T>> {
+    mut check: impl for<'a> FnMut(&'a mut S) -> PollFuture<'a, T> + Send,
+) -> anyhow::Result<Option<T>>
+where
+    S: Send,
+    T: Send,
+{
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Some(value) = check(state).await? {
@@ -84,13 +89,6 @@ pub(crate) fn configure_detached_child(
         command.process_group(0);
     }
     Ok(())
-}
-
-pub(crate) fn new_instance_id(what: &str) -> anyhow::Result<String> {
-    let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| anyhow::anyhow!("generate {what} instance id: {error}"))?;
-    Ok(hex::encode(bytes))
 }
 
 #[cfg(test)]

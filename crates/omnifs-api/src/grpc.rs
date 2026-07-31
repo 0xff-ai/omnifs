@@ -12,27 +12,30 @@ pub mod wire {
 
 use crate::{
     ActionKind, ActionPhase, ActionReceipt, ActiveMutation, ApplyReceipt, ApplyResourcesRequest,
-    AttachmentDefinition, AttachmentProgress, AttachmentProgressStage, CONTROL_RESOURCE_MAX_COUNT,
-    ControlError, ControlErrorCode, CredentialClientOverrides, CredentialDefinition,
-    CredentialHealth, CredentialKey, CredentialKind, CredentialMaterial, CredentialMaterialSidecar,
+    AttachmentAccess, AttachmentCommand, AttachmentDefinition, AttachmentPhase, AttachmentProgress,
+    AttachmentProgressStage, AttachmentStatus, CONTROL_RESOURCE_MAX_COUNT, ControlError,
+    ControlErrorCode, CredentialClientOverrides, CredentialDefinition, CredentialHealth,
+    CredentialKey, CredentialKind, CredentialMaterial, CredentialMaterialSidecar,
     CredentialProgress, CredentialProgressStage, CredentialReceipt, CredentialStatus,
     CredentialStatusKind, CredentialSubmission, DaemonHealth, DaemonInfo, DaemonInventory,
-    DaemonPhase, DaemonRecovery, DaemonStatus, HealthReport, HealthState, MountCredential,
-    MountDefinition, MountField, MountHealth, MountLimits, MountOpResult, MountPatch, MountRecord,
-    MountResourceDefinition, MutationOp, MutationOpResult, NormalizedResourceSet, ProgressEvent,
-    ProgressEventKind, ProgressSnapshot, ProgressTarget, ProviderDefinition,
-    ProviderImportDisposition, ProviderImportReceipt, ProviderMetadata,
+    DaemonPhase, DaemonRecovery, DaemonStatus, GetAttachmentAccessRequest, HealthReport,
+    HealthState, MountCredential, MountDefinition, MountField, MountHealth, MountLimits,
+    MountOpResult, MountPatch, MountRecord, MountResourceDefinition, MutationOp, MutationOpResult,
+    NormalizedResourceSet, ProgressEvent, ProgressEventKind, ProgressSnapshot, ProgressTarget,
+    ProviderDefinition, ProviderImportDisposition, ProviderImportReceipt, ProviderMetadata,
     ProviderPreparationProgress, ProviderPreparationStage, ProviderReference, RecoveryId,
     RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt, ResourceChange,
     ResourceChangeAction, ResourceDeclarations, ResourceDefinition, ResourceLimits, ResourcePhase,
-    ResourcePlan, ResourceSnapshot, ResourceStatus, RevokeCredentialRequest, SecretBytes,
-    ServingOutcome, ServingProgress, ServingProgressStage, SetCredentialMaterialRequest,
+    ResourcePlan, ResourceSnapshot, ResourceStatus, RestartAttachmentRequest,
+    RevokeCredentialRequest, SecretBytes, ServingOutcome, ServingProgress, ServingProgressStage,
+    SetCredentialMaterialRequest,
 };
 use omnifs_core::{
-    ActionId, AttachmentSpec, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion,
-    MountName, MountRevision, MountVersion, MutationId, ProviderId, ResourceDigest, ResourceKey,
-    ResourceKind, ResourceName, ResourceRevision,
+    ActionId, AttachmentSpec, AttachmentVersion, AuthRuntimeFingerprint, CredentialGeneration,
+    CredentialVersion, MountName, MountRevision, MountVersion, MutationId, ProviderId,
+    ResourceDigest, ResourceKey, ResourceKind, ResourceName, ResourceRevision,
 };
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -1287,6 +1290,22 @@ fn to_attachment_spec(v: &AttachmentSpec) -> wire::AttachmentSpec {
     }
 }
 
+fn attachment_definition(
+    value: &wire::AttachmentResource,
+) -> Result<AttachmentDefinition, FromGrpcError> {
+    Ok(AttachmentDefinition {
+        name: resource_name(value.name.clone())?,
+        spec: attachment_spec(&req(value.spec.clone(), "attachment spec")?)?,
+    })
+}
+
+fn to_attachment_definition(value: &AttachmentDefinition) -> wire::AttachmentResource {
+    wire::AttachmentResource {
+        name: value.name.to_string(),
+        spec: Some(to_attachment_spec(&value.spec)),
+    }
+}
+
 fn resource_limits(v: &wire::ResourceLimits) -> ResourceLimits {
     ResourceLimits {
         max_memory_mb: v.max_memory_mb,
@@ -1914,6 +1933,244 @@ pub fn to_revoke_credential_request(v: &RevokeCredentialRequest) -> wire::Revoke
     }
 }
 
+fn attachment_phase(v: wire::AttachmentPhase) -> Result<AttachmentPhase, FromGrpcError> {
+    match v {
+        wire::AttachmentPhase::AttachmentRuntimePending => Ok(AttachmentPhase::Pending),
+        wire::AttachmentPhase::AttachmentRuntimeWaitingForNamespace => {
+            Ok(AttachmentPhase::WaitingForNamespace)
+        },
+        wire::AttachmentPhase::AttachmentRuntimeStarting => Ok(AttachmentPhase::Starting),
+        wire::AttachmentPhase::AttachmentRuntimeReady => Ok(AttachmentPhase::Ready),
+        wire::AttachmentPhase::AttachmentRuntimeStopping => Ok(AttachmentPhase::Stopping),
+        wire::AttachmentPhase::AttachmentRuntimeRetrying => Ok(AttachmentPhase::Retrying),
+        wire::AttachmentPhase::AttachmentRuntimeFailed => Ok(AttachmentPhase::Failed),
+        wire::AttachmentPhase::AttachmentRuntimeDeleting => Ok(AttachmentPhase::Deleting),
+        wire::AttachmentPhase::AttachmentRuntimeUnspecified => {
+            Err(FromGrpcError::Unspecified("attachment phase"))
+        },
+    }
+}
+
+fn to_attachment_phase(v: AttachmentPhase) -> i32 {
+    match v {
+        AttachmentPhase::Pending => wire::AttachmentPhase::AttachmentRuntimePending as i32,
+        AttachmentPhase::WaitingForNamespace => {
+            wire::AttachmentPhase::AttachmentRuntimeWaitingForNamespace as i32
+        },
+        AttachmentPhase::Starting => wire::AttachmentPhase::AttachmentRuntimeStarting as i32,
+        AttachmentPhase::Ready => wire::AttachmentPhase::AttachmentRuntimeReady as i32,
+        AttachmentPhase::Stopping => wire::AttachmentPhase::AttachmentRuntimeStopping as i32,
+        AttachmentPhase::Retrying => wire::AttachmentPhase::AttachmentRuntimeRetrying as i32,
+        AttachmentPhase::Failed => wire::AttachmentPhase::AttachmentRuntimeFailed as i32,
+        AttachmentPhase::Deleting => wire::AttachmentPhase::AttachmentRuntimeDeleting as i32,
+    }
+}
+
+pub fn attachment_status(v: &wire::AttachmentStatus) -> Result<AttachmentStatus, FromGrpcError> {
+    let phase = attachment_phase(
+        wire::AttachmentPhase::try_from(v.phase)
+            .map_err(|_| FromGrpcError::Invalid("attachment phase"))?,
+    )?;
+    let runtime_instance = v.runtime_instance.clone();
+    if runtime_instance.as_ref().is_some_and(|instance| {
+        instance.len() != 32
+            || !instance
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) {
+        return Err(FromGrpcError::Invalid("attachment runtime instance"));
+    }
+    let desired_version =
+        AttachmentVersion::from_digest(exact(&v.desired_version, "attachment desired version")?);
+    let observed_version = v
+        .observed_version
+        .as_deref()
+        .map(|value| {
+            exact(value, "attachment observed version").map(AttachmentVersion::from_digest)
+        })
+        .transpose()?;
+    if phase == AttachmentPhase::Ready && observed_version != Some(desired_version) {
+        return Err(FromGrpcError::Invalid("ready attachment version"));
+    }
+    if phase == AttachmentPhase::Failed && (v.error_code.is_none() || v.detail.is_none()) {
+        return Err(FromGrpcError::Invalid("attachment failure details"));
+    }
+    Ok(AttachmentStatus {
+        definition: attachment_definition(&req(v.definition.clone(), "attachment definition")?)?,
+        desired_revision: ResourceRevision::new(v.desired_revision),
+        desired_version,
+        observed_version,
+        phase,
+        runtime_instance,
+        action_generation: v.action_generation,
+        error_code: v.error_code.clone(),
+        detail: v.detail.clone(),
+        retry_at_unix_ms: v.retry_at_unix_ms,
+        deleting: v.deleting,
+    })
+}
+
+pub fn to_attachment_status(v: &AttachmentStatus) -> wire::AttachmentStatus {
+    wire::AttachmentStatus {
+        definition: Some(to_attachment_definition(&v.definition)),
+        desired_revision: v.desired_revision.get(),
+        desired_version: v.desired_version.as_bytes().to_vec().into(),
+        observed_version: v
+            .observed_version
+            .map(|version| version.as_bytes().to_vec().into()),
+        phase: to_attachment_phase(v.phase),
+        runtime_instance: v.runtime_instance.clone(),
+        action_generation: v.action_generation,
+        error_code: v.error_code.clone(),
+        detail: v.detail.clone(),
+        retry_at_unix_ms: v.retry_at_unix_ms,
+        deleting: v.deleting,
+    }
+}
+
+pub fn get_attachment_status_response(
+    v: &wire::GetAttachmentStatusResponse,
+) -> Result<Option<AttachmentStatus>, FromGrpcError> {
+    v.status.as_ref().map(attachment_status).transpose()
+}
+
+pub fn to_get_attachment_status_response(
+    v: Option<&AttachmentStatus>,
+) -> wire::GetAttachmentStatusResponse {
+    wire::GetAttachmentStatusResponse {
+        status: v.map(to_attachment_status),
+    }
+}
+
+pub fn restart_attachment_request(
+    v: &wire::RestartAttachmentRequest,
+) -> Result<RestartAttachmentRequest, FromGrpcError> {
+    Ok(RestartAttachmentRequest {
+        action_id: action_id(&v.action_id)?,
+        base_action_generation: v.base_action_generation,
+        attachment: resource_name(v.attachment_name.clone())?,
+    })
+}
+
+pub fn to_restart_attachment_request(
+    v: &RestartAttachmentRequest,
+) -> wire::RestartAttachmentRequest {
+    wire::RestartAttachmentRequest {
+        action_id: v.action_id.as_bytes().to_vec().into(),
+        base_action_generation: v.base_action_generation,
+        attachment_name: v.attachment.to_string(),
+    }
+}
+
+pub fn restart_attachment_response(
+    v: &wire::RestartAttachmentResponse,
+) -> Result<ActionReceipt, FromGrpcError> {
+    let receipt = action_receipt(&req(v.receipt.clone(), "attachment action receipt")?)?;
+    if receipt.kind != ActionKind::RestartAttachment {
+        return Err(FromGrpcError::Invalid("attachment action kind"));
+    }
+    Ok(receipt)
+}
+
+pub fn to_restart_attachment_response(v: &ActionReceipt) -> wire::RestartAttachmentResponse {
+    wire::RestartAttachmentResponse {
+        receipt: Some(to_action_receipt(v)),
+    }
+}
+
+pub fn get_attachment_access_request(
+    v: &wire::GetAttachmentAccessRequest,
+) -> Result<GetAttachmentAccessRequest, FromGrpcError> {
+    Ok(GetAttachmentAccessRequest {
+        attachment: resource_name(v.attachment_name.clone())?,
+        interactive: v.interactive,
+        shell: v.shell.clone(),
+        command: v.command.clone(),
+    })
+}
+
+pub fn to_get_attachment_access_request(
+    v: &GetAttachmentAccessRequest,
+) -> wire::GetAttachmentAccessRequest {
+    wire::GetAttachmentAccessRequest {
+        attachment_name: v.attachment.to_string(),
+        interactive: v.interactive,
+        shell: v.shell.clone(),
+        command: v.command.clone(),
+    }
+}
+
+#[cfg(unix)]
+fn os_string(v: &[u8]) -> OsString {
+    use std::os::unix::ffi::OsStringExt as _;
+    OsString::from_vec(v.to_vec())
+}
+
+#[cfg(unix)]
+fn os_string_bytes(v: &std::ffi::OsStr) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt as _;
+    v.as_bytes().to_vec()
+}
+
+pub fn attachment_access(v: &wire::AttachmentAccess) -> Result<AttachmentAccess, FromGrpcError> {
+    match req(v.value.clone(), "attachment access")? {
+        wire::attachment_access::Value::HostPath(path) => Ok(AttachmentAccess::HostPath(
+            path_from_bytes(&path, "attachment host path")?,
+        )),
+        wire::attachment_access::Value::Command(command) => {
+            if command.program.is_empty() {
+                return Err(FromGrpcError::Invalid("attachment access command program"));
+            }
+            Ok(AttachmentAccess::Command(AttachmentCommand {
+                program: os_string(&command.program),
+                args: command.args.iter().map(|value| os_string(value)).collect(),
+                current_dir: command
+                    .current_dir
+                    .as_deref()
+                    .map(|path| path_from_bytes(path, "attachment command directory"))
+                    .transpose()?,
+            }))
+        },
+    }
+}
+
+pub fn to_attachment_access(v: &AttachmentAccess) -> wire::AttachmentAccess {
+    let value = match v {
+        AttachmentAccess::HostPath(path) => {
+            wire::attachment_access::Value::HostPath(path_bytes(path).into())
+        },
+        AttachmentAccess::Command(command) => {
+            wire::attachment_access::Value::Command(wire::AttachmentCommand {
+                program: os_string_bytes(&command.program).into(),
+                args: command
+                    .args
+                    .iter()
+                    .map(|value| os_string_bytes(value).into())
+                    .collect(),
+                current_dir: command
+                    .current_dir
+                    .as_deref()
+                    .map(|path| path_bytes(path).into()),
+            })
+        },
+    };
+    wire::AttachmentAccess { value: Some(value) }
+}
+
+pub fn get_attachment_access_response(
+    v: &wire::GetAttachmentAccessResponse,
+) -> Result<AttachmentAccess, FromGrpcError> {
+    attachment_access(&req(v.access.clone(), "attachment access")?)
+}
+
+pub fn to_get_attachment_access_response(
+    v: &AttachmentAccess,
+) -> wire::GetAttachmentAccessResponse {
+    wire::GetAttachmentAccessResponse {
+        access: Some(to_attachment_access(v)),
+    }
+}
+
 pub fn progress_target(v: &wire::WatchProgressRequest) -> Result<ProgressTarget, FromGrpcError> {
     match req(v.target.clone(), "progress target")? {
         wire::watch_progress_request::Target::DesiredRevision(revision) => Ok(
@@ -2095,8 +2352,20 @@ fn attachment_progress_stage(
 ) -> Result<AttachmentProgressStage, FromGrpcError> {
     match v {
         wire::AttachmentProgressStage::AttachmentQueued => Ok(AttachmentProgressStage::Queued),
+        wire::AttachmentProgressStage::AttachmentWaitingForNamespace => {
+            Ok(AttachmentProgressStage::WaitingForNamespace)
+        },
+        wire::AttachmentProgressStage::AttachmentPullingImage => {
+            Ok(AttachmentProgressStage::PullingImage)
+        },
+        wire::AttachmentProgressStage::AttachmentMaterializing => {
+            Ok(AttachmentProgressStage::Materializing)
+        },
         wire::AttachmentProgressStage::AttachmentStarting => Ok(AttachmentProgressStage::Starting),
+        wire::AttachmentProgressStage::AttachmentMounting => Ok(AttachmentProgressStage::Mounting),
         wire::AttachmentProgressStage::AttachmentStopping => Ok(AttachmentProgressStage::Stopping),
+        wire::AttachmentProgressStage::AttachmentRetrying => Ok(AttachmentProgressStage::Retrying),
+        wire::AttachmentProgressStage::AttachmentDeleting => Ok(AttachmentProgressStage::Deleting),
         wire::AttachmentProgressStage::AttachmentReady => Ok(AttachmentProgressStage::Ready),
         wire::AttachmentProgressStage::AttachmentFailed => Ok(AttachmentProgressStage::Failed),
         wire::AttachmentProgressStage::Unspecified => {
@@ -2108,14 +2377,52 @@ fn attachment_progress_stage(
 fn to_attachment_progress_stage(v: AttachmentProgressStage) -> i32 {
     match v {
         AttachmentProgressStage::Queued => wire::AttachmentProgressStage::AttachmentQueued as i32,
+        AttachmentProgressStage::WaitingForNamespace => {
+            wire::AttachmentProgressStage::AttachmentWaitingForNamespace as i32
+        },
+        AttachmentProgressStage::PullingImage => {
+            wire::AttachmentProgressStage::AttachmentPullingImage as i32
+        },
+        AttachmentProgressStage::Materializing => {
+            wire::AttachmentProgressStage::AttachmentMaterializing as i32
+        },
         AttachmentProgressStage::Starting => {
             wire::AttachmentProgressStage::AttachmentStarting as i32
+        },
+        AttachmentProgressStage::Mounting => {
+            wire::AttachmentProgressStage::AttachmentMounting as i32
         },
         AttachmentProgressStage::Stopping => {
             wire::AttachmentProgressStage::AttachmentStopping as i32
         },
+        AttachmentProgressStage::Retrying => {
+            wire::AttachmentProgressStage::AttachmentRetrying as i32
+        },
+        AttachmentProgressStage::Deleting => {
+            wire::AttachmentProgressStage::AttachmentDeleting as i32
+        },
         AttachmentProgressStage::Ready => wire::AttachmentProgressStage::AttachmentReady as i32,
         AttachmentProgressStage::Failed => wire::AttachmentProgressStage::AttachmentFailed as i32,
+    }
+}
+
+fn filesystem_runtime(
+    v: i32,
+    field: &'static str,
+) -> Result<omnifs_core::fs::Runtime, FromGrpcError> {
+    match wire::FsRuntime::try_from(v).map_err(|_| FromGrpcError::Invalid(field))? {
+        wire::FsRuntime::FsHost => Ok(omnifs_core::fs::Runtime::Host),
+        wire::FsRuntime::FsDocker => Ok(omnifs_core::fs::Runtime::Docker),
+        wire::FsRuntime::FsLibkrun => Ok(omnifs_core::fs::Runtime::Libkrun),
+        wire::FsRuntime::Unspecified => Err(FromGrpcError::Unspecified(field)),
+    }
+}
+
+fn to_filesystem_runtime(v: omnifs_core::fs::Runtime) -> i32 {
+    match v {
+        omnifs_core::fs::Runtime::Host => wire::FsRuntime::FsHost as i32,
+        omnifs_core::fs::Runtime::Docker => wire::FsRuntime::FsDocker as i32,
+        omnifs_core::fs::Runtime::Libkrun => wire::FsRuntime::FsLibkrun as i32,
     }
 }
 
@@ -2292,10 +2599,16 @@ fn attachment_progress(v: &wire::AttachmentProgress) -> Result<AttachmentProgres
     }
     Ok(AttachmentProgress {
         key,
+        desired_revision: ResourceRevision::new(v.desired_revision),
+        runtime: filesystem_runtime(v.runtime, "attachment progress runtime")?,
         stage: attachment_progress_stage(
             wire::AttachmentProgressStage::try_from(v.stage)
                 .map_err(|_| FromGrpcError::Invalid("attachment progress stage"))?,
         )?,
+        completed_bytes: v.completed_bytes,
+        total_bytes: v.total_bytes,
+        queued_attachments: v.queued_attachments,
+        active_attachments: v.active_attachments,
         error_code: v.error_code.clone(),
         detail: v.detail.clone(),
         retry_count: v.retry_count,
@@ -2311,6 +2624,12 @@ fn to_attachment_progress(v: &AttachmentProgress) -> wire::AttachmentProgress {
         detail: v.detail.clone(),
         retry_count: v.retry_count,
         next_retry_unix_ms: v.next_retry_unix_ms,
+        desired_revision: v.desired_revision.get(),
+        runtime: to_filesystem_runtime(v.runtime),
+        completed_bytes: v.completed_bytes,
+        total_bytes: v.total_bytes,
+        queued_attachments: v.queued_attachments,
+        active_attachments: v.active_attachments,
     }
 }
 
@@ -3186,6 +3505,84 @@ mod tests {
         assert!(action_receipt(&failed).is_ok());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn attachment_operations_round_trip_strict_status_and_argv() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let version = AttachmentVersion::from_digest([7; 32]);
+        let status = AttachmentStatus {
+            definition: supported_attachment(),
+            desired_revision: ResourceRevision::new(9),
+            desired_version: version,
+            observed_version: Some(version),
+            phase: AttachmentPhase::Ready,
+            runtime_instance: Some("ab".repeat(16)),
+            action_generation: 3,
+            error_code: None,
+            detail: None,
+            retry_at_unix_ms: None,
+            deleting: false,
+        };
+        assert_eq!(
+            get_attachment_status_response(&to_get_attachment_status_response(Some(&status)))
+                .unwrap(),
+            Some(status.clone())
+        );
+        assert_eq!(
+            get_attachment_status_response(&to_get_attachment_status_response(None)).unwrap(),
+            None
+        );
+
+        let restart = RestartAttachmentRequest {
+            action_id: ActionId::from_bytes([4; 16]),
+            base_action_generation: status.action_generation,
+            attachment: status.definition.name.clone(),
+        };
+        assert_eq!(
+            restart_attachment_request(&to_restart_attachment_request(&restart)).unwrap(),
+            restart
+        );
+        let receipt = action_receipt_for(ActionKind::RestartAttachment);
+        assert_eq!(
+            restart_attachment_response(&to_restart_attachment_response(&receipt)).unwrap(),
+            receipt
+        );
+
+        let request = GetAttachmentAccessRequest {
+            attachment: status.definition.name.clone(),
+            interactive: true,
+            shell: Some("/bin/sh".into()),
+            command: vec!["printf".into(), "ok".into()],
+        };
+        assert_eq!(
+            get_attachment_access_request(&to_get_attachment_access_request(&request)).unwrap(),
+            request
+        );
+        let access = AttachmentAccess::Command(AttachmentCommand {
+            program: OsString::from_vec(vec![b'd', b'o', b'c', b'k', b'e', b'r']),
+            args: vec![OsString::from_vec(vec![b'e', b'x', b'e', b'c', 0x80])],
+            current_dir: Some(PathBuf::from("/tmp")),
+        });
+        assert_eq!(
+            get_attachment_access_response(&to_get_attachment_access_response(&access)).unwrap(),
+            access
+        );
+
+        let mut invalid = to_attachment_status(&status);
+        invalid.observed_version = None;
+        assert!(matches!(
+            attachment_status(&invalid),
+            Err(FromGrpcError::Invalid("ready attachment version"))
+        ));
+        let mut invalid = to_attachment_status(&status);
+        invalid.runtime_instance = Some("not-an-instance".into());
+        assert!(matches!(
+            attachment_status(&invalid),
+            Err(FromGrpcError::Invalid("attachment runtime instance"))
+        ));
+    }
+
     #[test]
     #[allow(
         clippy::too_many_lines,
@@ -3254,7 +3651,13 @@ mod tests {
             }),
             ProgressEventKind::AttachmentProgress(AttachmentProgress {
                 key: attachment_key,
+                desired_revision: ResourceRevision::new(4),
+                runtime: omnifs_core::fs::Runtime::Docker,
                 stage: AttachmentProgressStage::Starting,
+                completed_bytes: 5,
+                total_bytes: Some(9),
+                queued_attachments: 2,
+                active_attachments: 1,
                 error_code: None,
                 detail: None,
                 retry_count: 4,

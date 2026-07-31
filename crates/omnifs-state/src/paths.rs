@@ -2,6 +2,7 @@
 
 use anyhow::Context as _;
 use omnifs_bootstrap::{Bootstrap, Daemon};
+use omnifs_core::ResourceName;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,11 +13,14 @@ pub(crate) const DATABASE_FILE: &str = "state.sqlite3";
 pub(crate) const CONTROL_STORE_DIR: &str = "control-store";
 pub(crate) const STAGING_DIR: &str = "staging";
 pub(crate) const CACHE_DIR: &str = "cache";
+pub(crate) const RUNTIME_DIR: &str = "runtime";
 pub(crate) const LOG_DIR: &str = "logs";
 pub(crate) const DAEMON_LOG_FILE: &str = "daemon.log";
 pub(crate) const PROJECTION_CACHE_DIR: &str = "projection";
 pub(crate) const WASMTIME_CACHE_DIR: &str = "wasmtime";
 pub(crate) const CLONE_CACHE_DIR: &str = "git";
+pub(crate) const GUEST_IMAGES_CACHE_DIR: &str = "guest-images";
+pub(crate) const ATTACHMENTS_DIR: &str = "attachments";
 
 /// Headroom multiplier reserved against the disk budget for one import.
 const PROVIDER_DISK_MULTIPLIER: u64 = 3;
@@ -88,13 +92,80 @@ impl DaemonStatePaths {
         self.root.join(LOG_DIR)
     }
 
+    /// Private root for daemon-owned runtime records and sockets.
+    #[must_use]
+    pub fn runtime(&self) -> PathBuf {
+        self.root.join(RUNTIME_DIR)
+    }
+
+    /// Private directory containing one runtime subdirectory per attachment.
+    #[must_use]
+    pub fn attachments_runtime(&self) -> PathBuf {
+        self.runtime().join(ATTACHMENTS_DIR)
+    }
+
+    /// Private runtime directory for one validated attachment name.
+    #[must_use]
+    pub fn attachment_runtime(&self, name: &ResourceName) -> PathBuf {
+        self.attachments_runtime().join(name.as_str())
+    }
+
+    /// Create and restrict one attachment's private runtime directory.
+    pub fn prepare_attachment_runtime(&self, name: &ResourceName) -> anyhow::Result<PathBuf> {
+        let path = self.attachment_runtime(name);
+        ensure_private_dir(&path)?;
+        Ok(path)
+    }
+
+    /// Private cache for guest image layers and resolved image data.
+    #[must_use]
+    pub fn guest_images_cache(&self) -> PathBuf {
+        self.cache().join(GUEST_IMAGES_CACHE_DIR)
+    }
+
+    /// Private directory containing one daemon-owned attachment log per name.
+    #[must_use]
+    pub fn attachment_logs(&self) -> PathBuf {
+        self.logs().join(ATTACHMENTS_DIR)
+    }
+
+    /// Private log path for one validated attachment name.
+    #[must_use]
+    pub fn attachment_log(&self, name: &ResourceName) -> PathBuf {
+        self.attachment_logs()
+            .join(format!("{}.log", name.as_str()))
+    }
+
+    /// Open one attachment log with private file permissions.
+    pub fn open_attachment_log(&self, name: &ResourceName) -> anyhow::Result<std::fs::File> {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+        ensure_private_dir(&self.root)?;
+        ensure_private_dir(&self.logs())?;
+        ensure_private_dir(&self.attachment_logs())?;
+        let path = self.attachment_log(name);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("open attachment log {}", path.display()))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict attachment log {}", path.display()))?;
+        Ok(file)
+    }
+
     pub fn prepare(&self) -> anyhow::Result<()> {
         for path in [
             self.root.clone(),
             self.control_store(),
             self.staging(),
             self.cache(),
+            self.runtime(),
             self.logs(),
+            self.attachments_runtime(),
+            self.attachment_logs(),
+            self.guest_images_cache(),
         ] {
             ensure_private_dir(&path)?;
         }

@@ -18,7 +18,7 @@ use bollard::query_parameters::{
     RemoveContainerOptions, StartContainerOptions, StopContainerOptions,
 };
 use futures_util::TryStreamExt;
-use omnifs_core::{ClientOwnerId, fs};
+use omnifs_core::{AttachmentSpec, ResourceName, fs};
 
 pub use self::container::resolve_filesystem_image;
 use self::container::{
@@ -124,6 +124,7 @@ pub struct DockerClient {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DockerContainerIdentity {
     pub id: String,
+    pub runtime_instance: String,
 }
 
 /// One container [`DockerClient::owned`] proved carries both an immutable ID
@@ -181,7 +182,9 @@ impl DockerClient {
         );
         self.launch_container(
             request.paths.profile_root(),
-            request.client_owner,
+            request.attachment,
+            request.attachment_spec,
+            request.runtime_instance,
             request.spec,
             addr.port(),
         )
@@ -194,14 +197,17 @@ impl DockerClient {
     async fn launch_container(
         &self,
         home: &std::path::Path,
-        client_owner: ClientOwnerId,
+        attachment: &ResourceName,
+        attachment_spec: &AttachmentSpec,
+        runtime_instance: &str,
         spec: &fs::Spec,
         attach_port: u16,
     ) -> Result<()> {
         let body = self.target.build_filesystem_container_body(
             home,
-            client_owner,
-            spec,
+            attachment,
+            attachment_spec,
+            runtime_instance,
             attach_port,
             cfg!(target_os = "linux"),
         );
@@ -214,14 +220,20 @@ impl DockerClient {
         }
 
         let identity = self
-            .confirmed(home, client_owner, spec)
+            .confirmed(home, attachment, attachment_spec, runtime_instance)
             .await?
             .map(|(identity, _running)| identity)
             .context("the launched filesystem container did not retain its exact identity")?;
 
         if let Err(mount_error) = self.wait_for_mount_ready().await {
             let cleanup = self
-                .stop_confirmed(&identity, home, client_owner, spec)
+                .stop_confirmed(
+                    &identity,
+                    home,
+                    attachment,
+                    attachment_spec,
+                    runtime_instance,
+                )
                 .await;
             return err_after_rollback(mount_error, cleanup, "the failed filesystem container");
         }
@@ -262,11 +274,12 @@ impl DockerClient {
     pub async fn confirmed(
         &self,
         expected_home: &std::path::Path,
-        client_owner: ClientOwnerId,
-        expected_spec: &fs::Spec,
+        attachment: &ResourceName,
+        expected_spec: &AttachmentSpec,
+        runtime_instance: &str,
     ) -> Result<Option<(DockerContainerIdentity, bool)>> {
         let Some((identity, running)) = self
-            .confirmed_name_and_labels(expected_home, expected_spec.id())
+            .confirmed_name_and_labels(expected_home, attachment)
             .await?
         else {
             return Ok(None);
@@ -290,13 +303,18 @@ impl DockerClient {
             .config
             .as_ref()
             .and_then(|config| config.cmd.as_ref());
-        let expected_command = filesystem_command(client_owner, expected_spec);
+        let expected_command = filesystem_command(attachment, expected_spec, runtime_instance);
         anyhow::ensure!(
             actual_command == Some(&expected_command),
-            "filesystem container command does not match configured spec `{}`",
-            expected_spec.id()
+            "filesystem container command does not match configured spec `{attachment}`"
         );
-        Ok(Some((identity, running)))
+        Ok(Some((
+            DockerContainerIdentity {
+                id: identity.id,
+                runtime_instance: runtime_instance.to_owned(),
+            },
+            running,
+        )))
     }
 
     /// Prove the stable name and both ownership labels, regardless of whether
@@ -306,7 +324,7 @@ impl DockerClient {
     async fn confirmed_name_and_labels(
         &self,
         expected_home: &std::path::Path,
-        expected_id: &fs::Id,
+        expected_id: &ResourceName,
     ) -> Result<Option<(DockerContainerIdentity, bool)>> {
         let inspect = match self
             .docker
@@ -354,7 +372,13 @@ impl DockerClient {
         let id = inspect
             .id
             .context("Docker inspect returned no immutable container ID")?;
-        Ok(Some((DockerContainerIdentity { id }, running)))
+        Ok(Some((
+            DockerContainerIdentity {
+                id,
+                runtime_instance: String::new(),
+            },
+            running,
+        )))
     }
 
     /// List every container carrying this profile's ownership label,
@@ -383,7 +407,10 @@ impl DockerClient {
         Ok(containers
             .into_iter()
             .map(|container| {
-                let identity = container.id.map(|id| DockerContainerIdentity { id });
+                let identity = container.id.map(|id| DockerContainerIdentity {
+                    id,
+                    runtime_instance: String::new(),
+                });
                 let filesystem_id = container
                     .labels
                     .as_ref()
@@ -421,11 +448,12 @@ impl DockerClient {
         &self,
         expected: &DockerContainerIdentity,
         expected_home: &std::path::Path,
-        client_owner: ClientOwnerId,
-        expected_spec: &fs::Spec,
+        attachment: &ResourceName,
+        expected_spec: &AttachmentSpec,
+        runtime_instance: &str,
     ) -> Result<()> {
         let current = self
-            .confirmed(expected_home, client_owner, expected_spec)
+            .confirmed(expected_home, attachment, expected_spec, runtime_instance)
             .await?
             .context("the confirmed filesystem container no longer exists")?
             .0;

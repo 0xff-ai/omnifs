@@ -1,6 +1,7 @@
 //! Daemon-private durable state.
 
 mod action;
+mod attachment;
 mod batch;
 mod blob;
 mod credential;
@@ -37,7 +38,10 @@ use provider::{
 };
 use writer::StateWriter;
 
-pub use action::{ActionWriteError, CredentialActionOperation, CredentialActionRequest};
+pub use action::{
+    ActionWriteError, AttachmentActionRequest, CredentialActionOperation, CredentialActionRequest,
+};
+pub use attachment::{AttachmentInstance, AttachmentObservation, AttachmentPhase};
 pub use batch::{BatchError, OpOutcome, StateOp, StateOpError};
 pub use credential::{
     CredentialDocument, CredentialRefreshKind, CredentialRefreshOutcome,
@@ -51,7 +55,8 @@ pub use provider::{
     StoredProviderMetadata, ValidatedProviderUpload,
 };
 pub use resource::{
-    CredentialSecretSidecar, ResourceApplyError, ResourceApplyRequest, ResourceSnapshot,
+    CredentialSecretSidecar, DesiredAttachment, ResourceApplyError, ResourceApplyRequest,
+    ResourceSnapshot,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -236,6 +241,22 @@ impl StateStore {
             .await?
     }
 
+    /// Accept one non-secret attachment restart action and its durable receipt
+    /// in one writer transaction.
+    pub async fn accept_attachment_action(
+        &self,
+        request: AttachmentActionRequest,
+    ) -> Result<omnifs_api::ActionReceipt, ActionWriteError> {
+        self.writer
+            .call(move |mut connection| async move {
+                let result = Db::new(&mut connection)
+                    .accept_attachment_action(request)
+                    .await;
+                (connection, result)
+            })
+            .await?
+    }
+
     pub async fn action_receipt(
         &self,
         action_id: omnifs_core::ActionId,
@@ -264,6 +285,66 @@ impl StateStore {
             .await
             .context("acquire action receipt reader")?;
         action::action_receipts(&mut connection).await
+    }
+
+    /// Read one exact observed attachment instance, including a deleting
+    /// tombstone that no longer has a desired resource.
+    pub async fn attachment_instance(
+        &self,
+        name: &omnifs_core::ResourceName,
+    ) -> anyhow::Result<Option<AttachmentInstance>> {
+        let mut connection = self
+            .reads
+            .acquire()
+            .await
+            .context("acquire attachment instance reader")?;
+        attachment::load_instance(&mut connection, name).await
+    }
+
+    /// Read all observed attachment instances in stable name order.
+    pub async fn attachment_instances(&self) -> anyhow::Result<Vec<AttachmentInstance>> {
+        attachment::list_instances(&self.reads).await
+    }
+
+    /// Read all desired attachment definitions with their durable versions.
+    pub async fn desired_attachments(&self) -> anyhow::Result<Vec<DesiredAttachment>> {
+        resource::desired_attachments(&self.reads).await
+    }
+
+    /// Record one observed attachment phase after checking the exact desired,
+    /// action, and runtime identity observed before the supervisor effect.
+    ///
+    /// A stale write returns `None` and cannot change desired state, deletion
+    /// state, or action generation.
+    pub async fn write_attachment_observation(
+        &self,
+        observation: AttachmentObservation,
+    ) -> anyhow::Result<Option<AttachmentInstance>> {
+        self.writer
+            .call(move |mut connection| async move {
+                let result = Db::new(&mut connection)
+                    .write_attachment_observation(observation)
+                    .await;
+                (connection, result)
+            })
+            .await?
+    }
+
+    /// Clear a deletion tombstone only if its desired row and exact runtime
+    /// identity have not changed since the teardown proof.
+    pub async fn clear_attachment_instance_if_deleting(
+        &self,
+        name: omnifs_core::ResourceName,
+        runtime_instance: Option<String>,
+    ) -> anyhow::Result<bool> {
+        self.writer
+            .call(move |mut connection| async move {
+                let result = Db::new(&mut connection)
+                    .delete_attachment_instance_if_deleting(name, runtime_instance)
+                    .await;
+                (connection, result)
+            })
+            .await?
     }
 
     pub async fn transition_action(

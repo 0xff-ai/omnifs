@@ -4,6 +4,7 @@
 //! subcommand. This crate owns daemon startup, serving, and control handling.
 
 mod app;
+mod attachment_supervisor;
 mod auth_fingerprint;
 mod context;
 mod control;

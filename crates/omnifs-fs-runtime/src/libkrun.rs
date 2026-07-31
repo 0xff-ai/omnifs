@@ -124,10 +124,11 @@ const SEED_CONF_NAME: &str = "omnifs-seed.conf";
 /// The exact seed keys a launch ever writes. The lockdown audit
 /// ([`audit_seed_staging`]) asserts the staging dir carries exactly this set
 /// before it is burned into the ISO.
-const SEED_CONF_KEYS: [&str; 5] = [
+const SEED_CONF_KEYS: [&str; 6] = [
     OMNIFS_ATTACH_ADDR_ENV,
-    "OMNIFS_CLIENT_OWNER",
-    "OMNIFS_FS_ID",
+    "OMNIFS_ATTACHMENT_NAME",
+    "OMNIFS_RUNTIME_INSTANCE",
+    "OMNIFS_LIBKRUN_GUEST_IMAGE",
     "OMNIFS_READY_VSOCK_PORT",
     "OMNIFS_SSH_PUBKEY",
 ];
@@ -311,8 +312,9 @@ impl LibkrunRunner {
     /// interpolated into a shell.
     fn write_seed_iso(
         &self,
-        client_owner: omnifs_core::ClientOwnerId,
-        spec: &fs::Spec,
+        attachment: &omnifs_core::ResourceName,
+        attachment_spec: &omnifs_core::AttachmentSpec,
+        runtime_instance: &str,
         ssh_pubkey: &str,
     ) -> Result<()> {
         let staging = self.seed_staging();
@@ -323,11 +325,12 @@ impl LibkrunRunner {
         let conf_path = staging.join(SEED_CONF_NAME);
         let conf = format!(
             "{OMNIFS_ATTACH_ADDR_ENV}=vsock:{ATTACH_VSOCK_PORT}\n\
-             OMNIFS_CLIENT_OWNER={client_owner}\n\
-             OMNIFS_FS_ID={}\n\
+             OMNIFS_ATTACHMENT_NAME={attachment}\n\
+             OMNIFS_RUNTIME_INSTANCE={runtime_instance}\n\
+             OMNIFS_LIBKRUN_GUEST_IMAGE={}\n\
              OMNIFS_READY_VSOCK_PORT={READY_VSOCK_PORT}\n\
              OMNIFS_SSH_PUBKEY={ssh_pubkey}\n",
-            spec.id()
+            attachment_spec.libkrun_guest_image().unwrap_or_default()
         );
         std::fs::write(&conf_path, conf)
             .with_context(|| format!("write {}", conf_path.display()))?;
@@ -438,10 +441,7 @@ async fn resolve_guest_image(
     guest_image_cache: &Path,
     events: RuntimeEventSink,
 ) -> Result<PathBuf> {
-    let resolved = std::env::var(ENV_GUEST_IMAGE)
-        .ok()
-        .or_else(|| configured.map(str::to_owned))
-        .unwrap_or_else(|| default_guest_image_for(BUILD_CHANNEL).to_string());
+    let resolved = resolve_guest_image_reference(configured);
     let path = match BUILD_CHANNEL {
         BuildChannel::Dev => PathBuf::from(resolved),
         BuildChannel::Release => {
@@ -462,6 +462,19 @@ async fn resolve_guest_image(
     Ok(path)
 }
 
+/// Resolve only the immutable guest image reference or path.
+///
+/// Declarative clients persist this value in the Attachment spec so the
+/// daemon does not depend on the environment of the client process that
+/// submitted it. Materialization and validation remain daemon-owned.
+#[must_use]
+pub fn resolve_guest_image_reference(configured: Option<&str>) -> String {
+    std::env::var(ENV_GUEST_IMAGE)
+        .ok()
+        .or_else(|| configured.map(str::to_owned))
+        .unwrap_or_else(|| default_guest_image_for(BUILD_CHANNEL).to_string())
+}
+
 /// Owns one Libkrun launch from replacement through readiness publication.
 /// Every resource created after replacement is cleaned here when publication
 /// fails. The attach listener, immutable guest image, and SSH key are
@@ -474,7 +487,9 @@ struct LibkrunLaunchLease<'a> {
     child: Option<std::process::Child>,
     ready_listener: Option<tokio::net::UnixListener>,
     instance_id: Option<String>,
-    client_owner: Option<omnifs_core::ClientOwnerId>,
+    attachment: Option<omnifs_core::ResourceName>,
+    attachment_spec: Option<omnifs_core::AttachmentSpec>,
+    runtime_instance: Option<String>,
     spec: Option<fs::Spec>,
     expected_record: Option<HelperRecord>,
     replaced: bool,
@@ -506,7 +521,9 @@ impl<'a> LibkrunLaunchLease<'a> {
             child: None,
             ready_listener: None,
             instance_id: None,
-            client_owner: None,
+            attachment: None,
+            attachment_spec: None,
+            runtime_instance: None,
             spec: None,
             expected_record: None,
             replaced: false,
@@ -521,7 +538,9 @@ impl<'a> LibkrunLaunchLease<'a> {
             child: None,
             ready_listener: None,
             instance_id: None,
-            client_owner: None,
+            attachment: None,
+            attachment_spec: None,
+            runtime_instance: None,
             spec: None,
             expected_record: Some(expected_record),
             replaced: true,
@@ -536,7 +555,9 @@ impl<'a> LibkrunLaunchLease<'a> {
         )
         .await?;
         let mut lease = Self::new(runner, request.endpoints.attach_unix()?, guest_image);
-        lease.client_owner = Some(request.client_owner);
+        lease.attachment = Some(request.attachment.clone());
+        lease.attachment_spec = Some(request.attachment_spec.clone());
+        lease.runtime_instance = Some(request.runtime_instance.to_owned());
         lease.spec = Some(request.spec.clone());
         Ok(lease)
     }
@@ -602,24 +623,64 @@ impl<'a> LibkrunLaunchLease<'a> {
             .as_ref()
             .context("libkrun launch has no filesystem identity")?
             .clone();
-        let client_owner = self
-            .client_owner
-            .context("libkrun launch has no client owner identity")?;
+        let attachment = self
+            .attachment
+            .as_ref()
+            .context("libkrun launch has no attachment identity")?;
+        let attachment_spec = self
+            .attachment_spec
+            .as_ref()
+            .context("libkrun launch has no exact attachment spec")?;
+        let runtime_instance = self
+            .runtime_instance
+            .as_deref()
+            .context("libkrun launch has no runtime instance")?
+            .to_owned();
         self.runner
-            .write_seed_iso(client_owner, &spec, &ssh_pubkey)?;
+            .write_seed_iso(attachment, attachment_spec, &runtime_instance, &ssh_pubkey)?;
         self.ready_listener = Some(self.bind_ready_listener()?);
         let _ = std::fs::remove_file(self.runner.ssh_socket());
         let _ = std::fs::remove_file(self.runner.control_socket());
 
-        let instance_id = crate::process::new_instance_id("libkrun helper")?;
+        self.spawn_and_confirm_helper(&installation, dir, &spec, &runtime_instance)
+            .await?;
+
+        self.wait_for_ready(events).await?;
+        let spec = self
+            .spec
+            .as_ref()
+            .context("libkrun launch has no filesystem identity")?;
+        emit_stage(
+            events,
+            spec,
+            RuntimeStage::WaitForVfsSession,
+            RuntimeState::Active,
+        );
+        attached.await?;
+        emit_stage(
+            events,
+            spec,
+            RuntimeStage::WaitForVfsSession,
+            RuntimeState::Ready,
+        );
+        Ok(())
+    }
+
+    async fn spawn_and_confirm_helper(
+        &mut self,
+        installation: &Installation,
+        dir: &Path,
+        spec: &fs::Spec,
+        runtime_instance: &str,
+    ) -> Result<()> {
         let helper_config = omnifs_libkrun::Config::omnifs(
             dir,
             &self.daemon_attach_socket,
             spec.clone(),
-            &instance_id,
-            &installation,
+            runtime_instance,
+            installation,
         )?;
-        self.instance_id = Some(instance_id);
+        self.instance_id = Some(runtime_instance.to_owned());
         let mut command = Command::new(installation.helper());
         helper_config.apply_to(&mut command);
         crate::process::configure_detached_child(
@@ -650,7 +711,7 @@ impl<'a> LibkrunLaunchLease<'a> {
             record.pid
         );
         anyhow::ensure!(
-            record.spec == spec,
+            &record.spec == spec,
             "libkrun helper record did not match the resolved filesystem spec"
         );
         anyhow::ensure!(
@@ -658,25 +719,6 @@ impl<'a> LibkrunLaunchLease<'a> {
             "libkrun helper record did not match the launch instance"
         );
         self.runner.confirm_record(&record)?;
-
-        self.wait_for_ready(events).await?;
-        let spec = self
-            .spec
-            .as_ref()
-            .context("libkrun launch has no filesystem identity")?;
-        emit_stage(
-            events,
-            spec,
-            RuntimeStage::WaitForVfsSession,
-            RuntimeState::Active,
-        );
-        attached.await?;
-        emit_stage(
-            events,
-            spec,
-            RuntimeStage::WaitForVfsSession,
-            RuntimeState::Ready,
-        );
         Ok(())
     }
 
@@ -1259,8 +1301,9 @@ mod tests {
         std::fs::write(
             dir.path().join(SEED_CONF_NAME),
             "OMNIFS_ATTACH_ADDR=vsock:1024\n\
-             OMNIFS_CLIENT_OWNER=0123456789abcdef0123456789abcdef\n\
-             OMNIFS_FS_ID=main\n\
+             OMNIFS_ATTACHMENT_NAME=main\n\
+             OMNIFS_RUNTIME_INSTANCE=0123456789abcdef0123456789abcdef\n\
+             OMNIFS_LIBKRUN_GUEST_IMAGE=\n\
              OMNIFS_READY_VSOCK_PORT=1025\n\
              OMNIFS_SSH_PUBKEY=ssh-ed25519 AAAA test\n",
         )

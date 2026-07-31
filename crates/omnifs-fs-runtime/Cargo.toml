@@ -17,7 +17,6 @@ omnifs-thin = { workspace = true }
 anyhow = { workspace = true }
 bollard = { workspace = true }
 futures-util = "0.3"
-getrandom = "0.3"
 hex = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

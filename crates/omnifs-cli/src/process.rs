@@ -21,6 +21,10 @@ type PollFuture<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<Option<T>>> 
 /// A caller whose own body cannot fail folds any hard-abort condition into
 /// `Ok(Some(value))` instead and ignores the (then-unreachable) `Err` case,
 /// rather than inventing a placeholder error type.
+#[allow(
+    dead_code,
+    reason = "Plan 006 removes the last superseded client runtime caller"
+)]
 pub(crate) async fn poll_until<T, Fut>(
     timeout: Duration,
     interval: Duration,

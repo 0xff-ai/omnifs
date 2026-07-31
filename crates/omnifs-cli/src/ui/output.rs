@@ -649,6 +649,10 @@ impl Output {
 
     /// Start a spinner whose transient frame and settled row share
     /// `key_width` with the rest of its ledger block.
+    #[allow(
+        dead_code,
+        reason = "Plan 008 replaces the old runtime spinner with streamed daemon progress"
+    )]
     pub(crate) fn progress(
         &self,
         key: impl Into<String>,

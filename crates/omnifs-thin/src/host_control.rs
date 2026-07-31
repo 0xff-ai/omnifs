@@ -103,6 +103,7 @@ impl HostControl {
         let control_socket = record.control_socket.clone();
         if let Some(parent) = control_socket.parent() {
             std::fs::create_dir_all(parent)?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
         }
         let listener = UnixListener::bind(&control_socket)?;
         std::fs::set_permissions(&control_socket, std::fs::Permissions::from_mode(0o600))?;
@@ -347,8 +348,12 @@ async fn read_reply_line(
     Ok(serde_json::from_slice(&line)?)
 }
 
-pub fn control_socket_for(state_dir: &Path, instance_id: &str) -> PathBuf {
-    state_dir.join(format!("control-{instance_id}.sock"))
+pub fn control_socket_for(state_dir: &Path, _instance_id: &str) -> PathBuf {
+    // One runner claim owns this state directory at a time, while the control
+    // protocol still fences every request with the exact runtime instance.
+    // Keeping the filename fixed avoids exceeding the short Unix-domain socket
+    // path limit for otherwise valid profile roots.
+    state_dir.join("control.sock")
 }
 
 #[cfg(test)]

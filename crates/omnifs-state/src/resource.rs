@@ -1,6 +1,6 @@
 //! Durable desired resources, one-time legacy backfill, and atomic full-set apply.
 
-mod codec;
+pub(crate) mod codec;
 
 use crate::credential::{CredentialDocument, CredentialSummary, credential_summaries_query};
 use crate::db::Db;
@@ -8,8 +8,9 @@ use crate::mount::{MountLimits, StoredMount, mounts_query};
 use crate::row::{RowExt as _, sql_int};
 use anyhow::Context as _;
 use omnifs_api::{
-    ApplyReceipt, CredentialDefinition, MountResourceDefinition, NormalizedResourceSet,
-    ProviderDefinition, ResourceChangeAction, ResourceDefinition, ResourceLimits, plan,
+    ApplyReceipt, AttachmentDefinition, CredentialDefinition, MountResourceDefinition,
+    NormalizedResourceSet, ProviderDefinition, ResourceChangeAction, ResourceDefinition,
+    ResourceLimits, plan,
 };
 use omnifs_core::{
     AttachmentVersion, MutationId, ProviderId, ResourceDigest, ResourceKind, ResourceName,
@@ -30,6 +31,15 @@ pub struct ResourceSnapshot {
     pub revision: ResourceRevision,
     pub desired_digest: ResourceDigest,
     pub resources: NormalizedResourceSet,
+}
+
+/// One exact desired attachment row with its durable content version and
+/// resource revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesiredAttachment {
+    pub definition: omnifs_api::AttachmentDefinition,
+    pub version: AttachmentVersion,
+    pub revision: ResourceRevision,
 }
 
 /// Request-only credential material paired with one credential resource.
@@ -415,6 +425,37 @@ async fn read_attachment_resources(
     Ok(())
 }
 
+pub(crate) async fn desired_attachments(
+    pool: &SqlitePool,
+) -> anyhow::Result<Vec<DesiredAttachment>> {
+    let mut attachments = Vec::new();
+    for row in sqlx::query(
+        "SELECT name, canonical, version, revision \
+         FROM attachment_resources ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await
+    .context("read desired attachment resources")?
+    {
+        let name_text: String = row
+            .try_get("name")
+            .context("read desired attachment resource name")?;
+        let version = AttachmentVersion::from_digest(row.digest("version")?);
+        let definition = decode_attachment(&row.bytes("canonical")?, version)
+            .with_context(|| format!("decode desired attachment resource `{name_text}`"))?;
+        anyhow::ensure!(
+            definition.name.as_str() == name_text,
+            "attachment resource `{name_text}` name does not match canonical bytes"
+        );
+        attachments.push(DesiredAttachment {
+            definition,
+            version,
+            revision: ResourceRevision::new(row.unsigned("revision")?),
+        });
+    }
+    Ok(attachments)
+}
+
 async fn apply_resource_row_changes(
     connection: &mut SqliteConnection,
     changes: &[omnifs_api::ResourceChange],
@@ -466,93 +507,151 @@ async fn write_resource(
     let revision = sql_int(revision.get(), "resource revision")?;
     match resource {
         ResourceDefinition::Provider(definition) => {
-            sqlx::query(
-                "INSERT INTO provider_resources(\
-                     name, provider_digest, revision, last_mutation_id, updated_at\
-                 ) VALUES (?1, ?2, ?3, ?4, unixepoch()) \
-                 ON CONFLICT(name) DO UPDATE SET \
-                     provider_digest = excluded.provider_digest, \
-                     revision = excluded.revision, \
-                     last_mutation_id = excluded.last_mutation_id, \
-                     updated_at = excluded.updated_at",
-            )
-            .bind(definition.name.as_str())
-            .bind(definition.artifact.as_bytes().as_slice())
-            .bind(revision)
-            .bind(mutation_id.as_bytes().as_slice())
-            .execute(connection)
-            .await
-            .with_context(|| format!("write provider resource `{}`", definition.name))?;
+            write_provider(connection, definition, revision, mutation_id).await
         },
         ResourceDefinition::Credential(definition) => {
-            sqlx::query(
-                "INSERT INTO credential_resources(\
-                     name, provider_name, scheme, account, revision, last_mutation_id, updated_at\
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch()) \
-                 ON CONFLICT(name) DO UPDATE SET \
-                     provider_name = excluded.provider_name, scheme = excluded.scheme, \
-                     account = excluded.account, revision = excluded.revision, \
-                     last_mutation_id = excluded.last_mutation_id, \
-                     updated_at = excluded.updated_at",
-            )
-            .bind(definition.name.as_str())
-            .bind(definition.provider.as_str())
-            .bind(&definition.scheme)
-            .bind(&definition.account)
-            .bind(revision)
-            .bind(mutation_id.as_bytes().as_slice())
-            .execute(connection)
-            .await
-            .with_context(|| format!("write credential resource `{}`", definition.name))?;
+            write_credential(connection, definition, revision, mutation_id).await
         },
         ResourceDefinition::Mount(definition) => {
-            let (canonical, version) = encode_mount(definition)?;
-            sqlx::query(
-                "INSERT INTO mount_resources(\
-                     name, canonical, version, provider_name, credential_name, \
-                     revision, last_mutation_id, updated_at\
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch()) \
-                 ON CONFLICT(name) DO UPDATE SET \
-                     canonical = excluded.canonical, version = excluded.version, \
-                     provider_name = excluded.provider_name, \
-                     credential_name = excluded.credential_name, \
-                     revision = excluded.revision, \
-                     last_mutation_id = excluded.last_mutation_id, \
-                     updated_at = excluded.updated_at",
-            )
-            .bind(definition.name.as_str())
-            .bind(canonical)
-            .bind(version.as_slice())
-            .bind(definition.provider.as_str())
-            .bind(definition.credential.as_ref().map(ResourceName::as_str))
-            .bind(revision)
-            .bind(mutation_id.as_bytes().as_slice())
-            .execute(connection)
-            .await
-            .with_context(|| format!("write mount resource `{}`", definition.name))?;
+            write_mount(connection, definition, revision, mutation_id).await
         },
         ResourceDefinition::Attachment(definition) => {
-            let (canonical, version) = encode_attachment(definition)?;
-            sqlx::query(
-                "INSERT INTO attachment_resources(\
-                     name, canonical, version, revision, last_mutation_id, updated_at\
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, unixepoch()) \
-                 ON CONFLICT(name) DO UPDATE SET \
-                     canonical = excluded.canonical, version = excluded.version, \
-                     revision = excluded.revision, \
-                     last_mutation_id = excluded.last_mutation_id, \
-                     updated_at = excluded.updated_at",
-            )
-            .bind(definition.name.as_str())
-            .bind(canonical)
-            .bind(version.as_bytes().as_slice())
-            .bind(revision)
-            .bind(mutation_id.as_bytes().as_slice())
-            .execute(connection)
-            .await
-            .with_context(|| format!("write attachment resource `{}`", definition.name))?;
+            write_attachment(connection, definition, revision, mutation_id).await
         },
     }
+}
+
+async fn write_provider(
+    connection: &mut SqliteConnection,
+    definition: &ProviderDefinition,
+    revision: i64,
+    mutation_id: MutationId,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO provider_resources(\
+             name, provider_digest, revision, last_mutation_id, updated_at\
+         ) VALUES (?1, ?2, ?3, ?4, unixepoch()) \
+         ON CONFLICT(name) DO UPDATE SET \
+             provider_digest = excluded.provider_digest, \
+             revision = excluded.revision, \
+             last_mutation_id = excluded.last_mutation_id, \
+             updated_at = excluded.updated_at",
+    )
+    .bind(definition.name.as_str())
+    .bind(definition.artifact.as_bytes().as_slice())
+    .bind(revision)
+    .bind(mutation_id.as_bytes().as_slice())
+    .execute(connection)
+    .await
+    .with_context(|| format!("write provider resource `{}`", definition.name))?;
+    Ok(())
+}
+
+async fn write_credential(
+    connection: &mut SqliteConnection,
+    definition: &CredentialDefinition,
+    revision: i64,
+    mutation_id: MutationId,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO credential_resources(\
+             name, provider_name, scheme, account, revision, last_mutation_id, updated_at\
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch()) \
+         ON CONFLICT(name) DO UPDATE SET \
+             provider_name = excluded.provider_name, scheme = excluded.scheme, \
+             account = excluded.account, revision = excluded.revision, \
+             last_mutation_id = excluded.last_mutation_id, \
+             updated_at = excluded.updated_at",
+    )
+    .bind(definition.name.as_str())
+    .bind(definition.provider.as_str())
+    .bind(&definition.scheme)
+    .bind(&definition.account)
+    .bind(revision)
+    .bind(mutation_id.as_bytes().as_slice())
+    .execute(connection)
+    .await
+    .with_context(|| format!("write credential resource `{}`", definition.name))?;
+    Ok(())
+}
+
+async fn write_mount(
+    connection: &mut SqliteConnection,
+    definition: &MountResourceDefinition,
+    revision: i64,
+    mutation_id: MutationId,
+) -> anyhow::Result<()> {
+    let (canonical, version) = encode_mount(definition)?;
+    sqlx::query(
+        "INSERT INTO mount_resources(\
+             name, canonical, version, provider_name, credential_name, \
+             revision, last_mutation_id, updated_at\
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch()) \
+         ON CONFLICT(name) DO UPDATE SET \
+             canonical = excluded.canonical, version = excluded.version, \
+             provider_name = excluded.provider_name, \
+             credential_name = excluded.credential_name, \
+             revision = excluded.revision, \
+             last_mutation_id = excluded.last_mutation_id, \
+             updated_at = excluded.updated_at",
+    )
+    .bind(definition.name.as_str())
+    .bind(canonical)
+    .bind(version.as_slice())
+    .bind(definition.provider.as_str())
+    .bind(definition.credential.as_ref().map(ResourceName::as_str))
+    .bind(revision)
+    .bind(mutation_id.as_bytes().as_slice())
+    .execute(connection)
+    .await
+    .with_context(|| format!("write mount resource `{}`", definition.name))?;
+    Ok(())
+}
+
+async fn write_attachment(
+    connection: &mut SqliteConnection,
+    definition: &AttachmentDefinition,
+    revision: i64,
+    mutation_id: MutationId,
+) -> anyhow::Result<()> {
+    let (canonical, version) = encode_attachment(definition)?;
+    sqlx::query(
+        "INSERT INTO attachment_resources(\
+             name, canonical, version, revision, last_mutation_id, updated_at\
+         ) VALUES (?1, ?2, ?3, ?4, ?5, unixepoch()) \
+         ON CONFLICT(name) DO UPDATE SET \
+             canonical = excluded.canonical, version = excluded.version, \
+             revision = excluded.revision, \
+             last_mutation_id = excluded.last_mutation_id, \
+             updated_at = excluded.updated_at",
+    )
+    .bind(definition.name.as_str())
+    .bind(&canonical)
+    .bind(version.as_bytes().as_slice())
+    .bind(revision)
+    .bind(mutation_id.as_bytes().as_slice())
+    .execute(&mut *connection)
+    .await
+    .with_context(|| format!("write attachment resource `{}`", definition.name))?;
+    sqlx::query(
+        "INSERT INTO attachment_instances(\
+             name, desired_version, desired_spec, observed_version, observed_spec, phase, \
+             runtime_instance, action_generation, last_error_code, last_error_detail, \
+             retry_at, deleting, updated_at\
+         ) VALUES (?1, ?2, ?3, NULL, NULL, 'pending', NULL, 0, NULL, NULL, NULL, 0, unixepoch()) \
+         ON CONFLICT(name) DO UPDATE SET \
+             desired_version = excluded.desired_version, desired_spec = excluded.desired_spec, \
+             phase = CASE WHEN attachment_instances.observed_version = excluded.desired_version \
+                 THEN 'ready' ELSE 'pending' END, \
+             last_error_code = NULL, last_error_detail = NULL, retry_at = NULL, \
+             deleting = 0, updated_at = excluded.updated_at",
+    )
+    .bind(definition.name.as_str())
+    .bind(version.as_bytes().as_slice())
+    .bind(canonical)
+    .execute(connection)
+    .await
+    .with_context(|| format!("initialize observed attachment state `{}`", definition.name))?;
     Ok(())
 }
 
@@ -561,6 +660,19 @@ async fn delete_resource(
     name: &ResourceName,
     kind: ResourceKind,
 ) -> anyhow::Result<()> {
+    if kind == ResourceKind::Attachment {
+        sqlx::query(
+            "UPDATE attachment_instances \
+             SET desired_version = NULL, desired_spec = NULL, phase = 'deleting', \
+                 deleting = 1, last_error_code = NULL, last_error_detail = NULL, \
+                 retry_at = NULL, updated_at = unixepoch() \
+             WHERE name = ?1",
+        )
+        .bind(name.as_str())
+        .execute(&mut *connection)
+        .await
+        .with_context(|| format!("mark attachment resource `{name}` deleting"))?;
+    }
     let statement = match kind {
         ResourceKind::Provider => "DELETE FROM provider_resources WHERE name = ?1",
         ResourceKind::Credential => "DELETE FROM credential_resources WHERE name = ?1",

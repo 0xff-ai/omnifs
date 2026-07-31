@@ -1,3 +1,8 @@
+#![allow(
+    dead_code,
+    reason = "Plan 006 removes client runtime launch code while retaining its path scanner"
+)]
+
 //! CLI adapters for the UI-free filesystem runtime crate.
 
 use std::collections::HashMap;

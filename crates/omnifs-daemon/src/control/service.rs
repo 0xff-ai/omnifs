@@ -294,28 +294,27 @@ impl wire::control_server::Control for GrpcControlService {
                 still_attached: Vec::new(),
             }));
         };
+        daemon.resources.shutdown();
+        let supervisor = Arc::clone(daemon.attachment_supervisor().map_err(grpc_internal)?);
         let vfs = Arc::clone(&daemon.vfs);
         let shutdown_tx = daemon.shutdown_tx.clone();
         let result = tokio::spawn(async move {
             let (detached, still_attached) = if stop_filesystems {
-                let before = vfs.attachments().len();
-                vfs.stop_filesystems();
-                let still = vfs.drain_attachments(DRAIN_TIMEOUT).await;
+                let before = vfs.sessions().len();
+                let still = supervisor.stop_all().await?;
                 (
                     before.saturating_sub(still.len()),
-                    still
-                        .into_iter()
-                        .map(|identity| identity.to_string())
-                        .collect(),
+                    still.into_iter().map(|name| name.to_string()).collect(),
                 )
             } else {
                 (0, Vec::new())
             };
             let _ = shutdown_tx.send(true);
-            (detached, still_attached)
+            anyhow::Ok((detached, still_attached))
         })
         .await
-        .map_err(|error| grpc_internal(error.to_string()))?;
+        .map_err(|error| grpc_internal(error.to_string()))?
+        .map_err(grpc_internal)?;
         let (detached, still_attached) = result;
         Ok(Response::new(wire::ShutdownResponse {
             detached: u32::try_from(detached).map_err(grpc_internal)?,
@@ -650,6 +649,55 @@ impl wire::control_server::Control for GrpcControlService {
         Ok(Response::new(wire::RevokeCredentialResponse {
             receipt: Some(grpc::to_credential_receipt(&receipt)),
         }))
+    }
+
+    async fn get_attachment_status(
+        &self,
+        request: Request<wire::GetAttachmentStatusRequest>,
+    ) -> Result<Response<wire::GetAttachmentStatusResponse>, Status> {
+        let daemon = self.daemon()?;
+        let name = omnifs_core::ResourceName::new(request.into_inner().attachment_name)
+            .map_err(grpc_invalid)?;
+        let status = daemon
+            .attachment_status(&name)
+            .await
+            .map_err(grpc_internal)?;
+        Ok(Response::new(grpc::to_get_attachment_status_response(
+            status.as_ref(),
+        )))
+    }
+
+    async fn restart_attachment(
+        &self,
+        request: Request<wire::RestartAttachmentRequest>,
+    ) -> Result<Response<wire::RestartAttachmentResponse>, Status> {
+        let daemon = self.daemon()?;
+        let request =
+            grpc::restart_attachment_request(&request.into_inner()).map_err(grpc_invalid)?;
+        let receipt = daemon
+            .resources
+            .restart_attachment(request)
+            .await
+            .map_err(|error| resource_control_status(&error))?;
+        Ok(Response::new(grpc::to_restart_attachment_response(
+            &receipt,
+        )))
+    }
+
+    async fn get_attachment_access(
+        &self,
+        request: Request<wire::GetAttachmentAccessRequest>,
+    ) -> Result<Response<wire::GetAttachmentAccessResponse>, Status> {
+        let daemon = self.daemon()?;
+        let request =
+            grpc::get_attachment_access_request(&request.into_inner()).map_err(grpc_invalid)?;
+        let access = daemon
+            .attachment_access(request)
+            .await
+            .map_err(grpc_status)?;
+        Ok(Response::new(grpc::to_get_attachment_access_response(
+            &access,
+        )))
     }
 
     type WatchProgressStream =

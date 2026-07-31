@@ -156,9 +156,9 @@ fn workspace_root() -> PathBuf {
 // ===========================================================================
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
-/// as a contributor would: daemon start, named filesystem create and attach,
-/// `fs ls`, explicit detach, `down`. No test touches the user's real
-/// `~/.omnifs` or default ports.
+/// as a contributor would: daemon start, desired Attachment apply and
+/// progress watch, `fs ls`, explicit desired removal, `down`. No test touches
+/// the user's real `~/.omnifs` or default ports.
 struct Fixture {
     home: TempDir,
     mount_point: PathBuf,
@@ -185,7 +185,7 @@ impl Fixture {
 
     fn libkrun_dir(&self) -> PathBuf {
         self.home_path()
-            .join("client/filesystems/runtime/itest-libkrun/libkrun")
+            .join("daemon-state/runtime/attachments/itest-libkrun/libkrun")
     }
 
     fn control_socket(&self) -> PathBuf {
@@ -261,29 +261,12 @@ impl Fixture {
         loop {
             let status = self.filesystem_status();
             let text = String::from_utf8_lossy(&status.stdout);
-            if libkrun_is_attached(&text) {
+            if libkrun_is_ready(&text) {
                 return;
             }
             assert!(
                 Instant::now() < deadline,
                 "libkrun filesystem did not reconnect within 30s\nstdout: {text}\nstderr: {}",
-                String::from_utf8_lossy(&status.stderr)
-            );
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-
-    fn wait_for_libkrun_detachment(&self) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let status = self.filesystem_status();
-            let text = String::from_utf8_lossy(&status.stdout);
-            if !libkrun_is_attached(&text) {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "libkrun filesystem remained attached for 10s after helper exit\nstdout: {text}\nstderr: {}",
                 String::from_utf8_lossy(&status.stderr)
             );
             std::thread::sleep(Duration::from_millis(100));
@@ -578,10 +561,10 @@ fn assert_guest_lockdown(fixture: &Fixture) {
     );
 }
 
-fn libkrun_is_attached(status: &str) -> bool {
+fn libkrun_is_ready(status: &str) -> bool {
     status
         .lines()
-        .any(|line| line.contains("libkrun") && line.contains("attached"))
+        .any(|line| line.contains("libkrun") && line.contains("ready"))
 }
 
 fn wait_for_process_exit(pid: u32) {
@@ -694,8 +677,8 @@ fn libkrun_lifecycle_and_matrix() {
     assert!(status_out.status.success());
     let status_text = String::from_utf8_lossy(&status_out.stdout);
     assert!(
-        status_text.contains("libkrun") && status_text.contains("attached"),
-        "fs ls must report the libkrun guest attached: {status_text}"
+        status_text.contains("libkrun") && status_text.contains("ready"),
+        "fs ls must report the libkrun attachment ready: {status_text}"
     );
 
     assert_serves(&fixture);
@@ -731,7 +714,10 @@ fn libkrun_lifecycle_and_matrix() {
         "kill -KILL failed for helper {killed_pid}"
     );
     wait_for_process_exit(killed_pid);
-    fixture.wait_for_libkrun_detachment();
+    // The daemon supervisor owns restart after an unexpected runtime exit.
+    // Wait for its typed status to return to ready before issuing the
+    // idempotent transition-era attach command.
+    fixture.wait_for_libkrun_attachment();
     let recovered = fixture.filesystem_attach();
     fixture.assert_filesystem_attach_ok(&recovered, "recovery after abrupt helper exit");
     assert_ne!(fixture.libkrun_pid(), Some(killed_pid));

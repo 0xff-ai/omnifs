@@ -7,6 +7,69 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+const RUNTIME_INSTANCE_HINT: &str = "exactly 32 lowercase hexadecimal characters";
+
+/// Exact random identity of one launched Attachment runtime.
+///
+/// Parsing this at process and wire ingress prevents malformed peers from
+/// entering the live-session registry under an identity `SQLite` would reject.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RuntimeInstanceId(String);
+
+impl RuntimeInstanceId {
+    pub fn new(value: impl Into<String>) -> Result<Self, RuntimeInstanceIdError> {
+        let value = value.into();
+        if value.len() != 32
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(RuntimeInstanceIdError);
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for RuntimeInstanceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for RuntimeInstanceId {
+    type Err = RuntimeInstanceIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl Serialize for RuntimeInstanceId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RuntimeInstanceId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("runtime instance must contain {RUNTIME_INSTANCE_HINT}")]
+pub struct RuntimeInstanceIdError;
+
 /// An exact attachment configuration after daemon-owned normalization.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -299,5 +362,21 @@ mod tests {
             .to_fs_spec(&ResourceName::new("local").unwrap())
             .unwrap();
         assert_eq!(AttachmentSpec::from_fs_spec(&old).unwrap(), spec);
+    }
+
+    #[test]
+    fn runtime_instance_identity_is_strict_at_parse_boundaries() {
+        let valid = "0123456789abcdef0123456789abcdef";
+        assert_eq!(RuntimeInstanceId::new(valid).unwrap().as_str(), valid);
+        for invalid in [
+            "",
+            "0123456789abcdef",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef0",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "g123456789abcdef0123456789abcdef",
+        ] {
+            assert!(RuntimeInstanceId::new(invalid).is_err(), "{invalid}");
+        }
     }
 }

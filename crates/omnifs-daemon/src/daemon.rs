@@ -5,8 +5,11 @@ use super::context::{ATTACH_PORT_COUNT, ATTACH_PORT_MIN, DaemonContext};
 use super::provider_bundle::EmbeddedProviders;
 use anyhow::Context as _;
 use omnifs_api::{
-    CONTROL_SHUTDOWN_DRAIN_SECS, CredentialHealth, DaemonHealth, DaemonInventory, DaemonPhase,
-    DaemonRecovery, DaemonStatus, HealthReport, HealthState, MountHealth, MountInfo, MountRecord,
+    AttachmentAccess, AttachmentCommand, AttachmentDefinition,
+    AttachmentPhase as ApiAttachmentPhase, AttachmentStatus, CONTROL_SHUTDOWN_DRAIN_SECS,
+    ControlError, ControlErrorCode, CredentialHealth, DaemonHealth, DaemonInventory, DaemonPhase,
+    DaemonRecovery, DaemonStatus, GetAttachmentAccessRequest, HealthReport, HealthState,
+    MountHealth, MountInfo, MountRecord,
 };
 use omnifs_engine::{Inspector, ServingCell};
 use omnifs_state::StateStore;
@@ -59,6 +62,7 @@ pub(crate) struct Daemon {
     pub(crate) manager: Arc<crate::manager::MutationManager>,
     pub(crate) resources: Arc<crate::resource_control::ResourceControl>,
     pub(crate) reconciler: OnceLock<Arc<crate::serving_reconciler::ServingReconciler>>,
+    pub(crate) attachments: OnceLock<Arc<crate::attachment_supervisor::AttachmentSupervisor>>,
     pub(crate) vfs: Arc<omnifs_vfs::VfsServer>,
     pub(crate) bound_tcp: OnceLock<omnifs_vfs::Endpoint>,
     pub(crate) shutdown_tx: tokio::sync::watch::Sender<bool>,
@@ -97,6 +101,7 @@ impl Daemon {
             manager,
             resources,
             reconciler: OnceLock::new(),
+            attachments: OnceLock::new(),
             serving,
             vfs,
             bound_tcp: OnceLock::new(),
@@ -136,7 +141,12 @@ impl Daemon {
     /// stop already sends the signal itself.
     pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
         self.resources.shutdown();
-        info!("stopping serving reconciler");
+        info!("stopping attachment runtimes");
+        let attachment_result = match self.attachments.get() {
+            Some(supervisor) => supervisor.shutdown().await,
+            None => Ok(()),
+        };
+        info!("attachment runtimes stopped; stopping serving reconciler");
         let reconciler_result = match self.reconciler.get() {
             Some(reconciler) => reconciler.shutdown().await,
             None => Ok(()),
@@ -162,6 +172,7 @@ impl Daemon {
         info!("state store closed");
 
         crate::first_error([
+            attachment_result,
             reconciler_result,
             manager_result,
             generation_result,
@@ -176,6 +187,23 @@ impl Daemon {
         self.reconciler
             .set(reconciler)
             .map_err(|_| anyhow::anyhow!("serving reconciler already installed"))
+    }
+
+    pub(crate) fn install_attachment_supervisor(
+        &self,
+        supervisor: Arc<crate::attachment_supervisor::AttachmentSupervisor>,
+    ) -> anyhow::Result<()> {
+        self.attachments
+            .set(supervisor)
+            .map_err(|_| anyhow::anyhow!("attachment supervisor already installed"))
+    }
+
+    pub(crate) fn attachment_supervisor(
+        &self,
+    ) -> anyhow::Result<&Arc<crate::attachment_supervisor::AttachmentSupervisor>> {
+        self.attachments
+            .get()
+            .context("attachment supervisor is unavailable")
     }
 
     pub(crate) fn provider_imported(&self, outcome: &omnifs_state::ProviderImportOutcome) {
@@ -292,7 +320,7 @@ impl Daemon {
         mounts.sort_by(|a, b| a.mount.cmp(&b.mount));
         let attach_serving = self.vfs.ready();
         let attach_tcp = self.attach_tcp();
-        let filesystems = self.vfs.attachments();
+        let filesystems = self.live_filesystems();
         let health = self.daemon_health(attach_serving, &filesystems, &views);
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -444,7 +472,7 @@ impl Daemon {
             health: *status.health,
             mounts: self.mount_records().await?,
             credentials,
-            attachments: self.vfs.attachments(),
+            attachments: self.live_filesystems(),
             active_mutation: status.active_mutation,
         })
     }
@@ -457,6 +485,197 @@ impl Daemon {
             .map(|mount| {
                 let (mount_health, auth_health) = health.take(&mount);
                 api_mount_record(mount, mount_health, auth_health)
+            })
+            .collect()
+    }
+
+    pub(crate) async fn attachment_status(
+        &self,
+        name: &omnifs_core::ResourceName,
+    ) -> anyhow::Result<Option<AttachmentStatus>> {
+        let desired = self
+            .state
+            .desired_attachments()
+            .await?
+            .into_iter()
+            .find(|attachment| &attachment.definition.name == name);
+        let Some(desired) = desired else {
+            return Ok(None);
+        };
+        let instance = self.state.attachment_instance(name).await?;
+        let phase =
+            instance
+                .as_ref()
+                .map_or(ApiAttachmentPhase::Pending, |instance| {
+                    match instance.phase {
+                        omnifs_state::AttachmentPhase::Pending => ApiAttachmentPhase::Pending,
+                        omnifs_state::AttachmentPhase::WaitingForNamespace => {
+                            ApiAttachmentPhase::WaitingForNamespace
+                        },
+                        omnifs_state::AttachmentPhase::Starting => ApiAttachmentPhase::Starting,
+                        omnifs_state::AttachmentPhase::Ready => ApiAttachmentPhase::Ready,
+                        omnifs_state::AttachmentPhase::Stopping => ApiAttachmentPhase::Stopping,
+                        omnifs_state::AttachmentPhase::Retrying => ApiAttachmentPhase::Retrying,
+                        omnifs_state::AttachmentPhase::Failed => ApiAttachmentPhase::Failed,
+                        omnifs_state::AttachmentPhase::Deleting => ApiAttachmentPhase::Deleting,
+                    }
+                });
+        Ok(Some(AttachmentStatus {
+            definition: desired.definition,
+            desired_revision: desired.revision,
+            desired_version: desired.version,
+            observed_version: instance
+                .as_ref()
+                .and_then(|instance| instance.observed_version),
+            phase,
+            runtime_instance: instance
+                .as_ref()
+                .and_then(|instance| instance.runtime_instance.clone()),
+            action_generation: instance
+                .as_ref()
+                .map_or(0, |instance| instance.action_generation),
+            error_code: instance
+                .as_ref()
+                .and_then(|instance| instance.last_error_code.clone()),
+            detail: instance
+                .as_ref()
+                .and_then(|instance| instance.last_error_detail.clone()),
+            retry_at_unix_ms: instance
+                .as_ref()
+                .and_then(|instance| instance.retry_at)
+                .and_then(|seconds| u64::try_from(seconds).ok())
+                .and_then(|seconds| seconds.checked_mul(1_000)),
+            deleting: instance.as_ref().is_some_and(|instance| instance.deleting),
+        }))
+    }
+
+    pub(crate) async fn attachment_access(
+        &self,
+        request: GetAttachmentAccessRequest,
+    ) -> Result<AttachmentAccess, ControlError> {
+        let status = self
+            .attachment_status(&request.attachment)
+            .await
+            .map_err(|error| {
+                ControlError::new(
+                    ControlErrorCode::Internal,
+                    format!("read attachment status: {error:#}"),
+                )
+            })?
+            .ok_or_else(|| {
+                ControlError::new(
+                    ControlErrorCode::NotFound,
+                    format!("attachment `{}` was not found", request.attachment),
+                )
+            })?;
+        let runtime_instance = status.runtime_instance.as_deref().ok_or_else(|| {
+            ControlError::new(
+                ControlErrorCode::NotReady,
+                format!(
+                    "attachment `{}` has no running instance",
+                    request.attachment
+                ),
+            )
+        })?;
+        if status.phase != ApiAttachmentPhase::Ready
+            || status.observed_version != Some(status.desired_version)
+        {
+            return Err(ControlError::new(
+                ControlErrorCode::NotReady,
+                format!("attachment `{}` is not ready", request.attachment),
+            ));
+        }
+        let expected = omnifs_vfs::Session {
+            attachment: request.attachment.clone(),
+            spec: status.definition.spec.clone(),
+            runtime_instance: runtime_instance.to_owned(),
+        };
+        if !self
+            .vfs
+            .sessions()
+            .iter()
+            .any(|session| session == &expected)
+        {
+            return Err(ControlError::new(
+                ControlErrorCode::NotReady,
+                format!(
+                    "attachment `{}` has no exact VFS session",
+                    request.attachment
+                ),
+            ));
+        }
+        let driver = self
+            .attachment_runtime_driver(&status.definition)
+            .map_err(|error| {
+                ControlError::new(
+                    ControlErrorCode::Internal,
+                    format!("open attachment runtime: {error:#}"),
+                )
+            })?;
+        let confirmed = driver.confirmed(runtime_instance).await.map_err(|error| {
+            ControlError::new(
+                ControlErrorCode::NotReady,
+                format!("attachment runtime identity is not ready: {error}"),
+            )
+        })?;
+        if confirmed.is_none() {
+            return Err(ControlError::new(
+                ControlErrorCode::NotReady,
+                format!("attachment `{}` runtime is absent", request.attachment),
+            ));
+        }
+        if status.definition.spec.runtime() == omnifs_core::fs::Runtime::Host {
+            return Ok(AttachmentAccess::HostPath(
+                status.definition.spec.location().to_path_buf(),
+            ));
+        }
+        let command = driver
+            .shell_command(
+                request.interactive,
+                request.shell.as_deref(),
+                &request.command,
+            )
+            .expect("guest runtimes always expose a typed shell command");
+        Ok(AttachmentAccess::Command(AttachmentCommand {
+            program: command.get_program().to_os_string(),
+            args: command.get_args().map(ToOwned::to_owned).collect(),
+            current_dir: command.get_current_dir().map(ToOwned::to_owned),
+        }))
+    }
+
+    fn attachment_runtime_driver(
+        &self,
+        definition: &AttachmentDefinition,
+    ) -> anyhow::Result<omnifs_fs_runtime::RuntimeDriver> {
+        let paths = omnifs_state::DaemonStatePaths::new(self.context.daemon_state_root());
+        let runtime_paths = omnifs_fs_runtime::RuntimePaths::daemon_owned(
+            self.context.endpoint().bootstrap_dir().to_path_buf(),
+            std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
+            paths.attachments_runtime(),
+            paths.attachment_logs(),
+            paths.guest_images_cache(),
+            self.context.process_identity().executable().to_path_buf(),
+        );
+        omnifs_fs_runtime::RuntimeDriver::new(
+            &runtime_paths,
+            definition.spec.to_fs_spec(&definition.name)?,
+            omnifs_fs_runtime::RuntimeAssets {
+                docker_image: definition.spec.docker_image().map(str::to_owned),
+                guest_image: definition.spec.libkrun_guest_image().map(str::to_owned),
+            },
+            omnifs_fs_runtime::RuntimeEventSink::discard(),
+        )
+    }
+
+    fn live_filesystems(&self) -> Vec<omnifs_core::fs::Spec> {
+        self.vfs
+            .sessions()
+            .into_iter()
+            .map(|session| {
+                session
+                    .spec
+                    .to_fs_spec(&session.attachment)
+                    .expect("a validated VFS session has a valid filesystem projection")
             })
             .collect()
     }

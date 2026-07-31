@@ -74,8 +74,14 @@ pub enum CredentialProgressStage {
 #[serde(rename_all = "snake_case")]
 pub enum AttachmentProgressStage {
     Queued,
+    WaitingForNamespace,
+    PullingImage,
+    Materializing,
     Starting,
+    Mounting,
     Stopping,
+    Retrying,
+    Deleting,
     Ready,
     Failed,
 }
@@ -132,7 +138,13 @@ pub struct CredentialProgress {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AttachmentProgress {
     pub key: ResourceKey,
+    pub desired_revision: ResourceRevision,
+    pub runtime: omnifs_core::fs::Runtime,
     pub stage: AttachmentProgressStage,
+    pub completed_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub queued_attachments: u32,
+    pub active_attachments: u32,
     pub error_code: Option<String>,
     pub detail: Option<String>,
     pub retry_count: u32,

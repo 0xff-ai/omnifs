@@ -94,7 +94,7 @@ pub(super) fn decode_mount(
     Ok(definition)
 }
 
-pub(super) fn encode_attachment(
+pub(crate) fn encode_attachment(
     definition: &AttachmentDefinition,
 ) -> anyhow::Result<(Vec<u8>, AttachmentVersion)> {
     let payload = postcard::to_allocvec(&StoredAttachmentV1 {
@@ -117,7 +117,7 @@ pub(super) fn encode_attachment(
     ))
 }
 
-pub(super) fn decode_attachment(
+pub(crate) fn decode_attachment(
     canonical: &[u8],
     stored_version: AttachmentVersion,
 ) -> anyhow::Result<AttachmentDefinition> {

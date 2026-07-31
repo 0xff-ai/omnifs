@@ -33,6 +33,7 @@ pub(crate) fn probe(protocol: fs::Protocol) -> Result<()> {
 pub struct HostDriver {
     state_dir: PathBuf,
     log_path: PathBuf,
+    control_socket: Option<PathBuf>,
     executable: PathBuf,
     events: RuntimeEventSink,
 }
@@ -48,6 +49,24 @@ impl HostDriver {
         Self {
             state_dir,
             log_path,
+            control_socket: None,
+            executable,
+            events,
+        }
+    }
+
+    #[must_use]
+    pub fn new_with_control_socket(
+        state_dir: PathBuf,
+        log_path: PathBuf,
+        control_socket: PathBuf,
+        executable: PathBuf,
+        events: RuntimeEventSink,
+    ) -> Self {
+        Self {
+            state_dir,
+            log_path,
+            control_socket: Some(control_socket),
             executable,
             events,
         }
@@ -93,14 +112,17 @@ impl HostDriver {
             id: request.spec.id().clone(),
             state: RuntimeState::Active,
         });
-        PendingHostFilesystem::spawn(
-            &self.state_dir,
-            &self.log_path,
-            &self.executable,
-            request.client_owner,
-            request.spec,
-            request.endpoints.attach_unix()?,
-        )?
+        PendingHostFilesystem::spawn(PendingHostSpawn {
+            state_dir: &self.state_dir,
+            log_path: &self.log_path,
+            executable: &self.executable,
+            attachment: request.attachment,
+            attachment_spec: request.attachment_spec,
+            runtime_instance: request.runtime_instance,
+            spec: request.spec,
+            attach_socket: request.endpoints.attach_unix()?,
+            control_socket: self.control_socket.as_deref(),
+        })?
         .wait_until_mounted(request.spec)
         .await?;
         self.events.emit(RuntimeEvent::MountReady {
@@ -169,18 +191,48 @@ struct PendingHostFilesystem {
     log_path: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+struct PendingHostSpawn<'a> {
+    state_dir: &'a Path,
+    log_path: &'a Path,
+    executable: &'a Path,
+    attachment: &'a omnifs_core::ResourceName,
+    attachment_spec: &'a omnifs_core::AttachmentSpec,
+    runtime_instance: &'a str,
+    spec: &'a fs::Spec,
+    attach_socket: &'a Path,
+    control_socket: Option<&'a Path>,
+}
+
 impl PendingHostFilesystem {
-    fn spawn(
-        state_dir: &Path,
-        log_path: &Path,
-        executable: &Path,
-        client_owner: omnifs_core::ClientOwnerId,
-        spec: &fs::Spec,
-        attach_socket: &Path,
-    ) -> Result<Self> {
+    fn spawn(request: PendingHostSpawn<'_>) -> Result<Self> {
+        let PendingHostSpawn {
+            state_dir,
+            log_path,
+            executable,
+            attachment,
+            attachment_spec,
+            runtime_instance,
+            spec,
+            attach_socket,
+            control_socket,
+        } = request;
         let state_dir = state_dir.to_path_buf();
-        let instance_id = crate::process::new_instance_id("host filesystem")?;
-        let control_socket = control_socket_for(&state_dir, &instance_id);
+        let instance_id = runtime_instance.to_owned();
+        let control_socket = control_socket.map_or_else(
+            || control_socket_for(&state_dir, &instance_id),
+            Path::to_path_buf,
+        );
+        if let Some(parent) = control_socket.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                    .with_context(|| format!("restrict {} to 0700", parent.display()))?;
+            }
+        }
         let log_parent = log_path
             .parent()
             .context("filesystem log path has no parent directory")?;
@@ -190,16 +242,30 @@ impl PendingHostFilesystem {
         let mut command = Command::new(executable);
         command
             .arg("run-fs")
-            .arg("--client-owner")
-            .arg(client_owner.to_string())
             .arg("--name")
-            .arg(spec.id().as_str())
+            .arg(attachment.as_str())
             .arg("--protocol")
             .arg(spec.protocol().as_str())
             .arg("--runtime")
             .arg("host")
             .arg("--location")
             .arg(spec.location())
+            .args(
+                attachment_spec
+                    .docker_image()
+                    .map(|image| ["--docker-image", image])
+                    .into_iter()
+                    .flatten(),
+            )
+            .args(
+                attachment_spec
+                    .libkrun_guest_image()
+                    .map(|image| ["--libkrun-guest-image", image])
+                    .into_iter()
+                    .flatten(),
+            )
+            .arg("--runtime-instance")
+            .arg(runtime_instance)
             .arg("--state-dir")
             .arg(&state_dir)
             .arg("--attach")

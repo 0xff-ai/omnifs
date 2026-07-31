@@ -36,28 +36,25 @@ fn fresh_and_stopped_workspace_transcripts() {
 }
 
 #[test]
-fn filesystem_create_and_list_transcripts() {
+fn filesystem_legacy_list_transcript() {
     let fixture = Fixture::new();
+    let specs = fixture.home_path().join("client/filesystems/specs");
+    std::fs::create_dir_all(&specs).expect("legacy spec directory");
     let mount_point = fixture.home_path().join("mnt");
-    std::fs::create_dir_all(&mount_point).expect("mount point");
-    let mount_point = mount_point.to_string_lossy();
-
-    let create = fixture.run(&[
-        "fs",
-        "create",
-        "--name",
-        "dev",
-        "--protocol",
-        "nfs",
-        "--runtime",
-        "host",
-        "--location",
-        &mount_point,
-    ]);
-    insta::assert_snapshot!("fs_create", fixture.transcript(&create));
+    std::fs::write(
+        specs.join("dev.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "id": "dev",
+            "protocol": "nfs",
+            "runtime": "host",
+            "location": mount_point,
+        }))
+        .expect("legacy spec json"),
+    )
+    .expect("write legacy spec");
 
     let list = fixture.run(&["fs", "ls"]);
-    insta::assert_snapshot!("fs_list_detached", fixture.transcript(&list));
+    insta::assert_snapshot!("fs_list_legacy", fixture.transcript(&list));
 }
 
 #[test]

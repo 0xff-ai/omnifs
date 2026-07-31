@@ -7,14 +7,14 @@ use anyhow::Context as _;
 use omnifs_bootstrap::Client;
 use omnifs_core::fs;
 use omnifs_fs_runtime::{
-    Candidate, DockerClient, DockerContainerIdentity, DockerTarget, HostDriver, ImageInspection,
-    ImageRef, LibkrunRunner, OwnedFilesystemContainer, RuntimeEventSink, owned_filesystems,
+    Candidate, DockerClient, DockerTarget, HostDriver, ImageInspection, ImageRef, LibkrunRunner,
+    OwnedFilesystemContainer, RuntimeEventSink, owned_filesystems,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use crate::client_fs_state::{Claim, ClientFilesystemState, Registry};
-use crate::filesystem_driver::{RuntimeEventRenderer, runtime_paths};
+use crate::filesystem_driver::runtime_paths;
 use crate::inventory::{AuthState, DaemonHealth, DaemonProbe, Inventory, MountStatus, Severity};
 use crate::ui::output::{Output, ResultVerdict};
 use crate::ui::prompt::Confirm;
@@ -30,7 +30,8 @@ pub(crate) enum DoctorVerdict {
 }
 
 pub async fn run(output: Output) -> anyhow::Result<DoctorVerdict> {
-    let client_filesystems = ClientFilesystemState::resolve()?;
+    let client_root = crate::client_dir::client_root()?;
+    let client_filesystems = ClientFilesystemState::under_root(&client_root);
     let inventory = Inventory::collect_rpc().await?;
     let docker_target = resolve_filesystem_target(&client_filesystems)
         .map_err(|error: anyhow::Error| format!("resolve target: {error:#}"));
@@ -161,22 +162,10 @@ enum Remediation {
         state_dir: PathBuf,
         record: omnifs_mtab::RunnerRecord,
     },
-    StopDockerFilesystem {
-        target: DockerTarget,
-        identity: DockerContainerIdentity,
-        profile_root: PathBuf,
-        spec: fs::Spec,
-    },
     StopLibkrunFilesystem {
         state_dir: PathBuf,
         record: omnifs_libkrun::HelperRecord,
     },
-}
-
-struct DockerCandidate {
-    listed_identity: DockerContainerIdentity,
-    target: DockerTarget,
-    spec: fs::Spec,
 }
 
 impl Remediation {
@@ -195,9 +184,6 @@ impl Remediation {
                     record.spec.location().display()
                 )
             },
-            Self::StopDockerFilesystem { spec, .. } => {
-                format!("omnifs fs detach --name {}", spec.id())
-            },
             Self::StopLibkrunFilesystem { record, .. } => {
                 format!("omnifs fs detach --name {}", record.spec.id())
             },
@@ -207,14 +193,8 @@ impl Remediation {
     /// Spawn the fresh subprocess and require it to exit successfully. Array
     /// arguments only, never a shell string: the mount name came from the
     /// already-collected inventory, not from re-parsing the advisory `fix`
-    /// text. `output` is the invocation's real `Output` (mode, quiet), passed
-    /// through to the one remediation that talks to the Docker client rather
-    /// than hardcoding a fresh human one.
-    async fn apply(
-        &self,
-        client_filesystems: &ClientFilesystemState,
-        output: &Output,
-    ) -> anyhow::Result<()> {
+    /// text.
+    async fn apply(&self, client_filesystems: &ClientFilesystemState) -> anyhow::Result<()> {
         match self {
             // Only this variant needs the CLI's own path, so it resolves it
             // itself instead of every variant paying for a lookup it never uses.
@@ -278,22 +258,6 @@ impl Remediation {
                 .cleanup_stale(record)
                 .await
             },
-            Self::StopDockerFilesystem {
-                target,
-                identity,
-                profile_root,
-                spec,
-            } => {
-                stop_docker_filesystem(
-                    client_filesystems,
-                    output,
-                    target,
-                    identity,
-                    profile_root,
-                    spec,
-                )
-                .await
-            },
             Self::StopLibkrunFilesystem { state_dir, record } => {
                 let registry = client_filesystems.registry();
                 let _guard = claim_for_teardown(&registry, record.spec.id()).await?;
@@ -303,39 +267,6 @@ impl Remediation {
             },
         }
     }
-}
-
-async fn stop_docker_filesystem(
-    client_filesystems: &ClientFilesystemState,
-    output: &Output,
-    target: &DockerTarget,
-    identity: &DockerContainerIdentity,
-    profile_root: &Path,
-    spec: &fs::Spec,
-) -> anyhow::Result<()> {
-    let registry = client_filesystems.registry();
-    let _guard = claim_for_teardown(&registry, spec.id()).await?;
-    let (events, renderer) = RuntimeEventRenderer::start(output.clone());
-    let client = match DockerClient::connect_for(target, events.clone()) {
-        Ok(client) => client,
-        Err(error) => {
-            drop(events);
-            renderer.finish().await;
-            return Err(error);
-        },
-    };
-    let stopped = client
-        .stop_confirmed(
-            identity,
-            profile_root,
-            crate::commands::fs::client_owner_id()?,
-            spec,
-        )
-        .await;
-    drop(client);
-    drop(events);
-    renderer.finish().await;
-    stopped
 }
 
 /// Claim the registry lock for `id` and prove the daemon is stopped, in one
@@ -523,20 +454,6 @@ fn ownership_check_for(backend: &str) -> Check {
         "libkrun" => Check::LibkrunFilesystemOwnership,
         _ => Check::FilesystemState,
     }
-}
-
-fn docker_ownership_finding(target: impl Into<Option<String>>, result: ProbeResult) -> Finding {
-    Finding::from_probe(
-        Section::Filesystems,
-        Check::DockerFilesystemOwnership,
-        target.into(),
-        result,
-    )
-}
-
-fn doctor_client_owner() -> Result<omnifs_core::ClientOwnerId, String> {
-    crate::commands::fs::client_owner_id()
-        .map_err(|error| format!("resolve client owner identity: {error:#}"))
 }
 
 fn stale_process_identity_finding(
@@ -851,7 +768,7 @@ async fn offer_fix(
             continue;
         }
         summary.attempted += 1;
-        let outcome = remediation.apply(client_filesystems, output).await;
+        let outcome = remediation.apply(client_filesystems).await;
         match &outcome {
             Ok(()) => repairs.push(Repair::applied(command_line)),
             Err(error) => {
@@ -1033,8 +950,6 @@ impl Doctor {
             },
         };
         let candidates = owned_filesystems(&paths, docker).await;
-        let client_owner = doctor_client_owner();
-        let mut client_owner_reported = false;
         let mut findings = Vec::new();
         for candidate in candidates {
             match candidate {
@@ -1072,22 +987,8 @@ impl Doctor {
                         ProbeResult::Err(format!("{error:#}")),
                     )),
                 },
-                Candidate::Docker(owned) => match &client_owner {
-                    Ok(client_owner) => {
-                        findings.extend(
-                            self.docker_candidate_finding(owned, *client_owner, daemon_health)
-                                .await,
-                        );
-                    },
-                    Err(error) => {
-                        if !client_owner_reported {
-                            findings.push(docker_ownership_finding(
-                                None,
-                                ProbeResult::Err(error.clone()),
-                            ));
-                            client_owner_reported = true;
-                        }
-                    },
+                Candidate::Docker(owned) => {
+                    findings.extend(Self::docker_candidate_finding(owned, daemon_health));
                 },
                 Candidate::Libkrun {
                     id,
@@ -1174,120 +1075,26 @@ impl Doctor {
         }
     }
 
-    /// One already-validated owned Docker container: resolve its target,
-    /// reconnect, and re-confirm its exact identity before ever offering a
-    /// stray-filesystem finding, matching the confirm-before-remediate
-    /// contract every driver's `stop_confirmed` also holds callers to.
-    async fn docker_candidate_finding(
-        &self,
+    /// A Docker scan proves only the immutable container ID and filesystem
+    /// label. It cannot prove the daemon-owned attachment spec or
+    /// runtime-instance ID required by the current runtime API, so doctor
+    /// must never turn this observation into a stop request.
+    fn docker_candidate_finding(
         owned: OwnedFilesystemContainer,
-        client_owner: omnifs_core::ClientOwnerId,
         daemon_health: DaemonHealth,
     ) -> Vec<Finding> {
-        let finding_target = owned.filesystem_id.clone();
-        let candidate = match self.resolve_docker_candidate(owned) {
-            Ok(candidate) => candidate,
-            Err(error) => {
-                return vec![docker_ownership_finding(
-                    finding_target,
-                    ProbeResult::Err(format!("{error:#}")),
-                )];
-            },
-        };
-        let client = match DockerClient::connect_for(&candidate.target, RuntimeEventSink::discard())
-        {
-            Ok(client) => client,
-            Err(error) => {
-                return vec![docker_ownership_finding(
-                    candidate.spec.id().to_string(),
-                    ProbeResult::Err(format!("{error:#}")),
-                )];
-            },
-        };
-        let confirmed = client
-            .confirmed(
-                self.client_filesystems.profile_root(),
-                client_owner,
-                &candidate.spec,
-            )
-            .await;
-        let (confirmed_identity, running) = match confirmed {
-            Ok(Some(confirmed)) => confirmed,
-            Ok(None) => {
-                return vec![docker_ownership_finding(
-                    candidate.spec.id().to_string(),
-                    ProbeResult::Warn("container disappeared during inspection".to_owned()),
-                )];
-            },
-            Err(error) => {
-                return vec![docker_ownership_finding(
-                    candidate.spec.id().to_string(),
-                    ProbeResult::Err(format!("{error:#}")),
-                )];
-            },
-        };
-        if confirmed_identity != candidate.listed_identity {
-            return vec![docker_ownership_finding(
-                candidate.spec.id().to_string(),
-                ProbeResult::Err(
-                    "container identity changed during inspection; refusing remediation".to_owned(),
-                ),
-            )];
-        }
-        if self.attached(&candidate.spec) {
-            return Vec::new();
-        }
-        let remediation =
-            (daemon_health == DaemonHealth::Stopped).then_some(Remediation::StopDockerFilesystem {
-                target: candidate.target,
-                identity: confirmed_identity,
-                profile_root: self.client_filesystems.profile_root().to_path_buf(),
-                spec: candidate.spec.clone(),
-            });
-        let state = if running { "running" } else { "stopped" };
         vec![Finding {
             section: Section::Filesystems,
-            check: Check::StrayFilesystem,
-            target: Some(candidate.spec.id().to_string()),
+            check: Check::DockerFilesystemOwnership,
+            target: Some(owned.filesystem_id),
             severity: Severity::Attention,
             message: format!(
-                "{state} container identity is confirmed but daemon health is {daemon_health:?} and reports no matching attachment"
+                "container {} cannot be remediated automatically: its record has no exact attachment spec or runtime instance (daemon health is {daemon_health:?})",
+                owned.identity.id,
             ),
-            fix: remediation.as_ref().map(Remediation::command_line),
-            remediation,
+            fix: None,
+            remediation: None,
         }]
-    }
-
-    fn resolve_docker_candidate(
-        &self,
-        candidate: OwnedFilesystemContainer,
-    ) -> anyhow::Result<DockerCandidate> {
-        let id = fs::Id::new(candidate.filesystem_id)?;
-        let config = self.client_filesystems.config()?;
-        let paths = runtime_paths(&self.client_filesystems)?;
-        let target = DockerTarget::for_filesystem(
-            paths.profile_root(),
-            paths.is_default_profile(),
-            &id,
-            config.filesystem.docker_image.as_deref(),
-        )?;
-        let canonical_name = format!("/{}", target.container_name());
-        anyhow::ensure!(
-            candidate.names.iter().any(|name| name == &canonical_name),
-            "profile labels are on a non-canonical container name; expected `{canonical_name}`"
-        );
-        let spec = fs::Spec::new(
-            id,
-            fs::Protocol::Fuse,
-            fs::Runtime::Docker,
-            PathBuf::from(fs::GUEST_LOCATION),
-        )
-        .expect("the fixed Docker filesystem identity is valid");
-        Ok(DockerCandidate {
-            listed_identity: candidate.identity,
-            target,
-            spec,
-        })
     }
 
     /// One libkrun helper candidate, matching

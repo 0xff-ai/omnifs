@@ -13,11 +13,11 @@ Read this before touching `omnifs-cli`, `omnifs-api`, `omnifs-bootstrap`, `omnif
 
 There is no shared workspace store. `omnifs-bootstrap` resolves one profile root from `OMNIFS_HOME` or `$HOME/.omnifs`, creates the fixed `control.sock`, writes the narrow `process.json` identity, and serializes daemon spawn with `spawn.lock`.
 
-The CLI owns user-facing commands, OAuth and static-auth UX, client config, `ClientOwnerId` and the single-record mutation journal, filesystem specs and runners, metrics, and daemon spawn. It persists client data under `<profile>/client/` and sends all daemon mutations through typed local RPC.
+The CLI owns user-facing commands, OAuth and static-auth UX, client config, the legacy single-record mutation journal, metrics, daemon spawn, and resource authoring. It persists remaining client data under `<profile>/client/` and sends all daemon mutations through typed local RPC. Legacy filesystem specs are read-only migration input and never start a runtime.
 
-The daemon owns providers, credentials, mounts, SQLite state and cache, attach endpoints, live filesystem attachments, and raw log bytes. Its durable state is under `<profile>/daemon-state/`: `control-store/state.sqlite3`, `cache/`, `staging/`, `logs/daemon.log`, and the engine projection, Wasmtime, and clone caches. The daemon never reads client files or chooses client configuration.
+The daemon owns providers, credentials, mounts, desired resources, Attachment runtime state and lifecycle, SQLite state and cache, attach endpoints, live VFS sessions, and raw log bytes. Its durable state is under `<profile>/daemon-state/`: `control-store/state.sqlite3`, `cache/`, `runtime/attachments/`, `staging/`, `logs/`, and the engine projection, Wasmtime, clone, and guest-image caches. The daemon never reads client files or chooses client configuration.
 
-The control protocol is the only CLI-to-daemon API. It is tonic/protobuf gRPC using the checked-in `omnifs.control.v1` schema and generated Rust from `build.rs`, served only on the profile's local Unix socket. It exposes readiness, status and inventory, provider import and metadata, mount and credential reads, one batched mutation lease (`BeginMutation`/`ApplyMutation`/`DropMutation`), recovery and repair, shutdown, Inspector subscription, and bounded raw log streaming. Unary messages and stream items are each limited to 1 MiB; log tails are limited to 10,000 lines. Ordinary finite calls have a 5-second client deadline, the daemon's single mutation lease is fixed at 30 seconds with no renewal, and shutdown has 15 seconds around its 10-second filesystem drain. Credential material may cross only in request payloads on this local socket. It never crosses filesystem attach/TCP, appears in responses, status, inventory, logs, Debug, or Inspector output.
+The control protocol is the only CLI-to-daemon API. It is tonic/protobuf gRPC using the checked-in `omnifs.control.v1` schema and generated Rust from `build.rs`, served only on the profile's local Unix socket. It exposes readiness, status and inventory, provider import and metadata, pure resource planning, transactional complete-set apply, typed progress watches, durable actions, Attachment status and access, the transitional mutation lease, recovery and repair, shutdown, Inspector subscription, and bounded raw log streaming. `ApplyResources` performs validation and one SQLite transaction, sends a non-blocking reconcile wakeup, and returns. Provider preparation, serving publication, runtime launch, mount, and VFS waits occur only in daemon reconcilers. Credential material may cross only in request payloads on this local socket. It never crosses filesystem attach/TCP or appears in responses, status, inventory, logs, Debug, Inspector, progress, or receipts.
 
 The daemon listens on the profile's fixed `control.sock`. The profile directory is `0700`; the socket and process identity are `0600`. The VFS namespace is separate: `daemon-state/local.sock` and one profile-derived loopback or Docker-bridge TCP port. TCP has no auth and never binds all interfaces. Both VFS listeners must bind before readiness, and either listener's unexpected exit is fatal.
 
@@ -30,13 +30,13 @@ The public binary is one `omnifs` executable. The hidden `omnifs daemon` subcomm
 - `omnifs status`, `down`, `logs`, `inspect`, `doctor`, `setup`, `skill`, `completions`, and `version`.
 - `omnifs mount add|ls|show|update|reauth|revoke|rm`. Add, update, and remove each apply one lease-scoped batch through `BeginMutation`/`ApplyMutation`. `mount add` can upload an exact Wasm artifact or select an embedded provider, then folds a fresh credential submission and the mount create into one batch. `mount update` re-reads the mount under its own lease and applies its patch atomically; there is no version-based compare-and-swap. `mount reauth` and `mount revoke` each apply a single-op credential batch.
 - `omnifs credential ls|rm`. List returns non-secret daemon-owned credential status. Remove deletes stored material after showing affected mounts and getting consent; it does not revoke access upstream.
-- `omnifs fs create|attach|detach|restart|rm|shell|ls --name <id>`. Specs are client-owned configuration. Attachments are daemon-owned live state joined by `fs ls` and `status`.
+- `omnifs fs create|attach|detach|restart|rm|shell|ls --name <id>` is the transitional Attachment grammar. Create and ensure-present commit desired resources, detach and remove delete them, restart submits a durable action, shell uses typed daemon access, and list reads desired and observed status. Mutation commands follow their revision or action stream by default.
 
 Global `--output human|json|jsonl`, `--quiet`, `--no-input`, and `--yes` apply to one invocation after Clap parses it. JSON emits one terminal envelope. JSONL emits stream records followed by one terminal result or error. Clap usage errors exit 2 before output mode applies.
 
 `omnifs setup` starts the daemon, lists every embedded provider with an honest auth label, then offers two quick-start confirms: mount every provider that needs no sign-in in one atomic batch, and attach the platform's recommended filesystem. It never selects providers on the caller's behalf and never starts an OAuth flow; a provider that needs a sign-in or a config value is left for `omnifs mount add`. There is no `omnifs up`, `omnifs apply`, or offline product mode.
 
-`omnifs down` sends `Shutdown { stop_filesystems: true }`, waits for the bounded drain, reports busy attachments, and then stops the daemon. Daemon spawn and replacement never launch or stop filesystem runners implicitly.
+`omnifs down` rejects new writes, asks `AttachmentSupervisor` to stop every exact observed runtime, waits for the bounded drain, reports stragglers, and stops the daemon without deleting desired Attachment rows. The next daemon reloads and restores desired Attachments.
 
 ## Mounts, providers, and credentials
 
@@ -48,11 +48,11 @@ Credentials live in the daemon's SQLite store. The CLI owns browser, device, and
 
 ## Filesystems and attach
 
-`omnifs_core::fs` owns validated filesystem IDs, protocol, runtime, and resolved location. The CLI stores strict specs under `client/filesystems/specs`, per-ID state under `client/filesystems/state`, host logs under `client/cache/filesystem-<id>.log`, and launch roots under `client/filesystems/runtime`. `fs create` resolves defaults once without launching. Host locations are absolute; Docker and libkrun use `/omnifs`.
+`omnifs_core::AttachmentSpec` owns the exact protocol, runtime, resolved location, and runtime asset references. SQLite Attachment resources are desired truth. Durable observed rows retain the exact observed spec, version, runtime instance, phase, retry state, action generation, and deletion tombstone until teardown is proved. Host locations are absolute; Docker and libkrun use `/omnifs`.
 
-The CLI owns host process, Docker, and libkrun launch and teardown. Each runner attaches to the daemon's shared `omnifs_vfs::Namespace` and carries no provider or credential state. Attach rejects an existing confirmed instance. Detach proves mount absence and runtime exit. Remove never detaches an uncertain or running instance. `fs shell` selects only the stored runtime and ID.
+`AttachmentSupervisor` owns bounded host process, Docker, and libkrun launch and teardown through `omnifs-fs-runtime`. It persists exact identity before effects, adopts only an exact current runtime and session, serializes work per Attachment, and keeps pending restart actions durable across daemon restart. Each runner remains out of process and attaches to the shared `omnifs_vfs::Namespace` without provider or credential state.
 
-`VfsServer` owns listener tasks, readiness, reconnect, server-pushed stop, and attachment records. Wire handshakes carry the exact resolved filesystem spec and daemon instance. A reconnect is accepted only for the same ID and exact spec. A failed reconnect past its deadline enters filesystem-owned teardown.
+`VfsServer` owns listener tasks, readiness, reconnect, server-pushed stop, and live session records. VFS wire v11 handshakes carry the Attachment name, exact `AttachmentSpec`, and runtime instance. The daemon admits only the expected exact session and rejects conflicting identity. Configured Attachments and live VFS sessions are separate domains.
 
 ## Logs, Inspector, metrics, and dev
 
@@ -72,9 +72,9 @@ CLI dogfood metrics are local client files under `<profile>/metrics/`, controlle
 - Reintroduce `omnifs-workspace`, a shared workspace API, client-side mount desired state, Git refs, immutable mount snapshots, `daemon.json`, or JSON credential storage.
 - Add `up`, `apply`, `offline`, or a second reconcile path.
 - Send credentials through filesystem attach/TCP or expose them in RPC replies, status, inventory, logs, tracing, metrics, Debug, Inspector, or receipts.
-- Make the daemon read client filesystem specs or config, or make the CLI read daemon SQLite tables and logs directly.
+- Make the daemon read legacy client filesystem specs or config, make normal lifecycle write `client/filesystems`, or make the CLI read daemon SQLite tables and logs directly.
 - Add a remote control endpoint or TCP authentication mode. TCP attach remains local loopback or the detected Docker bridge without auth.
-- Let lifecycle commands remove or detach a filesystem implicitly during daemon replacement.
+- Clear observed Attachment identity or a deletion tombstone before exact runtime and session teardown is proved.
 
 ## Code
 

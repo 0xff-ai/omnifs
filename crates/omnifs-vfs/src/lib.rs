@@ -41,11 +41,11 @@ pub use client::{
     WireNamespace,
 };
 #[cfg(feature = "wire")]
-pub use server::{Endpoint, ListenerEvent, VfsServer, serve_connection};
+pub use server::{Endpoint, ListenerEvent, Session, VfsServer, serve_connection};
 
 /// The Omnifs VFS wire protocol version. Peers that disagree refuse to serve.
 #[cfg(feature = "wire")]
-pub const PROTOCOL: u32 = 10;
+pub const PROTOCOL: u32 = 11;
 
 #[cfg(feature = "wire")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,8 +118,9 @@ pub(crate) struct WireReply {
 pub(crate) enum Handshake {
     Hello {
         protocol: u32,
-        client_owner: omnifs_core::ClientOwnerId,
-        filesystem: omnifs_core::fs::Spec,
+        attachment: omnifs_core::ResourceName,
+        spec: omnifs_core::AttachmentSpec,
+        runtime_instance: String,
     },
     Welcome {
         protocol: u32,

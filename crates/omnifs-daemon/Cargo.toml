@@ -13,6 +13,7 @@ omnifs-auth = { workspace = true }
 omnifs-bootstrap = { workspace = true }
 omnifs-core = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
+omnifs-fs-runtime = { workspace = true }
 omnifs-provider = { workspace = true }
 omnifs-state = { workspace = true }
 omnifs-vfs = { workspace = true, features = ["wire"] }
@@ -25,6 +26,7 @@ anyhow = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true }
 hex = { workspace = true }
+getrandom = "0.3"
 postcard = { workspace = true }
 secrecy = "0.10"
 serde = { workspace = true }

@@ -18,7 +18,6 @@ use omnifs_api::ProviderMetadata;
 use omnifs_core::fs;
 use omnifs_provider::ProviderManifest;
 
-use crate::client_fs_state::ClientFilesystemState;
 use crate::client_state::ClientState;
 use crate::commands::daemon_start;
 use crate::error::ExitCode;
@@ -325,11 +324,9 @@ async fn offer_quick_start_filesystems(
     if offer.is_empty() {
         return Ok(None);
     }
-    let client_state = ClientFilesystemState::resolve()?;
     let mut locations = Vec::with_capacity(offer.len());
     for &(protocol, runtime) in offer {
-        let location =
-            crate::commands::fs::preview_filesystem_location(&client_state, protocol, runtime)?;
+        let location = crate::commands::fs::preview_filesystem_location(protocol, runtime)?;
         locations.push(location.display().to_string());
     }
     output.narrate("");
@@ -340,8 +337,7 @@ async fn offer_quick_start_filesystems(
     let mut host_location = None;
     for &(protocol, runtime) in offer {
         crate::commands::fs::ensure_setup_filesystem(protocol, runtime, output.clone()).await?;
-        let location =
-            crate::commands::fs::preview_filesystem_location(&client_state, protocol, runtime)?;
+        let location = crate::commands::fs::preview_filesystem_location(protocol, runtime)?;
         let id = fs::Id::new(format!("{protocol}-{runtime}"))?;
         if runtime == fs::Runtime::Host {
             host_location.get_or_insert_with(|| location.clone());

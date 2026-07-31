@@ -31,7 +31,9 @@ pub use events::{
 };
 pub use host::HostDriver;
 pub use image::{BUILD_CHANNEL, BuildChannel, ImageRef};
-pub use libkrun::{LibkrunRunner, default_guest_image_for, ensure_socat_available};
+pub use libkrun::{
+    LibkrunRunner, default_guest_image_for, ensure_socat_available, resolve_guest_image_reference,
+};
 
 /// An operation failure classified by its stable runtime stage.
 #[derive(Debug, thiserror::Error)]

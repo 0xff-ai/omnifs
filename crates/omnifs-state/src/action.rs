@@ -24,6 +24,14 @@ pub struct CredentialActionRequest {
     pub operation: CredentialActionOperation,
 }
 
+/// Non-secret request to restart one desired attachment runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentActionRequest {
+    pub action_id: ActionId,
+    pub attachment: ResourceName,
+    pub base_action_generation: u64,
+}
+
 impl std::fmt::Debug for CredentialActionRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -68,6 +76,8 @@ pub enum ActionWriteError {
     IdReuse(ActionId),
     #[error("credential resource `{0}` was not found")]
     ResourceNotFound(ResourceName),
+    #[error("attachment resource `{0}` was not found")]
+    AttachmentResourceNotFound(ResourceName),
     #[error("credential resource `{0}` has no material to act on")]
     ActionUnavailable(ResourceName),
     #[error("credential resource `{credential}` does not match submitted material: {detail}")]
@@ -83,8 +93,21 @@ pub enum ActionWriteError {
         expected: u64,
         actual: u64,
     },
+    #[error(
+        "attachment `{attachment}` action generation changed; expected {expected}, found {actual}"
+    )]
+    AttachmentGenerationConflict {
+        attachment: ResourceName,
+        expected: u64,
+        actual: u64,
+    },
     #[error("credential `{target}` already has pending action {action_id}")]
     Busy {
+        target: ResourceName,
+        action_id: ActionId,
+    },
+    #[error("attachment `{target}` already has pending action {action_id}")]
+    AttachmentBusy {
         target: ResourceName,
         action_id: ActionId,
     },
@@ -124,7 +147,10 @@ impl Db<'_> {
         }
         let target = credential_action_target(self.raw(), &request.credential).await?;
         validate_action_operation(&request, &target)?;
-        if let Some(action_id) = pending_action_for_target(self.raw(), &request.credential).await? {
+        if let Some(action_id) =
+            pending_action_for_target(self.raw(), ResourceKind::Credential, &request.credential)
+                .await?
+        {
             return Err(ActionWriteError::Busy {
                 target: request.credential,
                 action_id,
@@ -181,6 +207,66 @@ impl Db<'_> {
             action_id: request.action_id,
             kind,
             target: ResourceKey::new(ResourceKind::Credential, request.credential),
+            action_generation: accepted_generation,
+            phase: ActionPhase::Accepted,
+            error_code: None,
+            detail: None,
+        };
+        insert_action(self.raw(), request_digest, &receipt).await?;
+        prune_terminal_actions(self.raw()).await?;
+        Ok(receipt)
+    }
+
+    pub(crate) async fn accept_attachment_action(
+        &mut self,
+        request: AttachmentActionRequest,
+    ) -> Result<ActionReceipt, ActionWriteError> {
+        let request_digest = attachment_action_digest(&request);
+        self.transact("attachment action acceptance", async move |db| {
+            db.accept_attachment_action_in_transaction(request, request_digest)
+                .await
+        })
+        .await
+    }
+
+    async fn accept_attachment_action_in_transaction(
+        &mut self,
+        request: AttachmentActionRequest,
+        request_digest: ResourceDigest,
+    ) -> Result<ActionReceipt, ActionWriteError> {
+        if let Some(receipt) =
+            existing_action(self.raw(), request.action_id, request_digest).await?
+        {
+            return Ok(receipt);
+        }
+        attachment_action_target(self.raw(), &request.attachment).await?;
+        if let Some(action_id) =
+            pending_action_for_target(self.raw(), ResourceKind::Attachment, &request.attachment)
+                .await?
+        {
+            return Err(ActionWriteError::AttachmentBusy {
+                target: request.attachment,
+                action_id,
+            });
+        }
+        let actual_generation =
+            attachment_action_generation(self.raw(), &request.attachment).await?;
+        if actual_generation != request.base_action_generation {
+            return Err(ActionWriteError::AttachmentGenerationConflict {
+                attachment: request.attachment,
+                expected: request.base_action_generation,
+                actual: actual_generation,
+            });
+        }
+        let accepted_generation = actual_generation
+            .checked_add(1)
+            .context("attachment action generation exhausted")?;
+        persist_attachment_action_generation(self.raw(), &request.attachment, accepted_generation)
+            .await?;
+        let receipt = ActionReceipt {
+            action_id: request.action_id,
+            kind: ActionKind::RestartAttachment,
+            target: ResourceKey::new(ResourceKind::Attachment, request.attachment),
             action_generation: accepted_generation,
             phase: ActionPhase::Accepted,
             error_code: None,
@@ -387,13 +473,15 @@ async fn credential_action_generation(
 
 async fn pending_action_for_target(
     connection: &mut SqliteConnection,
+    kind: ResourceKind,
     target: &ResourceName,
 ) -> anyhow::Result<Option<ActionId>> {
     let value = sqlx::query_scalar::<_, Vec<u8>>(
         "SELECT action_id FROM action_receipts \
-         WHERE target_kind = 'credential' AND target_name = ?1 \
+         WHERE target_kind = ?1 AND target_name = ?2 \
            AND phase IN ('accepted', 'running', 'retrying')",
     )
+    .bind(resource_kind_str(kind))
     .bind(target.as_str())
     .fetch_optional(connection)
     .await
@@ -403,6 +491,74 @@ async fn pending_action_for_target(
         .map(decode_action_id)
         .transpose()
         .context("decode pending credential action id")
+}
+
+async fn attachment_action_target(
+    connection: &mut SqliteConnection,
+    attachment: &ResourceName,
+) -> Result<(), ActionWriteError> {
+    sqlx::query_scalar::<_, i64>("SELECT 1 FROM attachment_resources WHERE name = ?1")
+        .bind(attachment.as_str())
+        .fetch_optional(connection)
+        .await
+        .context("read attachment action target")?
+        .ok_or_else(|| ActionWriteError::AttachmentResourceNotFound(attachment.clone()))?;
+    Ok(())
+}
+
+async fn attachment_action_generation(
+    connection: &mut SqliteConnection,
+    attachment: &ResourceName,
+) -> anyhow::Result<u64> {
+    let generation = sqlx::query_scalar::<_, i64>(
+        "SELECT action_generation FROM attachment_instances WHERE name = ?1",
+    )
+    .bind(attachment.as_str())
+    .fetch_optional(connection)
+    .await
+    .context("read attachment action generation")?;
+    generation.map_or(Ok(0), |value| {
+        u64::try_from(value).context("stored attachment action generation is negative")
+    })
+}
+
+async fn persist_attachment_action_generation(
+    connection: &mut SqliteConnection,
+    attachment: &ResourceName,
+    generation: u64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO attachment_instances(\
+             name, desired_version, observed_version, phase, runtime_instance, \
+             action_generation, last_error_code, last_error_detail, retry_at, deleting, updated_at\
+         ) VALUES (?1, NULL, NULL, 'pending', NULL, ?2, NULL, NULL, NULL, 0, unixepoch()) \
+         ON CONFLICT(name) DO UPDATE SET \
+             action_generation = excluded.action_generation, \
+             updated_at = excluded.updated_at",
+    )
+    .bind(attachment.as_str())
+    .bind(sql_int(generation, "attachment action generation")?)
+    .execute(connection)
+    .await
+    .context("persist attachment action generation")?;
+    Ok(())
+}
+
+fn attachment_action_digest(request: &AttachmentActionRequest) -> ResourceDigest {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(ACTION_INPUT_DOMAIN);
+    hasher.update(&[action_kind_tag(ActionKind::RestartAttachment)]);
+    hasher.update(&[ResourceKind::Attachment.tag()]);
+    let target = request.attachment.as_str().as_bytes();
+    hasher.update(
+        u64::try_from(target.len())
+            .expect("resource name length fits u64")
+            .to_be_bytes()
+            .as_slice(),
+    );
+    hasher.update(target);
+    hasher.update(request.base_action_generation.to_be_bytes().as_slice());
+    ResourceDigest::from_bytes(*hasher.finalize().as_bytes())
 }
 
 fn action_request_digest(request: &CredentialActionRequest) -> ResourceDigest {
