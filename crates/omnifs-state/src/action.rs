@@ -72,10 +72,8 @@ impl CredentialActionOperation {
 pub enum ActionWriteError {
     #[error("action id {0} was already used for different input")]
     IdReuse(ActionId),
-    #[error("credential resource `{0}` was not found")]
-    ResourceNotFound(ResourceName),
-    #[error("attachment resource `{0}` was not found")]
-    AttachmentResourceNotFound(ResourceName),
+    #[error("{target} was not found")]
+    ResourceNotFound { target: ResourceKey },
     #[error("credential resource `{0}` has no material to act on")]
     ActionUnavailable(ResourceName),
     #[error("credential resource `{credential}` does not match submitted material: {detail}")]
@@ -83,30 +81,15 @@ pub enum ActionWriteError {
         credential: ResourceName,
         detail: String,
     },
-    #[error(
-        "credential `{credential}` action generation changed; expected {expected}, found {actual}"
-    )]
+    #[error("{target} action generation changed; expected {expected}, found {actual}")]
     GenerationConflict {
-        credential: ResourceName,
+        target: ResourceKey,
         expected: u64,
         actual: u64,
     },
-    #[error(
-        "attachment `{attachment}` action generation changed; expected {expected}, found {actual}"
-    )]
-    AttachmentGenerationConflict {
-        attachment: ResourceName,
-        expected: u64,
-        actual: u64,
-    },
-    #[error("credential `{target}` already has pending action {action_id}")]
+    #[error("{target} already has pending action {action_id}")]
     Busy {
-        target: ResourceName,
-        action_id: ActionId,
-    },
-    #[error("attachment `{target}` already has pending action {action_id}")]
-    AttachmentBusy {
-        target: ResourceName,
+        target: ResourceKey,
         action_id: ActionId,
     },
     #[error("action {0} was not found")]
@@ -150,14 +133,14 @@ impl Db<'_> {
                 .await?
         {
             return Err(ActionWriteError::Busy {
-                target: request.credential,
+                target: ResourceKey::new(ResourceKind::Credential, request.credential),
                 action_id,
             });
         }
         let actual_generation = credential_action_generation(self.raw(), &target.id).await?;
         if actual_generation != request.expected_generation {
             return Err(ActionWriteError::GenerationConflict {
-                credential: request.credential,
+                target: ResourceKey::new(ResourceKind::Credential, request.credential),
                 expected: request.expected_generation,
                 actual: actual_generation,
             });
@@ -245,16 +228,16 @@ impl Db<'_> {
             pending_action_for_target(self.raw(), ResourceKind::Attachment, &request.attachment)
                 .await?
         {
-            return Err(ActionWriteError::AttachmentBusy {
-                target: request.attachment,
+            return Err(ActionWriteError::Busy {
+                target: ResourceKey::new(ResourceKind::Attachment, request.attachment),
                 action_id,
             });
         }
         let actual_generation =
             attachment_action_generation(self.raw(), &request.attachment).await?;
         if actual_generation != request.base_action_generation {
-            return Err(ActionWriteError::AttachmentGenerationConflict {
-                attachment: request.attachment,
+            return Err(ActionWriteError::GenerationConflict {
+                target: ResourceKey::new(ResourceKind::Attachment, request.attachment),
                 expected: request.base_action_generation,
                 actual: actual_generation,
             });
@@ -416,7 +399,9 @@ async fn credential_action_target(
             },
             _ => None,
         })
-        .ok_or_else(|| ActionWriteError::ResourceNotFound(credential.clone()))?;
+        .ok_or_else(|| ActionWriteError::ResourceNotFound {
+            target: ResourceKey::new(ResourceKind::Credential, credential.clone()),
+        })?;
     let provider = snapshot
         .resources
         .resources()
@@ -530,7 +515,9 @@ async fn attachment_action_target(
             )
         })
         .then_some(())
-        .ok_or_else(|| ActionWriteError::AttachmentResourceNotFound(attachment.clone()))
+        .ok_or_else(|| ActionWriteError::ResourceNotFound {
+            target: ResourceKey::new(ResourceKind::Attachment, attachment.clone()),
+        })
 }
 
 async fn attachment_action_generation(

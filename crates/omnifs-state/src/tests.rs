@@ -5,7 +5,8 @@ use omnifs_api::{
     NormalizedResourceSet, ProviderDefinition, ResourceDefinition, ResourceLimits,
 };
 use omnifs_core::{
-    ActionId, AttachmentSpec, AttachmentVersion, MutationId, ProviderRef, ResourceName,
+    ActionId, AttachmentSpec, AttachmentVersion, MutationId, ProviderRef, ResourceKind,
+    ResourceName,
 };
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
@@ -832,7 +833,7 @@ async fn attachment_desired_updates_and_deletion_preserve_observed_runtime_state
 
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)] // one transaction contract with shared setup and row proof
-async fn resource_apply_is_atomic_idempotent_and_stamps_changed_rows() {
+async fn resource_apply_is_atomic_and_idempotent() {
     let (_temp, store, provider) = store_with_imported_provider().await;
     let desired = resource_set(provider.id, serde_json::json!({"a": 1}));
     let initial = store.resource_snapshot().await.unwrap();
@@ -1157,7 +1158,8 @@ async fn attachment_restart_actions_are_durable_and_generation_guarded() {
         .unwrap_err();
     assert!(matches!(
         missing,
-        ActionWriteError::AttachmentResourceNotFound(name) if name.as_str() == "missing-fs"
+        ActionWriteError::ResourceNotFound { target }
+            if target.kind == ResourceKind::Attachment && target.name.as_str() == "missing-fs"
     ));
 
     let bytes = provider_wasm(8);
@@ -1230,7 +1232,7 @@ async fn attachment_restart_actions_are_durable_and_generation_guarded() {
         .unwrap_err();
     assert!(matches!(
         busy,
-        ActionWriteError::AttachmentBusy { action_id, .. } if action_id == first_id
+        ActionWriteError::Busy { action_id, .. } if action_id == first_id
     ));
     store.shutdown().await.unwrap();
 
@@ -1266,7 +1268,7 @@ async fn attachment_restart_actions_are_durable_and_generation_guarded() {
         .unwrap_err();
     assert!(matches!(
         stale,
-        ActionWriteError::AttachmentGenerationConflict {
+        ActionWriteError::GenerationConflict {
             expected: 0,
             actual: 1,
             ..
