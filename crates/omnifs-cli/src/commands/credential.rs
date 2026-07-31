@@ -97,8 +97,6 @@ struct CredentialActionResult {
     credential: CredentialDefinition,
     accepted: CredentialReceipt,
     terminal: Option<ActionReceipt>,
-    committed: bool,
-    outcome: &'static str,
     follow: String,
 }
 
@@ -373,8 +371,6 @@ async fn settle_action(
                 credential: definition,
                 accepted,
                 terminal: Some(terminal),
-                committed: true,
-                outcome: "ready",
                 follow,
             };
             if output.is_structured() {
@@ -423,12 +419,6 @@ fn settle_action_error(
         credential: definition,
         accepted,
         terminal,
-        committed: true,
-        outcome: if code == ExitCode::Canceled {
-            "canceled"
-        } else {
-            "failed"
-        },
         follow: follow.clone(),
     };
     if output.is_structured() {
@@ -962,8 +952,6 @@ mod tests {
                 status: CredentialStatusKind::Active,
             },
             terminal: Some(action),
-            committed: true,
-            outcome: "ready",
             follow: "omnifs status --follow --action example".into(),
         };
         let encoded = serde_json::to_value(&result).unwrap();

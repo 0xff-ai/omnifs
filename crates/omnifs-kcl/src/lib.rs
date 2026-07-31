@@ -7,7 +7,9 @@
 mod evaluator;
 mod source;
 
-pub use evaluator::{EvaluateError, EvaluateOptions, EvaluatedConfig, evaluate, evaluate_sync};
+#[cfg(test)]
+use evaluator::evaluate_sync;
+pub use evaluator::{EvaluateError, EvaluatedConfig, evaluate};
 pub use source::{
     AttachmentAuthoring, AuthoringConfig, AuthoringResource, LocalProviderSource,
     ProviderAuthoring, ProviderSource, SourceResolutionError, resolve_local_source,
@@ -20,7 +22,8 @@ use serde_json::Value;
 /// plain-root fallback because `kcl-api` has no in-process package injection
 /// API; this constant keeps the schema available to a future editor/package
 /// bridge without requiring a system `kcl` installation.
-pub const OMNIFS_KCL_SCHEMA: &str = include_str!("../assets/omnifs.k");
+#[cfg(test)]
+const OMNIFS_KCL_SCHEMA: &str = include_str!("../assets/omnifs.k");
 
 /// Render a normalized resource set as deterministic KCL source.
 ///
@@ -236,7 +239,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let file = dir.path().join("roundtrip.k");
         std::fs::write(&file, rendered).unwrap();
-        let evaluated = evaluate_sync(&file, EvaluateOptions::default()).unwrap();
+        let evaluated = evaluate_sync(&file).unwrap();
         let normalized = evaluated
             .config
             .into_declarations(&std::collections::BTreeMap::new())
@@ -321,7 +324,7 @@ config = Config {{
         )
         .unwrap();
 
-        let evaluated = evaluate_sync(&file, EvaluateOptions::default()).unwrap();
+        let evaluated = evaluate_sync(&file).unwrap();
         assert_eq!(evaluated.config.resources.len(), 4);
         assert!(matches!(
             evaluated.config.resources.as_slice(),
@@ -363,9 +366,6 @@ config = Config {{
         )
         .unwrap();
 
-        assert!(matches!(
-            evaluate_sync(&file, EvaluateOptions::default()),
-            Err(EvaluateError::Kcl(_))
-        ));
+        assert!(matches!(evaluate_sync(&file), Err(EvaluateError::Kcl(_))));
     }
 }

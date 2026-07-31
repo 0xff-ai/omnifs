@@ -593,12 +593,6 @@ ProgressEvent
     serving desired and published revisions
     active provider preparations
     active attachment operations
-  ResourcePhaseChanged
-    resource key
-    observed revision
-    phase
-    stable error code?
-    safe detail?
   ProviderPreparation
     provider resource names[]
     catalog name
@@ -1377,11 +1371,11 @@ For an operational action, the equivalent hint is
 
 Structured modes carry the same fact without loose text. JSONL ends with one
 typed canceled envelope after its progress events. JSON emits one canceled
-envelope. Both include the durable receipt, `committed: true`, the target
-revision or action ID, and a typed follow hint. A stream transport failure
-uses the same shape with its stable error code. A terminal `RevisionFailed`,
-`RevisionSuperseded`, or `ActionFailed` exits nonzero; ready or completed exits
-zero.
+envelope. Both include the durable receipt and a typed follow hint. The receipt
+owns the target revision or action ID, while the envelope owns the stable
+outcome. A stream transport failure uses the same shape with its stable error
+code. A terminal `RevisionFailed`, `RevisionSuperseded`, or `ActionFailed`
+exits nonzero; ready or completed exits zero.
 
 ### Status
 

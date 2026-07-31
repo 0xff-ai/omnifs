@@ -788,20 +788,7 @@ pub fn to_credential_status(v: &CredentialStatus) -> wire::CredentialStatus {
         version: v.version.get(),
         generation: v.generation.get(),
         action_generation: v.action_generation,
-        status: match v.status {
-            CredentialStatusKind::Active => wire::CredentialStatusKind::CredentialActive as i32,
-            CredentialStatusKind::Blocked => wire::CredentialStatusKind::CredentialBlocked as i32,
-            CredentialStatusKind::PendingRepublish => {
-                wire::CredentialStatusKind::CredentialPendingRepublish as i32
-            },
-            CredentialStatusKind::RevocationPending => {
-                wire::CredentialStatusKind::CredentialRevocationPending as i32
-            },
-            CredentialStatusKind::RevocationUnknown => {
-                wire::CredentialStatusKind::CredentialRevocationUnknown as i32
-            },
-            CredentialStatusKind::Deleted => wire::CredentialStatusKind::CredentialDeleted as i32,
-        },
+        status: to_credential_status_kind(v.status),
     }
 }
 pub fn credential_status(v: &wire::CredentialStatus) -> Result<CredentialStatus, FromGrpcError> {
@@ -814,25 +801,10 @@ pub fn credential_status(v: &wire::CredentialStatus) -> Result<CredentialStatus,
             return Err(FromGrpcError::Unspecified("credential kind"));
         },
     };
-    let status = match wire::CredentialStatusKind::try_from(v.status)
-        .map_err(|_| FromGrpcError::Invalid("credential status"))?
-    {
-        wire::CredentialStatusKind::CredentialActive => CredentialStatusKind::Active,
-        wire::CredentialStatusKind::CredentialBlocked => CredentialStatusKind::Blocked,
-        wire::CredentialStatusKind::CredentialPendingRepublish => {
-            CredentialStatusKind::PendingRepublish
-        },
-        wire::CredentialStatusKind::CredentialRevocationPending => {
-            CredentialStatusKind::RevocationPending
-        },
-        wire::CredentialStatusKind::CredentialRevocationUnknown => {
-            CredentialStatusKind::RevocationUnknown
-        },
-        wire::CredentialStatusKind::CredentialDeleted => CredentialStatusKind::Deleted,
-        wire::CredentialStatusKind::Unspecified => {
-            return Err(FromGrpcError::Unspecified("credential status"));
-        },
-    };
+    let status = credential_status_kind(
+        wire::CredentialStatusKind::try_from(v.status)
+            .map_err(|_| FromGrpcError::Invalid("credential status"))?,
+    )?;
     Ok(CredentialStatus {
         key: credential_key(&req(v.key.clone(), "credential key")?),
         provider: provider_id(&v.provider)?,
@@ -1218,27 +1190,11 @@ fn to_resource_change(v: &ResourceChange) -> wire::ResourceChange {
 }
 
 pub fn resource_plan(v: &wire::ResourcePlan) -> Result<ResourcePlan, FromGrpcError> {
-    resource_count(v.normalized.len())?;
     resource_count(v.changes.len())?;
-    let declarations = ResourceDeclarations {
-        api_version: crate::API_VERSION.into(),
-        resources: v
-            .normalized
-            .iter()
-            .map(resource_definition)
-            .collect::<Result<_, _>>()?,
-    };
-    let normalized = declarations
-        .normalize()
-        .map_err(|_| FromGrpcError::Invalid("resource plan declarations"))?;
     let desired_digest = resource_digest(&v.desired_digest)?;
-    if normalized.digest() != desired_digest {
-        return Err(FromGrpcError::Invalid("resource plan digest"));
-    }
     Ok(ResourcePlan {
         base_revision: ResourceRevision::new(v.base_revision),
         desired_digest,
-        normalized: normalized.resources().to_vec(),
         changes: v
             .changes
             .iter()
@@ -1251,7 +1207,6 @@ pub fn to_resource_plan(v: &ResourcePlan) -> wire::ResourcePlan {
     wire::ResourcePlan {
         base_revision: v.base_revision.get(),
         desired_digest: v.desired_digest.as_bytes().to_vec().into(),
-        normalized: v.normalized.iter().map(to_resource_definition).collect(),
         changes: v.changes.iter().map(to_resource_change).collect(),
     }
 }
@@ -1904,12 +1859,6 @@ fn provider_preparation_stage(
         wire::ProviderPreparationStage::ProviderPreparationQueued => {
             Ok(ProviderPreparationStage::Queued)
         },
-        wire::ProviderPreparationStage::ProviderPreparationFetching => {
-            Ok(ProviderPreparationStage::Fetching)
-        },
-        wire::ProviderPreparationStage::ProviderPreparationValidating => {
-            Ok(ProviderPreparationStage::Validating)
-        },
         wire::ProviderPreparationStage::ProviderPreparationCompiling => {
             Ok(ProviderPreparationStage::Compiling)
         },
@@ -1932,12 +1881,6 @@ fn to_provider_preparation_stage(v: ProviderPreparationStage) -> i32 {
     match v {
         ProviderPreparationStage::Queued => {
             wire::ProviderPreparationStage::ProviderPreparationQueued as i32
-        },
-        ProviderPreparationStage::Fetching => {
-            wire::ProviderPreparationStage::ProviderPreparationFetching as i32
-        },
-        ProviderPreparationStage::Validating => {
-            wire::ProviderPreparationStage::ProviderPreparationValidating as i32
         },
         ProviderPreparationStage::Compiling => {
             wire::ProviderPreparationStage::ProviderPreparationCompiling as i32
@@ -2005,9 +1948,6 @@ fn credential_progress_stage(
     v: wire::CredentialProgressStage,
 ) -> Result<CredentialProgressStage, FromGrpcError> {
     match v {
-        wire::CredentialProgressStage::CredentialProgressQueued => {
-            Ok(CredentialProgressStage::Queued)
-        },
         wire::CredentialProgressStage::CredentialProgressRefreshing => {
             Ok(CredentialProgressStage::Refreshing)
         },
@@ -2028,9 +1968,6 @@ fn credential_progress_stage(
 
 fn to_credential_progress_stage(v: CredentialProgressStage) -> i32 {
     match v {
-        CredentialProgressStage::Queued => {
-            wire::CredentialProgressStage::CredentialProgressQueued as i32
-        },
         CredentialProgressStage::Refreshing => {
             wire::CredentialProgressStage::CredentialProgressRefreshing as i32
         },
@@ -2206,7 +2143,6 @@ fn provider_preparation_progress(
         queue_position: v.queue_position,
         completed_digests: v.completed_digests,
         retry_count: v.retry_count,
-        next_retry_unix_ms: v.next_retry_unix_ms,
     })
 }
 
@@ -2227,7 +2163,6 @@ fn to_provider_preparation_progress(
         queue_position: v.queue_position,
         completed_digests: v.completed_digests,
         retry_count: v.retry_count,
-        next_retry_unix_ms: v.next_retry_unix_ms,
     }
 }
 
@@ -2275,8 +2210,6 @@ fn credential_progress(v: &wire::CredentialProgress) -> Result<CredentialProgres
         )?,
         error_code: v.error_code.clone(),
         detail: v.detail.clone(),
-        retry_count: v.retry_count,
-        next_retry_unix_ms: v.next_retry_unix_ms,
     })
 }
 
@@ -2286,8 +2219,6 @@ fn to_credential_progress(v: &CredentialProgress) -> wire::CredentialProgress {
         stage: to_credential_progress_stage(v.stage),
         error_code: v.error_code.clone(),
         detail: v.detail.clone(),
-        retry_count: v.retry_count,
-        next_retry_unix_ms: v.next_retry_unix_ms,
     }
 }
 
@@ -2336,12 +2267,6 @@ pub fn progress_event(v: &wire::ProgressEvent) -> Result<ProgressEvent, FromGrpc
     let event = match req(v.event.clone(), "progress event")? {
         wire::progress_event::Event::Snapshot(value) => {
             ProgressEventKind::Snapshot(progress_snapshot(&value)?)
-        },
-        wire::progress_event::Event::ResourcePhaseChanged(value) => {
-            ProgressEventKind::ResourcePhaseChanged(resource_status(&req(
-                value.status,
-                "resource status",
-            )?)?)
         },
         wire::progress_event::Event::ProviderPreparation(value) => {
             ProgressEventKind::ProviderPreparation(provider_preparation_progress(&value)?)
@@ -2393,11 +2318,6 @@ pub fn to_progress_event(v: &ProgressEvent) -> wire::ProgressEvent {
     let event = match &v.event {
         ProgressEventKind::Snapshot(value) => {
             wire::progress_event::Event::Snapshot(to_progress_snapshot(value))
-        },
-        ProgressEventKind::ResourcePhaseChanged(value) => {
-            wire::progress_event::Event::ResourcePhaseChanged(wire::ResourcePhaseChanged {
-                status: Some(to_resource_status(value)),
-            })
         },
         ProgressEventKind::ProviderPreparation(value) => {
             wire::progress_event::Event::ProviderPreparation(to_provider_preparation_progress(
@@ -2770,7 +2690,6 @@ mod tests {
         let plan = ResourcePlan {
             base_revision: ResourceRevision::new(4),
             desired_digest: normalized.digest(),
-            normalized: normalized.resources().to_vec(),
             changes: vec![],
         };
         assert_eq!(resource_plan(&to_resource_plan(&plan)).unwrap(), plan);
@@ -3034,7 +2953,6 @@ mod tests {
         let attachment_key = ResourceKey::new(ResourceKind::Attachment, new_resource_name("local"));
         let events = vec![
             ProgressEventKind::Snapshot(snapshot.clone()),
-            ProgressEventKind::ResourcePhaseChanged(status.clone()),
             ProgressEventKind::ProviderPreparation(ProviderPreparationProgress {
                 digest: ProviderId::from_wasm_bytes(b"github"),
                 catalog_name: "github".into(),
@@ -3049,7 +2967,6 @@ mod tests {
                 queue_position: Some(1),
                 completed_digests: 4,
                 retry_count: 1,
-                next_retry_unix_ms: Some(42),
             }),
             ProgressEventKind::ServingProgress(ServingProgress {
                 revision: ResourceRevision::new(4),
@@ -3067,8 +2984,6 @@ mod tests {
                 stage: CredentialProgressStage::Refreshing,
                 error_code: None,
                 detail: None,
-                retry_count: 3,
-                next_retry_unix_ms: Some(44),
             }),
             ProgressEventKind::AttachmentProgress(AttachmentProgress {
                 key: attachment_key,

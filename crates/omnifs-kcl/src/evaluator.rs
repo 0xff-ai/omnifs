@@ -7,22 +7,6 @@ use thiserror::Error;
 const DEFAULT_MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
 const DEFAULT_MAX_RESULT_BYTES: usize = 16 * 1024 * 1024;
 
-/// Bounds applied before KCL output enters strict Rust parsing.
-#[derive(Debug, Clone, Copy)]
-pub struct EvaluateOptions {
-    pub max_source_bytes: u64,
-    pub max_result_bytes: usize,
-}
-
-impl Default for EvaluateOptions {
-    fn default() -> Self {
-        Self {
-            max_source_bytes: DEFAULT_MAX_SOURCE_BYTES,
-            max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
-        }
-    }
-}
-
 /// Result of one KCL evaluation, with no raw KCL runtime objects exposed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvaluatedConfig {
@@ -32,29 +16,31 @@ pub struct EvaluatedConfig {
 
 /// Evaluate KCL on a blocking worker. KCL's API is synchronous, so each call
 /// owns its API value inside the worker.
-pub async fn evaluate(
-    path: impl Into<PathBuf>,
-    options: EvaluateOptions,
-) -> Result<EvaluatedConfig, EvaluateError> {
+pub async fn evaluate(path: impl Into<PathBuf>) -> Result<EvaluatedConfig, EvaluateError> {
     let path = path.into();
-    tokio::task::spawn_blocking(move || evaluate_sync(path, options))
+    tokio::task::spawn_blocking(move || evaluate_sync(path))
         .await
         .map_err(|error| EvaluateError::Worker(error.to_string()))?
 }
 
 /// Synchronous evaluator used by focused tests and blocking callers.
-pub fn evaluate_sync(
+pub(crate) fn evaluate_sync(path: impl Into<PathBuf>) -> Result<EvaluatedConfig, EvaluateError> {
+    evaluate_sync_with_limits(path, DEFAULT_MAX_SOURCE_BYTES, DEFAULT_MAX_RESULT_BYTES)
+}
+
+fn evaluate_sync_with_limits(
     path: impl Into<PathBuf>,
-    options: EvaluateOptions,
+    max_source_bytes: u64,
+    max_result_bytes: usize,
 ) -> Result<EvaluatedConfig, EvaluateError> {
     let path = path.into();
     reject_url_path(&path)?;
     let source = path.canonicalize().map_err(EvaluateError::Io)?;
     let metadata = std::fs::metadata(&source).map_err(EvaluateError::Io)?;
-    if metadata.len() > options.max_source_bytes {
+    if metadata.len() > max_source_bytes {
         return Err(EvaluateError::SourceTooLarge {
             size: metadata.len(),
-            max: options.max_source_bytes,
+            max: max_source_bytes,
         });
     }
     let work_dir = source
@@ -78,10 +64,10 @@ pub fn evaluate_sync(
     if !result.err_message.is_empty() {
         return Err(EvaluateError::Kcl(result.err_message));
     }
-    if result.json_result.len() > options.max_result_bytes {
+    if result.json_result.len() > max_result_bytes {
         return Err(EvaluateError::ResultTooLarge {
             size: result.json_result.len(),
-            max: options.max_result_bytes,
+            max: max_result_bytes,
         });
     }
     let value: Value = serde_json::from_str(&result.json_result)
@@ -143,20 +129,19 @@ mod tests {
 config = {apiVersion = "omnifs.dev/v1alpha1", resources = []}"#,
         )
         .unwrap();
-        let evaluated = evaluate_sync(&file, EvaluateOptions::default()).unwrap();
+        let evaluated = evaluate_sync(&file).unwrap();
         assert_eq!(evaluated.config.resources, Vec::new());
     }
 
     #[test]
     fn rejects_remote_path_before_kcl() {
-        let error = evaluate_sync("https://example.invalid/main.k", EvaluateOptions::default())
-            .unwrap_err();
+        let error = evaluate_sync("https://example.invalid/main.k").unwrap_err();
         assert!(matches!(error, EvaluateError::RemoteSource(_)));
     }
 
     #[test]
     fn reports_missing_file_and_result_bound() {
-        let error = evaluate_sync("missing.k", EvaluateOptions::default()).unwrap_err();
+        let error = evaluate_sync("missing.k").unwrap_err();
         assert!(matches!(error, EvaluateError::Io(_)));
 
         let dir = tempdir().unwrap();
@@ -166,24 +151,10 @@ config = {apiVersion = "omnifs.dev/v1alpha1", resources = []}"#,
             r#"config = {apiVersion = "omnifs.dev/v1alpha1", resources = [{kind = "Credential", spec = {name = "a", provider = "p", scheme = "oauth", account = "x"}}]}"#,
         )
         .unwrap();
-        let error = evaluate_sync(
-            &file,
-            EvaluateOptions {
-                max_result_bytes: 1,
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
+        let error = evaluate_sync_with_limits(&file, DEFAULT_MAX_SOURCE_BYTES, 1).unwrap_err();
         assert!(matches!(error, EvaluateError::ResultTooLarge { .. }));
 
-        let error = evaluate_sync(
-            &file,
-            EvaluateOptions {
-                max_source_bytes: 1,
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
+        let error = evaluate_sync_with_limits(&file, 1, DEFAULT_MAX_RESULT_BYTES).unwrap_err();
         assert!(matches!(error, EvaluateError::SourceTooLarge { .. }));
     }
 
@@ -196,11 +167,11 @@ config = {apiVersion = "omnifs.dev/v1alpha1", resources = []}"#,
             r#"config = {apiVersion = "omnifs.dev/v1alpha1", nope = "x", resources = []}"#,
         )
         .unwrap();
-        let unknown_error = evaluate_sync(&unknown, EvaluateOptions::default()).unwrap_err();
+        let unknown_error = evaluate_sync(&unknown).unwrap_err();
         assert!(matches!(unknown_error, EvaluateError::Authoring(_)));
         let syntax = dir.path().join("syntax.k");
         fs::write(&syntax, "config = {").unwrap();
-        let error = evaluate_sync(&syntax, EvaluateOptions::default()).unwrap_err();
+        let error = evaluate_sync(&syntax).unwrap_err();
         assert!(matches!(error, EvaluateError::Kcl(message) if message.contains(":1:")));
     }
 
@@ -215,7 +186,7 @@ config = {apiVersion = "omnifs.dev/v1alpha1", resources = []}"#,
 config = {apiVersion = "omnifs.dev/v1alpha1", resources = []}"#,
         )
         .unwrap();
-        assert!(evaluate_sync(&file, EvaluateOptions::default()).is_ok());
+        assert!(evaluate_sync(&file).is_ok());
 
         let missing = dir.path().join("missing.k");
         fs::write(
@@ -224,7 +195,7 @@ config = {apiVersion = "omnifs.dev/v1alpha1", resources = []}"#,
 config = {apiVersion = "omnifs.dev/v1alpha1", resources = []}"#,
         )
         .unwrap();
-        let error = evaluate_sync(&missing, EvaluateOptions::default()).unwrap_err();
+        let error = evaluate_sync(&missing).unwrap_err();
         assert!(matches!(error, EvaluateError::Kcl(_)));
         assert!(!dir.path().join("vendor").exists());
     }
@@ -238,7 +209,7 @@ config = {apiVersion = "omnifs.dev/v1alpha1", resources = []}"#,
             r#"config = {apiVersion = "omnifs.dev/v1alpha1", resources = []}"#,
         )
         .unwrap();
-        let evaluated = evaluate(&file, EvaluateOptions::default()).await.unwrap();
+        let evaluated = evaluate(&file).await.unwrap();
         assert_eq!(evaluated.config.api_version, "omnifs.dev/v1alpha1");
     }
 }

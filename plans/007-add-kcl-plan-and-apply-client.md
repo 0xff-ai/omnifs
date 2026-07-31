@@ -355,8 +355,8 @@ desired state remains applied.
 
 For JSONL, cancellation or stream failure is the one terminal typed envelope
 after prior events. For JSON, it is the only envelope. Both include the durable
-receipt, committed revision, follow target, and stable outcome code without
-unstructured progress text.
+receipt and follow target without unstructured progress text. The receipt owns
+the committed revision, while the terminal envelope owns the stable outcome.
 
 An unchanged apply follows the current revision if it is still reconciling and
 finishes from the first snapshot if it is already ready.

@@ -32,8 +32,6 @@ pub struct ProgressSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum ProviderPreparationStage {
     Queued,
-    Fetching,
-    Validating,
     Compiling,
     Retrying,
     Ready,
@@ -62,7 +60,6 @@ pub enum ServingProgressStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialProgressStage {
-    Queued,
     Refreshing,
     Revoking,
     Ready,
@@ -103,7 +100,6 @@ pub struct ProviderPreparationProgress {
     pub queue_position: Option<u32>,
     pub completed_digests: u32,
     pub retry_count: u32,
-    pub next_retry_unix_ms: Option<u64>,
 }
 
 /// Progress for one desired serving generation.
@@ -129,8 +125,6 @@ pub struct CredentialProgress {
     pub stage: CredentialProgressStage,
     pub error_code: Option<String>,
     pub detail: Option<String>,
-    pub retry_count: u32,
-    pub next_retry_unix_ms: Option<u64>,
 }
 
 /// Progress for one attachment resource.
@@ -157,7 +151,6 @@ pub struct AttachmentProgress {
 #[serde(rename_all = "snake_case")]
 pub enum ProgressEventKind {
     Snapshot(ProgressSnapshot),
-    ResourcePhaseChanged(ResourceStatus),
     ProviderPreparation(ProviderPreparationProgress),
     ServingProgress(ServingProgress),
     CredentialProgress(CredentialProgress),

@@ -332,7 +332,6 @@ fn record_provider_progress(progress: &ProgressHub, status: ProviderPreparationS
         active_digests: status.active_digests,
         completed_digests: status.completed_digests,
         retry_count: status.retry_count,
-        next_retry_unix_ms: None,
     });
 }
 
@@ -787,7 +786,7 @@ mod tests {
             gate: Condvar::new(),
             started: started_tx,
         });
-        let sink: Arc<dyn crate::provider_preparer::ProviderProgressSink> = Arc::new(|_| {});
+        let sink: Arc<crate::provider_preparer::ProviderProgressSink> = Arc::new(|_| {});
         let preparer = ProviderPreparer::start_with_test_compiler(compiler.clone(), sink, 1);
         let embedded = startup_job(1, "embedded");
         let retained = startup_job(2, "retained");

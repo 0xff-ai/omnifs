@@ -107,28 +107,8 @@ pub(crate) struct ProviderPreparationStatus {
     pub(crate) detail: Option<String>,
 }
 
-/// Non-blocking progress boundary used by the daemon composition root.
-///
-/// Implementations must return without waiting for a subscriber.
-pub(crate) trait ProviderProgressSink: Send + Sync + 'static {
-    fn publish(&self, status: ProviderPreparationStatus);
-}
-
-impl<F> ProviderProgressSink for F
-where
-    F: Fn(ProviderPreparationStatus) + Send + Sync + 'static,
-{
-    fn publish(&self, status: ProviderPreparationStatus) {
-        self(status);
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EnqueueOutcome {
-    Enqueued,
-    Deduplicated,
-    Requeued,
-}
+/// Non-blocking progress callback used by the daemon composition root.
+pub(crate) type ProviderProgressSink = dyn Fn(ProviderPreparationStatus) + Send + Sync + 'static;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ProviderPreparerError {
@@ -166,13 +146,13 @@ pub(crate) struct ProviderPreparerHandle {
 }
 
 impl ProviderPreparer {
-    pub(crate) fn start(engine: ComponentEngine, sink: Arc<dyn ProviderProgressSink>) -> Self {
+    pub(crate) fn start(engine: ComponentEngine, sink: Arc<ProviderProgressSink>) -> Self {
         Self::start_with_worker_limit(engine, sink, default_worker_limit())
     }
 
     pub(crate) fn start_with_worker_limit(
         engine: ComponentEngine,
-        sink: Arc<dyn ProviderProgressSink>,
+        sink: Arc<ProviderProgressSink>,
         worker_limit: usize,
     ) -> Self {
         Self::start_with_compiler(Arc::new(WasmtimeCompiler { engine }), sink, worker_limit)
@@ -180,7 +160,7 @@ impl ProviderPreparer {
 
     fn start_with_compiler(
         compiler: Arc<dyn ProviderCompiler>,
-        sink: Arc<dyn ProviderProgressSink>,
+        sink: Arc<ProviderProgressSink>,
         worker_limit: usize,
     ) -> Self {
         assert!(worker_limit > 0, "provider worker limit must be nonzero");
@@ -211,7 +191,7 @@ impl ProviderPreparer {
     #[cfg(test)]
     pub(crate) fn start_with_test_compiler(
         compiler: Arc<dyn ProviderCompiler>,
-        sink: Arc<dyn ProviderProgressSink>,
+        sink: Arc<ProviderProgressSink>,
         worker_limit: usize,
     ) -> Self {
         Self::start_with_compiler(compiler, sink, worker_limit)
@@ -225,7 +205,7 @@ impl ProviderPreparer {
         &self,
         job: ProviderPreparationJob,
         priority: ProviderPriority,
-    ) -> Result<EnqueueOutcome, ProviderPreparerError> {
+    ) -> Result<(), ProviderPreparerError> {
         self.handle.enqueue(job, priority).await
     }
 
@@ -269,7 +249,7 @@ impl ProviderPreparerHandle {
         &self,
         job: ProviderPreparationJob,
         priority: ProviderPriority,
-    ) -> Result<EnqueueOutcome, ProviderPreparerError> {
+    ) -> Result<(), ProviderPreparerError> {
         self.send_enqueue(job, priority, false).await
     }
 
@@ -277,7 +257,7 @@ impl ProviderPreparerHandle {
         &self,
         job: ProviderPreparationJob,
         priority: ProviderPriority,
-    ) -> Result<EnqueueOutcome, ProviderPreparerError> {
+    ) -> Result<(), ProviderPreparerError> {
         self.send_enqueue(job, priority, true).await
     }
 
@@ -286,7 +266,7 @@ impl ProviderPreparerHandle {
         job: ProviderPreparationJob,
         priority: ProviderPriority,
         repaired: bool,
-    ) -> Result<EnqueueOutcome, ProviderPreparerError> {
+    ) -> Result<(), ProviderPreparerError> {
         let (reply, wait) = oneshot::channel();
         self.commands
             .send(Command::Enqueue {
@@ -371,7 +351,7 @@ enum Command {
         job: ProviderPreparationJob,
         priority: ProviderPriority,
         repaired: bool,
-        reply: oneshot::Sender<Result<EnqueueOutcome, ProviderPreparerError>>,
+        reply: oneshot::Sender<Result<(), ProviderPreparerError>>,
     },
     Shutdown {
         finished: oneshot::Sender<()>,
@@ -396,7 +376,7 @@ impl ProviderCompiler for WasmtimeCompiler {
 
 struct Actor {
     compiler: Arc<dyn ProviderCompiler>,
-    sink: Arc<dyn ProviderProgressSink>,
+    sink: Arc<ProviderProgressSink>,
     worker_limit: usize,
     receive: mpsc::Receiver<Command>,
     shared: Arc<SharedState>,
@@ -494,7 +474,8 @@ impl Actor {
                 let outcome = if self.shutting_down {
                     Err(ProviderPreparerError::ShuttingDown)
                 } else {
-                    Ok(self.enqueue(job, priority, repaired))
+                    self.enqueue(job, priority, repaired);
+                    Ok(())
                 };
                 let _ = reply.send(outcome);
             },
@@ -502,15 +483,11 @@ impl Actor {
         }
     }
 
-    fn enqueue(
-        &mut self,
-        job: ProviderPreparationJob,
-        priority: ProviderPriority,
-        repaired: bool,
-    ) -> EnqueueOutcome {
+    fn enqueue(&mut self, job: ProviderPreparationJob, priority: ProviderPriority, repaired: bool) {
         let provider_id = job.provider_id;
         if self.entries.contains_key(&provider_id) {
-            return self.update_existing(&job, priority, repaired);
+            self.update_existing(&job, priority, repaired);
+            return;
         }
 
         self.next_sequence = self.next_sequence.wrapping_add(1);
@@ -561,8 +538,7 @@ impl Actor {
             generation: 1,
             sequence,
         });
-        self.sink.publish(initial);
-        EnqueueOutcome::Enqueued
+        (self.sink)(initial);
     }
 
     #[allow(clippy::too_many_lines)] // one dedupe, repair, and reprioritization transition
@@ -571,7 +547,7 @@ impl Actor {
         job: &ProviderPreparationJob,
         priority: ProviderPriority,
         repaired: bool,
-    ) -> EnqueueOutcome {
+    ) {
         let provider_id = job.provider_id;
         {
             let entry = self
@@ -605,7 +581,7 @@ impl Actor {
                 .expect("existing provider entry")
                 .status
                 .send_replace(retrying.clone());
-            self.sink.publish(retrying);
+            (self.sink)(retrying);
 
             self.next_sequence = self.next_sequence.wrapping_add(1);
             let queued = self
@@ -638,14 +614,14 @@ impl Actor {
                 entry.status.send_replace(status.clone());
                 (entry.generation, status)
             };
-            self.sink.publish(queued_status);
+            (self.sink)(queued_status);
             self.queue.push(QueueItem {
                 provider_id,
                 priority: entry_priority,
                 generation,
                 sequence,
             });
-            return EnqueueOutcome::Requeued;
+            return;
         }
 
         let should_upgrade = self.entries.get(&provider_id).is_some_and(|entry| {
@@ -674,8 +650,7 @@ impl Actor {
             .expect("existing provider entry")
             .status
             .send_replace(status.clone());
-        self.sink.publish(status);
-        EnqueueOutcome::Deduplicated
+        (self.sink)(status);
     }
 
     fn dispatch_ready(&mut self) {
@@ -706,7 +681,7 @@ impl Actor {
                 self.shared.completed.load(AtomicOrdering::Relaxed),
             );
             entry.status.send_replace(preparing.clone());
-            self.sink.publish(preparing);
+            (self.sink)(preparing);
 
             let provider_id = item.provider_id;
             let job = Arc::clone(&entry.job);
@@ -773,7 +748,7 @@ impl Actor {
             completed,
         );
         entry.status.send_replace(status.clone());
-        self.sink.publish(status);
+        (self.sink)(status);
     }
 
     fn begin_shutdown(&mut self, finished: Option<oneshot::Sender<()>>) {
@@ -818,7 +793,7 @@ impl Actor {
                 self.shared.completed.load(AtomicOrdering::Relaxed),
             );
             entry.status.send_replace(status.clone());
-            self.sink.publish(status);
+            (self.sink)(status);
         }
     }
 
@@ -1014,19 +989,19 @@ mod tests {
     }
 
     fn recorder() -> (
-        Arc<dyn ProviderProgressSink>,
+        Arc<ProviderProgressSink>,
         Arc<Mutex<Vec<ProviderPreparationStatus>>>,
     ) {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&events);
-        let sink: Arc<dyn ProviderProgressSink> =
+        let sink: Arc<ProviderProgressSink> =
             Arc::new(move |status| captured.lock().unwrap().push(status));
         (sink, events)
     }
 
     fn preparer(
         compiler: Arc<FakeCompiler>,
-        sink: Arc<dyn ProviderProgressSink>,
+        sink: Arc<ProviderProgressSink>,
         limit: usize,
     ) -> ProviderPreparer {
         ProviderPreparer::start_with_compiler(compiler, sink, limit)
@@ -1055,20 +1030,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(started.recv().await, Some(blocker.provider_id));
-        assert_eq!(
-            preparer
-                .enqueue(first, ProviderPriority::Embedded)
-                .await
-                .unwrap(),
-            EnqueueOutcome::Enqueued
-        );
-        assert_eq!(
-            preparer
-                .enqueue(duplicate, ProviderPriority::Desired)
-                .await
-                .unwrap(),
-            EnqueueOutcome::Deduplicated
-        );
+        preparer
+            .enqueue(first, ProviderPriority::Embedded)
+            .await
+            .unwrap();
+        preparer
+            .enqueue(duplicate, ProviderPriority::Desired)
+            .await
+            .unwrap();
         compiler.release();
         preparer.wait_ready(provider_id).await.unwrap();
         assert_eq!(started.recv().await, Some(provider_id));
@@ -1196,14 +1165,11 @@ mod tests {
         assert!(preparer.wait_ready(repaired.provider_id).await.is_err());
 
         compiler.repair(repaired.provider_id);
-        assert_eq!(
-            preparer
-                .handle
-                .requeue_repaired(repaired.clone(), ProviderPriority::Desired)
-                .await
-                .unwrap(),
-            EnqueueOutcome::Requeued
-        );
+        preparer
+            .handle
+            .requeue_repaired(repaired.clone(), ProviderPriority::Desired)
+            .await
+            .unwrap();
         preparer.wait_ready(repaired.provider_id).await.unwrap();
         let status = preparer.handle.status(repaired.provider_id).unwrap();
         assert_eq!(status.phase, ProviderPreparationPhase::Ready);
@@ -1233,11 +1199,10 @@ mod tests {
         let (slow_send, _slow_receive) = mpsc::channel(1);
         let (dropped_send, dropped_receive) = mpsc::channel(1);
         drop(dropped_receive);
-        let sink: Arc<dyn ProviderProgressSink> =
-            Arc::new(move |status: ProviderPreparationStatus| {
-                let _ = slow_send.try_send(status.clone());
-                let _ = dropped_send.try_send(status);
-            });
+        let sink: Arc<ProviderProgressSink> = Arc::new(move |status: ProviderPreparationStatus| {
+            let _ = slow_send.try_send(status.clone());
+            let _ = dropped_send.try_send(status);
+        });
         let preparer = preparer(compiler, sink, 2);
         let jobs = [job(1, "one"), job(2, "two"), job(3, "three")];
         for job in jobs.iter().cloned() {

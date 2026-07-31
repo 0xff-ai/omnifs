@@ -89,12 +89,9 @@ pub struct ShellArgs {
 struct MutationResult {
     attachment: AttachmentDefinition,
     state: &'static str,
-    revision: Option<ResourceRevision>,
-    action_id: Option<ActionId>,
     receipt: Option<ApplyReceipt>,
     action_receipt: Option<ActionReceipt>,
-    committed: bool,
-    follow: Option<String>,
+    follow: String,
     snapshot: Option<ProgressSnapshot>,
 }
 
@@ -191,15 +188,12 @@ async fn add(_args: AddArgs, output: Output) -> Result<ExitCode> {
         MutationResult {
             attachment: definition,
             state: "ready",
-            revision: Some(result.receipt.revision),
-            action_id: None,
             receipt: Some(result.receipt),
             action_receipt: None,
-            committed: true,
-            follow: Some(format!(
+            follow: format!(
                 "omnifs status --follow --revision {}",
                 result.snapshot.desired_revision
-            )),
+            ),
             snapshot: Some(result.snapshot),
         },
     )
@@ -323,15 +317,12 @@ async fn remove(args: NameArgs, output: Output) -> Result<ExitCode> {
         MutationResult {
             attachment: definition,
             state: "removed",
-            revision: Some(result.receipt.revision),
-            action_id: None,
             receipt: Some(result.receipt),
             action_receipt: None,
-            committed: true,
-            follow: Some(format!(
+            follow: format!(
                 "omnifs status --follow --revision {}",
                 result.snapshot.desired_revision
-            )),
+            ),
             snapshot: Some(result.snapshot),
         },
     )
@@ -372,15 +363,9 @@ async fn restart(args: NameArgs, output: Output) -> Result<ExitCode> {
                 MutationResult {
                     attachment: definition,
                     state: "ready",
-                    revision: None,
-                    action_id: Some(receipt.action_id),
                     receipt: None,
                     action_receipt: Some(terminal_receipt),
-                    committed: true,
-                    follow: Some(format!(
-                        "omnifs status --follow --action {}",
-                        receipt.action_id
-                    )),
+                    follow: format!("omnifs status --follow --action {}", receipt.action_id),
                     snapshot: None,
                 },
             )
@@ -458,12 +443,9 @@ fn settle_action_error(
         let result = MutationResult {
             attachment,
             state: "restart",
-            revision: None,
-            action_id: Some(receipt.action_id),
             receipt: None,
             action_receipt: Some(receipt.clone()),
-            committed: true,
-            follow: Some(follow.clone()),
+            follow: follow.clone(),
             snapshot: None,
         };
         output.emit_detailed_error(
@@ -498,13 +480,13 @@ fn finish_result(output: &Output, result: MutationResult) -> Result<ExitCode> {
     if output.is_structured() {
         output.emit_result(ResultVerdict::Ok, result)?;
     } else {
+        let target = result.receipt.as_ref().map_or_else(
+            || "action".to_owned(),
+            |receipt| receipt.revision.to_string(),
+        );
         output.report(format!(
             "Attachment {} {} at {}\n",
-            result.attachment.name,
-            result.state,
-            result
-                .revision
-                .map_or_else(|| "action".to_owned(), |revision| revision.to_string())
+            result.attachment.name, result.state, target
         ));
     }
     Ok(ExitCode::Success)

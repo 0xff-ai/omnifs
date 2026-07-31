@@ -49,8 +49,6 @@ struct CommittedResourceWatchError {
 #[serde(rename_all = "camelCase")]
 struct CommittedResourceResult {
     receipt: ApplyReceipt,
-    committed: bool,
-    target: ResourceRevision,
     follow: String,
 }
 
@@ -164,12 +162,7 @@ pub(crate) fn finish_resource_error(
         code.code(),
         error.to_string(),
         follow.clone(),
-        CommittedResourceResult {
-            target: receipt.revision,
-            receipt,
-            committed: true,
-            follow,
-        },
+        CommittedResourceResult { receipt, follow },
     )?;
     Ok(code)
 }
@@ -326,9 +319,6 @@ pub(crate) async fn wait_for_revision(
             | ProgressEventKind::AttachmentProgress(_)) => {
                 render_active_progress(output, &progress, &mut renderer);
             },
-            ProgressEventKind::ResourcePhaseChanged(status) => {
-                render_resource_phase(output, &status, &mut renderer);
-            },
             ProgressEventKind::RevisionReady(ready) if ready == revision => {
                 return latest_snapshot.ok_or_else(|| {
                     anyhow::anyhow!("revision {revision} became ready without a progress snapshot")
@@ -390,9 +380,6 @@ async fn wait_for_action(
             | ProgressEventKind::AttachmentProgress(_)) => {
                 render_active_progress(output, &progress, &mut renderer);
             },
-            ProgressEventKind::ResourcePhaseChanged(status) => {
-                render_resource_phase(output, &status, &mut renderer);
-            },
             ProgressEventKind::ActionCompleted(receipt)
             | ProgressEventKind::ActionFailed {
                 receipt,
@@ -438,9 +425,6 @@ async fn follow_current(
             | ProgressEventKind::CredentialProgress(_)
             | ProgressEventKind::AttachmentProgress(_)) => {
                 render_active_progress(output, &progress, &mut renderer);
-            },
-            ProgressEventKind::ResourcePhaseChanged(status) => {
-                render_resource_phase(output, &status, &mut renderer);
             },
             _ => {},
         }
@@ -532,12 +516,7 @@ fn render_active_progress(
         ProgressEventKind::CredentialProgress(progress) => (
             format!("credential:{}", progress.key),
             stage_name(progress.stage),
-            format!(
-                "credential {} {} (retry {})",
-                progress.key,
-                stage_name(progress.stage),
-                progress.retry_count,
-            ),
+            format!("credential {} {}", progress.key, stage_name(progress.stage)),
         ),
         ProgressEventKind::AttachmentProgress(progress) => (
             format!("attachment:{}", progress.key),
@@ -556,18 +535,6 @@ fn render_active_progress(
     };
     if renderer.should_render(key, stage) {
         output.narrate(line);
-    }
-}
-
-fn render_resource_phase(
-    output: &Output,
-    status: &omnifs_api::ResourceStatus,
-    renderer: &mut ProgressRenderer,
-) {
-    if output.show_progress()
-        && renderer.should_render(format!("resource:{}", status.key), stage_name(status.phase))
-    {
-        output.narrate(format!("{} {}", status.key, stage_name(status.phase)));
     }
 }
 
@@ -657,8 +624,6 @@ impl StageName for omnifs_api::ProviderPreparationStage {
     fn stage_name(self) -> &'static str {
         match self {
             Self::Queued => "queued",
-            Self::Fetching => "fetching",
-            Self::Validating => "validating",
             Self::Compiling => "compiling",
             Self::Retrying => "retrying",
             Self::Ready => "ready",
@@ -689,7 +654,6 @@ impl StageName for omnifs_api::ServingProgressStage {
 impl StageName for omnifs_api::CredentialProgressStage {
     fn stage_name(self) -> &'static str {
         match self {
-            Self::Queued => "queued",
             Self::Refreshing => "refreshing",
             Self::Revoking => "revoking",
             Self::Ready => "ready",
@@ -818,7 +782,6 @@ mod tests {
             &ResourcePlan {
                 base_revision: ResourceRevision::new(1),
                 desired_digest: ResourceDigest::from_bytes([2; 32]),
-                normalized: vec![definition],
                 changes: vec![
                     ResourceChange {
                         key: selected,

@@ -149,7 +149,6 @@ current daemon state
 
 ```text
 Snapshot
-ResourcePhaseChanged
 ProviderPreparation
 ServingProgress
 CredentialProgress

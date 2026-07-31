@@ -184,7 +184,8 @@ For credential or restart actions, use
 
 JSONL ends cancellation or stream failure with one typed terminal envelope
 after prior events. JSON emits only that envelope. Each carries the durable
-receipt, `committed: true`, target, follow hint, and stable outcome code.
+receipt and follow hint; the receipt owns the target revision or action, and
+the terminal envelope owns the stable outcome.
 
 Interactive mutation commands require a TTY. Under `--no-input` or redirected
 input, return a clear error with:

@@ -835,8 +835,6 @@ async fn start_pending_actions(
                 stage: action_stage,
                 error_code: None,
                 detail: None,
-                retry_count: 0,
-                next_retry_unix_ms: None,
             },
         );
         actions.push(receipt.action_id);
@@ -914,8 +912,6 @@ fn publish_completed_action(resources: &ResourceControl, ready: omnifs_api::Acti
             stage: CredentialProgressStage::Ready,
             error_code: None,
             detail: None,
-            retry_count: 0,
-            next_retry_unix_ms: None,
         },
     );
     resources.publish_action(&ready);
@@ -950,8 +946,6 @@ async fn publish_failed_action(
             stage: CredentialProgressStage::Failed,
             error_code: Some(error_code.into()),
             detail: Some(detail.into()),
-            retry_count: 0,
-            next_retry_unix_ms: None,
         },
     );
     resources.publish_action(&failed);

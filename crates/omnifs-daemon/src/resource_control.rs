@@ -170,7 +170,6 @@ impl ResourceControl {
         Ok(ResourcePlan {
             base_revision: current.revision,
             desired_digest: desired.digest(),
-            normalized: desired.resources().to_vec(),
             changes,
         })
     }

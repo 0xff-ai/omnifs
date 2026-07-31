@@ -33,11 +33,7 @@ const RETRY_BASE: Duration = Duration::from_millis(250);
 const RETRY_CAP: Duration = Duration::from_secs(8);
 const MAX_RETRY_ATTEMPTS: u32 = 5;
 
-enum SupervisorCommand {
-    StopAll {
-        reply: tokio::sync::oneshot::Sender<anyhow::Result<Vec<ResourceName>>>,
-    },
-}
+type StopAllReply = tokio::sync::oneshot::Sender<anyhow::Result<Vec<ResourceName>>>;
 
 /// Sole daemon owner of Attachment runtime sequencing and recovery.
 pub(crate) struct AttachmentSupervisor {
@@ -45,7 +41,7 @@ pub(crate) struct AttachmentSupervisor {
     /// Interrupts an in-flight reconciliation pass before the command or
     /// shutdown path performs exact durable-identity cleanup.
     interrupt: watch::Sender<u64>,
-    commands: mpsc::Sender<SupervisorCommand>,
+    commands: mpsc::Sender<StopAllReply>,
     task: Mutex<Option<JoinHandle<anyhow::Result<()>>>>,
 }
 
@@ -70,10 +66,8 @@ struct Work {
 }
 
 enum WorkOutcome {
-    Settled,
-    Waiting,
+    Done,
     Retry,
-    Failed,
 }
 
 impl AttachmentSupervisor {
@@ -113,7 +107,7 @@ impl AttachmentSupervisor {
         });
         let (reply, receive) = tokio::sync::oneshot::channel();
         self.commands
-            .send(SupervisorCommand::StopAll { reply })
+            .send(reply)
             .await
             .context("attachment supervisor stopped before stop-all")?;
         receive
@@ -137,7 +131,7 @@ async fn run(
     context: ReconcileContext,
     mut shutdown: watch::Receiver<bool>,
     mut interrupt: watch::Receiver<u64>,
-    mut commands: mpsc::Receiver<SupervisorCommand>,
+    mut commands: mpsc::Receiver<StopAllReply>,
 ) -> anyhow::Result<()> {
     let mut revisions = context.resources.subscribe_revisions();
     let mut namespaces = context.resources.subscribe_namespace_revisions();
@@ -199,14 +193,13 @@ async fn run(
                 sessions.borrow_and_update();
                 reconcile_now = !suspended;
             },
-            command = commands.recv() => match command {
-                Some(SupervisorCommand::StopAll { reply }) => {
+            command = commands.recv() => {
+                if let Some(reply) = command {
                     let result = stop_all_runtimes(&context).await;
                     let _ = reply.send(result);
                     suspended = true;
                     reconcile_now = false;
-                },
-                None => {},
+                }
             },
             () = &mut retry_sleep => {
                 reconcile_now = !suspended;
@@ -313,7 +306,7 @@ async fn reconcile_latest(
         let Some(joined) = joined else { break };
         let (name, outcome) = joined.context("join attachment reconciliation task")??;
         match outcome {
-            WorkOutcome::Settled | WorkOutcome::Waiting | WorkOutcome::Failed => {
+            WorkOutcome::Done => {
                 retries.remove(&name);
             },
             WorkOutcome::Retry => {
@@ -374,7 +367,7 @@ async fn reconcile_one_active(
         && work.instance.observed_version == Some(desired.version)
         && work.action.is_none()
     {
-        return Ok(WorkOutcome::Failed);
+        return Ok(WorkOutcome::Done);
     }
     if !namespace_ready(context.resources.progress(), desired.revision) {
         if !update_observation(&context.state, &mut work.instance, |observation| {
@@ -385,7 +378,7 @@ async fn reconcile_one_active(
         })
         .await?
         {
-            return Ok(WorkOutcome::Waiting);
+            return Ok(WorkOutcome::Done);
         }
         context.resources.mark_attachment_phase(
             current_revision,
@@ -404,7 +397,7 @@ async fn reconcile_one_active(
                 ..PhaseReport::default()
             },
         );
-        return Ok(WorkOutcome::Waiting);
+        return Ok(WorkOutcome::Done);
     }
 
     let restart = work.action.is_some() || work.instance.observed_version != Some(desired.version);
@@ -452,7 +445,7 @@ async fn reconcile_one_active(
                         })
                         .await?
                         {
-                            return Ok(WorkOutcome::Waiting);
+                            return Ok(WorkOutcome::Done);
                         }
                         finish_ready(
                             context,
@@ -462,7 +455,7 @@ async fn reconcile_one_active(
                             current_revision,
                         )
                         .await?;
-                        return Ok(WorkOutcome::Settled);
+                        return Ok(WorkOutcome::Done);
                     },
                     ConfirmedSession::Absent => {},
                     ConfirmedSession::Stopped(confirmed)
@@ -490,7 +483,7 @@ async fn reconcile_one_active(
                     },
                 }
                 if !clear_observed(context, current_revision, work).await? {
-                    return Ok(WorkOutcome::Waiting);
+                    return Ok(WorkOutcome::Done);
                 }
             },
             Ok(Some(confirmed)) => {
@@ -500,7 +493,7 @@ async fn reconcile_one_active(
                     "confirmed attachment runtime requires replacement"
                 );
                 if !record_stopping(context, current_revision, &desired, work).await? {
-                    return Ok(WorkOutcome::Waiting);
+                    return Ok(WorkOutcome::Done);
                 }
                 if let Err(error) = stop_exact(
                     context,
@@ -537,7 +530,7 @@ async fn reconcile_one_active(
                     .await;
                 }
                 if !clear_observed(context, current_revision, work).await? {
-                    return Ok(WorkOutcome::Waiting);
+                    return Ok(WorkOutcome::Done);
                 }
             },
             Ok(None) => {
@@ -547,7 +540,7 @@ async fn reconcile_one_active(
                     "durable attachment runtime is absent; clearing its observation"
                 );
                 if !clear_observed(context, current_revision, work).await? {
-                    return Ok(WorkOutcome::Waiting);
+                    return Ok(WorkOutcome::Done);
                 }
             },
             Err(error) => {
@@ -588,7 +581,7 @@ async fn reconcile_one_active(
     })
     .await?
     {
-        return Ok(WorkOutcome::Waiting);
+        return Ok(WorkOutcome::Done);
     }
     context.resources.mark_attachment_phase(
         current_revision,
@@ -685,7 +678,7 @@ async fn reconcile_one_active(
             Ok(driver) => driver,
             Err(error) => {
                 tracing::warn!(attachment = %work.name, %error, "superseded attachment runtime spec is invalid");
-                return Ok(WorkOutcome::Waiting);
+                return Ok(WorkOutcome::Done);
             },
         };
         match driver.confirmed(&runtime_instance).await {
@@ -707,7 +700,7 @@ async fn reconcile_one_active(
                 tracing::warn!(attachment = %work.name, %error, "superseded attachment probe will retry against the latest desired version");
             },
         }
-        return Ok(WorkOutcome::Waiting);
+        return Ok(WorkOutcome::Done);
     }
     if !update_observation(&context.state, &mut work.instance, |observation| {
         observation.phase = AttachmentPhase::Ready;
@@ -717,7 +710,7 @@ async fn reconcile_one_active(
     })
     .await?
     {
-        return Ok(WorkOutcome::Waiting);
+        return Ok(WorkOutcome::Done);
     }
     finish_ready(
         context,
@@ -727,7 +720,7 @@ async fn reconcile_one_active(
         current_revision,
     )
     .await?;
-    Ok(WorkOutcome::Settled)
+    Ok(WorkOutcome::Done)
 }
 
 #[allow(
@@ -746,7 +739,7 @@ async fn reconcile_deletion(
     })
     .await?
     {
-        return Ok(WorkOutcome::Waiting);
+        return Ok(WorkOutcome::Done);
     }
     publish_deletion(context, revision, work);
     if let (Some(spec), Some(runtime_instance)) = (
@@ -843,7 +836,7 @@ async fn reconcile_deletion(
         // A newer desired declaration won the race while the old runtime was
         // being stopped. Preserve that row and let the next pass reconcile
         // from its durable desired and observed identities.
-        return Ok(WorkOutcome::Waiting);
+        return Ok(WorkOutcome::Done);
     }
     let terminal = context
         .resources
@@ -851,7 +844,7 @@ async fn reconcile_deletion(
     if terminal {
         publish_revision_ready(context.resources.progress(), revision);
     }
-    Ok(WorkOutcome::Settled)
+    Ok(WorkOutcome::Done)
 }
 
 async fn fail_action_for_deleted_attachment(
@@ -1065,7 +1058,7 @@ async fn retry_or_fail(
     })
     .await?
     {
-        return Ok(WorkOutcome::Waiting);
+        return Ok(WorkOutcome::Done);
     }
     if let Some(action) = &mut work.action {
         *action = context
@@ -1116,7 +1109,7 @@ async fn terminal_failure(
     })
     .await?
     {
-        return Ok(WorkOutcome::Waiting);
+        return Ok(WorkOutcome::Done);
     }
     publish_phase(
         context,
@@ -1166,7 +1159,7 @@ async fn terminal_failure(
             },
         );
     }
-    Ok(WorkOutcome::Failed)
+    Ok(WorkOutcome::Done)
 }
 
 async fn retry_deleted(
@@ -1184,7 +1177,7 @@ async fn retry_deleted(
     })
     .await?
     {
-        return Ok(WorkOutcome::Waiting);
+        return Ok(WorkOutcome::Done);
     }
     publish_deletion(context, revision, work);
     Ok(WorkOutcome::Retry)
@@ -1205,7 +1198,7 @@ async fn terminal_deleted_failure(
     })
     .await?
     {
-        return Ok(WorkOutcome::Waiting);
+        return Ok(WorkOutcome::Done);
     }
     mark_resource_phase(
         context,
@@ -1223,7 +1216,7 @@ async fn terminal_deleted_failure(
             detail: detail.to_owned(),
         },
     );
-    Ok(WorkOutcome::Failed)
+    Ok(WorkOutcome::Done)
 }
 
 #[derive(Default)]
@@ -1910,7 +1903,7 @@ mod tests {
             reconcile_one_active(&fixture.context, revision, &mut work)
                 .await
                 .unwrap(),
-            WorkOutcome::Waiting
+            WorkOutcome::Done
         ));
 
         let instance = fixture
@@ -2026,7 +2019,7 @@ mod tests {
             reconcile_deletion(&fixture.context, revision, &mut work)
                 .await
                 .unwrap(),
-            WorkOutcome::Settled
+            WorkOutcome::Done
         ));
 
         let receipt = fixture
@@ -2084,7 +2077,7 @@ mod tests {
             )
             .await
             .unwrap(),
-            WorkOutcome::Failed
+            WorkOutcome::Done
         ));
         let instance = fixture
             .state
@@ -2123,7 +2116,7 @@ mod tests {
             )
             .await
             .unwrap(),
-            WorkOutcome::Waiting
+            WorkOutcome::Done
         ));
 
         let instance = fixture

@@ -207,8 +207,7 @@ message ResourceChange {
 message ResourcePlan {
   uint64 base_revision = 1;
   bytes desired_digest = 2;
-  repeated ResourceDefinition normalized = 3;
-  repeated ResourceChange changes = 4;
+  repeated ResourceChange changes = 3;
 }
 message CredentialMaterialSidecar {
   string credential_name = 1;
@@ -253,20 +252,18 @@ message ProgressEvent {
   WatchProgressRequest target = 3;
   oneof event {
     ProgressSnapshot snapshot = 4;
-    ResourcePhaseChanged resource_phase_changed = 5;
-    ProviderPreparationProgress provider_preparation = 6;
-    ServingProgress serving_progress = 7;
-    CredentialProgress credential_progress = 8;
-    AttachmentProgress attachment_progress = 9;
-    RevisionReady revision_ready = 10;
-    RevisionFailed revision_failed = 11;
-    RevisionSuperseded revision_superseded = 12;
-    ActionCompleted action_completed = 13;
-    ActionFailed action_failed = 14;
-    ProgressSnapshot resync = 15;
+    ProviderPreparationProgress provider_preparation = 5;
+    ServingProgress serving_progress = 6;
+    CredentialProgress credential_progress = 7;
+    AttachmentProgress attachment_progress = 8;
+    RevisionReady revision_ready = 9;
+    RevisionFailed revision_failed = 10;
+    RevisionSuperseded revision_superseded = 11;
+    ActionCompleted action_completed = 12;
+    ActionFailed action_failed = 13;
+    ProgressSnapshot resync = 14;
   }
 }
-message ResourcePhaseChanged { ResourceStatus status = 1; }
 message ProviderPreparationProgress {
   bytes digest = 1;
   string catalog_name = 2;
@@ -279,9 +276,8 @@ message ProviderPreparationProgress {
   uint32 queued_digests = 9;
   uint32 active_digests = 10;
   uint32 retry_count = 11;
-  optional uint64 next_retry_unix_ms = 12;
-  optional uint32 queue_position = 13;
-  uint32 completed_digests = 14;
+  optional uint32 queue_position = 12;
+  uint32 completed_digests = 13;
 }
 message ServingProgress {
   uint64 revision = 1;
@@ -299,8 +295,6 @@ message CredentialProgress {
   CredentialProgressStage stage = 2;
   optional string error_code = 3;
   optional string detail = 4;
-  uint32 retry_count = 5;
-  optional uint64 next_retry_unix_ms = 6;
 }
 message AttachmentProgress {
   ResourceKey key = 1;
@@ -404,9 +398,9 @@ enum ResourcePhase { RESOURCE_PHASE_UNSPECIFIED = 0; RESOURCE_PENDING = 1; RESOU
 enum ResourceChangeAction { RESOURCE_CHANGE_ACTION_UNSPECIFIED = 0; RESOURCE_CREATE = 1; RESOURCE_UPDATE = 2; RESOURCE_DELETE = 3; RESOURCE_UNCHANGED = 4; }
 enum ActionKind { ACTION_KIND_UNSPECIFIED = 0; ACTION_SET_CREDENTIAL_MATERIAL = 1; ACTION_REVOKE_CREDENTIAL = 2; ACTION_RESTART_ATTACHMENT = 3; }
 enum ActionPhase { ACTION_PHASE_UNSPECIFIED = 0; ACTION_ACCEPTED = 1; ACTION_RUNNING = 2; ACTION_RETRYING = 3; ACTION_READY = 4; ACTION_FAILED = 5; }
-enum ProviderPreparationStage { PROVIDER_PREPARATION_STAGE_UNSPECIFIED = 0; PROVIDER_PREPARATION_QUEUED = 1; PROVIDER_PREPARATION_FETCHING = 2; PROVIDER_PREPARATION_VALIDATING = 3; PROVIDER_PREPARATION_COMPILING = 4; PROVIDER_PREPARATION_READY = 5; PROVIDER_PREPARATION_FAILED = 6; PROVIDER_PREPARATION_RETRYING = 7; }
+enum ProviderPreparationStage { PROVIDER_PREPARATION_STAGE_UNSPECIFIED = 0; PROVIDER_PREPARATION_QUEUED = 1; PROVIDER_PREPARATION_COMPILING = 2; PROVIDER_PREPARATION_READY = 3; PROVIDER_PREPARATION_FAILED = 4; PROVIDER_PREPARATION_RETRYING = 5; }
 enum ServingProgressStage { SERVING_PROGRESS_STAGE_UNSPECIFIED = 0; SERVING_QUEUED = 1; SERVING_BUILDING = 2; SERVING_DRAINING = 3; SERVING_READY = 4; SERVING_FAILED = 5; SERVING_WAITING_PROVIDERS = 6; SERVING_PROVIDERS_READY = 7; SERVING_BUILT = 8; SERVING_PUBLISHING = 9; SERVING_RETRYING = 10; SERVING_SUPERSEDED = 11; SERVING_DEGRADED = 12; }
-enum CredentialProgressStage { CREDENTIAL_PROGRESS_STAGE_UNSPECIFIED = 0; CREDENTIAL_PROGRESS_QUEUED = 1; CREDENTIAL_PROGRESS_REFRESHING = 2; CREDENTIAL_PROGRESS_REVOKING = 3; CREDENTIAL_PROGRESS_READY = 4; CREDENTIAL_PROGRESS_FAILED = 5; }
+enum CredentialProgressStage { CREDENTIAL_PROGRESS_STAGE_UNSPECIFIED = 0; CREDENTIAL_PROGRESS_REFRESHING = 1; CREDENTIAL_PROGRESS_REVOKING = 2; CREDENTIAL_PROGRESS_READY = 3; CREDENTIAL_PROGRESS_FAILED = 4; }
 enum AttachmentProgressStage { ATTACHMENT_PROGRESS_STAGE_UNSPECIFIED = 0; ATTACHMENT_QUEUED = 1; ATTACHMENT_STARTING = 2; ATTACHMENT_STOPPING = 3; ATTACHMENT_READY = 4; ATTACHMENT_FAILED = 5; ATTACHMENT_WAITING_FOR_NAMESPACE = 6; ATTACHMENT_PULLING_IMAGE = 7; ATTACHMENT_MATERIALIZING = 8; ATTACHMENT_MOUNTING = 9; ATTACHMENT_RETRYING = 10; ATTACHMENT_DELETING = 11; }
 enum AttachmentPhase { ATTACHMENT_RUNTIME_UNSPECIFIED = 0; ATTACHMENT_RUNTIME_PENDING = 1; ATTACHMENT_RUNTIME_WAITING_FOR_NAMESPACE = 2; ATTACHMENT_RUNTIME_STARTING = 3; ATTACHMENT_RUNTIME_READY = 4; ATTACHMENT_RUNTIME_STOPPING = 5; ATTACHMENT_RUNTIME_RETRYING = 6; ATTACHMENT_RUNTIME_FAILED = 7; ATTACHMENT_RUNTIME_DELETING = 8; }
 enum ErrorCode {

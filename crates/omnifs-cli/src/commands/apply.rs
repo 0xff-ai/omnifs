@@ -11,8 +11,7 @@ use crate::{
     },
 };
 use omnifs_api::{ApplyReceipt, ProgressSnapshot};
-use omnifs_core::ResourceRevision;
-use omnifs_kcl::{EvaluateOptions, evaluate};
+use omnifs_kcl::evaluate;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -20,10 +19,8 @@ use std::path::PathBuf;
 #[serde(rename_all = "camelCase")]
 struct ApplyResult {
     receipt: ApplyReceipt,
-    committed_revision: ResourceRevision,
     follow: String,
     snapshot: Option<ProgressSnapshot>,
-    outcome: &'static str,
 }
 
 pub async fn run(path: Option<PathBuf>, output: Output) -> anyhow::Result<ExitCode> {
@@ -31,7 +28,7 @@ pub async fn run(path: Option<PathBuf>, output: Output) -> anyhow::Result<ExitCo
     daemon_start::start(&output).await?;
     // The source is evaluated once. Provider imports are content-addressed and
     // inert, so they do not change desired state before this pure plan call.
-    let evaluated = evaluate(path, EvaluateOptions::default()).await?;
+    let evaluated = evaluate(path).await?;
     let rpc = RpcClient::resolve()?;
     let resolved = resolve_kcl_sources(&evaluated, &rpc).await?;
     let declarations = evaluated.config.into_declarations(&resolved)?;
@@ -66,15 +63,9 @@ pub async fn run(path: Option<PathBuf>, output: Output) -> anyhow::Result<ExitCo
                 receipt.revision
             );
             let result = ApplyResult {
-                committed_revision: receipt.revision,
                 receipt,
                 follow: follow.clone(),
                 snapshot: None,
-                outcome: if code == ExitCode::Canceled {
-                    "canceled"
-                } else {
-                    "watch_failed"
-                },
             };
             if output.is_structured() {
                 let verdict = if code == ExitCode::Canceled {
@@ -100,23 +91,21 @@ pub async fn run(path: Option<PathBuf>, output: Output) -> anyhow::Result<ExitCo
             if code == ExitCode::Canceled {
                 output.outro(format!(
                     "Canceled. Desired revision {} remains applied. Follow with {}.",
-                    result.committed_revision, result.follow
+                    result.receipt.revision, result.follow
                 ));
             }
             return Err(error.context(message)).with_hint(follow);
         },
     };
     let result = ApplyResult {
-        committed_revision: receipt.revision,
         receipt,
         follow,
         snapshot,
-        outcome: "ready",
     };
     if output.is_structured() {
         output.emit_result(ResultVerdict::Ok, result)?;
     } else {
-        output.report(format!("revision {} ready\n", result.committed_revision));
+        output.report(format!("revision {} ready\n", result.receipt.revision));
     }
     Ok(ExitCode::Success)
 }

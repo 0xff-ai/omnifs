@@ -441,7 +441,6 @@ pub fn plan(
 pub struct ResourcePlan {
     pub base_revision: ResourceRevision,
     pub desired_digest: ResourceDigest,
-    pub normalized: Vec<ResourceDefinition>,
     pub changes: Vec<ResourceChange>,
 }
 

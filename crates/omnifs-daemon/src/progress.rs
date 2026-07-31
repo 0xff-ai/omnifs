@@ -739,7 +739,10 @@ mod tests {
         for _ in 0..(LIVE_EVENT_CAPACITY * 4) {
             hub.publish(
                 ProgressTarget::Current,
-                ProgressEventKind::ResourcePhaseChanged(resource(1, ResourcePhase::Preparing)),
+                ProgressEventKind::ServingProgress(serving(
+                    1,
+                    omnifs_api::ServingProgressStage::Building,
+                )),
             );
         }
         let mut resynced = false;
@@ -758,7 +761,10 @@ mod tests {
         for _ in 0..LIVE_EVENT_CAPACITY {
             hub.publish(
                 ProgressTarget::Current,
-                ProgressEventKind::ResourcePhaseChanged(resource(1, ResourcePhase::Preparing)),
+                ProgressEventKind::ServingProgress(serving(
+                    1,
+                    omnifs_api::ServingProgressStage::Building,
+                )),
             );
         }
     }
@@ -798,7 +804,10 @@ mod tests {
         let _ = revision.recv().await.unwrap();
         hub.publish(
             ProgressTarget::Current,
-            ProgressEventKind::ResourcePhaseChanged(resource(2, ResourcePhase::Preparing)),
+            ProgressEventKind::ServingProgress(serving(
+                2,
+                omnifs_api::ServingProgressStage::Building,
+            )),
         );
         assert!(
             tokio::time::timeout(Duration::from_millis(20), revision.recv())
@@ -825,7 +834,6 @@ mod tests {
             queue_position: None,
             completed_digests: 1,
             retry_count: 0,
-            next_retry_unix_ms: None,
         });
         let hub = ProgressHub::new("daemon", current);
         let mut memberships = HashMap::new();
@@ -851,7 +859,6 @@ mod tests {
             queue_position: Some(1),
             completed_digests: 0,
             retry_count: 0,
-            next_retry_unix_ms: None,
         });
         let provider_event = stream.recv().await.unwrap();
         match provider_event.event {

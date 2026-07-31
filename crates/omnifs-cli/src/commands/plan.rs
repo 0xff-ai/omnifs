@@ -8,7 +8,7 @@ use crate::{
     ui::output::{Output, ResultVerdict},
 };
 use omnifs_api::{ResourceChange, ResourceChangeAction, ResourcePlan};
-use omnifs_kcl::{EvaluateOptions, evaluate};
+use omnifs_kcl::evaluate;
 use serde::Serialize;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -35,7 +35,7 @@ struct PlanCounts {
 pub async fn run(path: Option<PathBuf>, output: Output) -> anyhow::Result<ExitCode> {
     let path = super::config::default_path(path)?;
     daemon_start::start(&output).await?;
-    let evaluated = evaluate(path, EvaluateOptions::default()).await?;
+    let evaluated = evaluate(path).await?;
     let rpc = RpcClient::resolve()?;
     let resolved = resolve_kcl_sources(&evaluated, &rpc).await?;
     let declarations = evaluated.config.into_declarations(&resolved)?;
@@ -121,7 +121,6 @@ mod tests {
         let plan = ResourcePlan {
             base_revision: ResourceRevision::new(7),
             desired_digest: ResourceDigest::from_bytes([0; 32]),
-            normalized: Vec::new(),
             changes: vec![ResourceChange {
                 key: ResourceKey::new(ResourceKind::Mount, ResourceName::new("demo").unwrap()),
                 action: ResourceChangeAction::Unchanged,
@@ -138,7 +137,6 @@ mod tests {
         let plan = ResourcePlan {
             base_revision: ResourceRevision::new(1),
             desired_digest: ResourceDigest::from_bytes([1; 32]),
-            normalized: Vec::new(),
             changes: vec![
                 ResourceChange {
                     key: key(ResourceKind::Provider, "create"),
