@@ -92,6 +92,7 @@ sha2 = "0.10"
 fs2 = "0.4"
 atomic-write-file = "0.3"
 oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
+oci-client = "=0.17.0"
 webbrowser = "1"
 arc-swap = "1"
 async_singleflight = "0.6"

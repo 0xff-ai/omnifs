@@ -1,274 +1,131 @@
-//! Pulls the libkrun guest disk image from its ghcr OCI artifact and caches
-//! it locally: anonymous token, manifest, single blob, sha256 verification,
-//! and decompress-once. Only the release channel reaches this module; the dev
-//! channel uses a local path and never downloads.
+//! Pull and cache the release-channel libkrun guest image.
 //!
-//! Plain HTTP via the CLI's existing reqwest dependency, not an ORAS client:
-//! the guest image is a single-blob OCI artifact, so the full registry
-//! protocol surface ORAS covers (multi-arch indexes, referrers, copy) is
-//! more than this needs. `oras` itself is a CI-only tool
-//! (`scripts/ci/*guest-image*.sh`); it never ships in or runs from the CLI.
-//!
-//! Cache layout under `<cache_dir>/guest-images/`:
-//! - `<tag>.raw.zst`: the verified, still-compressed download.
-//! - `<tag>.raw`: decompressed once from the `.zst`, and the immutable base
-//!   callers materialize into a writable launch root.
-//!
-//! A present `<tag>.raw` is trusted on reuse without re-hashing: it was
-//! produced by decompressing an already sha256-verified `.zst` (or, on a
-//! corrupt-cache retry, a freshly re-verified one), and zstd's own frame
-//! checksum makes a silently corrupted decompress unlikely. Re-verifying the
-//! multi-hundred-MB `.zst` on every launch would cost real wall-clock time
-//! for a file this function itself never mutates after the rename below.
-//! Both the `.zst` and the final `.raw` are written to a `.part` sibling and
-//! renamed into place only after their integrity check passes, so a
-//! partial or failed download/decompress never leaves a usable-looking file
-//! at the real path.
+//! The OCI client owns reference parsing, registry authentication, manifest
+//! handling, and digest checks. This module owns only Omnifs cache paths,
+//! byte progress, decompression, and atomic publication.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use anyhow::{Context as _, Result};
-use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
+use oci_client::secrets::RegistryAuth;
+use oci_client::{Client, Reference};
+use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 
 use crate::{Artifact, ImageRef, RuntimeEvent, RuntimeEventSink};
 
-const ACCEPT_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
-
-/// The registry, repository, and reference (tag) parsed out of an
-/// `ImageRef` like `ghcr.io/0xff-ai/omnifs-guest:0.5.0`.
-struct OciRef {
-    registry: String,
-    repository: String,
-    reference: String,
-}
-
-impl OciRef {
-    fn parse(image: &str) -> Result<Self> {
-        let (registry, rest) = image
-            .split_once('/')
-            .with_context(|| format!("guest image reference `{image}` has no registry host"))?;
-        let (repository, reference) = rest
-            .rsplit_once(':')
-            .with_context(|| format!("guest image reference `{image}` has no tag"))?;
-        anyhow::ensure!(
-            !registry.is_empty() && !repository.is_empty() && !reference.is_empty(),
-            "guest image reference `{image}` is malformed"
-        );
-        Ok(Self {
-            registry: registry.to_string(),
-            repository: repository.to_string(),
-            reference: reference.to_string(),
-        })
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct BlobDescriptor {
-    digest: String,
-    size: u64,
-}
-
-/// The guest image is published as an OCI Image Manifest with exactly one layer.
-#[derive(Debug, Deserialize)]
-struct OciManifest {
-    layers: Vec<BlobDescriptor>,
-}
-
-impl OciManifest {
-    fn parse(bytes: &[u8]) -> Result<Self> {
-        serde_json::from_slice(bytes).context("parse the guest image OCI manifest")
-    }
-
-    /// The guest image manifest carries exactly one layer (the `.raw.zst`).
-    fn single_blob(&self) -> Result<&BlobDescriptor> {
-        let [one] = self.layers.as_slice() else {
-            anyhow::bail!(
-                "guest image manifest has {} layers; expected exactly one layer",
-                self.layers.len()
-            );
-        };
-        Ok(one)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenResponse {
-    token: Option<String>,
-    access_token: Option<String>,
-}
-
-/// Ensure the release-channel guest image named by `image` is present as a
-/// decompressed local `.raw` file under `images_dir`, pulling and caching it
-/// on first use. Returns the immutable base path a launch copies into its
-/// per-Attachment writable root before handing it to libkrun.
+/// Ensure the release-channel guest image is present as a decompressed local
+/// `.raw` file and return that immutable base path.
 pub(crate) async fn ensure_guest_image(
     image: &ImageRef,
     images_dir: &Path,
     events: RuntimeEventSink,
 ) -> Result<PathBuf> {
-    let oci_ref = OciRef::parse(image.as_str())?;
+    let reference = image
+        .as_str()
+        .parse::<Reference>()
+        .with_context(|| format!("parse guest image reference `{image}`"))?;
+    let tag = reference
+        .tag()
+        .context("guest image reference must use a tag")?
+        .to_owned();
     std::fs::create_dir_all(images_dir)
         .with_context(|| format!("create {}", images_dir.display()))?;
 
-    let raw_path = images_dir.join(format!("{}.raw", oci_ref.reference));
+    let raw_path = images_dir.join(format!("{tag}.raw"));
     if raw_path.is_file() {
         return Ok(raw_path);
     }
 
-    let zst_path = images_dir.join(format!("{}.raw.zst", oci_ref.reference));
-    let client = reqwest::Client::new();
-
+    let zst_path = images_dir.join(format!("{tag}.raw.zst"));
+    let client = Client::default();
     if !zst_path.is_file() {
-        download_and_verify(&client, &oci_ref, &zst_path, events.clone()).await?;
+        download(&client, &reference, &zst_path, events.clone()).await?;
     }
 
     match decompress(&zst_path, &raw_path) {
         Ok(()) => Ok(raw_path),
         Err(decompress_error) => {
-            // The cached .zst may be a leftover from an interrupted prior
-            // decompress; re-download once before giving up, rather than
-            // leaving the caller stuck on a permanently corrupt cache entry.
-            // Its own standalone single-row block: no sibling ledger row
-            // ever prints alongside a guest image pull.
             events.emit(RuntimeEvent::ImageRetry {
                 artifact: Artifact::GuestImage,
                 path: zst_path.clone(),
                 reason: format!("{decompress_error:#}"),
             });
             let _ = std::fs::remove_file(&zst_path);
-            download_and_verify(&client, &oci_ref, &zst_path, events).await?;
+            download(&client, &reference, &zst_path, events).await?;
             decompress(&zst_path, &raw_path)?;
             Ok(raw_path)
         },
     }
 }
 
-async fn fetch_pull_token(client: &reqwest::Client, oci_ref: &OciRef) -> Result<String> {
-    let url = format!(
-        "https://{}/token?scope=repository:{}:pull&service={}",
-        oci_ref.registry, oci_ref.repository, oci_ref.registry
-    );
-    let response: TokenResponse = client
-        .get(&url)
-        .send()
-        .await
-        .context("request an anonymous ghcr pull token")?
-        .error_for_status()
-        .context("ghcr token endpoint returned an error status")?
-        .json()
-        .await
-        .context("parse the ghcr token response")?;
-    response
-        .token
-        .or(response.access_token)
-        .context("ghcr token response carried no token")
-}
-
-async fn fetch_manifest(
-    client: &reqwest::Client,
-    oci_ref: &OciRef,
-    token: &str,
-) -> Result<OciManifest> {
-    let url = format!(
-        "https://{}/v2/{}/manifests/{}",
-        oci_ref.registry, oci_ref.repository, oci_ref.reference
-    );
-    let bytes = client
-        .get(&url)
-        .bearer_auth(token)
-        .header(reqwest::header::ACCEPT, ACCEPT_MANIFEST)
-        .send()
-        .await
-        .context("request the guest image manifest")?
-        .error_for_status()
-        .context("ghcr manifest endpoint returned an error status")?
-        .bytes()
-        .await
-        .context("read the guest image manifest body")?;
-    OciManifest::parse(&bytes)
-}
-
-/// Download the manifest's one blob, verify its sha256 digest against the
-/// manifest before it is trusted, and land it at `dest` only after that
-/// check passes (a temp sibling is used until then).
-async fn download_and_verify(
-    client: &reqwest::Client,
-    oci_ref: &OciRef,
-    dest: &Path,
+async fn download(
+    client: &Client,
+    reference: &Reference,
+    destination: &Path,
     events: RuntimeEventSink,
 ) -> Result<()> {
+    let tmp_path = part_path(destination);
     let result: Result<u64> = async {
-        let token = fetch_pull_token(client, oci_ref).await?;
-        let manifest = fetch_manifest(client, oci_ref, &token).await?;
-        let blob = manifest.single_blob()?;
-
-        let blob_url = format!(
-            "https://{}/v2/{}/blobs/{}",
-            oci_ref.registry, oci_ref.repository, blob.digest
-        );
-        let mut response = client
-            .get(&blob_url)
-            .bearer_auth(&token)
-            .send()
+        let (manifest, _) = client
+            .pull_image_manifest(reference, &RegistryAuth::Anonymous)
             .await
-            .context("request the guest image blob")?
-            .error_for_status()
-            .context("ghcr blob endpoint returned an error status")?;
-
-        let tmp_path = part_path(dest);
-        let mut file = std::fs::File::create(&tmp_path)
-            .with_context(|| format!("create {}", tmp_path.display()))?;
-        let mut hasher = Sha256::new();
-        let mut downloaded: u64 = 0;
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .context("read a chunk of the guest image blob")?
-        {
-            hasher.update(&chunk);
-            file.write_all(&chunk)
-                .with_context(|| format!("write {}", tmp_path.display()))?;
-            downloaded += chunk.len() as u64;
-            events.emit(RuntimeEvent::Download {
-                artifact: Artifact::GuestImage,
-                completed_bytes: downloaded,
-                total_bytes: Some(blob.size),
-                source: oci_ref.registry.clone(),
-            });
-        }
-        file.flush()
-            .with_context(|| format!("flush {}", tmp_path.display()))?;
-        drop(file);
-
-        let actual_digest = format!("sha256:{:x}", hasher.finalize());
-        if actual_digest != blob.digest || downloaded != blob.size {
-            let _ = std::fs::remove_file(&tmp_path);
+            .context("pull guest image manifest")?;
+        let [layer] = manifest.layers.as_slice() else {
             anyhow::bail!(
-                "guest image blob failed verification: expected {} ({} bytes), got {actual_digest} \
-                 ({downloaded} bytes)",
-                blob.digest,
-                blob.size
+                "guest image manifest has {} layers; expected exactly one layer",
+                manifest.layers.len()
             );
-        }
-
-        std::fs::rename(&tmp_path, dest)
-            .with_context(|| format!("rename {} to {}", tmp_path.display(), dest.display()))?;
-        Ok(downloaded)
+        };
+        let total = u64::try_from(layer.size).context("guest image layer size is negative")?;
+        let file = tokio::fs::File::create(&tmp_path)
+            .await
+            .with_context(|| format!("create {}", tmp_path.display()))?;
+        let mut output = ProgressWriter {
+            file,
+            completed: 0,
+            total,
+            source: reference.registry().to_owned(),
+            events: events.clone(),
+        };
+        client
+            .pull_blob(reference, layer, &mut output)
+            .await
+            .context("pull guest image layer")?;
+        output
+            .flush()
+            .await
+            .with_context(|| format!("flush {}", tmp_path.display()))?;
+        anyhow::ensure!(
+            output.completed == total,
+            "guest image layer size mismatch: expected {total} bytes, got {}",
+            output.completed
+        );
+        let completed = output.completed;
+        drop(output);
+        std::fs::rename(&tmp_path, destination).with_context(|| {
+            format!("rename {} to {}", tmp_path.display(), destination.display())
+        })?;
+        Ok(completed)
     }
     .await;
 
     match result {
-        Ok(downloaded) => {
+        Ok(completed) => {
             events.emit(RuntimeEvent::DownloadFinished {
                 artifact: Artifact::GuestImage,
-                reference: oci_ref.reference.clone(),
-                completed_bytes: Some(downloaded),
+                reference: reference
+                    .tag()
+                    .expect("tag checked before download")
+                    .to_owned(),
+                completed_bytes: Some(completed),
             });
             Ok(())
         },
         Err(error) => {
+            let _ = std::fs::remove_file(&tmp_path);
             events.emit(RuntimeEvent::DownloadFailed {
                 artifact: Artifact::GuestImage,
                 reference: None,
@@ -278,8 +135,51 @@ async fn download_and_verify(
     }
 }
 
-/// Decompress `zst_path` into `raw_path`, via a `.part` sibling renamed into
-/// place only once the whole stream has decoded successfully.
+struct ProgressWriter {
+    file: tokio::fs::File,
+    completed: u64,
+    total: u64,
+    source: String,
+    events: RuntimeEventSink,
+}
+
+impl AsyncWrite for ProgressWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match Pin::new(&mut self.file).poll_write(context, buffer) {
+            Poll::Ready(Ok(written)) => {
+                self.completed += written as u64;
+                self.events.emit(RuntimeEvent::Download {
+                    artifact: Artifact::GuestImage,
+                    completed_bytes: self.completed,
+                    total_bytes: Some(self.total),
+                    source: self.source.clone(),
+                });
+                Poll::Ready(Ok(written))
+            },
+            result => result,
+        }
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.file).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.file).poll_shutdown(context)
+    }
+}
+
+/// Decompress via a `.part` sibling and publish only a complete image.
 fn decompress(zst_path: &Path, raw_path: &Path) -> Result<()> {
     let input =
         std::fs::File::open(zst_path).with_context(|| format!("open {}", zst_path.display()))?;
@@ -316,70 +216,13 @@ fn part_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    const IMAGE_MANIFEST_FIXTURE: &str = r#"{
-        "schemaVersion": 2,
-        "mediaType": "application/vnd.oci.image.manifest.v1+json",
-        "artifactType": "application/vnd.omnifs.guest-image.v1+zstd",
-        "config": {
-            "mediaType": "application/vnd.oci.empty.v1+json",
-            "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
-            "size": 2
-        },
-        "layers": [
-            {
-                "mediaType": "application/vnd.omnifs.guest-image.v1+zstd",
-                "digest": "sha256:2d24b9eb82aa02a06ac3a487489a17083ec337a613ccb2a1f1ca610ec37370ca",
-                "size": 18
-            }
-        ]
-    }"#;
-
     #[test]
-    fn parses_oci_image_manifest_shape() {
-        let manifest = OciManifest::parse(IMAGE_MANIFEST_FIXTURE.as_bytes()).unwrap();
-        let blob = manifest.single_blob().unwrap();
-        assert_eq!(
-            blob.digest,
-            "sha256:2d24b9eb82aa02a06ac3a487489a17083ec337a613ccb2a1f1ca610ec37370ca"
-        );
-        assert_eq!(blob.size, 18);
-    }
-
-    #[test]
-    fn rejects_a_manifest_with_no_layers() {
-        let manifest = OciManifest::parse(r#"{"layers": []}"#.as_bytes()).unwrap();
-        let err = manifest.single_blob().unwrap_err();
-        assert!(err.to_string().contains("expected exactly one layer"));
-    }
-
-    #[test]
-    fn rejects_a_manifest_with_multiple_layers() {
-        let two_layers = r#"{
-            "layers": [
-                {"mediaType": "a", "digest": "sha256:aaaa", "size": 1},
-                {"mediaType": "b", "digest": "sha256:bbbb", "size": 2}
-            ]
-        }"#;
-        let manifest = OciManifest::parse(two_layers.as_bytes()).unwrap();
-        let err = manifest.single_blob().unwrap_err();
-        assert!(err.to_string().contains("expected exactly one layer"));
-    }
-
-    #[test]
-    fn oci_ref_parses_registry_repository_and_tag() {
-        let oci_ref = OciRef::parse("ghcr.io/0xff-ai/omnifs-guest:0.5.0").unwrap();
-        assert_eq!(oci_ref.registry, "ghcr.io");
-        assert_eq!(oci_ref.repository, "0xff-ai/omnifs-guest");
-        assert_eq!(oci_ref.reference, "0.5.0");
-    }
-
-    #[test]
-    fn oci_ref_rejects_a_reference_with_no_registry() {
-        assert!(OciRef::parse("omnifs-guest:0.5.0").is_err());
-    }
-
-    #[test]
-    fn oci_ref_rejects_a_reference_with_no_tag() {
-        assert!(OciRef::parse("ghcr.io/0xff-ai/omnifs-guest").is_err());
+    fn guest_image_reference_preserves_registry_and_tag() {
+        let reference = "ghcr.io/0xff-ai/omnifs-guest:0.5.0"
+            .parse::<Reference>()
+            .unwrap();
+        assert_eq!(reference.registry(), "ghcr.io");
+        assert_eq!(reference.repository(), "0xff-ai/omnifs-guest");
+        assert_eq!(reference.tag(), Some("0.5.0"));
     }
 }
