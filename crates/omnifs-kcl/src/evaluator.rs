@@ -1,6 +1,6 @@
 use crate::source::AuthoringConfig;
 use kcl_lang::{API, ExecProgramArgs};
-use serde_json::Value;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -14,13 +14,18 @@ pub struct EvaluatedConfig {
     pub config: AuthoringConfig,
 }
 
+#[derive(Deserialize)]
+struct KclOutput {
+    config: AuthoringConfig,
+}
+
 /// Evaluate KCL on a blocking worker. KCL's API is synchronous, so each call
 /// owns its API value inside the worker.
 pub async fn evaluate(path: impl Into<PathBuf>) -> Result<EvaluatedConfig, EvaluateError> {
     let path = path.into();
     tokio::task::spawn_blocking(move || evaluate_sync(path))
         .await
-        .map_err(|error| EvaluateError::Worker(error.to_string()))?
+        .map_err(EvaluateError::Worker)?
 }
 
 /// Synchronous evaluator used by focused tests and blocking callers.
@@ -70,14 +75,8 @@ fn evaluate_sync_with_limits(
             max: max_result_bytes,
         });
     }
-    let value: Value = serde_json::from_str(&result.json_result)
-        .map_err(|error| EvaluateError::Json(error.to_string()))?;
-    let config = value
-        .get("config")
-        .cloned()
-        .ok_or(EvaluateError::MissingConfig)?;
-    let config = serde_json::from_value(config)
-        .map_err(|error| EvaluateError::Authoring(error.to_string()))?;
+    let KclOutput { config } =
+        serde_json::from_str(&result.json_result).map_err(EvaluateError::Authoring)?;
     Ok(EvaluatedConfig { source, config })
 }
 
@@ -102,15 +101,11 @@ pub enum EvaluateError {
     #[error("KCL evaluation failed: {0}")]
     Kcl(String),
     #[error("KCL worker failed: {0}")]
-    Worker(String),
+    Worker(#[source] tokio::task::JoinError),
     #[error("KCL JSON output is {size} bytes, above the {max}-byte limit")]
     ResultTooLarge { size: usize, max: usize },
-    #[error("KCL returned invalid JSON: {0}")]
-    Json(String),
-    #[error("KCL result did not contain a root `config` value")]
-    MissingConfig,
     #[error("KCL config does not match strict omnifs authoring types: {0}")]
-    Authoring(String),
+    Authoring(#[source] serde_json::Error),
 }
 
 #[cfg(test)]

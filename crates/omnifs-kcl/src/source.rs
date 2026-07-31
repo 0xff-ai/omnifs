@@ -3,7 +3,8 @@ use omnifs_api::{
     ResourceDeclarations, ResourceDefinition,
 };
 use omnifs_core::{
-    AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ProviderId, ResourceName,
+    AttachmentProtocol, AttachmentRuntime, AttachmentSpec, AttachmentSpecError, ProviderId,
+    ResourceName,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
@@ -52,54 +53,12 @@ pub struct AttachmentAuthoring {
 
 /// Client-only source selector. Paths and selectors never cross the daemon
 /// boundary; they must be resolved to a content-addressed provider id first.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum ProviderSource {
-    Embedded { embedded: String },
+    Embedded { embedded: ResourceName },
     Local { local: LocalProviderSource },
     Digest { digest: ProviderId },
-}
-
-impl<'de> Deserialize<'de> for ProviderSource {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| serde::de::Error::custom("provider source must be an object"))?;
-        if object.len() != 1 {
-            return Err(serde::de::Error::custom(
-                "provider source must contain exactly one of `embedded`, `local`, or `digest`",
-            ));
-        }
-        let (kind, value) = object
-            .iter()
-            .next()
-            .expect("checked that provider source has exactly one field");
-        match kind.as_str() {
-            "embedded" => {
-                let embedded = serde_json::from_value::<String>(value.clone())
-                    .map_err(serde::de::Error::custom)?;
-                if embedded.is_empty() {
-                    return Err(serde::de::Error::custom(
-                        "embedded provider source must not be empty",
-                    ));
-                }
-                Ok(Self::Embedded { embedded })
-            },
-            "local" => serde_json::from_value::<LocalProviderSource>(value.clone())
-                .map(|local| Self::Local { local })
-                .map_err(serde::de::Error::custom),
-            "digest" => serde_json::from_value::<ProviderId>(value.clone())
-                .map(|digest| Self::Digest { digest })
-                .map_err(serde::de::Error::custom),
-            _ => Err(serde::de::Error::custom(
-                "provider source must contain one of `embedded`, `local`, or `digest`",
-            )),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,8 +102,7 @@ impl AuthoringConfig {
                         value.location,
                         value.docker_image,
                         value.libkrun_guest_image,
-                    )
-                    .map_err(|error| SourceResolutionError::Attachment(error.to_string()))?;
+                    )?;
                     Ok(ResourceDefinition::Attachment(AttachmentDefinition {
                         name: value.name,
                         spec,
@@ -164,17 +122,21 @@ impl AuthoringConfig {
 /// KCL authoring runs with the user's authority, so an explicit local artifact
 /// path is not restricted to the KCL package. Only the resolved digest crosses
 /// the control boundary.
-pub fn resolve_local_source(
+pub async fn resolve_local_source(
     source: &LocalProviderSource,
     config_dir: &std::path::Path,
-) -> Result<(PathBuf, ProviderId), SourceResolutionError> {
+) -> Result<(PathBuf, Vec<u8>), SourceResolutionError> {
     let path = if source.path.is_absolute() {
         source.path.clone()
     } else {
         config_dir.join(&source.path)
     };
-    let path = path.canonicalize().map_err(SourceResolutionError::Io)?;
-    let bytes = std::fs::read(&path).map_err(SourceResolutionError::Io)?;
+    let path = tokio::fs::canonicalize(path)
+        .await
+        .map_err(SourceResolutionError::Io)?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(SourceResolutionError::Io)?;
     let digest = ProviderId::from_wasm_bytes(&bytes);
     if digest != source.expected_digest {
         return Err(SourceResolutionError::DigestMismatch {
@@ -183,7 +145,7 @@ pub fn resolve_local_source(
             actual: digest,
         });
     }
-    Ok((path, digest))
+    Ok((path, bytes))
 }
 
 #[derive(Debug, Error)]
@@ -199,7 +161,7 @@ pub enum SourceResolutionError {
         actual: ProviderId,
     },
     #[error("invalid attachment source: {0}")]
-    Attachment(String),
+    Attachment(#[from] AttachmentSpecError),
 }
 
 #[cfg(test)]
@@ -208,8 +170,8 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    #[test]
-    fn local_source_resolves_relative_to_config_and_checks_digest() {
+    #[tokio::test]
+    async fn local_source_resolves_relative_to_config_and_checks_digest() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("provider.wasm");
         fs::write(&path, b"wasm").unwrap();
@@ -217,12 +179,12 @@ mod tests {
             path: PathBuf::from("provider.wasm"),
             expected_digest: ProviderId::from_wasm_bytes(b"wasm"),
         };
-        let (_, digest) = resolve_local_source(&source, dir.path()).unwrap();
-        assert_eq!(digest, source.expected_digest);
+        let (_, bytes) = resolve_local_source(&source, dir.path()).await.unwrap();
+        assert_eq!(bytes, b"wasm");
     }
 
-    #[test]
-    fn local_source_rejects_digest_mismatch() {
+    #[tokio::test]
+    async fn local_source_rejects_digest_mismatch() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("provider.wasm"), b"wasm").unwrap();
         let source = LocalProviderSource {
@@ -230,13 +192,13 @@ mod tests {
             expected_digest: ProviderId::from_wasm_bytes(b"other"),
         };
         assert!(matches!(
-            resolve_local_source(&source, dir.path()),
+            resolve_local_source(&source, dir.path()).await,
             Err(SourceResolutionError::DigestMismatch { .. })
         ));
     }
 
-    #[test]
-    fn local_source_resolves_an_explicit_path_outside_config_directory() {
+    #[tokio::test]
+    async fn local_source_resolves_an_explicit_path_outside_config_directory() {
         let dir = tempdir().unwrap();
         let artifact_dir = tempdir().unwrap();
         let artifact = artifact_dir.path().join("provider.wasm");
@@ -245,7 +207,7 @@ mod tests {
             path: artifact,
             expected_digest: ProviderId::from_wasm_bytes(b"wasm"),
         };
-        assert!(resolve_local_source(&source, dir.path()).is_ok());
+        assert!(resolve_local_source(&source, dir.path()).await.is_ok());
     }
 
     #[test]

@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::Path;
-use tokio::fs as tokio_fs;
 
 use crate::rpc::RpcClient;
 
@@ -285,7 +284,7 @@ pub(crate) async fn resolve_kcl_sources(
         };
         let digest = match &provider.source {
             ProviderSource::Embedded { embedded } => {
-                rpc.import_embedded_provider(embedded.clone())
+                rpc.import_embedded_provider(embedded.to_string())
                     .await?
                     .provider
                     .id
@@ -298,12 +297,8 @@ pub(crate) async fn resolve_kcl_sources(
                 *digest
             },
             ProviderSource::Local { local } => {
-                let (path, digest) = resolve_local_source(local, config_dir)?;
-                let bytes = tokio_fs::read(&path).await?;
-                anyhow::ensure!(
-                    ProviderId::from_wasm_bytes(&bytes) == digest,
-                    "local provider changed after source resolution"
-                );
+                let (path, bytes) = resolve_local_source(local, config_dir).await?;
+                let digest = local.expected_digest;
                 let file_name = path
                     .file_name()
                     .and_then(|value| value.to_str())
