@@ -18,6 +18,11 @@ session waits all happen in daemon workers after the transaction. A client
 that wants the ordinary synchronous command experience follows
 `WatchProgress`; disconnecting that stream never cancels daemon work.
 
+This split keeps the durable decision small and recoverable. A revision says
+what should exist, not that compilation, publication, or mounting already
+finished. Reconciliation can resume from SQLite after a client disconnect or
+daemon restart without replaying a client journal.
+
 ## Reconciliation
 
 The daemon constructs one required-cache `ComponentEngine` and shares it with
@@ -25,12 +30,34 @@ provider preparation and `HostOnline`. Bounded preparation starts for embedded
 providers before SQLite opens. Desired and retained digests join the same
 deduplicated queue after state becomes available. Preparation drops temporary
 components, while the active generation retains only the providers it uses.
+The cache is required because compilation is normal daemon work, not an
+optional optimization. One engine keeps cache identity and Wasmtime settings
+consistent across preparation and serving; retaining only the active
+generation avoids turning catalog warm-up into an unbounded component store.
 
 The serving reconciler builds only the latest desired revision. A failed build
 leaves the last good generation active. `AttachmentSupervisor` separately
 reconciles desired Attachment specs into exact out-of-process host, Docker, or
 libkrun runtimes. Durable observed rows and deletion tombstones let it adopt,
 stop, or replace exact runtime instances after daemon restart.
+
+Revision wakeups are notifications, not a durable work ledger. Every
+reconciler reloads current SQLite state and converges on the newest applicable
+revision. Provider phase maps are process-local; the required Wasmtime cache is
+the compiled-artifact authority, and cache filenames alone prove nothing.
+Compilation runs on its own bounded blocking pool. Workers record phase state
+before publishing best-effort events so a fresh snapshot remains sufficient
+after reconnect.
+
+Any future cache pruning belongs in a daemon worker coordinated with provider
+preparation. It cannot run in a control handler, delay raw apply, or replace
+honest preparation stages with inferred cache-hit claims.
+
+Each long-lived reconciler owns its spawned work, admission bound,
+cancellation, and join path. Shutdown stops new control writes and launches,
+drains exact Attachment runtimes and VFS sessions, then joins serving and
+provider preparation. Detached work may outlive a client stream, never its
+daemon owner.
 
 ## Progress and actions
 
@@ -55,3 +82,36 @@ client interchange before strict Rust validation. The CLI owns prompts, local
 provider path resolution, secret collection, and rendering. Users author KCL
 directly; the CLI does not keep a second KCL renderer or schema asset. It does
 not own desired state or filesystem runtime lifecycle.
+
+The narrow bootstrap layer exists only because a client must locate or spawn
+the daemon before RPC is available, and Doctor must prove exact process
+identity when SQLite is missing or corrupt. `Profile`, `SpawnLock`, and
+`DaemonIdentity` cover that boundary. Daemon-state layout and desired resources
+do not belong in bootstrap.
+
+## Rejected prior control plane
+
+The former control plane split authority between imperative mutation RPCs,
+lease-scoped batches, a client recovery journal, client-owned filesystem specs,
+and runtime launch code in the CLI. A request could mix the durable decision
+with provider and filesystem work. Recovery then depended on which client
+files, daemon rows, and live processes happened to survive.
+
+That design was removed rather than kept as a compatibility path:
+
+- Complete-set resource apply replaced imperative per-kind mutations and the
+  mutation lease.
+- SQLite receipts replaced the client journal and snapshot handoff.
+- Daemon reconciliation replaced client-owned provider and filesystem
+  lifecycle.
+- Strict `AttachmentSpec` plus durable runtime identity replaced client
+  filesystem registries and owner IDs.
+- Required shared compilation caching replaced optional or fallback engine
+  construction.
+- KCL became client input to strict Rust declarations, not another schema or
+  state authority.
+
+Do not restore readers, scanners, migrations, aliases, or hidden commands for
+that model. If interoperability with an old release ever becomes a product
+requirement, design it as an explicit bounded import boundary rather than a
+second active control plane.

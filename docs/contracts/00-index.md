@@ -5,7 +5,9 @@ Owns: the agent-facing map for binding `omnifs` rules.
 
 ## Read when
 
-Read this first when deciding which contract applies. Do not load every contract by default. `AGENTS.md` is the always-loaded router; the files here are task-area rules.
+Read this first when deciding which contract applies. Do not load every contract
+by default. `AGENTS.md` is the always-loaded entry point; this index is the
+single task-area router.
 
 ## Rules
 
@@ -20,7 +22,7 @@ Read this first when deciding which contract applies. Do not load every contract
 
 Documentation types:
 
-- `AGENTS.md`: always-loaded operating guide.
+- `AGENTS.md`: always-loaded universal rules and operating entry point.
 - `docs/contracts/`: binding rules by task area.
 - `docs/architecture/`: current explanatory model and rationale, loaded only when a task needs subsystem context.
 

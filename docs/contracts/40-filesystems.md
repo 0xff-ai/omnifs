@@ -15,6 +15,23 @@ Filesystem crates translate namespace answers into protocol state. They do not d
 
 A filesystem consumes the narrow `omnifs_engine::namespace` surface (`Namespace`, validated `Path`, `Attrs`, `DirPage`, `ReadAnswer`, `NsEvent`, and friends) and nothing else of the engine. It never touches internal tree or view modules directly: the already-policied protocol answer (size, TTL, change counter, direct-I/O, read style) crosses the `Namespace` boundary as plain data. Keep inode numbers, filehandles, stateids, leases, notifications, reply construction, and protocol-specific error mapping in filesystem crates. Convert namespace types into protocol replies once at the filesystem boundary.
 
+### Compatibility target
+
+One shared projected tree must behave like ordinary read-only files for every
+consumer, not one favored access pattern. Changes to namespace or protocol
+behavior must preserve:
+
+- reads and tails through `cat`, `head`, `tail`, `less`, `xxd`, `hexdump`,
+  `od`, and `file`;
+- traversal through `grep -r`, `rg`, `find`, and `fd`;
+- metadata through `ls`, `du`, `wc`, and `stat`;
+- copy, archive, compare, and hashing through `cp`, `tar`, `rsync`, `diff`,
+  `cmp`, and checksum tools;
+- structured inspection through `jq`, `yq`, and `xmllint`.
+
+Memory-mapped editors remain best effort. Do not add shell-, editor-, or
+agent-specific namespace behavior.
+
 ### Filesystem registry
 
 The daemon constructs one `TreeNamespace` over the shared mount registry and gives it to `omnifs_vfs::VfsServer`. `VfsServer` binds one fixed Unix endpoint and one fixed TCP endpoint on every start, owns their tasks, and records the Attachment name, exact `omnifs_core::AttachmentSpec`, and runtime instance supplied in each handshake. The Unix endpoint is mode `0600`; TCP binds only loopback or the verified Docker bridge address and has no auth. Any listener exit after readiness is fatal.
@@ -41,7 +58,19 @@ The public identity is the Attachment resource's `ResourceName` plus its daemon-
 
 Host locations are absolute and default to a name-bearing daemon-owned path. Docker and libkrun always use `/omnifs`. Host and libkrun runtime records and controls include the Attachment name, full resolved spec, and a separate random process instance ID. Docker labels carry the name, while exact inspection verifies its full flat command against the stored spec.
 
-`AttachmentSupervisor` serializes normal lifecycle by Attachment name, publishes strict daemon-owned runtime records, and serves instance-specific mode-0600 control sockets. Launch confirmation, deletion, and Doctor require identity-matched proof; normal teardown never signals a PID read from disk. Status reads daemon desired and observed Attachment state. The product has no client-owned filesystem spec reader.
+`AttachmentSupervisor` serializes normal lifecycle by Attachment name, publishes strict daemon-owned runtime records, and serves instance-specific mode-0600 control sockets. Launch confirmation, deletion, and Doctor require identity-matched proof; normal teardown never signals a PID read from disk. Status reads daemon desired and observed Attachment state.
+
+Runtime records are recovery evidence, not desired truth. Changing the stored
+`AttachmentSpec` shape changes durable identity and the VFS handshake contract,
+so it requires explicit storage and protocol review.
+
+An exact stop installs the VFS reconnect fence before touching the runtime,
+even when no session is currently live. The supervisor first requests graceful
+session teardown, then stops and proves the exact runtime absent. Only after
+that proof may the server close a busy or stale connection. It waits for the
+exact session to disappear before releasing the fence. Never clear durable
+runtime identity or a deletion tombstone before both runtime and session
+absence are proved.
 
 ### Filesystem runtime and runner ownership
 
@@ -52,6 +81,15 @@ Host locations are absolute and default to a name-bearing daemon-owned path. Doc
 `omnifs attachment ls` and `omnifs status` list daemon desired and observed Attachment state. `omnifs status --follow`, `--revision <n>`, and `--action <id>` follow typed progress. A failed daemon probe yields `unknown`; it must not invent a stopped or attached runtime fact.
 
 Host, Docker, and libkrun lifecycle drivers probe and stop only exact Attachment runtime identity. Doctor alone searches daemon-owned runtime roots for stray state. Destructive cleanup holds the profile-wide spawn lock for the full repair, proves the daemon stopped before touching an exact identity, and requires interactive confirmation that `--yes` cannot bypass.
+
+`omnifs-fs-runtime` owns lifecycle mechanics, not desired-state policy. Callers
+supply the resolved Attachment, daemon paths, endpoints, and event sink. The
+crate does not resolve profiles, read `OMNIFS_HOME`, prompt, render terminal
+output, or depend on `omnifs-cli` or `omnifs-daemon`. Runtime events use closed
+typed variants, carry facts rather than user-facing prose, and use non-blocking
+delivery. One keyed supervisor task owns each Attachment; no mutex or lifecycle
+lock may span a runtime await. Host, Docker, and libkrun remain a closed
+dispatch set until a real fourth runtime exists.
 
 Libkrun is a libkrun microVM on Apple Silicon macOS. It ships the same filesystem binary and Omnifs VFS wire protocol as the Docker runtime; only the attach transport changes, from TCP to vsock. Three fixed vsock ports share one explicit virtio-vsock device: attach (guest-initiated, proxied by libkrun onto the daemon's fixed Unix attach socket), a readiness beacon (guest-initiated, dialed by `omnifs-fuse` once its FUSE mount is serving; see `crates/omnifs-vfs/src/beacon.rs`), and ssh (host-initiated, libkrun's connect mode, into the guest image's socket-activated dropbear, reached through `socat`). The helper owns a mode-0600 attach bridge between libkrun and the daemon target. When daemon replacement closes the target leg, the bridge closes the guest leg so the wire client reconnects through a fresh bridge connection to the restored target. No `virtio-net` device is ever configured, and the helper disables implicit vsock before adding that device with a zero TSI mask. The filesystem carries no credentials and needs no egress. The guest FUSE mount stays reachable only from inside the guest. The host-visible macOS surface remains the NFSv4 loopback filesystem; a guest runtime must never claim host visibility for its FUSE mount.
 

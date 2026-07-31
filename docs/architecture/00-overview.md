@@ -79,7 +79,13 @@ A filesystem consumes the same `omnifs_vfs::Namespace` through the Omnifs VFS wi
 
 There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemon`. The CLI owns setup, auth UX, resource authoring, metrics, and daemon spawn. The daemon owns desired resources, providers, credentials, mounts, SQLite state/cache, logs, Attachment runtime lifecycle, live VFS sessions, and namespace serving. The typed local RPC wire types live in `omnifs-api`; the CLI has no direct daemon-store API.
 
-The active profile root comes from `OMNIFS_HOME` or `$HOME/.omnifs`. Daemon state under `daemon-state/` contains `control-store/state.sqlite3`, provider artifacts, desired resources, durable Attachment instances and actions, runtime records, caches, and raw logs. The complete desired set commits through `ApplyResources` in one transaction and reconciles after the reply. Old client filesystem specs remain read-only migration data. There is no client-side resource desired state, snapshot handoff, or offline mode.
+The active profile root comes from `OMNIFS_HOME` or `$HOME/.omnifs`. Daemon
+state under `daemon-state/` contains `control-store/state.sqlite3`, provider
+artifacts, desired resources, durable Attachment instances and actions,
+runtime records, caches, and raw logs. The complete desired set commits
+through `ApplyResources` in one transaction and reconciles after the reply.
+There is no client-side desired state, second desired-state reader, snapshot
+handoff, or offline mode.
 
 The daemon process itself is host-native. `AttachmentSupervisor` starts host, Docker, and libkrun filesystem runtimes out of process and owns their exact lifecycle. On Apple Silicon macOS, the daemon starts the private sibling `omnifs-libkrun`, which loads the signed packaged dylib and firmware and exposes one fixed VM shape. VFS wire v11 separates configured Attachments from live sessions and fences each session with the exact Attachment spec and runtime instance across reconnect and daemon replacement.
 
@@ -113,4 +119,6 @@ These directions were explicitly ruled out and should not return without a new g
 - Auth boundary rationale: `docs/architecture/40-auth-boundary.md`
 - NFS filesystem rationale: `docs/architecture/50-nfs-filesystem.md`
 - Async provider runtime: `docs/architecture/60-async-provider-runtime.md`
+- Declarative resource control plane:
+  `docs/architecture/70-resource-control-plane.md`
 - Provider authoring: `providers/DESIGN.md` and `skills/omnifs-provider-sdk/SKILL.md`

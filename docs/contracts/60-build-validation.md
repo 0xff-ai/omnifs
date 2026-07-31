@@ -29,7 +29,20 @@ Run `just schema` after provider manifest schema changes. Keep the generated pro
 
 The control protocol has one current protobuf package, `omnifs.control.v1`; it does not use a postcard frame or a separate version prefix. Unary messages and stream items are bounded to 1 MiB, and log tails to 10,000 lines. Protocol tests exercise resource plan/apply, complete initial progress snapshots, revision and action terminal events, durable receipt recovery, Attachment identity, and typed domain conversions directly.
 
-`omnifs-kcl` uses the official in-process Rust API pinned to one exact upstream revision. Its checks must prove strict KCL output decoding, explicit local provider digest validation, no implicit remote package fetch, and conversion into typed Rust declarations. KCL JSON is temporary client interchange and must never contain secret material.
+`omnifs-kcl` uses the official in-process Rust API pinned to one exact upstream
+revision. It never invokes a `kcl` executable. Its checks must prove strict KCL
+output decoding, explicit local provider digest validation, no implicit remote
+package fetch, and conversion into typed Rust declarations. KCL JSON is
+temporary client interchange and must never contain secret material.
+
+Strict Rust declarations and SQLite rows own the resource contract. Do not add
+a KCL schema asset or generate Rust types from KCL. If typed KCL authoring ever
+needs generated definitions, derive that client package from the Rust model so
+authority continues to point toward Rust.
+
+Keep the external KCL API behind `omnifs-kcl`. An upstream revision change must
+rerun strict decode, import-boundary, and release-target build checks. Remote
+modules remain a separate gated design decision, not an upgrade side effect.
 
 ### Live runtime validation
 

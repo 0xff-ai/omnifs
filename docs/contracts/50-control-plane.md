@@ -35,17 +35,54 @@ The public binary is one `omnifs` executable. The hidden `omnifs daemon` subcomm
 - `omnifs provider add|ls|show|rm` imports embedded or local Wasm, pins a named Provider resource, and never grants authority by import alone.
 - `omnifs mount add|ls|show|update|reauth|revoke|rm` is interactive resource porcelain. It selects a Provider, collects typed config, host resources, limits, and Credential references, shows the planner's diff, applies the complete desired set, and follows typed revision progress. `reauth` changes secret material; `revoke` performs explicit upstream revocation and leaves the declared slot in `NeedsSecret`.
 - `omnifs credential login|ls|show|rm|revoke` plus `omnifs credential set <name> --from-env <variable>` keep values out of argv and output. `set --from-env` is the one secret automation path; login, removal, and revoke are interactive and follow durable action progress.
-- `omnifs attachment add|ls|show|rm|restart|shell <name>` is the public filesystem lifecycle. Resource presence requests attachment; removal requests teardown. Restart follows its action stream and shell uses typed daemon access. The old `fs` grammar is retired publicly, while hidden `run-fs` remains an internal runner.
+- `omnifs attachment add|ls|show|rm|restart|shell <name>` is the public filesystem lifecycle. Resource presence requests attachment; removal requests teardown. Restart follows its action stream and shell uses typed daemon access. Hidden `run-fs` remains an internal runner.
 
 Global `--output human|json|jsonl`, `--quiet`, `--no-input`, and `--yes` apply to one invocation after Clap parses it. JSON emits one terminal envelope. JSONL emits stream records followed by one terminal result or error. Clap usage errors exit 2 before output mode applies.
+
+Human, JSONL, JSON, and quiet mutation commands all wait for terminal
+reconciliation by default. Human and JSONL modes stream typed progress. JSON
+buffers progress and emits exactly one terminal envelope. Quiet mode emits
+only the terminal receipt. Non-TTY human output uses stable lines with no
+cursor control. TTY output may show elapsed time for an active stage but never
+turns it into a completion percentage or cache-hit claim.
+
+Finite control calls use bounded unary deadlines. Progress and log streams do
+not inherit a unary deadline; their target terminal state or Ctrl-C ends them.
+
+Ctrl-C stops only the client watch, exits 130, and prints the exact
+`status --follow --revision <n>` or `status --follow --action <id>` command
+needed to resume. It never cancels daemon work. A plan accepted after an
+interactive prompt applies against that exact base revision; stale apply fails
+and the CLI does not silently re-plan or ask again.
 
 `omnifs setup` starts the daemon, lists every embedded provider with honest auth and config labels, offers no-sign-in providers, creates Provider and Mount resources plus the recommended Attachment in one desired set, and asks for one plan consent. It then follows the returned revision until ready, failed, or superseded. The apply RPC does not wait for compilation or runtime work. There is no `omnifs up` or offline product mode; `omnifs plan <file>` and `omnifs apply <file> --yes` are the automation surface.
 
 `omnifs down` rejects new writes, asks `AttachmentSupervisor` to stop every exact observed runtime, waits for the bounded drain, reports stragglers, and stops the daemon without deleting desired Attachment rows. The next daemon reloads and restores desired Attachments.
 
+## KCL authoring boundary
+
+`omnifs plan <file>` and `omnifs apply <file> --yes` evaluate KCL once through
+the official in-process Rust API pinned to one exact upstream revision. They
+never invoke a `kcl` subprocess or fetch a remote package implicitly. Imports
+must resolve from explicit local input. Local provider paths are client-only:
+the CLI reads and validates the artifact, imports it by digest, and sends no
+source path to the daemon.
+
+KCL output is temporary JSON interchange decoded immediately into strict Rust
+resource types. Rust types and SQLite rows remain authoritative. There is no
+KCL schema asset and no generated Rust model derived from KCL. Secrets never
+enter KCL. The evaluator runs once per command so consent applies to the exact
+candidate that reaches `PlanResources` and `ApplyResources`.
+
 ## Mounts, providers, and credentials
 
-SQLite is the sole desired-state authority. Provider, Mount, Credential, and Attachment definitions commit as one complete set with an exact base revision and desired digest. The durable apply receipt makes retries safe across lost replies. Public reads may use resource snapshots or typed resource-specific status calls; there is no lease-scoped mutation batch, imperative authoring RPC, or client recovery journal.
+SQLite is the sole desired-state authority. Provider, Mount, Credential, and Attachment definitions commit as one complete set with an exact base revision and desired digest. The durable apply receipt makes retries safe across lost replies. Public reads may use resource snapshots or typed resource-specific status calls. Resource edits use complete-set apply; operational work uses durable typed actions.
+
+The normalized typed resource set owns digest identity. Do not hash KCL text,
+presentation JSON, protobuf bytes, or SQLite row layout. A resource change must
+update the explicit canonical digest encoding. `ResourceName` has one grammar
+in `omnifs-core` shared by every resource kind. Apply policy belongs in the
+resource transaction owner, not in SQL row codecs.
 
 Provider artifacts live in daemon state. `ImportProvider` accepts a bounded upload or an exact embedded provider name, validates the content digest and metadata, and returns a receipt keyed only by content digest. A dropped upload is simply retried, and importing identical bytes twice returns `Unchanged` rather than a second row.
 
@@ -74,8 +111,9 @@ CLI dogfood metrics are local client files under `<profile>/metrics/`, controlle
 
 ## Must not
 
-- Reintroduce `omnifs-workspace`, a shared workspace API, client-side mount desired state, Git refs, immutable mount snapshots, `daemon.json`, or JSON credential storage.
+- Add a second desired-state or workspace authority beside daemon SQLite.
 - Add `up`, an imperative mutation path separate from the resource planner, or an offline product mode. `omnifs apply` is the KCL complete-set apply command.
+- Add a KCL schema authority or `kcl` subprocess.
 - Send credentials through filesystem attach/TCP or expose them in RPC replies, status, inventory, logs, tracing, metrics, Debug, Inspector, or receipts.
 - Make the daemon read client-owned desired state or config, make normal lifecycle write a client-owned filesystem tree, or make the CLI read daemon SQLite tables and logs directly.
 - Add a remote control endpoint or TCP authentication mode. TCP attach remains local loopback or the detected Docker bridge without auth.
@@ -86,6 +124,7 @@ CLI dogfood metrics are local client files under `<profile>/metrics/`, controlle
 - `crates/omnifs-bootstrap/src/lib.rs`
 - `crates/omnifs-api/src/control.rs`
 - `crates/omnifs-cli/src/rpc.rs`
+- `crates/omnifs-kcl/src/lib.rs`
 - `crates/omnifs-inspector/src/lib.rs`
 - `crates/omnifs-daemon/src/app.rs`
 - `crates/omnifs-daemon/src/control.rs` and `crates/omnifs-daemon/src/control/`
