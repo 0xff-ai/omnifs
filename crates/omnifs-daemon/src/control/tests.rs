@@ -531,7 +531,7 @@ async fn typed_resources_apply_fast_and_progress_recovers_after_disconnect() {
     );
     let receipt = grpc::apply_resources_response(&response).unwrap();
     assert!(receipt.changed);
-    assert_eq!(receipt.revision, omnifs_core::ResourceRevision::new(2));
+    assert_eq!(receipt.revision, plan.base_revision.next().unwrap());
 
     let retry = c
         .apply_resources(grpc::to_apply_resources_request(&request))
