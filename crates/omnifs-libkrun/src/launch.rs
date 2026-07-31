@@ -173,7 +173,7 @@ impl AttachBridgeThread {
         let active = self
             .active
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(active) = active.as_ref() {
             let _ = active.guest.shutdown(Shutdown::Both);
             let _ = active.daemon.shutdown(Shutdown::Both);
@@ -288,7 +288,9 @@ impl AttachBridge {
         let mut daemon_writer = daemon;
 
         {
-            let mut active = active.lock().unwrap_or_else(|poison| poison.into_inner());
+            let mut active = active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if stop.load(Ordering::Acquire) {
                 return Ok(());
             }
@@ -318,7 +320,9 @@ impl AttachBridge {
             let _ = guest_shutdown.shutdown(Shutdown::Both);
             let _ = daemon_shutdown.shutdown(Shutdown::Both);
         });
-        *active.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
+        *active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         Ok(())
     }
 }
