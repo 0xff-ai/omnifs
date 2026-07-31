@@ -10,6 +10,7 @@ categories = ["filesystem", "wasm", "development-tools"]
 keywords = ["omnifs", "wasm", "wit", "sdk", "fuse"]
 
 [dependencies]
+derive_more = { workspace = true }
 omnifs-core = { workspace = true }
 omnifs-sdk-macros = { workspace = true }
 omnifs-wit = { workspace = true }

@@ -4,49 +4,39 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
 
+use derive_more::{AsRef, Display};
+
 const NAME_HINT: &str =
     "lowercase letters, digits, dashes; 1-32 chars; start with a letter or digit";
 
 /// One name grammar shared by every desired resource kind.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(AsRef, Debug, Display, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[as_ref(str)]
 pub struct ResourceName(String);
 
 impl ResourceName {
     pub fn new(value: impl Into<String>) -> Result<Self, ResourceNameError> {
         let value = value.into();
-        if value.is_empty() || value.len() > 32 {
+        if value.len() > 32 {
             return Err(ResourceNameError::InvalidLength);
         }
+
         let mut chars = value.chars();
-        let Some(first) = chars.next() else {
-            return Err(ResourceNameError::InvalidLength);
-        };
-        if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        let first = chars.next().ok_or(ResourceNameError::InvalidLength)?;
+        if !matches!(first, 'a'..='z' | '0'..='9') {
             return Err(ResourceNameError::InvalidStart);
         }
-        for ch in chars {
-            if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-') {
-                return Err(ResourceNameError::InvalidCharacter { ch });
-            }
+
+        if let Some(ch) = chars.find(|&ch| !matches!(ch, 'a'..='z' | '0'..='9' | '-')) {
+            return Err(ResourceNameError::InvalidCharacter { ch });
         }
+
         Ok(Self(value))
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl fmt::Display for ResourceName {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl AsRef<str> for ResourceName {
-    fn as_ref(&self) -> &str {
-        self.as_str()
     }
 }
 
@@ -152,7 +142,18 @@ impl fmt::Display for ResourceKey {
 
 /// Monotonic revision of the complete desired resource set.
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+    Debug,
+    Display,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
 )]
 #[serde(transparent)]
 pub struct ResourceRevision(u64);
@@ -173,12 +174,6 @@ impl ResourceRevision {
             Some(value) => Some(Self(value)),
             None => None,
         }
-    }
-}
-
-impl fmt::Display for ResourceRevision {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
     }
 }
 

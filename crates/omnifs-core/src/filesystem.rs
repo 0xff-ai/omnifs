@@ -5,6 +5,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use derive_more::{AsRef, Display};
+
 pub const FILESYSTEM_GUEST_LOCATION: &str = "/omnifs";
 const RUNTIME_INSTANCE_HINT: &str = "exactly 32 lowercase hexadecimal characters";
 
@@ -95,7 +97,8 @@ pub struct ParseFilesystemRuntimeError(String);
 ///
 /// Parsing this at process and wire ingress prevents malformed peers from
 /// entering the live-session registry under an identity `SQLite` would reject.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(AsRef, Debug, Display, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[as_ref(str)]
 pub struct RuntimeInstanceId(String);
 
 impl RuntimeInstanceId {
@@ -119,12 +122,6 @@ impl RuntimeInstanceId {
     #[must_use]
     pub fn into_string(self) -> String {
         self.0
-    }
-}
-
-impl fmt::Display for RuntimeInstanceId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
     }
 }
 

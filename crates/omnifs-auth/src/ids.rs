@@ -2,9 +2,12 @@ use omnifs_core::{ProviderName, validate_account, validate_key_part};
 use std::fmt;
 use std::str::FromStr;
 
+use derive_more::{AsRef, Display};
+
 pub use omnifs_core::IdError;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(AsRef, Debug, Display, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[as_ref(str)]
 pub struct SchemeId(String);
 
 impl SchemeId {
@@ -19,18 +22,6 @@ impl SchemeId {
     }
 }
 
-impl fmt::Display for SchemeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for SchemeId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
 impl FromStr for SchemeId {
     type Err = IdError;
 
@@ -39,7 +30,8 @@ impl FromStr for SchemeId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(AsRef, Debug, Display, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[as_ref(str)]
 pub struct AccountId(String);
 
 impl AccountId {
@@ -55,18 +47,6 @@ impl AccountId {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl fmt::Display for AccountId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for AccountId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
     }
 }
 

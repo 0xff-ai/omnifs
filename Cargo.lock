@@ -926,6 +926,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
+name = "convert_case"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1497,10 +1506,12 @@ version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
 dependencies = [
+ "convert_case",
  "proc-macro2",
  "quote",
  "rustc_version",
  "syn 2.0.118",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -4608,6 +4619,7 @@ version = "0.2.1"
 dependencies = [
  "arc-swap",
  "async_singleflight",
+ "derive_more",
  "http",
  "oauth2",
  "omnifs-core",
@@ -4699,6 +4711,7 @@ name = "omnifs-core"
 version = "0.2.1"
 dependencies = [
  "blake3",
+ "derive_more",
  "hex",
  "serde",
  "serde_json",
@@ -5053,6 +5066,7 @@ dependencies = [
 name = "omnifs-sdk"
 version = "0.2.1"
 dependencies = [
+ "derive_more",
  "hashbrown 0.15.5",
  "hex",
  "http",
