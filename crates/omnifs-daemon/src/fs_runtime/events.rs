@@ -102,6 +102,66 @@ pub enum RuntimeEvent {
     },
 }
 
+impl RuntimeEvent {
+    /// Map a runtime fact onto its daemon filesystem-progress contribution:
+    /// the progress stage it belongs to (if any), completed bytes, and total
+    /// bytes when known. Co-located with the event definitions so every new
+    /// variant's progress mapping is decided beside its shape.
+    pub(crate) fn progress_stage(
+        &self,
+    ) -> (
+        Option<omnifs_api::FilesystemProgressStage>,
+        u64,
+        Option<u64>,
+    ) {
+        use omnifs_api::FilesystemProgressStage;
+
+        match self {
+            Self::Download {
+                completed_bytes,
+                total_bytes,
+                ..
+            } => (
+                Some(FilesystemProgressStage::PullingImage),
+                *completed_bytes,
+                *total_bytes,
+            ),
+            Self::DownloadFinished {
+                completed_bytes, ..
+            } => (
+                Some(FilesystemProgressStage::Materializing),
+                completed_bytes.unwrap_or(0),
+                *completed_bytes,
+            ),
+            Self::Stage { stage, state, .. } => {
+                let stage = match stage {
+                    RuntimeStage::Probe => FilesystemProgressStage::Queued,
+                    RuntimeStage::MaterializeImage => FilesystemProgressStage::Materializing,
+                    RuntimeStage::StartProcess
+                    | RuntimeStage::StartContainer
+                    | RuntimeStage::StartVm => FilesystemProgressStage::Starting,
+                    RuntimeStage::WaitForOsMount => FilesystemProgressStage::Mounting,
+                    RuntimeStage::WaitForVfsSession => FilesystemProgressStage::WaitingForNamespace,
+                    RuntimeStage::Stop => FilesystemProgressStage::Stopping,
+                };
+                let stage = match state {
+                    RuntimeState::Stopped if stage == FilesystemProgressStage::Stopping => {
+                        FilesystemProgressStage::Queued
+                    },
+                    _ => stage,
+                };
+                (Some(stage), 0, None)
+            },
+            Self::MountReady { .. } => (Some(FilesystemProgressStage::Mounting), 0, None),
+            Self::Image { .. }
+            | Self::ImageRetry { .. }
+            | Self::Container { .. }
+            | Self::DownloadFailed { .. }
+            | Self::Failed { .. } => (None, 0, None),
+        }
+    }
+}
+
 /// Bounded, non-blocking runtime event producer.
 ///
 /// [`Self::emit`] uses `try_send`, so runtime work never waits for rendering
@@ -188,5 +248,22 @@ mod tests {
         assert!(sink.emit(known_total.clone()));
         assert_eq!(receiver.recv().await, Some(unknown_total));
         assert_eq!(receiver.recv().await, Some(known_total));
+    }
+
+    #[test]
+    fn runtime_events_never_invent_byte_totals() {
+        let (stage, completed, total) = RuntimeEvent::Download {
+            artifact: Artifact::FilesystemImage,
+            completed_bytes: 41,
+            total_bytes: None,
+            source: "registry".to_owned(),
+        }
+        .progress_stage();
+        assert_eq!(
+            stage,
+            Some(omnifs_api::FilesystemProgressStage::PullingImage)
+        );
+        assert_eq!(completed, 41);
+        assert_eq!(total, None);
     }
 }

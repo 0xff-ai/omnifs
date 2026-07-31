@@ -1,8 +1,8 @@
 //! Daemon-owned reconciliation of desired filesystems into exact runtimes.
 
 use crate::fs_runtime::{
-    AttachEndpoints, ConfirmedRuntime, RuntimeDriver, RuntimeEvent, RuntimeEventReceiver,
-    RuntimeEventSink, RuntimePaths, RuntimeStage, RuntimeState,
+    AttachEndpoints, ConfirmedRuntime, RuntimeDriver, RuntimeEventReceiver, RuntimeEventSink,
+    RuntimePaths,
 };
 use crate::progress::ProgressHub;
 use crate::resource_control::ResourceControl;
@@ -1307,7 +1307,7 @@ async fn forward_runtime_events(
     active: Arc<AtomicU32>,
 ) {
     while let Some(event) = receiver.recv().await {
-        let (stage, completed_bytes, total_bytes) = runtime_progress(&event);
+        let (stage, completed_bytes, total_bytes) = event.progress_stage();
         let Some(stage) = stage else {
             continue;
         };
@@ -1334,52 +1334,6 @@ async fn forward_runtime_events(
                 .progress()
                 .record_filesystem(ProgressTarget::Action(action.action_id), progress);
         }
-    }
-}
-
-fn runtime_progress(event: &RuntimeEvent) -> (Option<FilesystemProgressStage>, u64, Option<u64>) {
-    match event {
-        RuntimeEvent::Download {
-            completed_bytes,
-            total_bytes,
-            ..
-        } => (
-            Some(FilesystemProgressStage::PullingImage),
-            *completed_bytes,
-            *total_bytes,
-        ),
-        RuntimeEvent::DownloadFinished {
-            completed_bytes, ..
-        } => (
-            Some(FilesystemProgressStage::Materializing),
-            completed_bytes.unwrap_or(0),
-            *completed_bytes,
-        ),
-        RuntimeEvent::Stage { stage, state, .. } => {
-            let stage = match stage {
-                RuntimeStage::Probe => FilesystemProgressStage::Queued,
-                RuntimeStage::MaterializeImage => FilesystemProgressStage::Materializing,
-                RuntimeStage::StartProcess
-                | RuntimeStage::StartContainer
-                | RuntimeStage::StartVm => FilesystemProgressStage::Starting,
-                RuntimeStage::WaitForOsMount => FilesystemProgressStage::Mounting,
-                RuntimeStage::WaitForVfsSession => FilesystemProgressStage::WaitingForNamespace,
-                RuntimeStage::Stop => FilesystemProgressStage::Stopping,
-            };
-            let stage = match state {
-                RuntimeState::Stopped if stage == FilesystemProgressStage::Stopping => {
-                    FilesystemProgressStage::Queued
-                },
-                _ => stage,
-            };
-            (Some(stage), 0, None)
-        },
-        RuntimeEvent::MountReady { .. } => (Some(FilesystemProgressStage::Mounting), 0, None),
-        RuntimeEvent::Image { .. }
-        | RuntimeEvent::ImageRetry { .. }
-        | RuntimeEvent::Container { .. }
-        | RuntimeEvent::DownloadFailed { .. }
-        | RuntimeEvent::Failed { .. } => (None, 0, None),
     }
 }
 
@@ -1839,19 +1793,6 @@ mod tests {
         assert_eq!(retry_delay(2), Duration::from_millis(500));
         assert_eq!(retry_delay(3), Duration::from_secs(1));
         assert_eq!(retry_delay(99), RETRY_CAP);
-    }
-
-    #[test]
-    fn runtime_events_never_invent_byte_totals() {
-        let (stage, completed, total) = runtime_progress(&RuntimeEvent::Download {
-            artifact: crate::fs_runtime::Artifact::FilesystemImage,
-            completed_bytes: 41,
-            total_bytes: None,
-            source: "registry".to_owned(),
-        });
-        assert_eq!(stage, Some(FilesystemProgressStage::PullingImage));
-        assert_eq!(completed, 41);
-        assert_eq!(total, None);
     }
 
     #[test]
