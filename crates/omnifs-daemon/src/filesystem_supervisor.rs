@@ -619,10 +619,14 @@ async fn reconcile_one_active(
             .await;
         },
     };
-    let attached = context.vfs.wait_for_session(&expected, SESSION_WAIT);
+    let expected_session = expected.clone();
     let launch = driver
-        .launch(&runtime_instance, &context.endpoints, async move {
-            if attached.await {
+        .launch(&runtime_instance, &context.endpoints, || async move {
+            if context
+                .vfs
+                .wait_for_session(&expected_session, SESSION_WAIT)
+                .await
+            {
                 Ok(())
             } else {
                 anyhow::bail!("timed out waiting for exact VFS session")

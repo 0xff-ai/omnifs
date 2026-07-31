@@ -431,12 +431,15 @@ impl RuntimeDriver {
             })
     }
 
-    pub async fn launch(
+    pub async fn launch<Fut>(
         &self,
         runtime_instance: &str,
         endpoints: &AttachEndpoints,
-        attached: impl Future<Output = Result<()>>,
-    ) -> std::result::Result<(), RuntimeError> {
+        attached: impl FnOnce() -> Fut,
+    ) -> std::result::Result<(), RuntimeError>
+    where
+        Fut: Future<Output = Result<()>>,
+    {
         let request = LaunchRequest {
             filesystem: &self.filesystem,
             spec: &self.spec,
@@ -459,7 +462,7 @@ impl RuntimeDriver {
         let result = match &self.backend {
             Backend::Host(runner) => runner.launch(&request).await,
             Backend::Docker(client) => client.launch(&request).await,
-            Backend::Libkrun(runner) => runner.launch(&request, attached).await,
+            Backend::Libkrun(runner) => runner.launch(&request, attached()).await,
         };
         result.map_err(|source| {
             let error = RuntimeError::new(stage, source);
