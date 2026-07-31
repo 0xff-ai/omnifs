@@ -244,9 +244,6 @@ mod tests {
     fn filesystem() -> ResourceName {
         "work".parse().unwrap()
     }
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn spec() -> FilesystemSpec {
         FilesystemSpec::new(
@@ -261,9 +258,10 @@ mod tests {
 
     #[allow(unsafe_code)] // env::set_var/remove_var require unsafe; guarded by ENV_LOCK.
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A plain #[test] thread, not an async task: blocking_lock is valid
+        // here and the daemon-wide lock now serializes every env-mutating
+        // test in this binary, not just this module's.
+        let _guard = crate::ENV_LOCK.blocking_lock();
         let saved: Vec<(&str, Option<String>)> = vars
             .iter()
             .map(|(key, _)| (*key, std::env::var(*key).ok()))
