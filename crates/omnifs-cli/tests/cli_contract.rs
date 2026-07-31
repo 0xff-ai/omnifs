@@ -211,49 +211,6 @@ fn interactive_mutation_refusal_points_automation_to_kcl() {
 }
 
 #[test]
-fn legacy_detached_specs_are_read_only_and_never_launched() {
-    let fixture = Fixture::new();
-    let specs = fixture.home_path().join("client/filesystems/specs");
-    std::fs::create_dir_all(&specs).expect("legacy spec directory");
-    let location = fixture.home_path().join("legacy-mount");
-    std::fs::write(
-        specs.join("legacy.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "id": "legacy",
-            "protocol": "nfs",
-            "runtime": "host",
-            "location": location,
-        }))
-        .expect("legacy spec json"),
-    )
-    .expect("write legacy spec");
-
-    let doctor = fixture.run(&["doctor", "--output", "json", "--no-input"]);
-    assert_eq!(exit_code(&doctor), 5, "{doctor:?}");
-    let doctor = stdout_json(&doctor);
-    let findings = doctor["result"]["findings"]
-        .as_array()
-        .expect("doctor result.findings");
-    assert!(
-        findings.iter().any(|finding| {
-            finding["check"] == "legacy filesystem spec"
-                && finding["target"] == "legacy"
-                && finding["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("will not be launched"))
-        }),
-        "{findings:?}"
-    );
-
-    let fs = fixture.run(&["fs", "attach", "legacy"]);
-    assert_eq!(exit_code(&fs), 2, "{fs:?}");
-    assert!(
-        !location.exists(),
-        "doctor must not launch a legacy runtime"
-    );
-}
-
-#[test]
 fn removed_top_level_commands_are_usage_errors() {
     let fixture = Fixture::new();
     for (args, needle) in [

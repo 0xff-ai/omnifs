@@ -16,7 +16,6 @@ mod commands;
 mod daemon_teardown;
 mod error;
 mod inventory;
-mod legacy_filesystems;
 mod metrics;
 mod process;
 mod profile_config;

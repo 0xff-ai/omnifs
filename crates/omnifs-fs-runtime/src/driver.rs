@@ -21,17 +21,8 @@ pub struct RuntimePaths {
     is_default_profile: bool,
     state_root: PathBuf,
     host_log_root: PathBuf,
-    runtime_root: PathBuf,
     guest_image_cache: PathBuf,
     executable: PathBuf,
-    layout: RuntimePathLayout,
-}
-
-/// The owner-specific arrangement of otherwise identical runtime artifacts.
-#[derive(Debug, Clone, Copy)]
-enum RuntimePathLayout {
-    LegacyFilesystem,
-    DaemonAttachment,
 }
 
 fn short_attachment_hash(name: &ResourceName) -> String {
@@ -41,29 +32,6 @@ fn short_attachment_hash(name: &ResourceName) -> String {
 }
 
 impl RuntimePaths {
-    #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub fn new(
-        profile_root: PathBuf,
-        is_default_profile: bool,
-        state_root: PathBuf,
-        host_log_root: PathBuf,
-        runtime_root: PathBuf,
-        guest_image_cache: PathBuf,
-        executable: PathBuf,
-    ) -> Self {
-        Self {
-            profile_root,
-            is_default_profile,
-            state_root,
-            host_log_root,
-            runtime_root,
-            guest_image_cache,
-            executable,
-            layout: RuntimePathLayout::LegacyFilesystem,
-        }
-    }
-
     /// Construct daemon-owned attachment paths. The caller supplies daemon
     /// state roots, so this crate never resolves a profile or creates a
     /// fallback client layout.
@@ -81,10 +49,8 @@ impl RuntimePaths {
             is_default_profile,
             state_root: attachments_root.clone(),
             host_log_root: attachment_logs_root,
-            runtime_root: attachments_root,
             guest_image_cache,
             executable,
-            layout: RuntimePathLayout::DaemonAttachment,
         }
     }
 
@@ -94,22 +60,12 @@ impl RuntimePaths {
         AttachmentRuntimePaths {
             profile_root: self.profile_root.clone(),
             state_dir: state_dir.clone(),
-            host_log: match self.layout {
-                RuntimePathLayout::LegacyFilesystem => {
-                    self.host_log_root.join(format!("filesystem-{name}.log"))
-                },
-                RuntimePathLayout::DaemonAttachment => {
-                    self.host_log_root.join(format!("{name}.log"))
-                },
-            },
-            host_control_socket: match self.layout {
-                RuntimePathLayout::LegacyFilesystem => state_dir.join("control.sock"),
-                RuntimePathLayout::DaemonAttachment => self
-                    .profile_root
-                    .join(".r")
-                    .join(format!("{}.sock", short_attachment_hash(name))),
-            },
-            libkrun_root: self.runtime_root.join(name.as_str()).join("libkrun"),
+            host_log: self.host_log_root.join(format!("{name}.log")),
+            host_control_socket: self
+                .profile_root
+                .join(".r")
+                .join(format!("{}.sock", short_attachment_hash(name))),
+            libkrun_root: self.state_root.join(name.as_str()).join("libkrun"),
             guest_image_cache: self.guest_image_cache.clone(),
             executable: self.executable.clone(),
         }
@@ -128,11 +84,6 @@ impl RuntimePaths {
     #[must_use]
     pub fn state_root(&self) -> &Path {
         &self.state_root
-    }
-
-    #[must_use]
-    pub fn runtime_root(&self) -> &Path {
-        &self.runtime_root
     }
 }
 
@@ -563,7 +514,7 @@ pub async fn owned_filesystems(
             }),
         }
     }
-    candidates.append(&mut LibkrunRunner::owned(paths.runtime_root()));
+    candidates.append(&mut LibkrunRunner::owned(paths.state_root()));
     candidates
 }
 
@@ -606,12 +557,11 @@ mod tests {
     use super::*;
 
     fn paths(root: &Path) -> RuntimePaths {
-        RuntimePaths::new(
+        RuntimePaths::daemon_owned(
             root.to_path_buf(),
             false,
             root.join("state"),
             root.join("logs"),
-            root.join("runtime"),
             root.join("guest-images"),
             root.join("omnifs"),
         )
@@ -634,21 +584,6 @@ mod tests {
             (runtime == AttachmentRuntime::Libkrun).then(|| "guest.raw".into()),
         )
         .unwrap()
-    }
-
-    #[test]
-    fn legacy_paths_keep_filesystem_named_host_logs() {
-        let root = Path::new("/tmp/omnifs-runtime");
-        let paths = paths(root);
-        let attachment = paths.attachment(&ResourceName::new("work").unwrap());
-        assert_eq!(attachment.state_dir(), root.join("state/work"));
-        assert_eq!(attachment.host_log(), root.join("logs/filesystem-work.log"));
-        assert_eq!(
-            attachment.host_control_socket(),
-            root.join("state/work/control.sock")
-        );
-        assert_eq!(attachment.libkrun_root(), root.join("runtime/work/libkrun"));
-        assert_eq!(attachment.guest_image_cache(), root.join("guest-images"));
     }
 
     #[test]
@@ -793,7 +728,7 @@ mod tests {
         let name = ResourceName::new("work").unwrap();
         let attachment = paths.attachment(&name);
         assert_eq!(attachment.state_dir(), root.join("state/work"));
-        assert_eq!(attachment.host_log(), root.join("logs/filesystem-work.log"));
+        assert_eq!(attachment.host_log(), root.join("logs/work.log"));
         assert_eq!(attachment.libkrun_root(), root.join("runtime/work/libkrun"));
         assert_eq!(attachment.guest_image_cache(), root.join("guest-images"));
         assert_eq!(attachment.executable(), root.join("omnifs"));

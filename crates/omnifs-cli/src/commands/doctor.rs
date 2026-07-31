@@ -5,7 +5,7 @@
 
 use anyhow::Context as _;
 use omnifs_bootstrap::Profile;
-use omnifs_core::{AttachmentRuntime, ResourceName};
+use omnifs_core::ResourceName;
 use omnifs_fs_runtime::{
     Candidate, DockerClient, DockerTarget, HostDriver, ImageInspection, ImageRef, LibkrunRunner,
     OwnedFilesystemContainer, RuntimeEventSink, RuntimePaths, owned_filesystems,
@@ -15,7 +15,6 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use crate::inventory::{AuthState, DaemonHealth, DaemonProbe, Inventory, MountStatus, Severity};
-use crate::legacy_filesystems::LegacyFilesystems;
 use crate::ui::output::{Output, ResultVerdict};
 use crate::ui::prompt::Confirm;
 use crate::ui::render::{self, Capabilities, LedgerRow};
@@ -31,14 +30,12 @@ pub(crate) enum DoctorVerdict {
 
 pub async fn run(output: Output) -> anyhow::Result<DoctorVerdict> {
     let profile = Profile::resolve()?;
-    let legacy_filesystems = LegacyFilesystems::under_profile(profile.root());
     let daemon_runtime_paths = daemon_runtime_paths(&profile)?;
     let inventory = Inventory::collect_rpc().await?;
-    let docker_target = resolve_filesystem_target(&legacy_filesystems)
+    let docker_target = resolve_filesystem_target(&profile)
         .map_err(|error: anyhow::Error| format!("resolve target: {error:#}"));
     Doctor {
         profile,
-        legacy_filesystems,
         daemon_runtime_paths,
         inventory,
         docker_target,
@@ -51,20 +48,14 @@ pub async fn run(output: Output) -> anyhow::Result<DoctorVerdict> {
 /// The optional Docker-hosted FUSE filesystem's target, probed by the
 /// `docker reachable`/`image cached` diagnostics. The daemon itself always
 /// runs host-native, so there is no daemon Docker target to resolve here.
-fn resolve_filesystem_target(
-    legacy_filesystems: &LegacyFilesystems,
-) -> anyhow::Result<DockerTarget> {
-    let id = legacy_filesystems
-        .scan()?
-        .specs
-        .into_iter()
-        .find(|spec| spec.runtime() == AttachmentRuntime::Docker)
-        .map_or_else(
-            || ResourceName::new("doctor").expect("static attachment name"),
-            |spec| ResourceName::new(spec.id()).expect("validated legacy attachment name"),
-        );
-    let paths = legacy_filesystems.runtime_paths()?;
-    DockerTarget::for_filesystem(paths.profile_root(), paths.is_default_profile(), &id, None)
+fn resolve_filesystem_target(profile: &Profile) -> anyhow::Result<DockerTarget> {
+    let id = ResourceName::new("doctor").expect("static attachment name");
+    DockerTarget::for_filesystem(
+        profile.root(),
+        std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
+        &id,
+        None,
+    )
 }
 
 fn daemon_runtime_paths(profile: &Profile) -> anyhow::Result<RuntimePaths> {
@@ -81,7 +72,6 @@ fn daemon_runtime_paths(profile: &Profile) -> anyhow::Result<RuntimePaths> {
 
 struct Doctor {
     profile: Profile,
-    legacy_filesystems: LegacyFilesystems,
     daemon_runtime_paths: RuntimePaths,
     inventory: Inventory,
     /// The filesystem's Docker target, or the error resolving it.
@@ -119,8 +109,6 @@ enum Check {
     SshAgent,
     #[serde(rename = "config")]
     Config,
-    #[serde(rename = "legacy filesystem spec")]
-    LegacyFilesystemSpec,
     #[serde(rename = "network")]
     Network,
     #[serde(rename = "daemon identity")]
@@ -148,7 +136,6 @@ impl Check {
             Self::CredentialStore => "credential store",
             Self::SshAgent => "ssh-agent",
             Self::Config => "config",
-            Self::LegacyFilesystemSpec => "legacy filesystem spec",
             Self::Network => "network",
             Self::DaemonIdentity => "daemon identity",
             Self::Credentials => "credentials",
@@ -839,10 +826,9 @@ impl Doctor {
     async fn rediagnose_after_repairs(&self) -> anyhow::Result<DoctorResult> {
         let fresh = Doctor {
             profile: self.profile.clone(),
-            legacy_filesystems: self.legacy_filesystems.clone(),
             daemon_runtime_paths: self.daemon_runtime_paths.clone(),
             inventory: Inventory::collect_rpc().await?,
-            docker_target: resolve_filesystem_target(&self.legacy_filesystems)
+            docker_target: resolve_filesystem_target(&self.profile)
                 .map_err(|error: anyhow::Error| format!("resolve target: {error:#}")),
             output: self.output.clone(),
         };
@@ -910,7 +896,6 @@ impl Doctor {
         ] {
             findings.push(Finding::from_probe(Section::Profile, check, None, result));
         }
-        findings.extend(self.legacy_spec_findings());
         findings.push(Finding::from_probe(
             Section::Environment,
             Check::Network,
@@ -940,26 +925,8 @@ impl Doctor {
         docker: Option<&DockerClient>,
         daemon_health: DaemonHealth,
     ) -> Vec<Finding> {
-        let mut findings = self
-            .filesystem_findings_at(&self.daemon_runtime_paths, docker, daemon_health)
-            .await;
-        let legacy_paths = match self.legacy_filesystems.runtime_paths() {
-            Ok(paths) => paths,
-            Err(error) => {
-                findings.push(Finding::from_probe(
-                    Section::Attachments,
-                    Check::FilesystemState,
-                    None,
-                    ProbeResult::Err(format!("{error:#}")),
-                ));
-                return findings;
-            },
-        };
-        findings.extend(
-            self.filesystem_findings_at(&legacy_paths, None, daemon_health)
-                .await,
-        );
-        findings
+        self.filesystem_findings_at(&self.daemon_runtime_paths, docker, daemon_health)
+            .await
     }
 
     async fn filesystem_findings_at(
@@ -1261,50 +1228,12 @@ impl Doctor {
     }
 
     fn probe_config_file(&self) -> ProbeResult {
-        let path = self.legacy_filesystems.profile_root().join("config.toml");
-        match crate::profile_config::read(self.legacy_filesystems.profile_root()) {
+        let path = self.profile.root().join("config.toml");
+        match crate::profile_config::read(self.profile.root()) {
             Ok(_) if path.exists() => ProbeResult::Ok(path.display().to_string()),
             Ok(_) => ProbeResult::Ok(format!("defaults ({} absent)", path.display())),
             Err(error) => ProbeResult::Err(format!("{error:#}")),
         }
-    }
-
-    fn legacy_spec_findings(&self) -> Vec<Finding> {
-        let scan = match self.legacy_filesystems.scan() {
-            Ok(scan) => scan,
-            Err(error) => {
-                return vec![Finding::from_probe(
-                    Section::Profile,
-                    Check::LegacyFilesystemSpec,
-                    None,
-                    ProbeResult::Err(format!("{error:#}")),
-                )];
-            },
-        };
-        let mut findings = scan
-            .issues
-            .into_iter()
-            .map(|issue| Finding {
-                section: Section::Profile,
-                check: Check::LegacyFilesystemSpec,
-                target: Some(issue.path.display().to_string()),
-                severity: Severity::Attention,
-                message: issue.message,
-                fix: None,
-                remediation: None,
-            })
-            .collect::<Vec<_>>();
-        findings.extend(scan.specs.into_iter().map(|spec| Finding {
-            section: Section::Profile,
-            check: Check::LegacyFilesystemSpec,
-            target: Some(spec.id().to_string()),
-            severity: Severity::Attention,
-            message:
-                "legacy detached spec is not desired state and will not be launched".to_owned(),
-            fix: Some("omnifs attachment add".to_owned()),
-            remediation: None,
-        }));
-        findings
     }
 
     async fn probe_network(&self) -> ProbeResult {
@@ -1582,12 +1511,10 @@ mod golden {
 
     fn probe_credential_result(state: crate::inventory::DaemonHealth) -> ProbeResult {
         let root = TempDir::new().unwrap();
-        let legacy_filesystems = LegacyFilesystems::under_profile(root.path());
         let profile = Profile::under_root(root.path());
         let daemon_runtime_paths = daemon_runtime_paths(&profile).unwrap();
         let doctor = Doctor {
             profile,
-            legacy_filesystems,
             daemon_runtime_paths,
             inventory: Inventory::test(state, Vec::new(), Vec::new()),
             docker_target: Err("test".to_owned()),
@@ -1675,7 +1602,7 @@ mod golden {
         let id: ResourceName = "legacy".parse().unwrap();
         let spec = omnifs_core::AttachmentSpec::new(
             omnifs_core::AttachmentProtocol::Nfs,
-            AttachmentRuntime::Host,
+            omnifs_core::AttachmentRuntime::Host,
             root.path().join("mount"),
             None,
             None,
