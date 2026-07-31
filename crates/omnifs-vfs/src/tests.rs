@@ -949,7 +949,8 @@ async fn exact_session_stop_fences_reconnect_until_runtime_cleanup_finishes() {
     .expect("an exact stop fence must reject reconnects");
     assert!(matches!(rejected, WireError::Rejected(_)));
 
-    request.complete(crate::TeardownOutcome::Stopped);
+    request.complete(crate::TeardownOutcome::Busy);
+    server.close_stopped_session(&expected).unwrap();
     assert!(
         server
             .drain_sessions(Duration::from_secs(1))
@@ -969,6 +970,45 @@ async fn exact_session_stop_fences_reconnect_until_runtime_cleanup_finishes() {
 
     drop(replacement);
     drop(namespace);
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn exact_session_stop_fences_reconnect_when_the_session_is_already_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("ns.sock");
+    let server = start_local_server(StubNamespace::new(), &socket);
+    let expected = Session {
+        attachment: test_attachment(),
+        spec: test_identity(),
+        runtime_instance: test_runtime_instance(),
+    };
+
+    server.begin_session_stop(&expected).unwrap();
+    let rejected = WireNamespace::attach(
+        AttachTarget::Unix(socket.clone()),
+        expected.attachment.clone(),
+        expected.spec.clone(),
+        expected.runtime_instance.clone(),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .err()
+    .expect("runtime teardown must fence a reconnect after its old session has gone");
+    assert!(matches!(rejected, WireError::Rejected(_)));
+
+    server.finish_session_stop(&expected).unwrap();
+    let replacement = WireNamespace::attach(
+        AttachTarget::Unix(socket),
+        expected.attachment.clone(),
+        expected.spec.clone(),
+        expected.runtime_instance.clone(),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .expect("runtime cleanup releases the exact stop fence");
+
+    drop(replacement);
     server.shutdown().await;
 }
 

@@ -515,20 +515,6 @@ async fn reconcile_one_active(
                     )
                     .await;
                 }
-                if let Err(error) =
-                    wait_for_session_absence(context, &work.name, &runtime_instance).await
-                {
-                    tracing::warn!(attachment = %work.name, %error, "attachment session did not drain");
-                    return retry_or_fail(
-                        context,
-                        current_revision,
-                        &desired,
-                        work,
-                        "attachment_session_drain_failed",
-                        "the previous attachment session did not drain",
-                    )
-                    .await;
-                }
                 if !clear_observed(context, current_revision, work).await? {
                     return Ok(WorkOutcome::Done);
                 }
@@ -1430,7 +1416,6 @@ async fn stop_exact(
         .vfs
         .begin_session_stop(&expected_session)
         .map_err(anyhow::Error::msg)?;
-    wait_for_session_absence(context, name, runtime_instance).await?;
 
     let driver = runtime_driver(context, name, spec)?;
     driver
@@ -1441,6 +1426,11 @@ async fn stop_exact(
         driver.confirmed(runtime_instance).await?.is_none(),
         "attachment runtime is still present after exact stop"
     );
+    context
+        .vfs
+        .close_stopped_session(&expected_session)
+        .map_err(anyhow::Error::msg)?;
+    wait_for_session_absence(context, name, runtime_instance).await?;
     context
         .vfs
         .finish_session_stop(&expected_session)

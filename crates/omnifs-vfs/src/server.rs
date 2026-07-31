@@ -99,7 +99,14 @@ struct SessionKey(ResourceName);
 
 struct SessionConnection {
     key: SessionKey,
-    control: watch::Sender<bool>,
+    control: watch::Sender<SessionControl>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionControl {
+    Running,
+    Stop,
+    Close,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,7 +151,7 @@ impl Sessions {
         attachment: ResourceName,
         spec: &AttachmentSpec,
         runtime_instance: &str,
-        control: watch::Sender<bool>,
+        control: watch::Sender<SessionControl>,
     ) -> Result<u64, String> {
         let key = SessionKey(attachment);
         let mut state = self
@@ -281,7 +288,44 @@ impl Sessions {
                 .collect::<Vec<_>>()
         };
         for control in controls {
-            control.send_replace(true);
+            control.send_replace(SessionControl::Stop);
+        }
+        Ok(())
+    }
+
+    fn close_stopped(&self, expected: &Session) -> Result<(), String> {
+        let key = SessionKey(expected.attachment.clone());
+        let controls = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(current) = state.entries.get(&key) else {
+                return Ok(());
+            };
+            if current.spec != expected.spec
+                || current.runtime_instance != expected.runtime_instance
+            {
+                return Err(format!(
+                    "attachment `{}` changed before its stopped VFS session was closed",
+                    expected.attachment
+                ));
+            }
+            if state.stop_fences.get(&key) != Some(expected) {
+                return Err(format!(
+                    "attachment `{}` has no matching exact stop fence",
+                    expected.attachment
+                ));
+            }
+            state
+                .connections
+                .values()
+                .filter(|connection| connection.key == key)
+                .map(|connection| connection.control.clone())
+                .collect::<Vec<_>>()
+        };
+        for control in controls {
+            control.send_replace(SessionControl::Close);
         }
         Ok(())
     }
@@ -302,11 +346,9 @@ impl Sessions {
                     expected.attachment
                 ));
             }
-            let Some(current) = state.entries.get(&key) else {
-                return Ok(());
-            };
-            if current.spec != expected.spec
-                || current.runtime_instance != expected.runtime_instance
+            if let Some(current) = state.entries.get(&key)
+                && (current.spec != expected.spec
+                    || current.runtime_instance != expected.runtime_instance)
             {
                 return Err(format!(
                     "attachment `{}` changed before its exact VFS session stop began",
@@ -322,7 +364,7 @@ impl Sessions {
                 .collect::<Vec<_>>()
         };
         for control in controls {
-            control.send_replace(true);
+            control.send_replace(SessionControl::Stop);
         }
         Ok(())
     }
@@ -386,7 +428,7 @@ impl Sessions {
                 .collect::<Vec<_>>()
         };
         for control in controls {
-            control.send_replace(true);
+            control.send_replace(SessionControl::Stop);
         }
     }
 
@@ -596,6 +638,13 @@ impl VfsServer {
     /// attachment until its runtime owner completes the stop fence.
     pub fn begin_session_stop(&self, expected: &Session) -> Result<(), String> {
         self.sessions.begin_stop(expected)
+    }
+
+    /// Close the server side of one exact session after its runtime owner has
+    /// proved that runtime gone. This releases connections that cannot report
+    /// their own detach, while the stop fence still rejects reconnects.
+    pub fn close_stopped_session(&self, expected: &Session) -> Result<(), String> {
+        self.sessions.close_stopped(expected)
     }
 
     /// Release one exact stop fence after both the VFS session and its runtime
@@ -991,7 +1040,8 @@ where
     let (mut reader, mut writer) = tokio::io::split(stream);
 
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<Frame>(OUTBOUND_QUEUE_CAPACITY);
-    let (control_tx, mut control_rx) = watch::channel(false);
+    let (control_tx, mut control_rx) = watch::channel(SessionControl::Running);
+    let close_rx = control_tx.subscribe();
     let hello = read_hello(&mut reader, &mut writer).await?;
     let mut events = namespace.subscribe();
     let session_guard = if let Some(sessions) = sessions {
@@ -1026,12 +1076,16 @@ where
                     if changed.is_err() {
                         return;
                     }
-                    if !*control_rx.borrow_and_update() {
-                        continue;
-                    }
-                    let Ok(body) = postcard::to_allocvec(&ServerControl::Stop) else { return; };
-                    if write_frame(&mut writer, &Frame::new(0, KIND_CONTROL, body)).await.is_err() {
-                        return;
+                    let control = *control_rx.borrow_and_update();
+                    match control {
+                        SessionControl::Running => {},
+                        SessionControl::Stop => {
+                            let Ok(body) = postcard::to_allocvec(&ServerControl::Stop) else { return; };
+                            if write_frame(&mut writer, &Frame::new(0, KIND_CONTROL, body)).await.is_err() {
+                                return;
+                            }
+                        },
+                        SessionControl::Close => return,
                     }
                 }
                 frame = outbound_rx.recv() => {
@@ -1056,7 +1110,10 @@ where
         }
     });
 
-    let read_result = read_loop(&mut reader, &namespace, &outbound_tx).await;
+    let read_result = tokio::select! {
+        result = read_loop(&mut reader, &namespace, &outbound_tx) => result,
+        () = wait_for_session_close(close_rx) => Ok(()),
+    };
 
     // The session registry also holds an outbound sender. Abort the writer
     // before dropping the guard so disconnect cannot form a sender/guard
@@ -1066,6 +1123,17 @@ where
     let _ = writer_task.await;
     drop(session_guard);
     read_result
+}
+
+async fn wait_for_session_close(mut control: watch::Receiver<SessionControl>) {
+    loop {
+        if *control.borrow_and_update() == SessionControl::Close {
+            return;
+        }
+        if control.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Read the client's `Hello` and check the protocol. The caller performs
