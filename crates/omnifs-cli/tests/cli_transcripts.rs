@@ -74,10 +74,6 @@ fn logs_and_usage_error_transcripts() {
 
     insta::assert_snapshot!("logs_missing", fixture.transcript(&fixture.run(&["logs"])));
     insta::assert_snapshot!(
-        "retired_fs_usage_error",
-        fixture.transcript(&fixture.run(&["fs", "attach"]))
-    );
-    insta::assert_snapshot!(
         "non_interactive_mutation_refusal",
         fixture.transcript(&fixture.run(&["attachment", "add"]))
     );

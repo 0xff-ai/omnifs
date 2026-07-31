@@ -41,18 +41,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_when_absent_and_rejects_retired_filesystem_settings() {
+    fn defaults_when_absent_and_rejects_unknown_fields() {
         let dir = tempfile::tempdir().unwrap();
         assert!(read(dir.path()).unwrap().metrics.enabled);
         assert!(!dir.path().join("config.toml").exists());
 
-        std::fs::write(
-            dir.path().join("config.toml"),
-            "[filesystem]\ndocker_image = \"old\"\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[unknown]\nvalue = true\n").unwrap();
         let error = read(dir.path()).unwrap_err().to_string();
         assert!(error.contains("unknown field"), "{error}");
-        assert!(error.contains("filesystem"), "{error}");
+        assert!(error.contains("unknown"), "{error}");
     }
 }
