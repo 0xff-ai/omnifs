@@ -49,10 +49,6 @@ fn resource_help_exposes_only_the_final_public_grammar() {
     for command in ["provider", "mount", "credential", "fs"] {
         assert!(top_help.contains(command), "missing {command}: {top_help}");
     }
-    assert!(
-        !top_help.contains("\n  attachment "),
-        "retired command remains public: {top_help}"
-    );
 
     for (group, expected) in [
         ("provider", ["add", "ls", "show", "rm"].as_slice()),
@@ -225,10 +221,6 @@ fn removed_top_level_commands_are_usage_errors() {
         (
             ["mount", "snapshot", "test"].as_slice(),
             "unrecognized subcommand 'snapshot'",
-        ),
-        (
-            ["attachment", "ls"].as_slice(),
-            "unrecognized subcommand 'attachment'",
         ),
         (
             ["filesystem", "ls"].as_slice(),
