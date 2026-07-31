@@ -40,11 +40,23 @@ pub enum AttachmentCommand {
     /// List desired Attachments and their observed state.
     Ls,
     /// Show one desired Attachment and its observed state.
-    Show(NameArgs),
+    Show {
+        /// Attachment resource name.
+        #[arg(value_name = "NAME")]
+        name: ResourceName,
+    },
     /// Remove an Attachment from desired state.
-    Rm(NameArgs),
+    Rm {
+        /// Attachment resource name.
+        #[arg(value_name = "NAME")]
+        name: ResourceName,
+    },
     /// Restart an Attachment through a durable action.
-    Restart(NameArgs),
+    Restart {
+        /// Attachment resource name.
+        #[arg(value_name = "NAME")]
+        name: ResourceName,
+    },
     /// Enter the Attachment or run a command in its runtime.
     Shell(ShellArgs),
 }
@@ -59,13 +71,6 @@ impl fmt::Display for AttachmentPair {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{} / {}", self.protocol, self.runtime)
     }
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct NameArgs {
-    /// Attachment resource name.
-    #[arg(value_name = "NAME")]
-    pub name: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -122,9 +127,9 @@ impl AttachmentArgs {
         match self.command {
             AttachmentCommand::Add => add(output).await,
             AttachmentCommand::Ls => list(output).await,
-            AttachmentCommand::Show(args) => show(args, output).await,
-            AttachmentCommand::Rm(args) => remove(args, output).await,
-            AttachmentCommand::Restart(args) => restart(args, output).await,
+            AttachmentCommand::Show { name } => show(name, output).await,
+            AttachmentCommand::Rm { name } => remove(name, output).await,
+            AttachmentCommand::Restart { name } => restart(name, output).await,
             AttachmentCommand::Shell(args) => shell(args, output).await,
         }
     }
@@ -246,9 +251,8 @@ async fn list(output: Output) -> Result<ExitCode> {
     Ok(ExitCode::Success)
 }
 
-async fn show(args: NameArgs, output: Output) -> Result<ExitCode> {
+async fn show(name: ResourceName, output: Output) -> Result<ExitCode> {
     daemon_start::start(&output).await?;
-    let name = ResourceName::new(args.name)?;
     let status = RpcClient::resolve()?
         .attachment_status(name.clone())
         .await?
@@ -275,10 +279,9 @@ async fn show(args: NameArgs, output: Output) -> Result<ExitCode> {
     Ok(ExitCode::Success)
 }
 
-async fn remove(args: NameArgs, output: Output) -> Result<ExitCode> {
+async fn remove(name: ResourceName, output: Output) -> Result<ExitCode> {
     crate::commands::resource_flow::ensure_interactive_mutation(&output)?;
     daemon_start::start(&output).await?;
-    let name = ResourceName::new(args.name)?;
     let rpc = RpcClient::resolve()?;
     let snapshot = rpc.resources().await?;
     let Some(definition) = snapshot
@@ -325,10 +328,9 @@ async fn remove(args: NameArgs, output: Output) -> Result<ExitCode> {
     )
 }
 
-async fn restart(args: NameArgs, output: Output) -> Result<ExitCode> {
+async fn restart(name: ResourceName, output: Output) -> Result<ExitCode> {
     crate::commands::resource_flow::ensure_interactive_mutation(&output)?;
     daemon_start::start(&output).await?;
-    let name = ResourceName::new(args.name)?;
     let rpc = RpcClient::resolve()?;
     let status = rpc
         .attachment_status(name.clone())

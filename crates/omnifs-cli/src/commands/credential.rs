@@ -39,11 +39,23 @@ pub enum CredentialCommand {
     /// List declared credentials without exposing their material.
     Ls,
     /// Show one declared credential without exposing its material.
-    Show(NameArgs),
+    Show {
+        /// Credential resource name.
+        #[arg(value_name = "NAME")]
+        name: ResourceName,
+    },
     /// Remove an unused Credential resource and its local material.
-    Rm(NameArgs),
+    Rm {
+        /// Credential resource name.
+        #[arg(value_name = "NAME")]
+        name: ResourceName,
+    },
     /// Revoke a credential upstream and leave its declared slot empty.
-    Revoke(NameArgs),
+    Revoke {
+        /// Credential resource name.
+        #[arg(value_name = "NAME")]
+        name: ResourceName,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -54,13 +66,6 @@ pub struct SetArgs {
     /// Environment variable containing the token. The value is never printed.
     #[arg(long, value_name = "VARIABLE")]
     pub from_env: String,
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct NameArgs {
-    /// Credential resource name.
-    #[arg(value_name = "NAME")]
-    pub name: ResourceName,
 }
 
 #[derive(Debug, Serialize)]
@@ -136,9 +141,9 @@ impl CredentialArgs {
             CredentialCommand::Login => login(output).await,
             CredentialCommand::Set(args) => set(args, output).await,
             CredentialCommand::Ls => list(output).await,
-            CredentialCommand::Show(args) => show(args, output).await,
-            CredentialCommand::Rm(args) => remove(args, output).await,
-            CredentialCommand::Revoke(args) => revoke_named(args.name, output).await,
+            CredentialCommand::Show { name } => show(name, output).await,
+            CredentialCommand::Rm { name } => remove(name, output).await,
+            CredentialCommand::Revoke { name } => revoke_named(name, output).await,
         }
     }
 }
@@ -462,13 +467,13 @@ async fn list(output: Output) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::Success)
 }
 
-async fn show(args: NameArgs, output: Output) -> anyhow::Result<ExitCode> {
+async fn show(name: ResourceName, output: Output) -> anyhow::Result<ExitCode> {
     let rpc = RpcClient::resolve()?;
     let credential = credential_views(&rpc)
         .await?
         .into_iter()
-        .find(|credential| credential.name == args.name)
-        .ok_or_else(|| anyhow!("no Credential resource named `{}`", args.name))
+        .find(|credential| credential.name == name)
+        .ok_or_else(|| anyhow!("no Credential resource named `{name}`"))
         .with_hint("omnifs credential ls")?;
     let result = CredentialResult { credential };
     if output.is_structured() {
@@ -482,7 +487,7 @@ async fn show(args: NameArgs, output: Output) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::Success)
 }
 
-async fn remove(args: NameArgs, output: Output) -> anyhow::Result<ExitCode> {
+async fn remove(name: ResourceName, output: Output) -> anyhow::Result<ExitCode> {
     resource_flow::ensure_interactive_mutation(&output)?;
     daemon_start::start(&output).await?;
     let rpc = RpcClient::resolve()?;
@@ -491,17 +496,17 @@ async fn remove(args: NameArgs, output: Output) -> anyhow::Result<ExitCode> {
         snapshot.resources.iter().any(|resource| {
             matches!(
                 resource,
-                ResourceDefinition::Credential(definition) if definition.name == args.name
+                ResourceDefinition::Credential(definition) if definition.name == name
             )
         }),
         "no Credential resource named `{}`",
-        args.name
+        name
     );
-    let references = mount_references(&snapshot, &args.name);
+    let references = mount_references(&snapshot, &name);
     ensure!(
         references.is_empty(),
         "Credential `{}` is still referenced by Mount resources: {}; update or remove those Mounts first",
-        args.name,
+        name,
         references
             .iter()
             .map(ResourceName::as_str)
@@ -511,7 +516,6 @@ async fn remove(args: NameArgs, output: Output) -> anyhow::Result<ExitCode> {
     output.narrate(
         "Removing the resource deletes local credential material after the active generation drains. It does not revoke upstream access.",
     );
-    let name = args.name;
     let result = match resource_flow::edit_resources_and_wait(
         &rpc,
         &output,

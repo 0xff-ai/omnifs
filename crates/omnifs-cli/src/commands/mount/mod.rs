@@ -44,35 +44,15 @@ pub enum MountCommand {
     /// List desired Mount resources and their observed phases.
     Ls,
     /// Show one desired Mount resource.
-    Show(ShowArgs),
+    Show { name: ResourceName },
     /// Update one Mount resource through an interactive wizard.
-    Update(UpdateArgs),
+    Update { name: ResourceName },
     /// Collect fresh material for the Mount's declared Credential.
-    Reauth(ReauthArgs),
+    Reauth { name: ResourceName },
     /// Revoke the Mount's declared Credential upstream.
-    Revoke(RevokeArgs),
+    Revoke { name: ResourceName },
     /// Remove one Mount resource.
     Rm { name: ResourceName },
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct ShowArgs {
-    pub name: ResourceName,
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct UpdateArgs {
-    pub name: ResourceName,
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct ReauthArgs {
-    pub name: ResourceName,
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct RevokeArgs {
-    pub name: ResourceName,
 }
 
 #[derive(Debug, Clone)]
@@ -133,10 +113,10 @@ impl MountArgs {
         match self.command {
             MountCommand::Add => add(output).await,
             MountCommand::Ls => list(output).await,
-            MountCommand::Show(args) => show(args.name, output).await,
-            MountCommand::Update(args) => update(args.name, output).await,
-            MountCommand::Reauth(args) => reauth(args.name, output).await,
-            MountCommand::Revoke(args) => revoke(args.name, output).await,
+            MountCommand::Show { name } => show(name, output).await,
+            MountCommand::Update { name } => update(name, output).await,
+            MountCommand::Reauth { name } => reauth(name, output).await,
+            MountCommand::Revoke { name } => revoke(name, output).await,
             MountCommand::Rm { name } => remove(name, output).await,
         }
     }
