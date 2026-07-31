@@ -401,21 +401,33 @@ impl PendingHostFilesystem {
         crate::process::reap_managed_child(child);
         ready?.map_or_else(
             || {
-                let phase = phase_label(wait.last_phase.clone());
-                Err(advise(
-                    anyhow::anyhow!(
-                        "host filesystem `{}` did not confirm mount startup within {}s; \
-                         last proved phase was {phase}; runner {} was left alive for safe cleanup",
-                        attachment,
-                        STARTUP_TIMEOUT.as_secs(),
-                        wait.pending.instance_id
-                    ),
-                    RuntimeAdvice::HostLog(wait.pending.log_path.clone()),
+                Err(mount_startup_timeout(
+                    attachment,
+                    wait.last_phase.clone(),
+                    &wait.pending.instance_id,
+                    &wait.pending.log_path,
                 ))
             },
             Ok,
         )
     }
+}
+
+fn mount_startup_timeout(
+    attachment: &ResourceName,
+    last_phase: Option<RunnerPhase>,
+    instance_id: &str,
+    log_path: &Path,
+) -> anyhow::Error {
+    let phase = phase_label(last_phase);
+    advise(
+        anyhow::anyhow!(
+            "host filesystem `{attachment}` did not confirm mount startup within {}s; \
+             last proved phase was {phase}; runner {instance_id} was left alive for safe cleanup",
+            STARTUP_TIMEOUT.as_secs(),
+        ),
+        RuntimeAdvice::HostLog(log_path.to_path_buf()),
+    )
 }
 
 fn phase_label(phase: Option<RunnerPhase>) -> String {

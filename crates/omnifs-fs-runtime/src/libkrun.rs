@@ -893,13 +893,11 @@ impl<'a> LibkrunLaunchLease<'a> {
         if let Some(expected) = record.as_ref() {
             if process_alive(expected.pid) {
                 self.runner.confirm_record(expected)?;
-                if let Err(error) = ControlSocket::new(self.runner.control_socket())?
+                let shutdown = ControlSocket::new(self.runner.control_socket())?
                     .request_shutdown(expected)
-                    .context("request identity-matched libkrun shutdown")
-                {
-                    if process_alive(expected.pid) {
-                        return Err(error);
-                    }
+                    .context("request identity-matched libkrun shutdown");
+                if process_alive(expected.pid) {
+                    shutdown?;
                 }
             }
         } else if self.child.is_none() {
