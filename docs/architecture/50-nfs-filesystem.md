@@ -38,8 +38,8 @@ aware of projection schema.
 
 ## Mount lifecycle
 
-`AttachmentSupervisor` launches hidden `omnifs run-fs` with the resolved
-Attachment identity and attach endpoint. The process owns preflight, attach,
+`FilesystemSupervisor` launches hidden `omnifs run-fs` with the resolved
+Filesystem identity and attach endpoint. The process owns preflight, attach,
 startup cancellation, serving, and unmount; its instance-bound control socket
 handles daemon stop and exact Doctor repair.
 

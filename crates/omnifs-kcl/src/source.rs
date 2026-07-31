@@ -1,9 +1,9 @@
 use omnifs_api::{
-    AttachmentDefinition, CredentialDefinition, MountResourceDefinition, ProviderDefinition,
+    CredentialDefinition, FilesystemDefinition, MountResourceDefinition, ProviderDefinition,
     ResourceDeclarations, ResourceDefinition,
 };
 use omnifs_core::{
-    AttachmentProtocol, AttachmentRuntime, AttachmentSpec, AttachmentSpecError, ProviderId,
+    FilesystemProtocol, FilesystemRuntime, FilesystemSpec, FilesystemSpecError, ProviderId,
     ResourceName,
 };
 use serde::{Deserialize, Serialize};
@@ -30,7 +30,7 @@ pub enum AuthoringResource {
     Provider(ProviderAuthoring),
     Credential(CredentialDefinition),
     Mount(MountResourceDefinition),
-    Attachment(AttachmentAuthoring),
+    Filesystem(FilesystemAuthoring),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,10 +42,10 @@ pub struct ProviderAuthoring {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AttachmentAuthoring {
+pub struct FilesystemAuthoring {
     pub name: ResourceName,
-    pub protocol: AttachmentProtocol,
-    pub runtime: AttachmentRuntime,
+    pub protocol: FilesystemProtocol,
+    pub runtime: FilesystemRuntime,
     pub location: PathBuf,
     pub docker_image: Option<String>,
     pub libkrun_guest_image: Option<String>,
@@ -95,15 +95,15 @@ impl AuthoringConfig {
                 },
                 AuthoringResource::Credential(value) => Ok(ResourceDefinition::Credential(value)),
                 AuthoringResource::Mount(value) => Ok(ResourceDefinition::Mount(value)),
-                AuthoringResource::Attachment(value) => {
-                    let spec = AttachmentSpec::new(
+                AuthoringResource::Filesystem(value) => {
+                    let spec = FilesystemSpec::new(
                         value.protocol,
                         value.runtime,
                         value.location,
                         value.docker_image,
                         value.libkrun_guest_image,
                     )?;
-                    Ok(ResourceDefinition::Attachment(AttachmentDefinition {
+                    Ok(ResourceDefinition::Filesystem(FilesystemDefinition {
                         name: value.name,
                         spec,
                     }))
@@ -160,8 +160,8 @@ pub enum SourceResolutionError {
         expected: ProviderId,
         actual: ProviderId,
     },
-    #[error("invalid attachment source: {0}")]
-    Attachment(#[from] AttachmentSpecError),
+    #[error("invalid filesystem source: {0}")]
+    Filesystem(#[from] FilesystemSpecError),
 }
 
 #[cfg(test)]

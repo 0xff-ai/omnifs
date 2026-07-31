@@ -18,10 +18,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 
 use crate::{
-    attachment_supervisor::AttachmentSupervisor,
     context::DaemonContext,
     control::{ControlServer, RepairCommand},
     daemon::{Daemon, DaemonParts},
+    filesystem_supervisor::FilesystemSupervisor,
     generation_builder::empty_generation,
     logging,
     progress::ProgressHub,
@@ -89,7 +89,7 @@ pub async fn run() -> anyhow::Result<()> {
             providers: Vec::new(),
             serving: None,
             credentials: Vec::new(),
-            attachments: Vec::new(),
+            filesystems: Vec::new(),
         },
     );
     let engine = match prepare_component_engine(&state_paths) {
@@ -481,26 +481,26 @@ async fn build_daemon(
             if let Err(error) = daemon.install_reconciler(reconciler) {
                 return Err(close_failed_state(state, error).await);
             }
-            let attachment_paths = omnifs_fs_runtime::RuntimePaths::daemon_owned(
+            let filesystem_paths = omnifs_fs_runtime::RuntimePaths::daemon_owned(
                 daemon.context.profile().root().to_path_buf(),
                 std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
-                runtime.state_paths.attachments_runtime(),
-                runtime.state_paths.attachment_logs(),
+                runtime.state_paths.filesystems_runtime(),
+                runtime.state_paths.filesystem_logs(),
                 runtime.state_paths.guest_images_cache(),
                 daemon.context.process_identity().executable().to_path_buf(),
             );
-            let attachment_endpoints = omnifs_fs_runtime::AttachEndpoints::new(
+            let filesystem_endpoints = omnifs_fs_runtime::AttachEndpoints::new(
                 Some(daemon.context.attach_socket()),
                 daemon.attach_tcp(),
             );
-            let attachments = AttachmentSupervisor::spawn(
+            let filesystems = FilesystemSupervisor::spawn(
                 Arc::clone(&state),
                 Arc::clone(&daemon.resources),
                 Arc::clone(&daemon.vfs),
-                attachment_paths,
-                attachment_endpoints,
+                filesystem_paths,
+                filesystem_endpoints,
             );
-            if let Err(error) = daemon.install_attachment_supervisor(attachments) {
+            if let Err(error) = daemon.install_filesystem_supervisor(filesystems) {
                 return Err(close_failed_state(state, error).await);
             }
             Ok((daemon, events))

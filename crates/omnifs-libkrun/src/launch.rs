@@ -29,14 +29,14 @@ fn run_with<A: Api>(api: &A, config: &Config, diagnostic: &File) -> Result<(), E
     let mut context = Context::configure(api, config)?;
     let control = Control::bind(
         &config.control_socket,
-        &config.attachment,
+        &config.filesystem,
         &config.spec,
         &config.instance_id,
     )?;
     let shutdown_fd = context.shutdown_fd()?;
     let files = PublishedPid::publish(
         &config.pid_file,
-        &config.attachment,
+        &config.filesystem,
         &config.spec,
         &config.instance_id,
     )?;
@@ -342,8 +342,8 @@ struct Control {
 impl Control {
     fn bind(
         path: &Path,
-        attachment: &omnifs_core::ResourceName,
-        spec: &omnifs_core::AttachmentSpec,
+        filesystem: &omnifs_core::ResourceName,
+        spec: &omnifs_core::FilesystemSpec,
         instance_id: &str,
     ) -> Result<Self, Error> {
         let listener = UnixListener::bind(path)
@@ -358,7 +358,7 @@ impl Control {
             listener,
             record: HelperRecord::new(
                 std::process::id(),
-                attachment.clone(),
+                filesystem.clone(),
                 spec.clone(),
                 instance_id,
             )?,
@@ -411,21 +411,21 @@ impl Control {
                     }
                     let expected_ping = format!(
                         "ping {} {}\n",
-                        self.record.attachment, self.record.instance_id
+                        self.record.filesystem, self.record.instance_id
                     );
                     let expected_shutdown = format!(
                         "shutdown {} {}\n",
-                        self.record.attachment, self.record.instance_id
+                        self.record.filesystem, self.record.instance_id
                     );
                     let reply = if request == expected_ping {
                         format!(
                             "pong {} {} {}\n",
-                            self.record.pid, self.record.attachment, self.record.instance_id
+                            self.record.pid, self.record.filesystem, self.record.instance_id
                         )
                     } else if request == expected_shutdown {
                         format!(
                             "ok {} {} {}\n",
-                            self.record.pid, self.record.attachment, self.record.instance_id
+                            self.record.pid, self.record.filesystem, self.record.instance_id
                         )
                     } else {
                         eprintln!(
@@ -470,8 +470,8 @@ struct PublishedPid {
 impl PublishedPid {
     fn publish(
         pid_file: &Path,
-        attachment: &omnifs_core::ResourceName,
-        spec: &omnifs_core::AttachmentSpec,
+        filesystem: &omnifs_core::ResourceName,
+        spec: &omnifs_core::FilesystemSpec,
         instance_id: &str,
     ) -> Result<Self, Error> {
         let mut file = OpenOptions::new()
@@ -482,7 +482,7 @@ impl PublishedPid {
             .map_err(|error| Error::io("create helper record", pid_file, error))?;
         let record = HelperRecord::new(
             std::process::id(),
-            attachment.clone(),
+            filesystem.clone(),
             spec.clone(),
             instance_id,
         )?;
@@ -673,11 +673,11 @@ mod tests {
 
     fn config() -> Config {
         let install = Installation::for_executable("/opt/omnifs/omnifs").unwrap();
-        let attachment = omnifs_core::ResourceName::new("demo").unwrap();
-        let spec = omnifs_core::AttachmentSpec::new(
-            omnifs_core::AttachmentProtocol::Fuse,
-            omnifs_core::AttachmentRuntime::Libkrun,
-            omnifs_core::ATTACHMENT_GUEST_LOCATION.into(),
+        let filesystem = omnifs_core::ResourceName::new("demo").unwrap();
+        let spec = omnifs_core::FilesystemSpec::new(
+            omnifs_core::FilesystemProtocol::Fuse,
+            omnifs_core::FilesystemRuntime::Libkrun,
+            omnifs_core::FILESYSTEM_GUEST_LOCATION.into(),
             None,
             Some("guest.raw".into()),
         )
@@ -685,7 +685,7 @@ mod tests {
         Config::omnifs(
             "/tmp/omnifs/libkrun",
             "/tmp/omnifs/attach.sock",
-            attachment,
+            filesystem,
             spec,
             "0123456789abcdef0123456789abcdef",
             &install,
@@ -848,16 +848,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(crate::CONTROL_SOCKET_NAME);
         let instance = "0123456789abcdef0123456789abcdef";
-        let attachment = omnifs_core::ResourceName::new("demo").unwrap();
-        let spec = omnifs_core::AttachmentSpec::new(
-            omnifs_core::AttachmentProtocol::Fuse,
-            omnifs_core::AttachmentRuntime::Libkrun,
-            omnifs_core::ATTACHMENT_GUEST_LOCATION.into(),
+        let filesystem = omnifs_core::ResourceName::new("demo").unwrap();
+        let spec = omnifs_core::FilesystemSpec::new(
+            omnifs_core::FilesystemProtocol::Fuse,
+            omnifs_core::FilesystemRuntime::Libkrun,
+            omnifs_core::FILESYSTEM_GUEST_LOCATION.into(),
             None,
             Some("guest.raw".into()),
         )
         .unwrap();
-        let control = Control::bind(&path, &attachment, &spec, instance).unwrap();
+        let control = Control::bind(&path, &filesystem, &spec, instance).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let (mut signal_reader, signal_writer) = UnixStream::pair().unwrap();
         let thread = control.spawn(
@@ -865,7 +865,7 @@ mod tests {
             Arc::clone(&stop),
         );
         let client = crate::ControlSocket::new(path).unwrap();
-        let record = client.ping(&attachment, &spec, instance).unwrap();
+        let record = client.ping(&filesystem, &spec, instance).unwrap();
         assert_eq!(record.pid, std::process::id());
         assert_eq!(record.spec, spec);
         assert_eq!(record.instance_id, instance);
@@ -883,25 +883,25 @@ mod tests {
     fn published_pid_drop_never_removes_a_replacement_record() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(crate::PID_FILE_NAME);
-        let attachment = omnifs_core::ResourceName::new("demo").unwrap();
-        let spec = omnifs_core::AttachmentSpec::new(
-            omnifs_core::AttachmentProtocol::Fuse,
-            omnifs_core::AttachmentRuntime::Libkrun,
-            omnifs_core::ATTACHMENT_GUEST_LOCATION.into(),
+        let filesystem = omnifs_core::ResourceName::new("demo").unwrap();
+        let spec = omnifs_core::FilesystemSpec::new(
+            omnifs_core::FilesystemProtocol::Fuse,
+            omnifs_core::FilesystemRuntime::Libkrun,
+            omnifs_core::FILESYSTEM_GUEST_LOCATION.into(),
             None,
             Some("guest.raw".into()),
         )
         .unwrap();
         let published = PublishedPid::publish(
             &path,
-            &attachment,
+            &filesystem,
             &spec,
             "0123456789abcdef0123456789abcdef",
         )
         .unwrap();
         let replacement = HelperRecord::new(
             std::process::id(),
-            attachment,
+            filesystem,
             spec,
             "fedcba9876543210fedcba9876543210",
         )

@@ -8,9 +8,10 @@ architecture note and binding contract owns a change.
 
 Binding contracts: start with `docs/contracts/00-index.md`.
 
-`omnifs` projects external services as one filesystem namespace. A trusted host
-loads untrusted providers as `wasm32-wasip2` components; FUSE and NFS expose
-the same tree to the OS.
+`omnifs` is a filesystem projection system. It projects external services into
+one shared virtual namespace. A trusted host loads untrusted providers as
+`wasm32-wasip2` components; FUSE and NFS expose the same namespace to the OS as
+one or more filesystems.
 
 ## Ownership
 
@@ -59,13 +60,13 @@ a complete observation proves the exact size; the hint never bounds reads.
 ## Resource flow
 
 1. The CLI reads the current revision, plans a complete Provider, Credential,
-   Mount, and Attachment set, and calls `ApplyResources`.
+   Mount, and Filesystem set, and calls `ApplyResources`.
 2. The daemon validates and commits that set plus its receipt in one SQLite
    transaction, then wakes reconcilers and returns.
 3. Daemon workers prepare providers, publish the latest valid generation,
-   process credential actions, and reconcile Attachments. A failed build leaves
+   process credential actions, and reconcile Filesystems. A failed build leaves
    the last good generation active.
-4. `AttachmentSupervisor` realizes each desired Attachment as an exact
+4. `FilesystemSupervisor` realizes each desired Filesystem as an exact
    out-of-process runtime and waits for its identity-matched VFS session.
 
 Progress streams observe durable work but do not own or cancel it. SQLite is

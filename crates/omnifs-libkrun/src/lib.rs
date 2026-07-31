@@ -15,7 +15,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use omnifs_core::{
-    ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceName,
+    FILESYSTEM_GUEST_LOCATION, FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName,
 };
 use serde::{Deserialize, Serialize};
 
@@ -50,22 +50,22 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 pub struct HelperRecord {
     pub version: u8,
     pub pid: u32,
-    pub attachment: ResourceName,
-    pub spec: AttachmentSpec,
+    pub filesystem: ResourceName,
+    pub spec: FilesystemSpec,
     pub instance_id: String,
 }
 
 impl HelperRecord {
     pub fn new(
         pid: u32,
-        attachment: ResourceName,
-        spec: AttachmentSpec,
+        filesystem: ResourceName,
+        spec: FilesystemSpec,
         instance_id: impl Into<String>,
     ) -> Result<Self, Error> {
         let record = Self {
             version: HELPER_RECORD_VERSION,
             pid,
-            attachment,
+            filesystem,
             spec,
             instance_id: instance_id.into(),
         };
@@ -253,8 +253,8 @@ pub struct Config {
     ssh_port: u32,
     vcpus: u8,
     memory_mib: u32,
-    attachment: ResourceName,
-    spec: AttachmentSpec,
+    filesystem: ResourceName,
+    spec: FilesystemSpec,
     instance_id: String,
 }
 
@@ -262,8 +262,8 @@ impl Config {
     pub fn omnifs(
         state_dir: impl AsRef<Path>,
         attach_socket: impl AsRef<Path>,
-        attachment: ResourceName,
-        spec: AttachmentSpec,
+        filesystem: ResourceName,
+        spec: FilesystemSpec,
         instance_id: impl Into<String>,
         installation: &Installation,
     ) -> Result<Self, Error> {
@@ -287,7 +287,7 @@ impl Config {
             ssh_port: SSH_PORT,
             vcpus: VCPUS,
             memory_mib: MEMORY_MIB,
-            attachment,
+            filesystem,
             spec,
             instance_id: instance_id.into(),
         };
@@ -349,19 +349,19 @@ impl Config {
             filesystem_id
                 .to_string_lossy()
                 .parse()
-                .map_err(|error| Error::Arguments(format!("invalid Attachment name: {error}")))?,
-            AttachmentSpec::new(
+                .map_err(|error| Error::Arguments(format!("invalid Filesystem name: {error}")))?,
+            FilesystemSpec::new(
                 protocol.to_string_lossy().parse().map_err(|error| {
-                    Error::Arguments(format!("invalid Attachment protocol: {error}"))
+                    Error::Arguments(format!("invalid Filesystem protocol: {error}"))
                 })?,
                 runtime.to_string_lossy().parse().map_err(|error| {
-                    Error::Arguments(format!("invalid Attachment runtime: {error}"))
+                    Error::Arguments(format!("invalid Filesystem runtime: {error}"))
                 })?,
                 PathBuf::from(location),
                 None,
                 (!guest_image.is_empty()).then(|| guest_image.to_string_lossy().into_owned()),
             )
-            .map_err(|error| Error::Arguments(format!("invalid Attachment spec: {error}")))?,
+            .map_err(|error| Error::Arguments(format!("invalid Filesystem spec: {error}")))?,
             instance_id.to_string_lossy(),
             &Installation::current()?,
         )
@@ -378,7 +378,7 @@ impl Config {
                 "--attach-socket",
                 self.attach_socket.clone().into_os_string(),
             ),
-            ("--name", OsString::from(self.attachment.as_str())),
+            ("--name", OsString::from(self.filesystem.as_str())),
             ("--protocol", OsString::from(self.spec.protocol().as_str())),
             ("--runtime", OsString::from(self.spec.runtime().as_str())),
             ("--location", self.spec.location().as_os_str().to_owned()),
@@ -420,12 +420,12 @@ impl Config {
                 "vsock ports must be attach={ATTACH_PORT}, readiness={READINESS_PORT}, ssh={SSH_PORT}"
             )));
         }
-        if self.spec.protocol() != AttachmentProtocol::Fuse
-            || self.spec.runtime() != AttachmentRuntime::Libkrun
-            || self.spec.location() != Path::new(ATTACHMENT_GUEST_LOCATION)
+        if self.spec.protocol() != FilesystemProtocol::Fuse
+            || self.spec.runtime() != FilesystemRuntime::Libkrun
+            || self.spec.location() != Path::new(FILESYSTEM_GUEST_LOCATION)
         {
             return Err(Error::Config(format!(
-                "libkrun requires a fuse/libkrun filesystem at {ATTACHMENT_GUEST_LOCATION}"
+                "libkrun requires a fuse/libkrun filesystem at {FILESYSTEM_GUEST_LOCATION}"
             )));
         }
         if (self.vcpus, self.memory_mib) != (VCPUS, MEMORY_MIB) {
@@ -462,25 +462,25 @@ impl ControlSocket {
 
     pub fn ping(
         &self,
-        expected_attachment: &ResourceName,
-        expected_spec: &AttachmentSpec,
+        expected_filesystem: &ResourceName,
+        expected_spec: &FilesystemSpec,
         expected_instance_id: &str,
     ) -> Result<HelperRecord, Error> {
         validate_instance_id(expected_instance_id)?;
         let reply = self.request(&format!(
-            "ping {expected_attachment} {expected_instance_id}\n"
+            "ping {expected_filesystem} {expected_instance_id}\n"
         ))?;
         let mut fields = reply.trim_end().split(' ');
         let record = match (fields.next(), fields.next(), fields.next(), fields.next()) {
-            (Some("pong"), Some(pid), Some(attachment_name), Some(instance_id))
+            (Some("pong"), Some(pid), Some(filesystem_name), Some(instance_id))
                 if fields.next().is_none() =>
             {
-                let attachment: ResourceName = attachment_name.parse().map_err(|error| {
+                let filesystem: ResourceName = filesystem_name.parse().map_err(|error| {
                     Error::Control(format!(
                         "control Ping returned an invalid filesystem id: {error}"
                     ))
                 })?;
-                if &attachment != expected_attachment {
+                if &filesystem != expected_filesystem {
                     return Err(Error::Control(format!(
                         "control Ping identity mismatch at {}",
                         self.path.display()
@@ -490,7 +490,7 @@ impl ControlSocket {
                     pid.parse().map_err(|_| {
                         Error::Control("control Ping returned an invalid pid".to_owned())
                     })?,
-                    attachment,
+                    filesystem,
                     expected_spec.clone(),
                     instance_id,
                 )?
@@ -502,7 +502,7 @@ impl ControlSocket {
                 )));
             },
         };
-        if record.attachment != *expected_attachment
+        if record.filesystem != *expected_filesystem
             || record.spec != *expected_spec
             || record.instance_id != expected_instance_id
         {
@@ -518,11 +518,11 @@ impl ControlSocket {
         expected.validate()?;
         let reply = self.request(&format!(
             "shutdown {} {}\n",
-            expected.attachment, expected.instance_id
+            expected.filesystem, expected.instance_id
         ))?;
         let expected_reply = format!(
             "ok {} {} {}\n",
-            expected.pid, expected.attachment, expected.instance_id
+            expected.pid, expected.filesystem, expected.instance_id
         );
         if reply != expected_reply {
             return Err(Error::Control(format!(
@@ -569,15 +569,15 @@ impl ControlSocket {
 mod tests {
     use super::*;
 
-    fn attachment() -> ResourceName {
+    fn filesystem() -> ResourceName {
         "demo".parse().unwrap()
     }
 
-    fn spec() -> AttachmentSpec {
-        AttachmentSpec::new(
-            AttachmentProtocol::Fuse,
-            AttachmentRuntime::Libkrun,
-            ATTACHMENT_GUEST_LOCATION.into(),
+    fn spec() -> FilesystemSpec {
+        FilesystemSpec::new(
+            FilesystemProtocol::Fuse,
+            FilesystemRuntime::Libkrun,
+            FILESYSTEM_GUEST_LOCATION.into(),
             None,
             Some("guest.raw".into()),
         )
@@ -589,7 +589,7 @@ mod tests {
         let config = Config::omnifs(
             "/tmp/omnifs/libkrun",
             "/tmp/omnifs/attach.sock",
-            attachment(),
+            filesystem(),
             spec(),
             "0123456789abcdef0123456789abcdef",
             &install,
@@ -624,7 +624,7 @@ mod tests {
         assert_eq!(parsed.state_dir, config.state_dir);
         assert_eq!(parsed.attach_socket, config.attach_socket);
         assert_eq!(parsed.root_disk, config.root_disk);
-        assert_eq!(parsed.attachment, config.attachment);
+        assert_eq!(parsed.filesystem, config.filesystem);
         assert_eq!(parsed.spec, config.spec);
         assert_eq!(parsed.attach_port, ATTACH_PORT);
         assert_eq!(parsed.vcpus, VCPUS);
@@ -649,17 +649,17 @@ mod tests {
         let path = dir.path().join(PID_FILE_NAME);
         std::fs::write(
             &path,
-            r#"{"version":4,"pid":42,"attachment":"demo","spec":{"protocol":"fuse","runtime":"libkrun","location":"/omnifs","docker_image":null,"libkrun_guest_image":"guest.raw"},"instance_id":"0123456789abcdef0123456789abcdef"}"#,
+            r#"{"version":4,"pid":42,"filesystem":"demo","spec":{"protocol":"fuse","runtime":"libkrun","location":"/omnifs","docker_image":null,"libkrun_guest_image":"guest.raw"},"instance_id":"0123456789abcdef0123456789abcdef"}"#,
         )
         .unwrap();
         assert_eq!(HelperRecord::read(&path).unwrap().unwrap().pid, 42);
 
         std::fs::write(
             &path,
-            r#"{"version":4,"pid":42,"attachment":"demo","spec":{"protocol":"fuse","runtime":"libkrun","location":"/omnifs","docker_image":null,"libkrun_guest_image":"guest.raw"},"instance_id":"0123456789abcdef0123456789abcdef","extra":true}"#,
+            r#"{"version":4,"pid":42,"filesystem":"demo","spec":{"protocol":"fuse","runtime":"libkrun","location":"/omnifs","docker_image":null,"libkrun_guest_image":"guest.raw"},"instance_id":"0123456789abcdef0123456789abcdef","extra":true}"#,
         )
         .unwrap();
         assert!(HelperRecord::read(&path).is_err());
-        assert!(HelperRecord::new(42, attachment(), spec(), "short").is_err());
+        assert!(HelperRecord::new(42, filesystem(), spec(), "short").is_err());
     }
 }

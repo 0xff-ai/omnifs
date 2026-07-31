@@ -24,22 +24,22 @@ automation path; `credential set --from-env` is the sole secret automation
 command. Every write uses typed RPC; the CLI keeps no desired-state reader or
 journal.
 
-The daemon owns resources, SQLite, caches, provider preparation, Attachment
+The daemon owns resources, SQLite, caches, provider preparation, Filesystem
 lifecycle, attach endpoints, VFS sessions, and raw logs under
 `<profile>/daemon-state/`. It never reads client files or chooses client config.
 
 The only CLI-to-daemon API is tonic/protobuf gRPC over the profile Unix socket,
 using checked-in `omnifs.control.v1` and generated Rust. It covers control,
-resources, progress, actions, Attachments, recovery, shutdown, Inspector, and
+resources, progress, actions, Filesystems, recovery, shutdown, Inspector, and
 bounded logs. `ApplyResources` validates and commits one transaction, wakes
-reconcilers, and returns before any provider or Attachment work.
+reconcilers, and returns before any provider or Filesystem work.
 
 Progress registers before reading its full snapshot. Fanout is bounded and
 non-blocking; slow consumers receive a resync snapshot. Revision streams include
 only relevant work. Closed event variants carry factual stages, counts, retries,
 queues, and outcomes, never inferred percentages or cache hits.
 
-Credential and Attachment restart actions use client IDs and generation
+Credential and Filesystem restart actions use client IDs and generation
 preconditions. SQLite retains at most one non-terminal action per target across
 restart and returns durable receipts. Action dedupe never stores or hashes the
 submitted secret bytes; the first ID wins. Secrets cross only in request
@@ -70,7 +70,7 @@ One public `omnifs` binary hides `daemon` and `run-fs`. Public commands are:
 - `credential login|ls|show|rm|revoke` and
   `credential set <name> --from-env <variable>` keep values out of argv and
   output. Only `set --from-env` automates secrets.
-- `attachment add|ls|show|rm|restart|shell <name>` owns public filesystem
+- `fs add|ls|show|rm|restart|shell <name>` owns public filesystem
   lifecycle through resources and actions. Hidden `run-fs` stays internal.
 
 Global output and interaction flags apply after Clap parsing. JSON emits one
@@ -116,12 +116,12 @@ interactive prompt applies against that exact base revision; stale apply fails
 and the CLI does not silently re-plan or ask again.
 
 `setup` starts the daemon, presents embedded providers honestly, creates
-Provider and Mount resources plus the recommended Attachment in one consented
+Provider and Mount resources plus the recommended Filesystem in one consented
 set, and follows its revision. There is no `up` or offline product mode; KCL
 plan and apply are the automation surface.
 
 `down` rejects writes, drains exact observed runtimes, reports stragglers, and
-stops without deleting desired Attachments, which the next daemon restores.
+stops without deleting desired Filesystems, which the next daemon restores.
 
 ### KCL authoring boundary
 
@@ -140,7 +140,7 @@ candidate that reaches `PlanResources` and `ApplyResources`.
 
 ### Mounts, providers, and credentials
 
-SQLite alone owns desired Provider, Mount, Credential, and Attachment
+SQLite alone owns desired Provider, Mount, Credential, and Filesystem
 definitions. They commit as one set with exact base revision and digest.
 Durable receipts recover lost replies. Edits use complete-set apply; operations
 use durable actions.
@@ -163,19 +163,19 @@ actions through refresh, drain, and upstream work.
 
 ### Filesystems and attach
 
-`AttachmentSpec` owns protocol, runtime, resolved location, and assets. SQLite
+`FilesystemSpec` owns protocol, runtime, resolved location, and assets. SQLite
 resources are desired truth; observed rows retain exact spec, version, runtime
 instance, phase, retry, action generation, and tombstone until teardown proof.
 Host locations are absolute; guests use `/omnifs`.
 
-`AttachmentSupervisor` owns bounded host, Docker, and libkrun lifecycle through
+`FilesystemSupervisor` owns bounded host, Docker, and libkrun lifecycle through
 `omnifs-fs-runtime`. It persists identity before effects, adopts only exact
-runtime and session matches, serializes each Attachment, and retains restart
+runtime and session matches, serializes each Filesystem, and retains restart
 actions across daemon restart. Runners stay out of process and credential-free.
 
 `VfsServer` owns listeners, readiness, reconnect, pushed stop, and live
-sessions. VFS v11 handshakes carry Attachment name, exact spec, and runtime
-instance; only the expected identity is admitted. Desired Attachments and live
+sessions. VFS v11 handshakes carry Filesystem name, exact spec, and runtime
+instance; only the expected identity is admitted. Desired Filesystems and live
 sessions remain separate.
 
 ### Logs, Inspector, metrics, and dev
@@ -193,7 +193,7 @@ config or `OMNIFS_METRICS`. They are never sent and cannot fail a command.
 
 `scripts/dev.ts` owns a dedicated contributor profile. It builds providers and
 CLI, renders KCL, sets credentials through `credential set --from-env`, applies
-with `target/debug/omnifs`, waits for the revision, then opens `attachment shell
+with `target/debug/omnifs`, waits for the revision, then opens `fs shell
 dev-docker` at `/omnifs`. It uses no interactive porcelain or daemon container.
 
 ## Must not
@@ -208,7 +208,7 @@ dev-docker` at `/omnifs`. It uses no interactive porcelain or daemon container.
   filesystem tree, or the CLI read daemon SQLite or logs directly.
 - Add remote control or TCP authentication. TCP attach stays unauthenticated on
   loopback or the detected Docker bridge.
-- Clear observed Attachment identity or a deletion tombstone before exact runtime and session teardown is proved.
+- Clear observed Filesystem identity or a deletion tombstone before exact runtime and session teardown is proved.
 
 ## Code
 
@@ -223,7 +223,7 @@ dev-docker` at `/omnifs`. It uses no interactive porcelain or daemon container.
 - `crates/omnifs-daemon/src/log_stream.rs`
 - `crates/omnifs-daemon/src/resource_control.rs`
 - `crates/omnifs-daemon/src/progress.rs`
-- `crates/omnifs-daemon/src/attachment_supervisor.rs`
+- `crates/omnifs-daemon/src/filesystem_supervisor.rs`
 - `crates/omnifs-state/src/lib.rs`
 - `crates/omnifs-state/src/resource.rs`
 - `crates/omnifs-state/src/action.rs`

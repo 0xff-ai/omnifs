@@ -49,7 +49,7 @@ pub async fn run(output: Output) -> anyhow::Result<DoctorVerdict> {
 /// `docker reachable`/`image cached` diagnostics. The daemon itself always
 /// runs host-native, so there is no daemon Docker target to resolve here.
 fn resolve_filesystem_target(profile: &Profile) -> anyhow::Result<DockerTarget> {
-    let id = ResourceName::new("doctor").expect("static attachment name");
+    let id = ResourceName::new("doctor").expect("static filesystem name");
     DockerTarget::for_filesystem(
         profile.root(),
         std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
@@ -63,8 +63,8 @@ fn daemon_runtime_paths(profile: &Profile) -> anyhow::Result<RuntimePaths> {
     Ok(RuntimePaths::daemon_owned(
         profile.root().to_path_buf(),
         std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
-        state.attachments_runtime(),
-        state.attachment_logs(),
+        state.filesystems_runtime(),
+        state.filesystem_logs(),
         state.guest_images_cache(),
         std::env::current_exe().context("resolve the omnifs executable")?,
     ))
@@ -87,7 +87,7 @@ enum Section {
     Environment,
     Profile,
     Mounts,
-    Attachments,
+    Filesystems,
 }
 
 /// Which specific check a finding reports. A closed enum sitting next to
@@ -179,7 +179,7 @@ impl Remediation {
                 "omnifs doctor (clean stale daemon identity)".to_owned()
             },
             Self::StopHostFilesystem { record, .. } => {
-                format!("omnifs attachment rm {}", record.attachment)
+                format!("omnifs fs rm {}", record.filesystem)
             },
             Self::CleanStaleHostRecord { record, .. } => {
                 format!(
@@ -188,7 +188,7 @@ impl Remediation {
                 )
             },
             Self::StopLibkrunFilesystem { record, .. } => {
-                format!("omnifs attachment rm {}", record.attachment)
+                format!("omnifs fs rm {}", record.filesystem)
             },
         }
     }
@@ -236,7 +236,7 @@ impl Remediation {
                 record,
             } => {
                 let _guard = acquire_stopped_daemon_guard(profile).await?;
-                let paths = paths.attachment(&record.attachment);
+                let paths = paths.filesystem(&record.filesystem);
                 HostDriver::new(
                     state_dir.clone(),
                     paths.host_log().to_path_buf(),
@@ -252,7 +252,7 @@ impl Remediation {
                 record,
             } => {
                 let _guard = acquire_stopped_daemon_guard(profile).await?;
-                let paths = paths.attachment(&record.attachment);
+                let paths = paths.filesystem(&record.filesystem);
                 HostDriver::new(
                     state_dir.clone(),
                     paths.host_log().to_path_buf(),
@@ -535,7 +535,7 @@ fn build_rows(findings: &[Finding]) -> (Vec<Row>, Vec<Row>, Vec<Row>, Vec<Row>) 
             Section::Environment => environment.push(Row::from(finding)),
             Section::Profile => profile.push(Row::from(finding)),
             Section::Mounts => mounts.push(Row::from(finding)),
-            Section::Attachments => filesystems.push(Row::from(finding)),
+            Section::Filesystems => filesystems.push(Row::from(finding)),
         }
     }
     (environment, profile, mounts, filesystems)
@@ -664,7 +664,7 @@ fn render_report(
         ("Environment", &environment),
         ("Profile", &profile),
         ("Mounts", &mounts),
-        ("Attachments", &filesystems),
+        ("Filesystems", &filesystems),
         ("Daemon", &daemon),
     ] {
         out.push_str(&render_group(name, rows, caps));
@@ -905,9 +905,9 @@ impl Doctor {
         (runtime, findings)
     }
 
-    fn attached(&self, name: &ResourceName, spec: &omnifs_core::AttachmentSpec) -> bool {
+    fn attached(&self, name: &ResourceName, spec: &omnifs_core::FilesystemSpec) -> bool {
         self.inventory
-            .attachments
+            .filesystems
             .iter()
             .any(|filesystem| filesystem.name == *name && filesystem.spec == *spec)
     }
@@ -941,7 +941,7 @@ impl Doctor {
             match candidate {
                 Candidate::ListingFailed { backend, error } => {
                     findings.push(Finding::from_probe(
-                        Section::Attachments,
+                        Section::Filesystems,
                         ownership_check_for(backend),
                         None,
                         ProbeResult::Err(error),
@@ -953,7 +953,7 @@ impl Doctor {
                     error,
                 } => {
                     findings.push(Finding::from_probe(
-                        Section::Attachments,
+                        Section::Filesystems,
                         ownership_check_for(backend),
                         target,
                         ProbeResult::Err(error),
@@ -972,7 +972,7 @@ impl Doctor {
                 ) {
                     Ok(finding) => findings.extend(finding),
                     Err(error) => findings.push(Finding::from_probe(
-                        Section::Attachments,
+                        Section::Filesystems,
                         Check::FilesystemState,
                         None,
                         ProbeResult::Err(format!("{error:#}")),
@@ -982,12 +982,12 @@ impl Doctor {
                     findings.extend(Self::docker_candidate_finding(owned, daemon_health));
                 },
                 Candidate::Libkrun {
-                    attachment,
+                    filesystem,
                     state_dir,
                     confirmed,
                 } => {
                     findings.extend(self.libkrun_candidate_finding(
-                        &attachment,
+                        &filesystem,
                         state_dir,
                         confirmed,
                         daemon_health,
@@ -1014,10 +1014,10 @@ impl Doctor {
     ) -> anyhow::Result<Option<Finding>> {
         let spec = record.spec.clone();
         let mount_point = spec.location().to_path_buf();
-        let is_attached = self.attached(&record.attachment, &spec);
+        let is_attached = self.attached(&record.filesystem, &spec);
         let target = Some(format!(
             "`{}` {}/host at {}",
-            record.attachment,
+            record.filesystem,
             spec.protocol(),
             mount_point.display()
         ));
@@ -1032,12 +1032,12 @@ impl Doctor {
                     },
                 );
                 Ok(Some(Finding {
-                    section: Section::Attachments,
+                    section: Section::Filesystems,
                     check: Check::StrayFilesystem,
                     target,
                     severity: Severity::Attention,
                     message: format!(
-                        "runner is confirmed in phase {phase:?} but daemon health is {daemon_health:?} and reports no matching attachment"
+                        "runner is confirmed in phase {phase:?} but daemon health is {daemon_health:?} and reports no matching filesystem"
                     ),
                     fix: remediation.as_ref().map(Remediation::command_line),
                     remediation,
@@ -1052,7 +1052,7 @@ impl Doctor {
                         record,
                     });
                 Ok(Some(Finding {
-                    section: Section::Attachments,
+                    section: Section::Filesystems,
                     check: Check::StaleFilesystemState,
                     target,
                     severity: if mount_active || is_attached {
@@ -1077,7 +1077,7 @@ impl Doctor {
     }
 
     /// A Docker scan proves only the immutable container ID and filesystem
-    /// label. It cannot prove the daemon-owned attachment spec or
+    /// label. It cannot prove the daemon-owned filesystem spec or
     /// runtime-instance ID required by the current runtime API, so doctor
     /// must never turn this observation into a stop request.
     fn docker_candidate_finding(
@@ -1085,12 +1085,12 @@ impl Doctor {
         daemon_health: DaemonHealth,
     ) -> Vec<Finding> {
         vec![Finding {
-            section: Section::Attachments,
+            section: Section::Filesystems,
             check: Check::DockerFilesystemOwnership,
             target: Some(owned.filesystem_id),
             severity: Severity::Attention,
             message: format!(
-                "container {} cannot be remediated automatically: its record has no exact attachment spec or runtime instance (daemon health is {daemon_health:?})",
+                "container {} cannot be remediated automatically: its record has no exact filesystem spec or runtime instance (daemon health is {daemon_health:?})",
                 owned.identity.id,
             ),
             fix: None,
@@ -1111,30 +1111,30 @@ impl Doctor {
         daemon_health: DaemonHealth,
     ) -> Vec<Finding> {
         match confirmed {
-            Ok(Some(record)) if record.attachment != *id => {
+            Ok(Some(record)) if record.filesystem != *id => {
                 vec![Finding::from_probe(
-                    Section::Attachments,
+                    Section::Filesystems,
                     Check::LibkrunFilesystemOwnership,
                     Some(id.to_string()),
                     ProbeResult::Err(format!(
                         "helper claims filesystem `{}` instead of matching its state path",
-                        record.attachment
+                        record.filesystem
                     )),
                 )]
             },
             Ok(Some(record)) => {
-                if self.attached(&record.attachment, &record.spec) {
+                if self.attached(&record.filesystem, &record.spec) {
                     return Vec::new();
                 }
                 let remediation = (daemon_health == DaemonHealth::Stopped)
                     .then_some(Remediation::StopLibkrunFilesystem { state_dir, record });
                 vec![Finding {
-                    section: Section::Attachments,
+                    section: Section::Filesystems,
                     check: Check::StrayFilesystem,
                     target: Some(id.to_string()),
                     severity: Severity::Attention,
                     message: format!(
-                        "helper identity is confirmed but daemon health is {daemon_health:?} and reports no matching attachment"
+                        "helper identity is confirmed but daemon health is {daemon_health:?} and reports no matching filesystem"
                     ),
                     fix: remediation.as_ref().map(Remediation::command_line),
                     remediation,
@@ -1142,7 +1142,7 @@ impl Doctor {
             },
             Ok(None) => Vec::new(),
             Err(error) => vec![Finding::from_probe(
-                Section::Attachments,
+                Section::Filesystems,
                 Check::LibkrunFilesystemOwnership,
                 Some(id.to_string()),
                 ProbeResult::Err(error),
@@ -1196,10 +1196,10 @@ impl Doctor {
         match runtime.inspect_image(image.as_str()).await {
             Ok(ImageInspection::Present) => ProbeResult::Ok(format!("{image} cached")),
             Ok(ImageInspection::Missing) if image.has_registry() => ProbeResult::Warn(format!(
-                "{image} not cached (will pull on the next Docker attachment start)"
+                "{image} not cached (will pull on the next Docker filesystem start)"
             )),
             Ok(ImageInspection::Missing) => ProbeResult::Err(format!(
-                "{image} not present locally; a dev image is never pulled, so attachment start \
+                "{image} not present locally; a dev image is never pulled, so filesystem start \
                  cannot start (build it with `just filesystem-image`)"
             )),
             Err(error) => ProbeResult::Err(format!("inspect: {error}")),
@@ -1321,7 +1321,7 @@ mod golden {
         assert!(rendered.contains("Environment"), "{rendered}");
         assert!(rendered.contains("Profile"), "{rendered}");
         assert!(rendered.contains("Mounts"), "{rendered}");
-        assert!(rendered.contains("Attachments"), "{rendered}");
+        assert!(rendered.contains("Filesystems"), "{rendered}");
         assert!(rendered.contains("Daemon"), "{rendered}");
         assert!(
             rendered.trim_end().ends_with("Everything checks out."),
@@ -1470,7 +1470,7 @@ mod golden {
             ),
             findings: Vec::new(),
             repairs: vec![
-                Repair::applied("omnifs attachment rm docker".to_owned()),
+                Repair::applied("omnifs fs rm docker".to_owned()),
                 Repair::failed(
                     "omnifs doctor (clean stale daemon identity)".to_owned(),
                     "boom".to_owned(),
@@ -1600,19 +1600,19 @@ mod golden {
         let profile = Profile::under_root(root.path());
         let paths = daemon_runtime_paths(&profile).unwrap();
         let id: ResourceName = "legacy".parse().unwrap();
-        let spec = omnifs_core::AttachmentSpec::new(
-            omnifs_core::AttachmentProtocol::Nfs,
-            omnifs_core::AttachmentRuntime::Host,
+        let spec = omnifs_core::FilesystemSpec::new(
+            omnifs_core::FilesystemProtocol::Nfs,
+            omnifs_core::FilesystemRuntime::Host,
             root.path().join("mount"),
             None,
             None,
         )
         .unwrap();
-        let state_dir = paths.attachment(&id).state_dir().to_path_buf();
+        let state_dir = paths.filesystem(&id).state_dir().to_path_buf();
         std::fs::create_dir_all(&state_dir).unwrap();
         let record = |instance_id: &str| omnifs_mtab::RunnerRecord {
             version: omnifs_mtab::RunnerRecord::VERSION,
-            attachment: id.clone(),
+            filesystem: id.clone(),
             instance_id: instance_id.to_owned(),
             pid: 1,
             process_group: 1,

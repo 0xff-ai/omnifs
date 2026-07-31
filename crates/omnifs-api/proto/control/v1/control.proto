@@ -21,9 +21,9 @@ service Control {
   rpc ApplyResources(ApplyResourcesRequest) returns (ApplyResourcesResponse);
   rpc SetCredentialMaterial(SetCredentialMaterialRequest) returns (SetCredentialMaterialResponse);
   rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse);
-  rpc GetAttachmentStatus(GetAttachmentStatusRequest) returns (GetAttachmentStatusResponse);
-  rpc RestartAttachment(RestartAttachmentRequest) returns (RestartAttachmentResponse);
-  rpc GetAttachmentAccess(GetAttachmentAccessRequest) returns (GetAttachmentAccessResponse);
+  rpc GetFilesystemStatus(GetFilesystemStatusRequest) returns (GetFilesystemStatusResponse);
+  rpc RestartFilesystem(RestartFilesystemRequest) returns (RestartFilesystemResponse);
+  rpc GetFilesystemAccess(GetFilesystemAccessRequest) returns (GetFilesystemAccessResponse);
   rpc WatchProgress(WatchProgressRequest) returns (stream ProgressEvent);
   rpc SubscribeInspector(InspectorRequest) returns (stream InspectorStreamItem);
   rpc StreamLogs(StreamLogsRequest) returns (stream LogStreamItem);
@@ -43,7 +43,7 @@ message RepairStateRequest {
 }
 message RepairStateResponse { RepairReceipt receipt = 1; }
 message ShutdownRequest { bool stop_filesystems = 1; }
-message ShutdownResponse { uint32 detached = 1; repeated string still_attached = 2; }
+message ShutdownResponse { uint32 stopped = 1; repeated string still_running = 2; }
 
 message ListProvidersResponse { repeated ProviderEntry providers = 1; }
 message GetProviderMetadataRequest { bytes provider_id = 1; }
@@ -92,21 +92,21 @@ message RevokeCredentialRequest {
   string credential_name = 3;
 }
 message RevokeCredentialResponse { CredentialReceipt receipt = 1; }
-message GetAttachmentStatusRequest { string attachment_name = 1; }
-message GetAttachmentStatusResponse { optional AttachmentStatus status = 1; }
-message RestartAttachmentRequest {
+message GetFilesystemStatusRequest { string filesystem_name = 1; }
+message GetFilesystemStatusResponse { optional FilesystemStatus status = 1; }
+message RestartFilesystemRequest {
   bytes action_id = 1;
   uint64 base_action_generation = 2;
-  string attachment_name = 3;
+  string filesystem_name = 3;
 }
-message RestartAttachmentResponse { ActionReceipt receipt = 1; }
-message GetAttachmentAccessRequest {
-  string attachment_name = 1;
+message RestartFilesystemResponse { ActionReceipt receipt = 1; }
+message GetFilesystemAccessRequest {
+  string filesystem_name = 1;
   bool interactive = 2;
   optional string shell = 3;
   repeated string command = 4;
 }
-message GetAttachmentAccessResponse { AttachmentAccess access = 1; }
+message GetFilesystemAccessResponse { FilesystemAccess access = 1; }
 message WatchProgressRequest {
   oneof target {
     uint64 desired_revision = 1;
@@ -133,7 +133,7 @@ message ResourceDefinition {
     ProviderResource provider = 1;
     CredentialResource credential = 2;
     MountResource mount = 3;
-    AttachmentResource attachment = 4;
+    FilesystemResource filesystem = 4;
   }
 }
 message ProviderResource { string name = 1; bytes artifact = 2; }
@@ -154,23 +154,23 @@ message ResourceLimits {
   optional uint32 max_memory_mb = 1;
   optional uint64 max_fetch_blob_bytes = 2;
 }
-message AttachmentResource {
+message FilesystemResource {
   string name = 1;
-  AttachmentSpec spec = 2;
+  FilesystemSpec spec = 2;
 }
-message AttachmentSpec {
+message FilesystemSpec {
   FsProtocol protocol = 1;
   FsRuntime runtime = 2;
   bytes location = 3;
   optional string docker_image = 4;
   optional string libkrun_guest_image = 5;
 }
-message AttachmentStatus {
-  AttachmentResource definition = 1;
+message FilesystemStatus {
+  FilesystemResource definition = 1;
   uint64 desired_revision = 2;
   bytes desired_version = 3;
   optional bytes observed_version = 4;
-  AttachmentPhase phase = 5;
+  FilesystemPhase phase = 5;
   optional string runtime_instance = 6;
   uint64 action_generation = 7;
   optional string error_code = 8;
@@ -178,13 +178,13 @@ message AttachmentStatus {
   optional uint64 retry_at_unix_ms = 10;
   bool deleting = 11;
 }
-message AttachmentAccess {
+message FilesystemAccess {
   oneof value {
     bytes host_path = 1;
-    AttachmentCommand command = 2;
+    FilesystemCommand command = 2;
   }
 }
-message AttachmentCommand {
+message FilesystemCommand {
   bytes program = 1;
   repeated bytes args = 2;
   optional bytes current_dir = 3;
@@ -244,7 +244,7 @@ message ProgressSnapshot {
   repeated ProviderPreparationProgress providers = 5;
   optional ServingProgress serving = 6;
   repeated CredentialProgress credentials = 7;
-  repeated AttachmentProgress attachments = 8;
+  repeated FilesystemProgress filesystems = 8;
 }
 message ProgressEvent {
   string daemon_instance_id = 1;
@@ -255,7 +255,7 @@ message ProgressEvent {
     ProviderPreparationProgress provider_preparation = 5;
     ServingProgress serving_progress = 6;
     CredentialProgress credential_progress = 7;
-    AttachmentProgress attachment_progress = 8;
+    FilesystemProgress filesystem_progress = 8;
     RevisionReady revision_ready = 9;
     RevisionFailed revision_failed = 10;
     RevisionSuperseded revision_superseded = 11;
@@ -296,9 +296,9 @@ message CredentialProgress {
   optional string error_code = 3;
   optional string detail = 4;
 }
-message AttachmentProgress {
+message FilesystemProgress {
   ResourceKey key = 1;
-  AttachmentProgressStage stage = 2;
+  FilesystemProgressStage stage = 2;
   optional string error_code = 3;
   optional string detail = 4;
   uint32 retry_count = 5;
@@ -307,8 +307,8 @@ message AttachmentProgress {
   FsRuntime runtime = 8;
   uint64 completed_bytes = 9;
   optional uint64 total_bytes = 10;
-  uint32 queued_attachments = 11;
-  uint32 active_attachments = 12;
+  uint32 queued_filesystems = 11;
+  uint32 active_filesystems = 12;
 }
 message RevisionReady { uint64 revision = 1; }
 message RevisionFailed {
@@ -376,8 +376,8 @@ message StringList { repeated string values = 1; }
 message CredentialStatus { CredentialKey key = 1; bytes provider = 2; CredentialKind kind = 3; repeated string scopes = 4; bytes auth_fingerprint = 5; uint64 version = 6; uint64 generation = 7; CredentialStatusKind status = 8; uint64 action_generation = 10; }
 
 message DaemonInfo { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional bytes attach_unix = 5; optional string attach_tcp = 6; }
-message DaemonStatus { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional string attach_tcp = 5; repeated AttachmentResource attachments = 6; repeated MountInfo mounts = 7; DaemonHealth health = 8; }
-message DaemonInventory { DaemonInfo info = 1; DaemonPhase phase = 2; optional uint64 durable_revision = 3; optional uint64 serving_revision = 4; DaemonHealth health = 5; repeated MountRecord mounts = 6; repeated CredentialStatus credentials = 7; repeated AttachmentResource attachments = 8; }
+message DaemonStatus { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional string attach_tcp = 5; repeated FilesystemResource filesystems = 6; repeated MountInfo mounts = 7; DaemonHealth health = 8; }
+message DaemonInventory { DaemonInfo info = 1; DaemonPhase phase = 2; optional uint64 durable_revision = 3; optional uint64 serving_revision = 4; DaemonHealth health = 5; repeated MountRecord mounts = 6; repeated CredentialStatus credentials = 7; repeated FilesystemResource filesystems = 8; }
 message DaemonRecovery { DaemonPhase phase = 1; optional uint64 durable_revision = 2; optional uint64 serving_revision = 3; HealthReport store_health = 4; RecoveryOffer repair = 5; }
 message RecoveryOffer { bytes id = 1; repeated RepairAction actions = 2; }
 message RepairReceipt { string instance_id = 1; bytes recovery_id = 2; RepairAction action = 3; RepairDisposition disposition = 4; }
@@ -393,16 +393,16 @@ enum RepairAction { REPAIR_ACTION_UNSPECIFIED = 0; REPAIR_RECREATE_CONTROL_STORE
 enum RepairDisposition { REPAIR_DISPOSITION_UNSPECIFIED = 0; REPAIR_FRESH_STORE_CREATED = 1; REPAIR_CORRUPT_STORE_ARCHIVED = 2; }
 enum FsProtocol { FS_PROTOCOL_UNSPECIFIED = 0; FS_FUSE = 1; FS_NFS = 2; }
 enum FsRuntime { FS_RUNTIME_UNSPECIFIED = 0; FS_HOST = 1; FS_DOCKER = 2; FS_LIBKRUN = 3; }
-enum ResourceKind { RESOURCE_KIND_UNSPECIFIED = 0; RESOURCE_PROVIDER = 1; RESOURCE_CREDENTIAL = 2; RESOURCE_MOUNT = 3; RESOURCE_ATTACHMENT = 4; }
+enum ResourceKind { RESOURCE_KIND_UNSPECIFIED = 0; RESOURCE_PROVIDER = 1; RESOURCE_CREDENTIAL = 2; RESOURCE_MOUNT = 3; RESOURCE_FILESYSTEM = 4; }
 enum ResourcePhase { RESOURCE_PHASE_UNSPECIFIED = 0; RESOURCE_PENDING = 1; RESOURCE_PREPARING = 2; RESOURCE_READY = 3; RESOURCE_RETRYING = 4; RESOURCE_FAILED = 5; RESOURCE_BLOCKED = 6; RESOURCE_DELETING = 7; }
 enum ResourceChangeAction { RESOURCE_CHANGE_ACTION_UNSPECIFIED = 0; RESOURCE_CREATE = 1; RESOURCE_UPDATE = 2; RESOURCE_DELETE = 3; RESOURCE_UNCHANGED = 4; }
-enum ActionKind { ACTION_KIND_UNSPECIFIED = 0; ACTION_SET_CREDENTIAL_MATERIAL = 1; ACTION_REVOKE_CREDENTIAL = 2; ACTION_RESTART_ATTACHMENT = 3; }
+enum ActionKind { ACTION_KIND_UNSPECIFIED = 0; ACTION_SET_CREDENTIAL_MATERIAL = 1; ACTION_REVOKE_CREDENTIAL = 2; ACTION_RESTART_FILESYSTEM = 3; }
 enum ActionPhase { ACTION_PHASE_UNSPECIFIED = 0; ACTION_ACCEPTED = 1; ACTION_RUNNING = 2; ACTION_RETRYING = 3; ACTION_READY = 4; ACTION_FAILED = 5; }
 enum ProviderPreparationStage { PROVIDER_PREPARATION_STAGE_UNSPECIFIED = 0; PROVIDER_PREPARATION_QUEUED = 1; PROVIDER_PREPARATION_COMPILING = 2; PROVIDER_PREPARATION_READY = 3; PROVIDER_PREPARATION_FAILED = 4; PROVIDER_PREPARATION_RETRYING = 5; }
 enum ServingProgressStage { SERVING_PROGRESS_STAGE_UNSPECIFIED = 0; SERVING_QUEUED = 1; SERVING_BUILDING = 2; SERVING_DRAINING = 3; SERVING_READY = 4; SERVING_FAILED = 5; SERVING_WAITING_PROVIDERS = 6; SERVING_PROVIDERS_READY = 7; SERVING_BUILT = 8; SERVING_PUBLISHING = 9; SERVING_RETRYING = 10; SERVING_SUPERSEDED = 11; SERVING_DEGRADED = 12; }
 enum CredentialProgressStage { CREDENTIAL_PROGRESS_STAGE_UNSPECIFIED = 0; CREDENTIAL_PROGRESS_REFRESHING = 1; CREDENTIAL_PROGRESS_REVOKING = 2; CREDENTIAL_PROGRESS_READY = 3; CREDENTIAL_PROGRESS_FAILED = 4; }
-enum AttachmentProgressStage { ATTACHMENT_PROGRESS_STAGE_UNSPECIFIED = 0; ATTACHMENT_QUEUED = 1; ATTACHMENT_STARTING = 2; ATTACHMENT_STOPPING = 3; ATTACHMENT_READY = 4; ATTACHMENT_FAILED = 5; ATTACHMENT_WAITING_FOR_NAMESPACE = 6; ATTACHMENT_PULLING_IMAGE = 7; ATTACHMENT_MATERIALIZING = 8; ATTACHMENT_MOUNTING = 9; ATTACHMENT_RETRYING = 10; ATTACHMENT_DELETING = 11; }
-enum AttachmentPhase { ATTACHMENT_RUNTIME_UNSPECIFIED = 0; ATTACHMENT_RUNTIME_PENDING = 1; ATTACHMENT_RUNTIME_WAITING_FOR_NAMESPACE = 2; ATTACHMENT_RUNTIME_STARTING = 3; ATTACHMENT_RUNTIME_READY = 4; ATTACHMENT_RUNTIME_STOPPING = 5; ATTACHMENT_RUNTIME_RETRYING = 6; ATTACHMENT_RUNTIME_FAILED = 7; ATTACHMENT_RUNTIME_DELETING = 8; }
+enum FilesystemProgressStage { FILESYSTEM_PROGRESS_STAGE_UNSPECIFIED = 0; FILESYSTEM_QUEUED = 1; FILESYSTEM_STARTING = 2; FILESYSTEM_STOPPING = 3; FILESYSTEM_READY = 4; FILESYSTEM_FAILED = 5; FILESYSTEM_WAITING_FOR_NAMESPACE = 6; FILESYSTEM_PULLING_IMAGE = 7; FILESYSTEM_MATERIALIZING = 8; FILESYSTEM_MOUNTING = 9; FILESYSTEM_RETRYING = 10; FILESYSTEM_DELETING = 11; }
+enum FilesystemPhase { FILESYSTEM_RUNTIME_UNSPECIFIED = 0; FILESYSTEM_RUNTIME_PENDING = 1; FILESYSTEM_RUNTIME_WAITING_FOR_NAMESPACE = 2; FILESYSTEM_RUNTIME_STARTING = 3; FILESYSTEM_RUNTIME_READY = 4; FILESYSTEM_RUNTIME_STOPPING = 5; FILESYSTEM_RUNTIME_RETRYING = 6; FILESYSTEM_RUNTIME_FAILED = 7; FILESYSTEM_RUNTIME_DELETING = 8; }
 enum ErrorCode {
   ERROR_CODE_UNSPECIFIED = 0;
   reserved 1, 2, 3;

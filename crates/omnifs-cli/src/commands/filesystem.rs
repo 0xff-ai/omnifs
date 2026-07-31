@@ -1,19 +1,19 @@
-//! Daemon-owned Attachment porcelain.
+//! Daemon-owned Filesystem porcelain.
 //!
-//! An Attachment resource is desired OS exposure. Presence in `SQLite` asks the
+//! A Filesystem resource is desired OS exposure. Presence in `SQLite` asks the
 //! daemon to start it; removing the resource asks the daemon to tear it down.
 //! This module deliberately has no attach or detach operation.
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use clap::{Args, Subcommand};
 use omnifs_api::{
-    ActionReceipt, ApplyReceipt, AttachmentAccess, AttachmentDefinition, AttachmentStatus,
-    GetAttachmentAccessRequest, ProgressSnapshot, ResourceDefinition, ResourcePhase,
-    RestartAttachmentRequest,
+    ActionReceipt, ApplyReceipt, FilesystemAccess, FilesystemDefinition, FilesystemStatus,
+    GetFilesystemAccessRequest, ProgressSnapshot, ResourceDefinition, ResourcePhase,
+    RestartFilesystemRequest,
 };
 use omnifs_bootstrap::Profile;
 use omnifs_core::{
-    ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceKind,
+    FILESYSTEM_GUEST_LOCATION, FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceKind,
     ResourceName, ResourceRevision,
 };
 use serde::Serialize;
@@ -28,46 +28,46 @@ use crate::rpc::RpcClient;
 use crate::ui::output::{Output, ResultVerdict};
 
 #[derive(Args, Debug)]
-pub struct AttachmentArgs {
+pub struct FilesystemArgs {
     #[command(subcommand)]
-    pub command: AttachmentCommand,
+    pub command: FilesystemCommand,
 }
 
 #[derive(Subcommand, Debug)]
-pub enum AttachmentCommand {
-    /// Add a platform-supported Attachment.
+pub enum FilesystemCommand {
+    /// Add a platform-supported Filesystem.
     Add,
-    /// List desired Attachments and their observed state.
+    /// List desired Filesystems and their observed state.
     Ls,
-    /// Show one desired Attachment and its observed state.
+    /// Show one desired Filesystem and its observed state.
     Show {
-        /// Attachment resource name.
+        /// Filesystem resource name.
         #[arg(value_name = "NAME")]
         name: ResourceName,
     },
-    /// Remove an Attachment from desired state.
+    /// Remove a Filesystem from desired state.
     Rm {
-        /// Attachment resource name.
+        /// Filesystem resource name.
         #[arg(value_name = "NAME")]
         name: ResourceName,
     },
-    /// Restart an Attachment through a durable action.
+    /// Restart a Filesystem through a durable action.
     Restart {
-        /// Attachment resource name.
+        /// Filesystem resource name.
         #[arg(value_name = "NAME")]
         name: ResourceName,
     },
-    /// Enter the Attachment or run a command in its runtime.
+    /// Enter the Filesystem or run a command in its runtime.
     Shell(ShellArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AttachmentPair {
-    protocol: AttachmentProtocol,
-    runtime: AttachmentRuntime,
+struct FilesystemPair {
+    protocol: FilesystemProtocol,
+    runtime: FilesystemRuntime,
 }
 
-impl fmt::Display for AttachmentPair {
+impl fmt::Display for FilesystemPair {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{} / {}", self.protocol, self.runtime)
     }
@@ -75,7 +75,7 @@ impl fmt::Display for AttachmentPair {
 
 #[derive(Args, Debug, Clone)]
 pub struct ShellArgs {
-    /// Attachment resource name.
+    /// Filesystem resource name.
     #[arg(value_name = "NAME")]
     pub name: String,
     #[arg(
@@ -89,7 +89,7 @@ pub struct ShellArgs {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MutationResult {
-    attachment: AttachmentDefinition,
+    filesystem: FilesystemDefinition,
     state: &'static str,
     receipt: Option<ApplyReceipt>,
     action_receipt: Option<ActionReceipt>,
@@ -100,15 +100,15 @@ struct MutationResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ListResult {
-    attachments: Vec<ListRow>,
+    filesystems: Vec<ListRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ListRow {
     name: ResourceName,
-    protocol: AttachmentProtocol,
-    runtime: AttachmentRuntime,
+    protocol: FilesystemProtocol,
+    runtime: FilesystemRuntime,
     location: PathBuf,
     phase: &'static str,
     desired_revision: ResourceRevision,
@@ -119,18 +119,18 @@ struct ListRow {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShowResult {
-    status: AttachmentStatus,
+    status: FilesystemStatus,
 }
 
-impl AttachmentArgs {
+impl FilesystemArgs {
     pub async fn run(self, output: Output) -> Result<ExitCode> {
         match self.command {
-            AttachmentCommand::Add => add(output).await,
-            AttachmentCommand::Ls => list(output).await,
-            AttachmentCommand::Show { name } => show(name, output).await,
-            AttachmentCommand::Rm { name } => remove(name, output).await,
-            AttachmentCommand::Restart { name } => restart(name, output).await,
-            AttachmentCommand::Shell(args) => shell(args, output).await,
+            FilesystemCommand::Add => add(output).await,
+            FilesystemCommand::Ls => list(output).await,
+            FilesystemCommand::Show { name } => show(name, output).await,
+            FilesystemCommand::Rm { name } => remove(name, output).await,
+            FilesystemCommand::Restart { name } => restart(name, output).await,
+            FilesystemCommand::Shell(args) => shell(args, output).await,
         }
     }
 }
@@ -141,20 +141,20 @@ async fn add(output: Output) -> Result<ExitCode> {
     let pairs = available_pairs();
     ensure!(
         !pairs.is_empty(),
-        "this platform has no supported Attachment runtime"
+        "this platform has no supported Filesystem runtime"
     );
     let pair = crate::ui::prompt::Select::new("Protocol and runtime?")
         .items(pairs)
         .ask_with_output(&output)?;
     let default_name = format!("{}-{}", pair.protocol, pair.runtime);
-    let name = crate::ui::prompt::Text::new("Attachment name")
+    let name = crate::ui::prompt::Text::new("Filesystem name")
         .with_default(&default_name)
         .ask_with_output(&output)?;
     let name = ResourceName::new(name)?;
-    let location = if pair.runtime == AttachmentRuntime::Host {
+    let location = if pair.runtime == FilesystemRuntime::Host {
         let default = Profile::resolve()?
             .root()
-            .join("attachments")
+            .join("filesystems")
             .join(name.as_str());
         let value = crate::ui::prompt::Text::new("Host mount location")
             .with_default(default.to_string_lossy().into_owned())
@@ -164,16 +164,16 @@ async fn add(output: Output) -> Result<ExitCode> {
         None
     };
     let definition = definition_for_pair(name, pair, location)?;
-    output.narrate("The Attachment remains attached while this resource is desired.");
+    output.narrate("The Filesystem stays running while this resource is desired.");
     let rpc = RpcClient::resolve()?;
     let desired = definition.clone();
     let result = match crate::commands::resource_flow::edit_resources_and_wait(
         &rpc,
         &output,
-        "Apply Attachment resource",
+        "Apply Filesystem resource",
         move |resources| {
             resources.retain(|resource| resource.key() != desired.key());
-            resources.push(ResourceDefinition::Attachment(desired));
+            resources.push(ResourceDefinition::Filesystem(desired));
             Ok(())
         },
         Vec::new(),
@@ -188,7 +188,7 @@ async fn add(output: Output) -> Result<ExitCode> {
     finish_result(
         &output,
         MutationResult {
-            attachment: definition,
+            filesystem: definition,
             state: "ready",
             receipt: Some(result.receipt),
             action_receipt: None,
@@ -204,15 +204,15 @@ async fn add(output: Output) -> Result<ExitCode> {
 async fn list(output: Output) -> Result<ExitCode> {
     daemon_start::start(&output).await?;
     let snapshot = RpcClient::resolve()?.resources().await?;
-    let mut attachments = Vec::new();
+    let mut filesystems = Vec::new();
     for resource in snapshot.resources {
-        let ResourceDefinition::Attachment(definition) = resource else {
+        let ResourceDefinition::Filesystem(definition) = resource else {
             continue;
         };
         let status = snapshot.resource_statuses.iter().find(|status| {
-            status.key.kind == ResourceKind::Attachment && status.key.name == definition.name
+            status.key.kind == ResourceKind::Filesystem && status.key.name == definition.name
         });
-        attachments.push(ListRow {
+        filesystems.push(ListRow {
             name: definition.name.clone(),
             protocol: definition.spec.protocol(),
             runtime: definition.spec.runtime(),
@@ -223,15 +223,15 @@ async fn list(output: Output) -> Result<ExitCode> {
             detail: status.and_then(|status| status.detail.clone()),
         });
     }
-    attachments.sort_by(|left, right| left.name.cmp(&right.name));
-    let result = ListResult { attachments };
+    filesystems.sort_by(|left, right| left.name.cmp(&right.name));
+    let result = ListResult { filesystems };
     if output.is_structured() {
         output.emit_result(ResultVerdict::Ok, result)?;
-    } else if result.attachments.is_empty() {
-        output.report("No Attachments desired.\n");
+    } else if result.filesystems.is_empty() {
+        output.report("No Filesystems desired.\n");
     } else {
         let mut rendered = String::from("NAME\tPROTOCOL\tRUNTIME\tPHASE\tLOCATION\n");
-        for row in &result.attachments {
+        for row in &result.filesystems {
             writeln!(
                 rendered,
                 "{}\t{}\t{}\t{}\t{}",
@@ -254,21 +254,21 @@ async fn list(output: Output) -> Result<ExitCode> {
 async fn show(name: ResourceName, output: Output) -> Result<ExitCode> {
     daemon_start::start(&output).await?;
     let status = RpcClient::resolve()?
-        .attachment_status(name.clone())
+        .filesystem_status(name.clone())
         .await?
-        .with_context(|| format!("Attachment {name} is not desired"))?;
+        .with_context(|| format!("Filesystem {name} is not desired"))?;
     let result = ShowResult { status };
     if output.is_structured() {
         output.emit_result(ResultVerdict::Ok, result)?;
     } else {
         let status = &result.status;
         output.report(format!(
-            "Attachment {}\n  protocol: {}\n  runtime: {}\n  location: {}\n  phase: {}\n  desired revision: {}\n  observed: {}\n",
+            "Filesystem {}\n  protocol: {}\n  runtime: {}\n  location: {}\n  phase: {}\n  desired revision: {}\n  observed: {}\n",
             status.definition.name,
             status.definition.spec.protocol(),
             status.definition.spec.runtime(),
             status.definition.spec.location().display(),
-            attachment_phase(status.phase),
+            filesystem_phase(status.phase),
             status.desired_revision,
             status.observed_version.is_some(),
         ));
@@ -288,17 +288,17 @@ async fn remove(name: ResourceName, output: Output) -> Result<ExitCode> {
         .resources
         .iter()
         .find_map(|resource| match resource {
-            ResourceDefinition::Attachment(value) if value.name == name => Some(value.clone()),
+            ResourceDefinition::Filesystem(value) if value.name == name => Some(value.clone()),
             _ => None,
         })
     else {
-        return Err(anyhow!("Attachment {name} is not desired")).with_hint("omnifs attachment ls");
+        return Err(anyhow!("Filesystem {name} is not desired")).with_hint("omnifs fs ls");
     };
     let removed_key = definition.key();
     let result = match crate::commands::resource_flow::edit_resources_and_wait(
         &rpc,
         &output,
-        "Remove Attachment resource",
+        "Remove Filesystem resource",
         move |resources| {
             resources.retain(|resource| resource.key() != removed_key);
             Ok(())
@@ -315,7 +315,7 @@ async fn remove(name: ResourceName, output: Output) -> Result<ExitCode> {
     finish_result(
         &output,
         MutationResult {
-            attachment: definition,
+            filesystem: definition,
             state: "removed",
             receipt: Some(result.receipt),
             action_receipt: None,
@@ -333,14 +333,14 @@ async fn restart(name: ResourceName, output: Output) -> Result<ExitCode> {
     daemon_start::start(&output).await?;
     let rpc = RpcClient::resolve()?;
     let status = rpc
-        .attachment_status(name.clone())
+        .filesystem_status(name.clone())
         .await?
-        .with_context(|| format!("Attachment {name} is not desired"))?;
+        .with_context(|| format!("Filesystem {name} is not desired"))?;
     let receipt = rpc
-        .restart_attachment(&RestartAttachmentRequest {
+        .restart_filesystem(&RestartFilesystemRequest {
             action_id: resource_flow::random_action_id()?,
             base_action_generation: status.action_generation,
-            attachment: name,
+            filesystem: name,
         })
         .await?;
     let definition = status.definition.clone();
@@ -353,14 +353,14 @@ async fn restart(name: ResourceName, output: Output) -> Result<ExitCode> {
     .and_then(|progress| match progress {
         Some(crate::commands::resource_flow::FollowedProgress::Action(receipt)) => Ok(receipt),
         _ => Err(anyhow!(
-            "Attachment action stream ended without a terminal receipt"
+            "Filesystem action stream ended without a terminal receipt"
         )),
     }) {
         Ok(terminal_receipt) if terminal_receipt.phase == omnifs_api::ActionPhase::Ready => {
             finish_result(
                 &output,
                 MutationResult {
-                    attachment: definition,
+                    filesystem: definition,
                     state: "ready",
                     receipt: None,
                     action_receipt: Some(terminal_receipt),
@@ -371,7 +371,7 @@ async fn restart(name: ResourceName, output: Output) -> Result<ExitCode> {
         },
         Ok(terminal_receipt) => {
             let error = anyhow!(
-                "Attachment action {} failed{}{}",
+                "Filesystem action {} failed{}{}",
                 terminal_receipt.action_id,
                 terminal_receipt
                     .error_code
@@ -391,21 +391,21 @@ async fn restart(name: ResourceName, output: Output) -> Result<ExitCode> {
 }
 
 async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
-    output.require_human("attachment shell")?;
+    output.require_human("fs shell")?;
     daemon_start::start(&output).await?;
     let name = ResourceName::new(args.name)?;
     let interactive = std::io::stdin().is_terminal();
     let requested_command = args.command.clone();
     let access = RpcClient::resolve()?
-        .attachment_access(&GetAttachmentAccessRequest {
-            attachment: name.clone(),
+        .filesystem_access(&GetFilesystemAccessRequest {
+            filesystem: name.clone(),
             interactive,
             shell: None,
             command: requested_command.clone(),
         })
         .await?;
     match access {
-        AttachmentAccess::HostPath(path) => {
+        FilesystemAccess::HostPath(path) => {
             let mut command = if let Some(program) = requested_command.first() {
                 let mut command = Command::new(program);
                 command.args(&requested_command[1..]);
@@ -414,17 +414,17 @@ async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
                 Command::new("/bin/sh")
             };
             command.current_dir(path);
-            let status = command.status().context("run Attachment command")?;
-            ensure!(status.success(), "Attachment command exited with {status}");
+            let status = command.status().context("run Filesystem command")?;
+            ensure!(status.success(), "Filesystem command exited with {status}");
         },
-        AttachmentAccess::Command(invocation) => {
+        FilesystemAccess::Command(invocation) => {
             let mut command = Command::new(invocation.program);
             command.args(invocation.args);
             if let Some(current_dir) = invocation.current_dir {
                 command.current_dir(current_dir);
             }
-            let status = command.status().context("run Attachment command")?;
-            ensure!(status.success(), "Attachment command exited with {status}");
+            let status = command.status().context("run Filesystem command")?;
+            ensure!(status.success(), "Filesystem command exited with {status}");
         },
     }
     Ok(ExitCode::Success)
@@ -432,7 +432,7 @@ async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
 
 fn settle_action_error(
     output: &Output,
-    attachment: AttachmentDefinition,
+    filesystem: FilesystemDefinition,
     receipt: &ActionReceipt,
     error: anyhow::Error,
 ) -> Result<ExitCode> {
@@ -440,7 +440,7 @@ fn settle_action_error(
     let follow = format!("omnifs status --follow --action {}", receipt.action_id);
     if output.is_structured() {
         let result = MutationResult {
-            attachment,
+            filesystem,
             state: "restart",
             receipt: None,
             action_receipt: Some(receipt.clone()),
@@ -467,7 +467,7 @@ fn settle_action_error(
     } else {
         if code == ExitCode::Canceled {
             output.outro(format!(
-                "Canceled. Attachment action {} continues. Follow with {follow}.",
+                "Canceled. Filesystem action {} continues. Follow with {follow}.",
                 receipt.action_id
             ));
         }
@@ -484,8 +484,8 @@ fn finish_result(output: &Output, result: MutationResult) -> Result<ExitCode> {
             |receipt| receipt.revision.to_string(),
         );
         output.report(format!(
-            "Attachment {} {} at {}\n",
-            result.attachment.name, result.state, target
+            "Filesystem {} {} at {}\n",
+            result.filesystem.name, result.state, target
         ));
     }
     Ok(ExitCode::Success)
@@ -493,33 +493,33 @@ fn finish_result(output: &Output, result: MutationResult) -> Result<ExitCode> {
 
 fn definition_for_pair(
     name: ResourceName,
-    pair: AttachmentPair,
+    pair: FilesystemPair,
     location: Option<PathBuf>,
-) -> Result<AttachmentDefinition> {
-    let AttachmentPair { protocol, runtime } = pair;
+) -> Result<FilesystemDefinition> {
+    let FilesystemPair { protocol, runtime } = pair;
     ensure!(supports(protocol, runtime), "{pair} is not supported");
     let profile_root = Profile::resolve()?.root().to_path_buf();
     let location = match runtime {
-        AttachmentRuntime::Host => {
-            location.unwrap_or_else(|| profile_root.join("attachments").join(name.as_str()))
+        FilesystemRuntime::Host => {
+            location.unwrap_or_else(|| profile_root.join("filesystems").join(name.as_str()))
         },
-        AttachmentRuntime::Docker | AttachmentRuntime::Libkrun => {
+        FilesystemRuntime::Docker | FilesystemRuntime::Libkrun => {
             ensure!(
                 location.is_none(),
-                "guest Attachment runtimes own their location"
+                "guest Filesystem runtimes own their location"
             );
-            PathBuf::from(ATTACHMENT_GUEST_LOCATION)
+            PathBuf::from(FILESYSTEM_GUEST_LOCATION)
         },
     };
-    let docker_image = (runtime == AttachmentRuntime::Docker)
+    let docker_image = (runtime == FilesystemRuntime::Docker)
         .then(|| omnifs_fs_runtime::resolve_filesystem_image(None, None))
         .transpose()?
         .map(|value| value.to_string());
-    let libkrun_guest_image = (runtime == AttachmentRuntime::Libkrun)
+    let libkrun_guest_image = (runtime == FilesystemRuntime::Libkrun)
         .then(|| omnifs_fs_runtime::resolve_guest_image_reference(None));
-    Ok(AttachmentDefinition {
+    Ok(FilesystemDefinition {
         name,
-        spec: AttachmentSpec::new(
+        spec: FilesystemSpec::new(
             protocol,
             runtime,
             location,
@@ -529,32 +529,32 @@ fn definition_for_pair(
     })
 }
 
-pub(crate) fn platform_default() -> Option<(AttachmentProtocol, AttachmentRuntime)> {
+pub(crate) fn platform_default() -> Option<(FilesystemProtocol, FilesystemRuntime)> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", _) => Some((AttachmentProtocol::Fuse, AttachmentRuntime::Host)),
-        ("macos", "aarch64") => Some((AttachmentProtocol::Fuse, AttachmentRuntime::Libkrun)),
-        ("macos", _) => Some((AttachmentProtocol::Nfs, AttachmentRuntime::Host)),
+        ("linux", _) => Some((FilesystemProtocol::Fuse, FilesystemRuntime::Host)),
+        ("macos", "aarch64") => Some((FilesystemProtocol::Fuse, FilesystemRuntime::Libkrun)),
+        ("macos", _) => Some((FilesystemProtocol::Nfs, FilesystemRuntime::Host)),
         _ => None,
     }
 }
 
-pub(crate) fn supports(protocol: AttachmentProtocol, runtime: AttachmentRuntime) -> bool {
-    omnifs_core::attachment_pair_supported_on_current_host(protocol, runtime)
+pub(crate) fn supports(protocol: FilesystemProtocol, runtime: FilesystemRuntime) -> bool {
+    omnifs_core::filesystem_pair_supported_on_current_host(protocol, runtime)
 }
 
-fn available_pairs() -> Vec<AttachmentPair> {
+fn available_pairs() -> Vec<FilesystemPair> {
     let recommended = platform_default();
-    let mut pairs = [AttachmentProtocol::Fuse, AttachmentProtocol::Nfs]
+    let mut pairs = [FilesystemProtocol::Fuse, FilesystemProtocol::Nfs]
         .into_iter()
         .flat_map(|protocol| {
             [
-                AttachmentRuntime::Host,
-                AttachmentRuntime::Docker,
-                AttachmentRuntime::Libkrun,
+                FilesystemRuntime::Host,
+                FilesystemRuntime::Docker,
+                FilesystemRuntime::Libkrun,
             ]
             .into_iter()
             .filter(move |runtime| supports(protocol, *runtime))
-            .map(move |runtime| AttachmentPair { protocol, runtime })
+            .map(move |runtime| FilesystemPair { protocol, runtime })
         })
         .collect::<Vec<_>>();
     pairs.sort_by_key(|pair| {
@@ -567,14 +567,14 @@ fn available_pairs() -> Vec<AttachmentPair> {
     pairs
 }
 
-pub(crate) fn recommended_definition() -> Result<Option<AttachmentDefinition>> {
+pub(crate) fn recommended_definition() -> Result<Option<FilesystemDefinition>> {
     let Some((protocol, runtime)) = platform_default() else {
         return Ok(None);
     };
     let name = ResourceName::new(format!("{protocol}-{runtime}"))?;
     Ok(Some(definition_for_pair(
         name,
-        AttachmentPair { protocol, runtime },
+        FilesystemPair { protocol, runtime },
         None,
     )?))
 }
@@ -591,16 +591,16 @@ const fn resource_phase(phase: ResourcePhase) -> &'static str {
     }
 }
 
-const fn attachment_phase(phase: omnifs_api::AttachmentPhase) -> &'static str {
+const fn filesystem_phase(phase: omnifs_api::FilesystemPhase) -> &'static str {
     match phase {
-        omnifs_api::AttachmentPhase::Pending => "pending",
-        omnifs_api::AttachmentPhase::WaitingForNamespace => "waiting-for-namespace",
-        omnifs_api::AttachmentPhase::Starting => "starting",
-        omnifs_api::AttachmentPhase::Ready => "ready",
-        omnifs_api::AttachmentPhase::Stopping => "stopping",
-        omnifs_api::AttachmentPhase::Retrying => "retrying",
-        omnifs_api::AttachmentPhase::Failed => "failed",
-        omnifs_api::AttachmentPhase::Deleting => "deleting",
+        omnifs_api::FilesystemPhase::Pending => "pending",
+        omnifs_api::FilesystemPhase::WaitingForNamespace => "waiting-for-namespace",
+        omnifs_api::FilesystemPhase::Starting => "starting",
+        omnifs_api::FilesystemPhase::Ready => "ready",
+        omnifs_api::FilesystemPhase::Stopping => "stopping",
+        omnifs_api::FilesystemPhase::Retrying => "retrying",
+        omnifs_api::FilesystemPhase::Failed => "failed",
+        omnifs_api::FilesystemPhase::Deleting => "deleting",
     }
 }
 
@@ -612,15 +612,15 @@ mod tests {
     #[derive(Parser)]
     struct TestCli {
         #[command(subcommand)]
-        command: AttachmentCommand,
+        command: FilesystemCommand,
     }
 
     #[test]
     fn grammar_has_no_attach_or_detach_and_preserves_shell_argv() {
-        assert!(TestCli::try_parse_from(["attachment", "attach", "demo"]).is_err());
-        assert!(TestCli::try_parse_from(["attachment", "detach", "demo"]).is_err());
+        assert!(TestCli::try_parse_from(["fs", "attach", "demo"]).is_err());
+        assert!(TestCli::try_parse_from(["fs", "detach", "demo"]).is_err());
         let parsed = TestCli::try_parse_from([
-            "attachment",
+            "fs",
             "shell",
             "demo",
             "--",
@@ -629,7 +629,7 @@ mod tests {
             "printf '%s' 'two words'",
         ])
         .unwrap();
-        let AttachmentCommand::Shell(shell) = parsed.command else {
+        let FilesystemCommand::Shell(shell) = parsed.command else {
             panic!("expected shell");
         };
         assert_eq!(shell.command, ["sh", "-lc", "printf '%s' 'two words'"]);

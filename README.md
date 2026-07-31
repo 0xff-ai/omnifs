@@ -8,11 +8,15 @@
 <p align="center"><a href="#quickstart">quickstart</a> | <a href="https://omnifs.dev">homepage</a> | <a href="https://omnifs.dev/start">docs</a> | <a href="#things-to-try">things to try</a> | <a href="#providers">providers</a> | <a href="#how-it-works">how it works</a></p>
 </div>
 
-omnifs projects external systems into local filesystem paths. GitHub, DNS, arXiv, Docker, Linear, SQLite, Kubernetes, web pages, and Oura become directories and files you can `cd`, `ls`, `cat`, `grep`, `find`, `jq`, and script against.
+omnifs is a filesystem projection system. It projects external systems into a
+shared virtual namespace that can be exposed to an OS as one or more
+filesystems. GitHub, DNS, arXiv, Docker, Linear, SQLite, Kubernetes, web pages,
+and Oura become directories and files you can `cd`, `ls`, `cat`, `grep`,
+`find`, `jq`, and script against.
 
 The goal is simple: if a tool can read files, it can read the outside world without learning another SDK, auth flow, pagination model, or response schema.
 
-> Alpha status: omnifs is real and usable, but the read surface is still early. The daemon runs natively on Linux and macOS. Named Attachments are independent whole-namespace access surfaces managed with `omnifs attachment`. Docker and libkrun deliver FUSE only. Filesystems attach over the wire protocol and carry no providers or credentials.
+> Alpha status: omnifs is real and usable, but the read surface is still early. The daemon runs natively on Linux and macOS. Named Filesystems are independent whole-namespace access surfaces managed with `omnifs fs`. Docker and libkrun deliver FUSE only. Filesystems attach over the wire protocol and carry no providers or credentials.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/b9598ece-e772-4fdc-b5c7-8ad5ba26d39d" alt="omnifs demo" width="960">
@@ -28,17 +32,17 @@ omnifs setup
 omnifs status
 ```
 
-`omnifs setup` boots the host-native daemon, shows what is already running, and lists every embedded provider with honest auth and config labels. It then offers two default-yes confirms: create resources for every provider that needs no sign-in, and add the platform-recommended Attachment. `--yes` accepts both without asking; `--no-input` declines both and still exits 0. Anything that needs a sign-in or a config value goes through `omnifs mount add`.
+`omnifs setup` boots the host-native daemon, shows what is already running, and lists every embedded provider with honest auth and config labels. It then offers two default-yes confirms: create resources for every provider that needs no sign-in, and add the platform-recommended Filesystem. `--yes` accepts both without asking; `--no-input` declines both and still exits 0. Anything that needs a sign-in or a config value goes through `omnifs mount add`.
 
 ---
 
-Interactive commands edit the desired resource set, show the daemon plan, ask for consent, apply, and follow typed progress. For automation, use KCL with `omnifs plan <file>` and `omnifs apply <file> --yes`; set secrets only with `credential set --from-env`. Mounts, credentials, provider artifacts, and Attachments are daemon-owned state changed through local typed RPC.
+Interactive commands edit the desired resource set, show the daemon plan, ask for consent, apply, and follow typed progress. For automation, use KCL with `omnifs plan <file>` and `omnifs apply <file> --yes`; set secrets only with `credential set --from-env`. Mounts, credentials, provider artifacts, and Filesystems are daemon-owned state changed through local typed RPC.
 
 ```bash
 omnifs provider add
 omnifs mount add
 omnifs mount update github
-omnifs attachment add
+omnifs fs add
 omnifs status --follow
 ```
 
@@ -48,31 +52,31 @@ Useful commands:
 
 ```bash
 omnifs status      # resources and desired/observed phases
-omnifs attachment ls # configured Attachments and runtime state
+omnifs fs ls # configured Filesystems and runtime state
 omnifs logs -f     # follow daemon logs
 omnifs inspect     # live TUI for namespace, provider, cache, and callout activity
 omnifs status --follow --action <action-id>
 omnifs down        # stop the daemon
 ```
 
-Attachment resources persist as desired state. Host locations must be absolute; Docker and libkrun own their guest location. Resource presence requests attachment, and removal requests teardown.
+Filesystem resources persist as desired state. Host locations must be absolute; Docker and libkrun own their guest location. Resource presence requests a filesystem, and removal requests teardown.
 
 ```bash
-omnifs attachment add
-omnifs attachment restart guest
-omnifs attachment shell guest
-omnifs attachment shell guest -- ls -la /omnifs/github
-omnifs attachment rm guest
+omnifs fs add
+omnifs fs restart guest
+omnifs fs shell guest
+omnifs fs shell guest -- ls -la /omnifs/github
+omnifs fs rm guest
 ```
 
-Every Attachment exposes every configured mount. `omnifs provider add` resolves and retains one exact content-addressed provider artifact; import grants no authority. The planner validates the Mount before serving it.
+Every Filesystem exposes every configured mount. `omnifs provider add` resolves and retains one exact content-addressed provider artifact; import grants no authority. The planner validates the Mount before serving it.
 
 `omnifs mount update NAME` collects named auth, config, or limits fields, shows the complete desired-state diff, and applies an exact base revision. A stale plan fails without an automatic retry.
 
 For automation, select one invocation-owned output contract. JSON prints one envelope and keeps resource collections plural; JSONL uses the same terminal result or error envelope with its stream-record discriminator. Live logs and Inspector records remain line streams.
 
 ```bash
-omnifs --output json status | jq '.result.attachments[] | {name, phase, desiredRevision, observedRevision}'
+omnifs --output json status | jq '.result.filesystems[] | {name, phase, desiredRevision, observedRevision}'
 omnifs --output json mount ls | jq '.result.mounts[]'
 ```
 
@@ -242,7 +246,7 @@ The cache is host-owned plain byte storage. Providers can return canonical upstr
 
 ## Development workflows
 
-Use `just dev` when working from this repository. It builds provider WASM and the native CLI, renders KCL desired resources under `~/.omnifs-dev`, starts the host-native daemon and fixtures, applies that resource set, waits for the terminal revision, and opens an Attachment shell at `/omnifs`.
+Use `just dev` when working from this repository. It builds provider WASM and the native CLI, renders KCL desired resources under `~/.omnifs-dev`, starts the host-native daemon and fixtures, applies that resource set, waits for the terminal revision, and opens a Filesystem shell at `/omnifs`.
 
 ```bash
 git clone https://github.com/0xff-ai/omnifs
@@ -267,11 +271,11 @@ tail -n 80 ~/.omnifs-dev/daemon-state/logs/daemon.log
 
 ## Current status
 
-- FUSE (Linux) and read-only NFSv4 loopback (macOS) filesystems in host, Docker, or libkrun runtimes; exposed through daemon-owned Attachment resources.
+- FUSE (Linux) and read-only NFSv4 loopback (macOS) filesystems in host, Docker, or libkrun runtimes; exposed through daemon-owned Filesystem resources.
 - A host CLI on npm that handles mounts, auth, lifecycle, logs, status, and inspection.
 - Sandboxed Wasm providers that can only reach the network, Git, sockets, and files the host hands them.
 - Host-held credentials, layered caching, and `omnifs inspect` for a live view of what the runtime is doing.
-- Daemon-owned SQLite state and typed local RPC for mounts, credentials, providers, logs, and attachments.
+- Daemon-owned SQLite state and typed local RPC for mounts, credentials, providers, logs, and filesystems.
 - Nine live providers: GitHub, DNS, arXiv, Docker, Linear, SQLite, Kubernetes, Web, and Oura.
 
 ## License

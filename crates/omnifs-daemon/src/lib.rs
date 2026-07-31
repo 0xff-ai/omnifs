@@ -4,13 +4,13 @@
 //! subcommand. This crate owns daemon startup, serving, and control handling.
 
 mod app;
-mod attachment_supervisor;
 mod auth_fingerprint;
 mod context;
 mod control;
 mod credential_codec;
 mod credential_document;
 mod daemon;
+mod filesystem_supervisor;
 mod generation_builder;
 mod log_stream;
 mod logging;

@@ -1,7 +1,8 @@
 # omnifs-cli
 
-The `omnifs` command and host-native daemon. It projects external services such
-as GitHub, arXiv, and DNS as ordinary files and directories.
+The `omnifs` command and host-native daemon form a filesystem projection
+system. They project external services such as GitHub, arXiv, and DNS into a
+shared virtual namespace that can be exposed as one or more filesystems.
 
 ## Install
 
@@ -22,17 +23,17 @@ cargo install omnifs-cli
 ```bash
 omnifs setup
 omnifs status
-omnifs attachment ls
+omnifs fs ls
 ```
 
 `omnifs setup` starts the daemon, lists embedded providers, and offers a small
 initial desired resource set. The daemon stores resources, provider artifacts,
-credential material, action receipts, caches, logs, and observed Attachment
+credential material, action receipts, caches, logs, and observed Filesystem
 state under `OMNIFS_HOME/daemon-state`.
 
 ## Resources and automation
 
-Interactive `provider`, `mount`, `credential`, and `attachment` commands edit
+Interactive `provider`, `mount`, `credential`, and `fs` commands edit
 the complete desired set, show the typed plan, ask for consent, apply one
 SQLite transaction, and follow daemon progress to a terminal revision or
 action.
@@ -49,24 +50,24 @@ process and converts its result to strict Rust resource types. KCL never
 contains secrets. Static-token automation uses only `omnifs credential set
 NAME --from-env VARIABLE`.
 
-## Attachments
+## Filesystems
 
-An Attachment is one desired OS-facing exposure of the complete shared
+A Filesystem is one desired OS-facing exposure of the complete shared
 namespace. Resource presence asks the daemon to keep its filesystem runtime
 attached. Removing the resource asks the daemon to stop the exact runtime and
 VFS session.
 
 ```bash
-omnifs attachment add
-omnifs attachment ls
-omnifs attachment show local
-omnifs attachment restart local
-omnifs attachment shell local -- ls -la /omnifs
-omnifs attachment rm local
+omnifs fs add
+omnifs fs ls
+omnifs fs show local
+omnifs fs restart local
+omnifs fs shell local -- ls -la /omnifs
+omnifs fs rm local
 ```
 
-Host Attachments use FUSE on Linux or NFSv4 loopback on macOS. Docker and
-libkrun Attachments use FUSE at `/omnifs`. Every Attachment exposes every
+Host Filesystems use FUSE on Linux or NFSv4 loopback on macOS. Docker and
+libkrun Filesystems use FUSE at `/omnifs`. Every Filesystem exposes every
 configured Mount.
 
 ## Progress and output

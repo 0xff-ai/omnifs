@@ -5,13 +5,13 @@ Scope: why desired resources commit separately from daemon reconciliation,
 runtime work, progress, and actions.
 
 Read when: changing resource planning or apply, SQLite desired state, provider
-preparation, serving generations, Attachment reconciliation, progress streams,
+preparation, serving generations, Filesystem reconciliation, progress streams,
 durable actions, or client and daemon ownership.
 
 Binding contracts: `docs/contracts/50-control-plane.md` and
 `docs/contracts/60-build-validation.md`.
 
-SQLite holds one normalized Provider, Credential, Mount, and Attachment set.
+SQLite holds one normalized Provider, Credential, Mount, and Filesystem set.
 Clients plan a complete candidate and call `ApplyResources` with its base
 revision, digest, and mutation ID. One versioned `resource_state` row stores
 the set, digest, and revision; a durable receipt makes reply-loss retries safe.
@@ -34,8 +34,8 @@ temporary components, while the active generation retains only its providers.
 One engine keeps cache identity and Wasmtime settings consistent.
 
 The serving reconciler builds only the latest desired revision. A failed build
-leaves the last good generation active. `AttachmentSupervisor` separately
-reconciles desired Attachment specs into exact out-of-process host, Docker, or
+leaves the last good generation active. `FilesystemSupervisor` separately
+reconciles desired Filesystem specs into exact out-of-process host, Docker, or
 libkrun runtimes. Durable observed rows and deletion tombstones let it adopt,
 stop, or replace exact runtime instances after daemon restart.
 
@@ -50,7 +50,7 @@ control handler or inferred progress stage.
 
 Each long-lived reconciler owns its spawned work, admission bound,
 cancellation, and join path. Shutdown stops new control writes and launches,
-drains exact Attachment runtimes and VFS sessions, then joins serving and
+drains exact Filesystem runtimes and VFS sessions, then joins serving and
 provider preparation. Detached work may outlive a client stream, never its
 daemon owner.
 
@@ -60,7 +60,7 @@ Subscriptions register before reading their full snapshot. Fanout is bounded;
 slow consumers receive a resync snapshot. Revision streams include only work
 that can affect that revision; unused warm-up appears only in current status.
 
-Credential material changes, upstream revocation, and Attachment restart use
+Credential material changes, upstream revocation, and Filesystem restart use
 client-generated action IDs plus action-generation preconditions. SQLite
 allows one non-terminal action per target and retains accepted actions across
 daemon restart. Secret bytes never enter resources, KCL, receipts, progress,
@@ -93,7 +93,7 @@ That design was removed rather than kept as a compatibility path:
 - SQLite receipts replaced the client journal and snapshot handoff.
 - Daemon reconciliation replaced client-owned provider and filesystem
   lifecycle.
-- Strict `AttachmentSpec` plus durable runtime identity replaced client
+- Strict `FilesystemSpec` plus durable runtime identity replaced client
   filesystem registries and owner IDs.
 - Required shared compilation caching replaced optional or fallback engine
   construction.

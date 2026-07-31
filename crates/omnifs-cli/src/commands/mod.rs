@@ -1,10 +1,10 @@
 pub mod apply;
-pub mod attachment;
 pub mod completions;
 pub mod credential;
 pub(crate) mod daemon_start;
 pub mod doctor;
 pub mod down;
+pub mod filesystem;
 pub mod inspect;
 pub mod logs;
 pub mod mount;

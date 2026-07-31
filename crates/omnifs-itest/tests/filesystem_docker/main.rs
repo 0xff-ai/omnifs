@@ -1,12 +1,12 @@
 //! Docker-hosted FUSE filesystem acceptance.
 //!
-//! A desired Docker Attachment starts a separate, credential-free container
+//! A desired Docker Filesystem starts a separate, credential-free container
 //! against a host-native daemon's shared namespace over TCP and renders kernel FUSE
 //! inside it. This suite proves the container behaves like a real mount for
 //! the standard toolbox (the `fuse-docker` conformance column, reusing the
 //! shared matrix machinery from `omnifs_itest::matrix` rather than forking
 //! it), plus the surrounding lifecycle, timing, and security guarantees:
-//! `omnifs attachment {restart,rm,ls}`, explicit desired teardown before
+//! `omnifs fs {restart,rm,ls}`, explicit desired teardown before
 //! `omnifs down`, a cold-start budget, cross-mount byte identity,
 //! kill/reattach behavior, and
 //! the no-credentials contract.
@@ -24,9 +24,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use omnifs_api::{AttachmentDefinition, DaemonInfo};
+use omnifs_api::{DaemonInfo, FilesystemDefinition};
 use omnifs_core::{
-    ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceName,
+    FILESYSTEM_GUEST_LOCATION, FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName,
 };
 use omnifs_itest::matrix::{self, Exec};
 use omnifs_itest::{live, provider_artifact_dir};
@@ -141,8 +141,8 @@ fn docker_logs(name: &str) -> String {
 // ===========================================================================
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
-/// as a contributor would: daemon start, desired Attachment apply and
-/// progress watch, `attachment restart/rm/ls`, `down`. No test
+/// as a contributor would: daemon start, desired Filesystem apply and
+/// progress watch, `fs restart/rm/ls`, `down`. No test
 /// touches the user's real `~/.omnifs` or default ports.
 struct Fixture {
     home: TempDir,
@@ -243,17 +243,17 @@ impl Fixture {
         self.start_daemon();
 
         let protocol = if cfg!(target_os = "linux") {
-            AttachmentProtocol::Fuse
+            FilesystemProtocol::Fuse
         } else {
-            AttachmentProtocol::Nfs
+            FilesystemProtocol::Nfs
         };
-        live::ensure_attachment(
+        live::ensure_filesystem(
             &self.control_socket(),
-            AttachmentDefinition {
+            FilesystemDefinition {
                 name: ResourceName::new("itest-host").unwrap(),
-                spec: AttachmentSpec::new(
+                spec: FilesystemSpec::new(
                     protocol,
-                    AttachmentRuntime::Host,
+                    FilesystemRuntime::Host,
                     self.mount_point.clone(),
                     None,
                     None,
@@ -275,35 +275,35 @@ impl Fixture {
     }
 
     fn filesystem_attach(&self) -> Output {
-        live::ensure_attachment(
+        live::ensure_filesystem(
             &self.control_socket(),
-            AttachmentDefinition {
+            FilesystemDefinition {
                 name: ResourceName::new("itest-docker").unwrap(),
-                spec: AttachmentSpec::new(
-                    AttachmentProtocol::Fuse,
-                    AttachmentRuntime::Docker,
-                    ATTACHMENT_GUEST_LOCATION.into(),
+                spec: FilesystemSpec::new(
+                    FilesystemProtocol::Fuse,
+                    FilesystemRuntime::Docker,
+                    FILESYSTEM_GUEST_LOCATION.into(),
                     Some(self.filesystem_image.clone()),
                     None,
                 )
                 .unwrap(),
             },
         );
-        self.run(&["attachment", "show", "itest-docker", "--output", "json"])
+        self.run(&["fs", "show", "itest-docker", "--output", "json"])
     }
 
     fn filesystem_restart(&self) {
-        live::restart_attachment(&self.control_socket(), "itest-docker");
+        live::restart_filesystem(&self.control_socket(), "itest-docker");
     }
 
-    fn wait_for_filesystem_attachment(&self, id: &str, timeout: Duration) {
+    fn wait_for_filesystem_ready(&self, id: &str, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
-            let output = self.run(&["attachment", "ls", "--output", "json"]);
+            let output = self.run(&["fs", "ls", "--output", "json"]);
             if serde_json::from_slice::<serde_json::Value>(&output.stdout)
                 .ok()
                 .is_some_and(|value| {
-                    value["result"]["attachments"]
+                    value["result"]["filesystems"]
                         .as_array()
                         .is_some_and(|filesystems| {
                             filesystems.iter().any(|filesystem| {
@@ -352,13 +352,13 @@ impl Fixture {
             if serde_json::from_slice::<serde_json::Value>(&output.stdout)
                 .ok()
                 .and_then(|value| {
-                    value["result"]["inventory"]["attachments"]
+                    value["result"]["inventory"]["filesystems"]
                         .as_array()
                         .cloned()
                 })
-                .is_some_and(|attachments| {
-                    attachments.iter().any(|attachment| {
-                        attachment["name"] == id && attachment["state"] == "attached"
+                .is_some_and(|filesystems| {
+                    filesystems.iter().any(|filesystem| {
+                        filesystem["name"] == id && filesystem["state"] == "ready"
                     })
                 })
             {
@@ -401,7 +401,7 @@ impl Fixture {
     }
 
     fn filesystem_status(&self) -> Output {
-        self.run(&["attachment", "ls"])
+        self.run(&["fs", "ls"])
     }
 
     fn down(&self) -> Output {
@@ -771,11 +771,11 @@ fn fuse_docker_lifecycle_and_matrix() {
     fixture.assert_filesystem_action_ok(&up_out, "cold start");
     record_cold_start(elapsed);
 
-    // (a) `attachment ls` is truthful.
+    // (a) `fs ls` is truthful.
     let status_out = fixture.filesystem_status();
     assert!(
         status_out.status.success(),
-        "attachment ls failed (exit {})\nstdout: {}\nstderr: {}",
+        "fs ls failed (exit {})\nstdout: {}\nstderr: {}",
         status_out.status,
         String::from_utf8_lossy(&status_out.stdout),
         String::from_utf8_lossy(&status_out.stderr),
@@ -783,7 +783,7 @@ fn fuse_docker_lifecycle_and_matrix() {
     let status_text = String::from_utf8_lossy(&status_out.stdout);
     assert!(
         status_text.contains("ready"),
-        "attachment ls must report a ready Docker attachment: {status_text}"
+        "fs ls must report a ready Docker filesystem: {status_text}"
     );
 
     let container = fixture.container_name();
@@ -860,10 +860,10 @@ fn fuse_docker_lifecycle_and_matrix() {
     fixture.assert_filesystem_action_ok(&reattached, "ensure after restart");
     assert_serves(&fixture.container_name());
 
-    // Remove both desired Attachments explicitly, then stop the daemon with
+    // Remove both desired Filesystems explicitly, then stop the daemon with
     // `omnifs down`. The daemon owns runtime teardown before rows vanish.
-    live::remove_attachment(&fixture.control_socket(), "itest-docker");
-    live::remove_attachment(&fixture.control_socket(), "itest-host");
+    live::remove_filesystem(&fixture.control_socket(), "itest-docker");
+    live::remove_filesystem(&fixture.control_socket(), "itest-host");
     let down_out = fixture.down();
     assert!(
         down_out.status.success(),
@@ -874,7 +874,7 @@ fn fuse_docker_lifecycle_and_matrix() {
     );
     assert!(
         fixture.containers().is_empty(),
-        "attachment removal must stop and remove the filesystem container before omnifs down"
+        "filesystem removal must stop and remove the filesystem container before omnifs down"
     );
 }
 
@@ -886,7 +886,7 @@ fn fuse_docker_lifecycle_and_matrix() {
 ///
 /// 1. **Kill the container.** The daemon observes that its exact runtime
 ///    stopped, removes that retained identity, and creates a fresh container
-///    from the durable desired Attachment without a client command.
+///    from the durable desired Filesystem without a client command.
 /// 2. **Kill the daemon, leaving the container alive.** The VFS wire client
 ///    reconnects with backoff forever (`omnifs-vfs`) to the fixed attach
 ///    endpoint. The same container therefore reattaches without replacement.
@@ -920,7 +920,7 @@ fn kill_and_reattach_fuse_semantics() {
         "docker kill must succeed"
     );
     let id_2 = wait_for_container_replacement(&container, &id_1, Duration::from_secs(15));
-    fixture.wait_for_filesystem_attachment("itest-docker", Duration::from_secs(15));
+    fixture.wait_for_filesystem_ready("itest-docker", Duration::from_secs(15));
     assert_serves(&container);
 
     // Failure mode 2: SIGKILL the daemon, container untouched.

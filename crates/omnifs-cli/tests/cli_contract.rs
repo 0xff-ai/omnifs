@@ -46,11 +46,11 @@ fn resource_help_exposes_only_the_final_public_grammar() {
         .expect("spawn omnifs --help");
     assert!(top.status.success());
     let top_help = String::from_utf8_lossy(&top.stdout);
-    for command in ["provider", "mount", "credential", "attachment"] {
+    for command in ["provider", "mount", "credential", "fs"] {
         assert!(top_help.contains(command), "missing {command}: {top_help}");
     }
     assert!(
-        !top_help.contains("\n  fs "),
+        !top_help.contains("\n  attachment "),
         "retired command remains public: {top_help}"
     );
 
@@ -65,7 +65,7 @@ fn resource_help_exposes_only_the_final_public_grammar() {
             ["login", "set", "ls", "show", "rm", "revoke"].as_slice(),
         ),
         (
-            "attachment",
+            "fs",
             ["add", "ls", "show", "rm", "restart", "shell"].as_slice(),
         ),
     ] {
@@ -119,9 +119,9 @@ fn resource_help_exposes_only_the_final_public_grammar() {
     assert!(!credential_help.contains("--token"), "{credential_help}");
 
     let shell = Command::new(omnifs_bin())
-        .args(["attachment", "shell", "--help"])
+        .args(["fs", "shell", "--help"])
         .output()
-        .expect("spawn omnifs attachment shell --help");
+        .expect("spawn omnifs fs shell --help");
     assert!(shell.status.success());
     let shell_help = String::from_utf8_lossy(&shell.stdout);
     for argument in ["<NAME>", "[COMMAND]"] {
@@ -191,7 +191,7 @@ fn interactive_mutation_refusal_points_automation_to_kcl() {
     for args in [
         ["provider", "add"].as_slice(),
         ["mount", "add"].as_slice(),
-        ["attachment", "add"].as_slice(),
+        ["fs", "add"].as_slice(),
         ["credential", "login"].as_slice(),
     ] {
         let output = fixture.run(args);
@@ -227,6 +227,10 @@ fn removed_top_level_commands_are_usage_errors() {
             "unrecognized subcommand 'snapshot'",
         ),
         (
+            ["attachment", "ls"].as_slice(),
+            "unrecognized subcommand 'attachment'",
+        ),
+        (
             ["filesystem", "ls"].as_slice(),
             "unrecognized subcommand 'filesystem'",
         ),
@@ -243,13 +247,12 @@ fn removed_top_level_commands_are_usage_errors() {
             "unrecognized subcommand 'up'",
         ),
         (["down", "--force"].as_slice(), "--force"),
-        (["fs", "ls"].as_slice(), "unrecognized subcommand 'fs'"),
         (
-            ["attachment", "attach", "main"].as_slice(),
+            ["fs", "attach", "main"].as_slice(),
             "unrecognized subcommand 'attach'",
         ),
         (
-            ["attachment", "detach", "main"].as_slice(),
+            ["fs", "detach", "main"].as_slice(),
             "unrecognized subcommand 'detach'",
         ),
         (
@@ -340,7 +343,7 @@ fn json_commands_emit_expected_shapes() {
     assert_eq!(status_json["schema_version"], 1);
     assert_eq!(status_json["command"], "status");
     assert!(status_json["verdict"].is_string());
-    for key in ["providers", "credentials", "mounts", "attachments"] {
+    for key in ["providers", "credentials", "mounts", "filesystems"] {
         assert!(
             status_json["result"][key].as_array().is_some(),
             "missing plural resource array {key}: {status_json}"

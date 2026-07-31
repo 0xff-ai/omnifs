@@ -1,6 +1,6 @@
 ---
 source: crates/omnifs-cli/tests/cli_transcripts.rs
-expression: "fixture.transcript(&fixture.run(&[\"attachment\", \"add\"]))"
+expression: "fixture.transcript(&fixture.run(&[\"fs\", \"add\"]))"
 ---
 exit: 4
 stdout:

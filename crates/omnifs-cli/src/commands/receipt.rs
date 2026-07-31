@@ -31,17 +31,17 @@ fn verdict_from_rows(rows: &[Outcome]) -> ResultVerdict {
 pub(crate) struct TeardownReceipt {
     pub(crate) verdict: ResultVerdict,
     pub(crate) rows: Vec<Outcome>,
-    pub(crate) detached: usize,
-    pub(crate) still_attached: Vec<String>,
+    pub(crate) stopped: usize,
+    pub(crate) still_running: Vec<String>,
 }
 
 impl TeardownReceipt {
-    pub(crate) fn new(rows: Vec<Outcome>, detached: usize, still_attached: Vec<String>) -> Self {
+    pub(crate) fn new(rows: Vec<Outcome>, stopped: usize, still_running: Vec<String>) -> Self {
         Self {
             verdict: verdict_from_rows(&rows),
             rows,
-            detached,
-            still_attached,
+            stopped,
+            still_running,
         }
     }
 
@@ -69,7 +69,7 @@ mod tests {
         assert_eq!(receipt.exit_code(), crate::error::ExitCode::GenericFailure);
         let json = serde_json::to_value(&receipt).unwrap();
         assert_eq!(json["verdict"], "degraded");
-        assert_eq!(json["detached"], 2);
-        assert_eq!(json["still_attached"][0], "fuse/host at /mnt/omnifs");
+        assert_eq!(json["stopped"], 2);
+        assert_eq!(json["still_running"][0], "fuse/host at /mnt/omnifs");
     }
 }

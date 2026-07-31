@@ -1,22 +1,22 @@
-//! Exact desired filesystem attachment specifications.
+//! Exact desired filesystem specifications.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-pub const ATTACHMENT_GUEST_LOCATION: &str = "/omnifs";
+pub const FILESYSTEM_GUEST_LOCATION: &str = "/omnifs";
 const RUNTIME_INSTANCE_HINT: &str = "exactly 32 lowercase hexadecimal characters";
 
-/// OS filesystem protocol exposed by an Attachment.
+/// OS filesystem protocol exposed by a filesystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AttachmentProtocol {
+pub enum FilesystemProtocol {
     Fuse,
     Nfs,
 }
 
-impl AttachmentProtocol {
+impl FilesystemProtocol {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -26,38 +26,38 @@ impl AttachmentProtocol {
     }
 }
 
-impl fmt::Display for AttachmentProtocol {
+impl fmt::Display for FilesystemProtocol {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl FromStr for AttachmentProtocol {
-    type Err = ParseAttachmentProtocolError;
+impl FromStr for FilesystemProtocol {
+    type Err = ParseFilesystemProtocolError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "fuse" => Ok(Self::Fuse),
             "nfs" => Ok(Self::Nfs),
-            _ => Err(ParseAttachmentProtocolError(value.to_owned())),
+            _ => Err(ParseFilesystemProtocolError(value.to_owned())),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown Attachment protocol `{0}`; expected fuse or nfs")]
-pub struct ParseAttachmentProtocolError(String);
+#[error("unknown Filesystem protocol `{0}`; expected fuse or nfs")]
+pub struct ParseFilesystemProtocolError(String);
 
-/// Runtime that owns one Attachment.
+/// Runtime that owns one Filesystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AttachmentRuntime {
+pub enum FilesystemRuntime {
     Host,
     Docker,
     Libkrun,
 }
 
-impl AttachmentRuntime {
+impl FilesystemRuntime {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -68,30 +68,30 @@ impl AttachmentRuntime {
     }
 }
 
-impl fmt::Display for AttachmentRuntime {
+impl fmt::Display for FilesystemRuntime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
 }
 
-impl FromStr for AttachmentRuntime {
-    type Err = ParseAttachmentRuntimeError;
+impl FromStr for FilesystemRuntime {
+    type Err = ParseFilesystemRuntimeError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "host" => Ok(Self::Host),
             "docker" => Ok(Self::Docker),
             "libkrun" => Ok(Self::Libkrun),
-            _ => Err(ParseAttachmentRuntimeError(value.to_owned())),
+            _ => Err(ParseFilesystemRuntimeError(value.to_owned())),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown Attachment runtime `{0}`; expected host, docker, or libkrun")]
-pub struct ParseAttachmentRuntimeError(String);
+#[error("unknown Filesystem runtime `{0}`; expected host, docker, or libkrun")]
+pub struct ParseFilesystemRuntimeError(String);
 
-/// Exact random identity of one launched Attachment runtime.
+/// Exact random identity of one launched Filesystem runtime.
 ///
 /// Parsing this at process and wire ingress prevents malformed peers from
 /// entering the live-session registry under an identity `SQLite` would reject.
@@ -152,12 +152,12 @@ impl<'de> Deserialize<'de> for RuntimeInstanceId {
 #[error("runtime instance must contain {RUNTIME_INSTANCE_HINT}")]
 pub struct RuntimeInstanceIdError;
 
-/// An exact attachment configuration after daemon-owned normalization.
+/// An exact filesystem configuration after daemon-owned normalization.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct AttachmentSpec {
-    protocol: AttachmentProtocol,
-    runtime: AttachmentRuntime,
+pub struct FilesystemSpec {
+    protocol: FilesystemProtocol,
+    runtime: FilesystemRuntime,
     location: PathBuf,
     docker_image: Option<String>,
     libkrun_guest_image: Option<String>,
@@ -165,17 +165,17 @@ pub struct AttachmentSpec {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredAttachmentSpec {
-    protocol: AttachmentProtocol,
-    runtime: AttachmentRuntime,
+struct StoredFilesystemSpec {
+    protocol: FilesystemProtocol,
+    runtime: FilesystemRuntime,
     location: PathBuf,
     docker_image: Option<String>,
     libkrun_guest_image: Option<String>,
 }
 
-impl<'de> Deserialize<'de> for AttachmentSpec {
+impl<'de> Deserialize<'de> for FilesystemSpec {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let stored = StoredAttachmentSpec::deserialize(deserializer)?;
+        let stored = StoredFilesystemSpec::deserialize(deserializer)?;
         Self::new(
             stored.protocol,
             stored.runtime,
@@ -187,47 +187,47 @@ impl<'de> Deserialize<'de> for AttachmentSpec {
     }
 }
 
-impl AttachmentSpec {
+impl FilesystemSpec {
     pub fn new(
-        protocol: AttachmentProtocol,
-        runtime: AttachmentRuntime,
+        protocol: FilesystemProtocol,
+        runtime: FilesystemRuntime,
         location: PathBuf,
         docker_image: Option<String>,
         libkrun_guest_image: Option<String>,
-    ) -> Result<Self, AttachmentSpecError> {
+    ) -> Result<Self, FilesystemSpecError> {
         if !valid_pair(protocol, runtime) {
-            return Err(AttachmentSpecError::UnsupportedPair { protocol, runtime });
+            return Err(FilesystemSpecError::UnsupportedPair { protocol, runtime });
         }
         match runtime {
-            AttachmentRuntime::Host => {
+            FilesystemRuntime::Host => {
                 if !location.is_absolute() {
-                    return Err(AttachmentSpecError::HostLocationNotAbsolute(location));
+                    return Err(FilesystemSpecError::HostLocationNotAbsolute(location));
                 }
                 if docker_image.is_some() || libkrun_guest_image.is_some() {
-                    return Err(AttachmentSpecError::HostAssets);
+                    return Err(FilesystemSpecError::HostAssets);
                 }
             },
-            AttachmentRuntime::Docker => {
-                if location != Path::new(ATTACHMENT_GUEST_LOCATION) {
-                    return Err(AttachmentSpecError::GuestLocation {
+            FilesystemRuntime::Docker => {
+                if location != Path::new(FILESYSTEM_GUEST_LOCATION) {
+                    return Err(FilesystemSpecError::GuestLocation {
                         runtime,
                         actual: location,
                     });
                 }
                 if libkrun_guest_image.is_some() {
-                    return Err(AttachmentSpecError::LibkrunAssetOnOtherRuntime { runtime });
+                    return Err(FilesystemSpecError::LibkrunAssetOnOtherRuntime { runtime });
                 }
                 validate_asset("docker image", docker_image.as_deref())?;
             },
-            AttachmentRuntime::Libkrun => {
-                if location != Path::new(ATTACHMENT_GUEST_LOCATION) {
-                    return Err(AttachmentSpecError::GuestLocation {
+            FilesystemRuntime::Libkrun => {
+                if location != Path::new(FILESYSTEM_GUEST_LOCATION) {
+                    return Err(FilesystemSpecError::GuestLocation {
                         runtime,
                         actual: location,
                     });
                 }
                 if docker_image.is_some() {
-                    return Err(AttachmentSpecError::DockerAssetOnOtherRuntime { runtime });
+                    return Err(FilesystemSpecError::DockerAssetOnOtherRuntime { runtime });
                 }
                 validate_asset("libkrun guest image", libkrun_guest_image.as_deref())?;
             },
@@ -242,12 +242,12 @@ impl AttachmentSpec {
     }
 
     #[must_use]
-    pub const fn protocol(&self) -> AttachmentProtocol {
+    pub const fn protocol(&self) -> FilesystemProtocol {
         self.protocol
     }
 
     #[must_use]
-    pub const fn runtime(&self) -> AttachmentRuntime {
+    pub const fn runtime(&self) -> FilesystemRuntime {
         self.runtime
     }
 
@@ -267,41 +267,41 @@ impl AttachmentSpec {
     }
 }
 
-fn validate_asset(field: &'static str, value: Option<&str>) -> Result<(), AttachmentSpecError> {
+fn validate_asset(field: &'static str, value: Option<&str>) -> Result<(), FilesystemSpecError> {
     if value.is_some_and(str::is_empty) {
-        return Err(AttachmentSpecError::EmptyAsset { field });
+        return Err(FilesystemSpecError::EmptyAsset { field });
     }
     Ok(())
 }
 
-fn valid_pair(protocol: AttachmentProtocol, runtime: AttachmentRuntime) -> bool {
+fn valid_pair(protocol: FilesystemProtocol, runtime: FilesystemRuntime) -> bool {
     matches!(
         (protocol, runtime),
-        (AttachmentProtocol::Nfs, AttachmentRuntime::Host)
+        (FilesystemProtocol::Nfs, FilesystemRuntime::Host)
             | (
-                AttachmentProtocol::Fuse,
-                AttachmentRuntime::Host | AttachmentRuntime::Docker | AttachmentRuntime::Libkrun
+                FilesystemProtocol::Fuse,
+                FilesystemRuntime::Host | FilesystemRuntime::Docker | FilesystemRuntime::Libkrun
             )
     )
 }
 
 /// Whether the current daemon host can launch this protocol/runtime pair.
 ///
-/// This is separate from [`AttachmentSpec`] parsing because Docker and
+/// This is separate from [`FilesystemSpec`] parsing because Docker and
 /// libkrun launch the Linux guest with the daemon's exact spec. A libkrun
 /// guest must accept `fuse/libkrun` even though Linux cannot host libkrun.
 #[must_use]
-pub const fn attachment_pair_supported_on_current_host(
-    protocol: AttachmentProtocol,
-    runtime: AttachmentRuntime,
+pub const fn filesystem_pair_supported_on_current_host(
+    protocol: FilesystemProtocol,
+    runtime: FilesystemRuntime,
 ) -> bool {
     match (protocol, runtime) {
-        (AttachmentProtocol::Nfs, AttachmentRuntime::Host)
-        | (AttachmentProtocol::Fuse, AttachmentRuntime::Docker) => {
+        (FilesystemProtocol::Nfs, FilesystemRuntime::Host)
+        | (FilesystemProtocol::Fuse, FilesystemRuntime::Docker) => {
             cfg!(any(target_os = "linux", target_os = "macos"))
         },
-        (AttachmentProtocol::Fuse, AttachmentRuntime::Host) => cfg!(target_os = "linux"),
-        (AttachmentProtocol::Fuse, AttachmentRuntime::Libkrun) => {
+        (FilesystemProtocol::Fuse, FilesystemRuntime::Host) => cfg!(target_os = "linux"),
+        (FilesystemProtocol::Fuse, FilesystemRuntime::Libkrun) => {
             cfg!(all(target_os = "macos", target_arch = "aarch64"))
         },
         _ => false,
@@ -309,34 +309,34 @@ pub const fn attachment_pair_supported_on_current_host(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum AttachmentSpecError {
-    #[error("{protocol}/{runtime} is not a valid Attachment protocol/runtime pair")]
+pub enum FilesystemSpecError {
+    #[error("{protocol}/{runtime} is not a valid Filesystem protocol/runtime pair")]
     UnsupportedPair {
-        protocol: AttachmentProtocol,
-        runtime: AttachmentRuntime,
+        protocol: FilesystemProtocol,
+        runtime: FilesystemRuntime,
     },
-    #[error("host attachment location must be absolute: {}", .0.display())]
+    #[error("host filesystem location must be absolute: {}", .0.display())]
     HostLocationNotAbsolute(PathBuf),
-    #[error("{runtime} owns its guest location; expected {ATTACHMENT_GUEST_LOCATION}, got {}", actual.display())]
+    #[error("{runtime} owns its guest location; expected {FILESYSTEM_GUEST_LOCATION}, got {}", actual.display())]
     GuestLocation {
-        runtime: AttachmentRuntime,
+        runtime: FilesystemRuntime,
         actual: PathBuf,
     },
-    #[error("host attachments cannot have runtime image references")]
+    #[error("host filesystems cannot have runtime image references")]
     HostAssets,
     #[error("docker image is only valid for the docker runtime, not {runtime}")]
-    DockerAssetOnOtherRuntime { runtime: AttachmentRuntime },
+    DockerAssetOnOtherRuntime { runtime: FilesystemRuntime },
     #[error("libkrun guest image is only valid for the libkrun runtime, not {runtime}")]
-    LibkrunAssetOnOtherRuntime { runtime: AttachmentRuntime },
+    LibkrunAssetOnOtherRuntime { runtime: FilesystemRuntime },
     #[error("{field} cannot be empty")]
     EmptyAsset { field: &'static str },
 }
 
-/// Content version of an exact attachment specification.
+/// Content version of an exact filesystem specification.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AttachmentVersion([u8; 32]);
+pub struct FilesystemVersion([u8; 32]);
 
-impl AttachmentVersion {
+impl FilesystemVersion {
     #[must_use]
     pub const fn from_digest(digest: [u8; 32]) -> Self {
         Self(digest)
@@ -348,7 +348,7 @@ impl AttachmentVersion {
     }
 }
 
-impl fmt::Display for AttachmentVersion {
+impl fmt::Display for FilesystemVersion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         for byte in self.0 {
             write!(formatter, "{byte:02x}")?;
@@ -357,13 +357,13 @@ impl fmt::Display for AttachmentVersion {
     }
 }
 
-impl fmt::Debug for AttachmentVersion {
+impl fmt::Debug for FilesystemVersion {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "AttachmentVersion({self})")
+        write!(formatter, "FilesystemVersion({self})")
     }
 }
 
-impl FromStr for AttachmentVersion {
+impl FromStr for FilesystemVersion {
     type Err = crate::ResourceDigestParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
@@ -372,13 +372,13 @@ impl FromStr for AttachmentVersion {
     }
 }
 
-impl Serialize for AttachmentVersion {
+impl Serialize for FilesystemVersion {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)
     }
 }
 
-impl<'de> Deserialize<'de> for AttachmentVersion {
+impl<'de> Deserialize<'de> for FilesystemVersion {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         String::deserialize(deserializer)?
             .parse()
@@ -393,9 +393,9 @@ mod tests {
     #[test]
     fn rejects_invalid_locations_assets_and_pairs() {
         assert!(
-            AttachmentSpec::new(
-                AttachmentProtocol::Fuse,
-                AttachmentRuntime::Host,
+            FilesystemSpec::new(
+                FilesystemProtocol::Fuse,
+                FilesystemRuntime::Host,
                 PathBuf::from("relative"),
                 None,
                 None
@@ -403,19 +403,19 @@ mod tests {
             .is_err()
         );
         assert!(
-            AttachmentSpec::new(
-                AttachmentProtocol::Nfs,
-                AttachmentRuntime::Docker,
-                PathBuf::from(ATTACHMENT_GUEST_LOCATION),
+            FilesystemSpec::new(
+                FilesystemProtocol::Nfs,
+                FilesystemRuntime::Docker,
+                PathBuf::from(FILESYSTEM_GUEST_LOCATION),
                 None,
                 None
             )
             .is_err()
         );
         assert!(
-            AttachmentSpec::new(
-                AttachmentProtocol::Fuse,
-                AttachmentRuntime::Host,
+            FilesystemSpec::new(
+                FilesystemProtocol::Fuse,
+                FilesystemRuntime::Host,
                 PathBuf::from("/tmp/omnifs"),
                 Some("image".into()),
                 None
@@ -426,17 +426,17 @@ mod tests {
 
     #[test]
     fn exact_libkrun_spec_round_trips_inside_its_linux_guest() {
-        let spec = AttachmentSpec::new(
-            AttachmentProtocol::Fuse,
-            AttachmentRuntime::Libkrun,
-            ATTACHMENT_GUEST_LOCATION.into(),
+        let spec = FilesystemSpec::new(
+            FilesystemProtocol::Fuse,
+            FilesystemRuntime::Libkrun,
+            FILESYSTEM_GUEST_LOCATION.into(),
             None,
             Some("guest.raw".into()),
         )
         .unwrap();
         let encoded = serde_json::to_vec(&spec).unwrap();
         assert_eq!(
-            serde_json::from_slice::<AttachmentSpec>(&encoded).unwrap(),
+            serde_json::from_slice::<FilesystemSpec>(&encoded).unwrap(),
             spec
         );
     }
@@ -444,9 +444,9 @@ mod tests {
     #[test]
     fn host_support_is_distinct_from_exact_spec_validity() {
         assert_eq!(
-            attachment_pair_supported_on_current_host(
-                AttachmentProtocol::Fuse,
-                AttachmentRuntime::Libkrun
+            filesystem_pair_supported_on_current_host(
+                FilesystemProtocol::Fuse,
+                FilesystemRuntime::Libkrun
             ),
             cfg!(all(target_os = "macos", target_arch = "aarch64"))
         );

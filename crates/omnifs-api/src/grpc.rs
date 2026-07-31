@@ -11,27 +11,27 @@ pub mod wire {
 }
 
 use crate::{
-    ActionKind, ActionPhase, ActionReceipt, ApplyReceipt, ApplyResourcesRequest, AttachmentAccess,
-    AttachmentCommand, AttachmentDefinition, AttachmentPhase, AttachmentProgress,
-    AttachmentProgressStage, AttachmentStatus, CONTROL_RESOURCE_MAX_COUNT, ControlError,
-    ControlErrorCode, CredentialClientOverrides, CredentialDefinition, CredentialHealth,
-    CredentialKey, CredentialKind, CredentialMaterial, CredentialMaterialSidecar,
-    CredentialProgress, CredentialProgressStage, CredentialReceipt, CredentialStatus,
-    CredentialStatusKind, CredentialSubmission, DaemonHealth, DaemonInfo, DaemonInventory,
-    DaemonPhase, DaemonRecovery, DaemonStatus, GetAttachmentAccessRequest, HealthReport,
+    ActionKind, ActionPhase, ActionReceipt, ApplyReceipt, ApplyResourcesRequest,
+    CONTROL_RESOURCE_MAX_COUNT, ControlError, ControlErrorCode, CredentialClientOverrides,
+    CredentialDefinition, CredentialHealth, CredentialKey, CredentialKind, CredentialMaterial,
+    CredentialMaterialSidecar, CredentialProgress, CredentialProgressStage, CredentialReceipt,
+    CredentialStatus, CredentialStatusKind, CredentialSubmission, DaemonHealth, DaemonInfo,
+    DaemonInventory, DaemonPhase, DaemonRecovery, DaemonStatus, FilesystemAccess,
+    FilesystemCommand, FilesystemDefinition, FilesystemPhase, FilesystemProgress,
+    FilesystemProgressStage, FilesystemStatus, GetFilesystemAccessRequest, HealthReport,
     HealthState, MountCredential, MountDefinition, MountHealth, MountLimits, MountRecord,
     MountResourceDefinition, NormalizedResourceSet, ProgressEvent, ProgressEventKind,
     ProgressSnapshot, ProgressTarget, ProviderDefinition, ProviderImportDisposition,
     ProviderImportReceipt, ProviderMetadata, ProviderPreparationProgress, ProviderPreparationStage,
     ProviderReference, RecoveryId, RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt,
     ResourceChange, ResourceChangeAction, ResourceDeclarations, ResourceDefinition, ResourceLimits,
-    ResourcePhase, ResourcePlan, ResourceSnapshot, ResourceStatus, RestartAttachmentRequest,
+    ResourcePhase, ResourcePlan, ResourceSnapshot, ResourceStatus, RestartFilesystemRequest,
     RevokeCredentialRequest, SecretBytes, ServingProgress, ServingProgressStage,
     SetCredentialMaterialRequest,
 };
 use omnifs_core::{
-    ActionId, AttachmentSpec, AttachmentVersion, AuthRuntimeFingerprint, CredentialGeneration,
-    CredentialVersion, MountVersion, MutationId, ProviderId, ResourceDigest, ResourceKey,
+    ActionId, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, FilesystemSpec,
+    FilesystemVersion, MountVersion, MutationId, ProviderId, ResourceDigest, ResourceKey,
     ResourceKind, ResourceName, ResourceRevision,
 };
 use std::ffi::OsString;
@@ -415,10 +415,10 @@ pub fn daemon_status(v: &wire::DaemonStatus) -> Result<DaemonStatus, FromGrpcErr
             .as_deref()
             .map(|x| x.parse().map_err(|_| FromGrpcError::Invalid("attach tcp")))
             .transpose()?,
-        attachments: v
-            .attachments
+        filesystems: v
+            .filesystems
             .iter()
-            .map(attachment_definition)
+            .map(filesystem_definition)
             .collect::<Result<_, _>>()?,
         mounts: v.mounts.iter().map(mount_info).collect::<Result<_, _>>()?,
         health: Box::new(daemon_health(&req(v.health.clone(), "daemon health")?)?),
@@ -445,10 +445,10 @@ pub fn daemon_inventory(v: &wire::DaemonInventory) -> Result<DaemonInventory, Fr
             .iter()
             .map(credential_status)
             .collect::<Result<_, _>>()?,
-        attachments: v
-            .attachments
+        filesystems: v
+            .filesystems
             .iter()
-            .map(attachment_definition)
+            .map(filesystem_definition)
             .collect::<Result<_, _>>()?,
     })
 }
@@ -460,7 +460,7 @@ pub fn to_daemon_status(v: &DaemonStatus) -> wire::DaemonStatus {
         instance_id: v.instance_id.clone(),
         executable: path_bytes(&v.executable).into(),
         attach_tcp: v.attach_tcp.map(|x| x.to_string()),
-        attachments: v.attachments.iter().map(to_attachment_definition).collect(),
+        filesystems: v.filesystems.iter().map(to_filesystem_definition).collect(),
         mounts: v
             .mounts
             .iter()
@@ -483,7 +483,7 @@ pub fn to_daemon_inventory(v: &DaemonInventory) -> wire::DaemonInventory {
         health: Some(to_daemon_health(&v.health)),
         mounts: v.mounts.iter().map(to_mount_record).collect(),
         credentials: v.credentials.iter().map(to_credential_status).collect(),
-        attachments: v.attachments.iter().map(to_attachment_definition).collect(),
+        filesystems: v.filesystems.iter().map(to_filesystem_definition).collect(),
     }
 }
 
@@ -836,7 +836,7 @@ fn resource_kind(v: wire::ResourceKind) -> Result<ResourceKind, FromGrpcError> {
         wire::ResourceKind::ResourceProvider => Ok(ResourceKind::Provider),
         wire::ResourceKind::ResourceCredential => Ok(ResourceKind::Credential),
         wire::ResourceKind::ResourceMount => Ok(ResourceKind::Mount),
-        wire::ResourceKind::ResourceAttachment => Ok(ResourceKind::Attachment),
+        wire::ResourceKind::ResourceFilesystem => Ok(ResourceKind::Filesystem),
         wire::ResourceKind::Unspecified => Err(FromGrpcError::Unspecified("resource kind")),
     }
 }
@@ -846,7 +846,7 @@ fn to_resource_kind(v: ResourceKind) -> i32 {
         ResourceKind::Provider => wire::ResourceKind::ResourceProvider as i32,
         ResourceKind::Credential => wire::ResourceKind::ResourceCredential as i32,
         ResourceKind::Mount => wire::ResourceKind::ResourceMount as i32,
-        ResourceKind::Attachment => wire::ResourceKind::ResourceAttachment as i32,
+        ResourceKind::Filesystem => wire::ResourceKind::ResourceFilesystem as i32,
     }
 }
 
@@ -915,46 +915,46 @@ fn to_resource_change_action(v: ResourceChangeAction) -> i32 {
     }
 }
 
-fn attachment_spec(v: &wire::AttachmentSpec) -> Result<AttachmentSpec, FromGrpcError> {
+fn filesystem_spec(v: &wire::FilesystemSpec) -> Result<FilesystemSpec, FromGrpcError> {
     let protocol = match wire::FsProtocol::try_from(v.protocol)
-        .map_err(|_| FromGrpcError::Invalid("attachment protocol"))?
+        .map_err(|_| FromGrpcError::Invalid("filesystem protocol"))?
     {
-        wire::FsProtocol::FsFuse => omnifs_core::AttachmentProtocol::Fuse,
-        wire::FsProtocol::FsNfs => omnifs_core::AttachmentProtocol::Nfs,
+        wire::FsProtocol::FsFuse => omnifs_core::FilesystemProtocol::Fuse,
+        wire::FsProtocol::FsNfs => omnifs_core::FilesystemProtocol::Nfs,
         wire::FsProtocol::Unspecified => {
-            return Err(FromGrpcError::Unspecified("attachment protocol"));
+            return Err(FromGrpcError::Unspecified("filesystem protocol"));
         },
     };
     let runtime = match wire::FsRuntime::try_from(v.runtime)
-        .map_err(|_| FromGrpcError::Invalid("attachment runtime"))?
+        .map_err(|_| FromGrpcError::Invalid("filesystem runtime"))?
     {
-        wire::FsRuntime::FsHost => omnifs_core::AttachmentRuntime::Host,
-        wire::FsRuntime::FsDocker => omnifs_core::AttachmentRuntime::Docker,
-        wire::FsRuntime::FsLibkrun => omnifs_core::AttachmentRuntime::Libkrun,
+        wire::FsRuntime::FsHost => omnifs_core::FilesystemRuntime::Host,
+        wire::FsRuntime::FsDocker => omnifs_core::FilesystemRuntime::Docker,
+        wire::FsRuntime::FsLibkrun => omnifs_core::FilesystemRuntime::Libkrun,
         wire::FsRuntime::Unspecified => {
-            return Err(FromGrpcError::Unspecified("attachment runtime"));
+            return Err(FromGrpcError::Unspecified("filesystem runtime"));
         },
     };
-    AttachmentSpec::new(
+    FilesystemSpec::new(
         protocol,
         runtime,
-        path_from_bytes(&v.location, "attachment location")?,
+        path_from_bytes(&v.location, "filesystem location")?,
         v.docker_image.clone(),
         v.libkrun_guest_image.clone(),
     )
-    .map_err(|_| FromGrpcError::Invalid("attachment spec"))
+    .map_err(|_| FromGrpcError::Invalid("filesystem spec"))
 }
 
-fn to_attachment_spec(v: &AttachmentSpec) -> wire::AttachmentSpec {
-    wire::AttachmentSpec {
+fn to_filesystem_spec(v: &FilesystemSpec) -> wire::FilesystemSpec {
+    wire::FilesystemSpec {
         protocol: match v.protocol() {
-            omnifs_core::AttachmentProtocol::Fuse => wire::FsProtocol::FsFuse as i32,
-            omnifs_core::AttachmentProtocol::Nfs => wire::FsProtocol::FsNfs as i32,
+            omnifs_core::FilesystemProtocol::Fuse => wire::FsProtocol::FsFuse as i32,
+            omnifs_core::FilesystemProtocol::Nfs => wire::FsProtocol::FsNfs as i32,
         },
         runtime: match v.runtime() {
-            omnifs_core::AttachmentRuntime::Host => wire::FsRuntime::FsHost as i32,
-            omnifs_core::AttachmentRuntime::Docker => wire::FsRuntime::FsDocker as i32,
-            omnifs_core::AttachmentRuntime::Libkrun => wire::FsRuntime::FsLibkrun as i32,
+            omnifs_core::FilesystemRuntime::Host => wire::FsRuntime::FsHost as i32,
+            omnifs_core::FilesystemRuntime::Docker => wire::FsRuntime::FsDocker as i32,
+            omnifs_core::FilesystemRuntime::Libkrun => wire::FsRuntime::FsLibkrun as i32,
         },
         location: path_bytes(v.location()).into(),
         docker_image: v.docker_image().map(str::to_owned),
@@ -962,19 +962,19 @@ fn to_attachment_spec(v: &AttachmentSpec) -> wire::AttachmentSpec {
     }
 }
 
-fn attachment_definition(
-    value: &wire::AttachmentResource,
-) -> Result<AttachmentDefinition, FromGrpcError> {
-    Ok(AttachmentDefinition {
+fn filesystem_definition(
+    value: &wire::FilesystemResource,
+) -> Result<FilesystemDefinition, FromGrpcError> {
+    Ok(FilesystemDefinition {
         name: resource_name(value.name.clone())?,
-        spec: attachment_spec(&req(value.spec.clone(), "attachment spec")?)?,
+        spec: filesystem_spec(&req(value.spec.clone(), "filesystem spec")?)?,
     })
 }
 
-fn to_attachment_definition(value: &AttachmentDefinition) -> wire::AttachmentResource {
-    wire::AttachmentResource {
+fn to_filesystem_definition(value: &FilesystemDefinition) -> wire::FilesystemResource {
+    wire::FilesystemResource {
         name: value.name.to_string(),
-        spec: Some(to_attachment_spec(&value.spec)),
+        spec: Some(to_filesystem_spec(&value.spec)),
     }
 }
 
@@ -1019,10 +1019,10 @@ fn resource_definition(v: &wire::ResourceDefinition) -> Result<ResourceDefinitio
                 limits: value.limits.as_ref().map(resource_limits),
             }))
         },
-        wire::resource_definition::Definition::Attachment(value) => {
-            Ok(ResourceDefinition::Attachment(AttachmentDefinition {
+        wire::resource_definition::Definition::Filesystem(value) => {
+            Ok(ResourceDefinition::Filesystem(FilesystemDefinition {
                 name: resource_name(value.name)?,
-                spec: attachment_spec(&req(value.spec, "attachment spec")?)?,
+                spec: filesystem_spec(&req(value.spec, "filesystem spec")?)?,
             }))
         },
     }
@@ -1055,10 +1055,10 @@ fn to_resource_definition(v: &ResourceDefinition) -> wire::ResourceDefinition {
                 limits: value.limits.as_ref().map(to_resource_limits),
             })
         },
-        ResourceDefinition::Attachment(value) => {
-            wire::resource_definition::Definition::Attachment(wire::AttachmentResource {
+        ResourceDefinition::Filesystem(value) => {
+            wire::resource_definition::Definition::Filesystem(wire::FilesystemResource {
                 name: value.name.to_string(),
-                spec: Some(to_attachment_spec(&value.spec)),
+                spec: Some(to_filesystem_spec(&value.spec)),
             })
         },
     };
@@ -1365,7 +1365,7 @@ fn action_kind(v: wire::ActionKind) -> Result<ActionKind, FromGrpcError> {
     match v {
         wire::ActionKind::ActionSetCredentialMaterial => Ok(ActionKind::SetCredentialMaterial),
         wire::ActionKind::ActionRevokeCredential => Ok(ActionKind::RevokeCredential),
-        wire::ActionKind::ActionRestartAttachment => Ok(ActionKind::RestartAttachment),
+        wire::ActionKind::ActionRestartFilesystem => Ok(ActionKind::RestartFilesystem),
         wire::ActionKind::Unspecified => Err(FromGrpcError::Unspecified("action kind")),
     }
 }
@@ -1374,7 +1374,7 @@ fn to_action_kind(v: ActionKind) -> i32 {
     match v {
         ActionKind::SetCredentialMaterial => wire::ActionKind::ActionSetCredentialMaterial as i32,
         ActionKind::RevokeCredential => wire::ActionKind::ActionRevokeCredential as i32,
-        ActionKind::RestartAttachment => wire::ActionKind::ActionRestartAttachment as i32,
+        ActionKind::RestartFilesystem => wire::ActionKind::ActionRestartFilesystem as i32,
     }
 }
 
@@ -1404,7 +1404,7 @@ fn validate_action_target(kind: ActionKind, target: &ResourceKey) -> Result<(), 
         ActionKind::SetCredentialMaterial | ActionKind::RevokeCredential => {
             ResourceKind::Credential
         },
-        ActionKind::RestartAttachment => ResourceKind::Attachment,
+        ActionKind::RestartFilesystem => ResourceKind::Filesystem,
     };
     if target.kind != expected {
         return Err(FromGrpcError::Invalid("action target"));
@@ -1588,43 +1588,43 @@ pub fn to_revoke_credential_request(v: &RevokeCredentialRequest) -> wire::Revoke
     }
 }
 
-fn attachment_phase(v: wire::AttachmentPhase) -> Result<AttachmentPhase, FromGrpcError> {
+fn filesystem_phase(v: wire::FilesystemPhase) -> Result<FilesystemPhase, FromGrpcError> {
     match v {
-        wire::AttachmentPhase::AttachmentRuntimePending => Ok(AttachmentPhase::Pending),
-        wire::AttachmentPhase::AttachmentRuntimeWaitingForNamespace => {
-            Ok(AttachmentPhase::WaitingForNamespace)
+        wire::FilesystemPhase::FilesystemRuntimePending => Ok(FilesystemPhase::Pending),
+        wire::FilesystemPhase::FilesystemRuntimeWaitingForNamespace => {
+            Ok(FilesystemPhase::WaitingForNamespace)
         },
-        wire::AttachmentPhase::AttachmentRuntimeStarting => Ok(AttachmentPhase::Starting),
-        wire::AttachmentPhase::AttachmentRuntimeReady => Ok(AttachmentPhase::Ready),
-        wire::AttachmentPhase::AttachmentRuntimeStopping => Ok(AttachmentPhase::Stopping),
-        wire::AttachmentPhase::AttachmentRuntimeRetrying => Ok(AttachmentPhase::Retrying),
-        wire::AttachmentPhase::AttachmentRuntimeFailed => Ok(AttachmentPhase::Failed),
-        wire::AttachmentPhase::AttachmentRuntimeDeleting => Ok(AttachmentPhase::Deleting),
-        wire::AttachmentPhase::AttachmentRuntimeUnspecified => {
-            Err(FromGrpcError::Unspecified("attachment phase"))
+        wire::FilesystemPhase::FilesystemRuntimeStarting => Ok(FilesystemPhase::Starting),
+        wire::FilesystemPhase::FilesystemRuntimeReady => Ok(FilesystemPhase::Ready),
+        wire::FilesystemPhase::FilesystemRuntimeStopping => Ok(FilesystemPhase::Stopping),
+        wire::FilesystemPhase::FilesystemRuntimeRetrying => Ok(FilesystemPhase::Retrying),
+        wire::FilesystemPhase::FilesystemRuntimeFailed => Ok(FilesystemPhase::Failed),
+        wire::FilesystemPhase::FilesystemRuntimeDeleting => Ok(FilesystemPhase::Deleting),
+        wire::FilesystemPhase::FilesystemRuntimeUnspecified => {
+            Err(FromGrpcError::Unspecified("filesystem phase"))
         },
     }
 }
 
-fn to_attachment_phase(v: AttachmentPhase) -> i32 {
+fn to_filesystem_phase(v: FilesystemPhase) -> i32 {
     match v {
-        AttachmentPhase::Pending => wire::AttachmentPhase::AttachmentRuntimePending as i32,
-        AttachmentPhase::WaitingForNamespace => {
-            wire::AttachmentPhase::AttachmentRuntimeWaitingForNamespace as i32
+        FilesystemPhase::Pending => wire::FilesystemPhase::FilesystemRuntimePending as i32,
+        FilesystemPhase::WaitingForNamespace => {
+            wire::FilesystemPhase::FilesystemRuntimeWaitingForNamespace as i32
         },
-        AttachmentPhase::Starting => wire::AttachmentPhase::AttachmentRuntimeStarting as i32,
-        AttachmentPhase::Ready => wire::AttachmentPhase::AttachmentRuntimeReady as i32,
-        AttachmentPhase::Stopping => wire::AttachmentPhase::AttachmentRuntimeStopping as i32,
-        AttachmentPhase::Retrying => wire::AttachmentPhase::AttachmentRuntimeRetrying as i32,
-        AttachmentPhase::Failed => wire::AttachmentPhase::AttachmentRuntimeFailed as i32,
-        AttachmentPhase::Deleting => wire::AttachmentPhase::AttachmentRuntimeDeleting as i32,
+        FilesystemPhase::Starting => wire::FilesystemPhase::FilesystemRuntimeStarting as i32,
+        FilesystemPhase::Ready => wire::FilesystemPhase::FilesystemRuntimeReady as i32,
+        FilesystemPhase::Stopping => wire::FilesystemPhase::FilesystemRuntimeStopping as i32,
+        FilesystemPhase::Retrying => wire::FilesystemPhase::FilesystemRuntimeRetrying as i32,
+        FilesystemPhase::Failed => wire::FilesystemPhase::FilesystemRuntimeFailed as i32,
+        FilesystemPhase::Deleting => wire::FilesystemPhase::FilesystemRuntimeDeleting as i32,
     }
 }
 
-pub fn attachment_status(v: &wire::AttachmentStatus) -> Result<AttachmentStatus, FromGrpcError> {
-    let phase = attachment_phase(
-        wire::AttachmentPhase::try_from(v.phase)
-            .map_err(|_| FromGrpcError::Invalid("attachment phase"))?,
+pub fn filesystem_status(v: &wire::FilesystemStatus) -> Result<FilesystemStatus, FromGrpcError> {
+    let phase = filesystem_phase(
+        wire::FilesystemPhase::try_from(v.phase)
+            .map_err(|_| FromGrpcError::Invalid("filesystem phase"))?,
     )?;
     let runtime_instance = v.runtime_instance.clone();
     if runtime_instance.as_ref().is_some_and(|instance| {
@@ -1633,25 +1633,25 @@ pub fn attachment_status(v: &wire::AttachmentStatus) -> Result<AttachmentStatus,
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     }) {
-        return Err(FromGrpcError::Invalid("attachment runtime instance"));
+        return Err(FromGrpcError::Invalid("filesystem runtime instance"));
     }
     let desired_version =
-        AttachmentVersion::from_digest(exact(&v.desired_version, "attachment desired version")?);
+        FilesystemVersion::from_digest(exact(&v.desired_version, "filesystem desired version")?);
     let observed_version = v
         .observed_version
         .as_deref()
         .map(|value| {
-            exact(value, "attachment observed version").map(AttachmentVersion::from_digest)
+            exact(value, "filesystem observed version").map(FilesystemVersion::from_digest)
         })
         .transpose()?;
-    if phase == AttachmentPhase::Ready && observed_version != Some(desired_version) {
-        return Err(FromGrpcError::Invalid("ready attachment version"));
+    if phase == FilesystemPhase::Ready && observed_version != Some(desired_version) {
+        return Err(FromGrpcError::Invalid("ready filesystem version"));
     }
-    if phase == AttachmentPhase::Failed && (v.error_code.is_none() || v.detail.is_none()) {
-        return Err(FromGrpcError::Invalid("attachment failure details"));
+    if phase == FilesystemPhase::Failed && (v.error_code.is_none() || v.detail.is_none()) {
+        return Err(FromGrpcError::Invalid("filesystem failure details"));
     }
-    Ok(AttachmentStatus {
-        definition: attachment_definition(&req(v.definition.clone(), "attachment definition")?)?,
+    Ok(FilesystemStatus {
+        definition: filesystem_definition(&req(v.definition.clone(), "filesystem definition")?)?,
         desired_revision: ResourceRevision::new(v.desired_revision),
         desired_version,
         observed_version,
@@ -1665,15 +1665,15 @@ pub fn attachment_status(v: &wire::AttachmentStatus) -> Result<AttachmentStatus,
     })
 }
 
-pub fn to_attachment_status(v: &AttachmentStatus) -> wire::AttachmentStatus {
-    wire::AttachmentStatus {
-        definition: Some(to_attachment_definition(&v.definition)),
+pub fn to_filesystem_status(v: &FilesystemStatus) -> wire::FilesystemStatus {
+    wire::FilesystemStatus {
+        definition: Some(to_filesystem_definition(&v.definition)),
         desired_revision: v.desired_revision.get(),
         desired_version: v.desired_version.as_bytes().to_vec().into(),
         observed_version: v
             .observed_version
             .map(|version| version.as_bytes().to_vec().into()),
-        phase: to_attachment_phase(v.phase),
+        phase: to_filesystem_phase(v.phase),
         runtime_instance: v.runtime_instance.clone(),
         action_generation: v.action_generation,
         error_code: v.error_code.clone(),
@@ -1683,72 +1683,72 @@ pub fn to_attachment_status(v: &AttachmentStatus) -> wire::AttachmentStatus {
     }
 }
 
-pub fn get_attachment_status_response(
-    v: &wire::GetAttachmentStatusResponse,
-) -> Result<Option<AttachmentStatus>, FromGrpcError> {
-    v.status.as_ref().map(attachment_status).transpose()
+pub fn get_filesystem_status_response(
+    v: &wire::GetFilesystemStatusResponse,
+) -> Result<Option<FilesystemStatus>, FromGrpcError> {
+    v.status.as_ref().map(filesystem_status).transpose()
 }
 
-pub fn to_get_attachment_status_response(
-    v: Option<&AttachmentStatus>,
-) -> wire::GetAttachmentStatusResponse {
-    wire::GetAttachmentStatusResponse {
-        status: v.map(to_attachment_status),
+pub fn to_get_filesystem_status_response(
+    v: Option<&FilesystemStatus>,
+) -> wire::GetFilesystemStatusResponse {
+    wire::GetFilesystemStatusResponse {
+        status: v.map(to_filesystem_status),
     }
 }
 
-pub fn restart_attachment_request(
-    v: &wire::RestartAttachmentRequest,
-) -> Result<RestartAttachmentRequest, FromGrpcError> {
-    Ok(RestartAttachmentRequest {
+pub fn restart_filesystem_request(
+    v: &wire::RestartFilesystemRequest,
+) -> Result<RestartFilesystemRequest, FromGrpcError> {
+    Ok(RestartFilesystemRequest {
         action_id: action_id(&v.action_id)?,
         base_action_generation: v.base_action_generation,
-        attachment: resource_name(v.attachment_name.clone())?,
+        filesystem: resource_name(v.filesystem_name.clone())?,
     })
 }
 
-pub fn to_restart_attachment_request(
-    v: &RestartAttachmentRequest,
-) -> wire::RestartAttachmentRequest {
-    wire::RestartAttachmentRequest {
+pub fn to_restart_filesystem_request(
+    v: &RestartFilesystemRequest,
+) -> wire::RestartFilesystemRequest {
+    wire::RestartFilesystemRequest {
         action_id: v.action_id.as_bytes().to_vec().into(),
         base_action_generation: v.base_action_generation,
-        attachment_name: v.attachment.to_string(),
+        filesystem_name: v.filesystem.to_string(),
     }
 }
 
-pub fn restart_attachment_response(
-    v: &wire::RestartAttachmentResponse,
+pub fn restart_filesystem_response(
+    v: &wire::RestartFilesystemResponse,
 ) -> Result<ActionReceipt, FromGrpcError> {
-    let receipt = action_receipt(&req(v.receipt.clone(), "attachment action receipt")?)?;
-    if receipt.kind != ActionKind::RestartAttachment {
-        return Err(FromGrpcError::Invalid("attachment action kind"));
+    let receipt = action_receipt(&req(v.receipt.clone(), "filesystem action receipt")?)?;
+    if receipt.kind != ActionKind::RestartFilesystem {
+        return Err(FromGrpcError::Invalid("filesystem action kind"));
     }
     Ok(receipt)
 }
 
-pub fn to_restart_attachment_response(v: &ActionReceipt) -> wire::RestartAttachmentResponse {
-    wire::RestartAttachmentResponse {
+pub fn to_restart_filesystem_response(v: &ActionReceipt) -> wire::RestartFilesystemResponse {
+    wire::RestartFilesystemResponse {
         receipt: Some(to_action_receipt(v)),
     }
 }
 
-pub fn get_attachment_access_request(
-    v: &wire::GetAttachmentAccessRequest,
-) -> Result<GetAttachmentAccessRequest, FromGrpcError> {
-    Ok(GetAttachmentAccessRequest {
-        attachment: resource_name(v.attachment_name.clone())?,
+pub fn get_filesystem_access_request(
+    v: &wire::GetFilesystemAccessRequest,
+) -> Result<GetFilesystemAccessRequest, FromGrpcError> {
+    Ok(GetFilesystemAccessRequest {
+        filesystem: resource_name(v.filesystem_name.clone())?,
         interactive: v.interactive,
         shell: v.shell.clone(),
         command: v.command.clone(),
     })
 }
 
-pub fn to_get_attachment_access_request(
-    v: &GetAttachmentAccessRequest,
-) -> wire::GetAttachmentAccessRequest {
-    wire::GetAttachmentAccessRequest {
-        attachment_name: v.attachment.to_string(),
+pub fn to_get_filesystem_access_request(
+    v: &GetFilesystemAccessRequest,
+) -> wire::GetFilesystemAccessRequest {
+    wire::GetFilesystemAccessRequest {
+        filesystem_name: v.filesystem.to_string(),
         interactive: v.interactive,
         shell: v.shell.clone(),
         command: v.command.clone(),
@@ -1767,35 +1767,35 @@ fn os_string_bytes(v: &std::ffi::OsStr) -> Vec<u8> {
     v.as_bytes().to_vec()
 }
 
-pub fn attachment_access(v: &wire::AttachmentAccess) -> Result<AttachmentAccess, FromGrpcError> {
-    match req(v.value.clone(), "attachment access")? {
-        wire::attachment_access::Value::HostPath(path) => Ok(AttachmentAccess::HostPath(
-            path_from_bytes(&path, "attachment host path")?,
+pub fn filesystem_access(v: &wire::FilesystemAccess) -> Result<FilesystemAccess, FromGrpcError> {
+    match req(v.value.clone(), "filesystem access")? {
+        wire::filesystem_access::Value::HostPath(path) => Ok(FilesystemAccess::HostPath(
+            path_from_bytes(&path, "filesystem host path")?,
         )),
-        wire::attachment_access::Value::Command(command) => {
+        wire::filesystem_access::Value::Command(command) => {
             if command.program.is_empty() {
-                return Err(FromGrpcError::Invalid("attachment access command program"));
+                return Err(FromGrpcError::Invalid("filesystem access command program"));
             }
-            Ok(AttachmentAccess::Command(AttachmentCommand {
+            Ok(FilesystemAccess::Command(FilesystemCommand {
                 program: os_string(&command.program),
                 args: command.args.iter().map(|value| os_string(value)).collect(),
                 current_dir: command
                     .current_dir
                     .as_deref()
-                    .map(|path| path_from_bytes(path, "attachment command directory"))
+                    .map(|path| path_from_bytes(path, "filesystem command directory"))
                     .transpose()?,
             }))
         },
     }
 }
 
-pub fn to_attachment_access(v: &AttachmentAccess) -> wire::AttachmentAccess {
+pub fn to_filesystem_access(v: &FilesystemAccess) -> wire::FilesystemAccess {
     let value = match v {
-        AttachmentAccess::HostPath(path) => {
-            wire::attachment_access::Value::HostPath(path_bytes(path).into())
+        FilesystemAccess::HostPath(path) => {
+            wire::filesystem_access::Value::HostPath(path_bytes(path).into())
         },
-        AttachmentAccess::Command(command) => {
-            wire::attachment_access::Value::Command(wire::AttachmentCommand {
+        FilesystemAccess::Command(command) => {
+            wire::filesystem_access::Value::Command(wire::FilesystemCommand {
                 program: os_string_bytes(&command.program).into(),
                 args: command
                     .args
@@ -1809,20 +1809,20 @@ pub fn to_attachment_access(v: &AttachmentAccess) -> wire::AttachmentAccess {
             })
         },
     };
-    wire::AttachmentAccess { value: Some(value) }
+    wire::FilesystemAccess { value: Some(value) }
 }
 
-pub fn get_attachment_access_response(
-    v: &wire::GetAttachmentAccessResponse,
-) -> Result<AttachmentAccess, FromGrpcError> {
-    attachment_access(&req(v.access.clone(), "attachment access")?)
+pub fn get_filesystem_access_response(
+    v: &wire::GetFilesystemAccessResponse,
+) -> Result<FilesystemAccess, FromGrpcError> {
+    filesystem_access(&req(v.access.clone(), "filesystem access")?)
 }
 
-pub fn to_get_attachment_access_response(
-    v: &AttachmentAccess,
-) -> wire::GetAttachmentAccessResponse {
-    wire::GetAttachmentAccessResponse {
-        access: Some(to_attachment_access(v)),
+pub fn to_get_filesystem_access_response(
+    v: &FilesystemAccess,
+) -> wire::GetFilesystemAccessResponse {
+    wire::GetFilesystemAccessResponse {
+        access: Some(to_filesystem_access(v)),
     }
 }
 
@@ -1984,82 +1984,82 @@ fn to_credential_progress_stage(v: CredentialProgressStage) -> i32 {
     }
 }
 
-fn attachment_progress_stage(
-    v: wire::AttachmentProgressStage,
-) -> Result<AttachmentProgressStage, FromGrpcError> {
+fn filesystem_progress_stage(
+    v: wire::FilesystemProgressStage,
+) -> Result<FilesystemProgressStage, FromGrpcError> {
     match v {
-        wire::AttachmentProgressStage::AttachmentQueued => Ok(AttachmentProgressStage::Queued),
-        wire::AttachmentProgressStage::AttachmentWaitingForNamespace => {
-            Ok(AttachmentProgressStage::WaitingForNamespace)
+        wire::FilesystemProgressStage::FilesystemQueued => Ok(FilesystemProgressStage::Queued),
+        wire::FilesystemProgressStage::FilesystemWaitingForNamespace => {
+            Ok(FilesystemProgressStage::WaitingForNamespace)
         },
-        wire::AttachmentProgressStage::AttachmentPullingImage => {
-            Ok(AttachmentProgressStage::PullingImage)
+        wire::FilesystemProgressStage::FilesystemPullingImage => {
+            Ok(FilesystemProgressStage::PullingImage)
         },
-        wire::AttachmentProgressStage::AttachmentMaterializing => {
-            Ok(AttachmentProgressStage::Materializing)
+        wire::FilesystemProgressStage::FilesystemMaterializing => {
+            Ok(FilesystemProgressStage::Materializing)
         },
-        wire::AttachmentProgressStage::AttachmentStarting => Ok(AttachmentProgressStage::Starting),
-        wire::AttachmentProgressStage::AttachmentMounting => Ok(AttachmentProgressStage::Mounting),
-        wire::AttachmentProgressStage::AttachmentStopping => Ok(AttachmentProgressStage::Stopping),
-        wire::AttachmentProgressStage::AttachmentRetrying => Ok(AttachmentProgressStage::Retrying),
-        wire::AttachmentProgressStage::AttachmentDeleting => Ok(AttachmentProgressStage::Deleting),
-        wire::AttachmentProgressStage::AttachmentReady => Ok(AttachmentProgressStage::Ready),
-        wire::AttachmentProgressStage::AttachmentFailed => Ok(AttachmentProgressStage::Failed),
-        wire::AttachmentProgressStage::Unspecified => {
-            Err(FromGrpcError::Unspecified("attachment progress stage"))
+        wire::FilesystemProgressStage::FilesystemStarting => Ok(FilesystemProgressStage::Starting),
+        wire::FilesystemProgressStage::FilesystemMounting => Ok(FilesystemProgressStage::Mounting),
+        wire::FilesystemProgressStage::FilesystemStopping => Ok(FilesystemProgressStage::Stopping),
+        wire::FilesystemProgressStage::FilesystemRetrying => Ok(FilesystemProgressStage::Retrying),
+        wire::FilesystemProgressStage::FilesystemDeleting => Ok(FilesystemProgressStage::Deleting),
+        wire::FilesystemProgressStage::FilesystemReady => Ok(FilesystemProgressStage::Ready),
+        wire::FilesystemProgressStage::FilesystemFailed => Ok(FilesystemProgressStage::Failed),
+        wire::FilesystemProgressStage::Unspecified => {
+            Err(FromGrpcError::Unspecified("filesystem progress stage"))
         },
     }
 }
 
-fn to_attachment_progress_stage(v: AttachmentProgressStage) -> i32 {
+fn to_filesystem_progress_stage(v: FilesystemProgressStage) -> i32 {
     match v {
-        AttachmentProgressStage::Queued => wire::AttachmentProgressStage::AttachmentQueued as i32,
-        AttachmentProgressStage::WaitingForNamespace => {
-            wire::AttachmentProgressStage::AttachmentWaitingForNamespace as i32
+        FilesystemProgressStage::Queued => wire::FilesystemProgressStage::FilesystemQueued as i32,
+        FilesystemProgressStage::WaitingForNamespace => {
+            wire::FilesystemProgressStage::FilesystemWaitingForNamespace as i32
         },
-        AttachmentProgressStage::PullingImage => {
-            wire::AttachmentProgressStage::AttachmentPullingImage as i32
+        FilesystemProgressStage::PullingImage => {
+            wire::FilesystemProgressStage::FilesystemPullingImage as i32
         },
-        AttachmentProgressStage::Materializing => {
-            wire::AttachmentProgressStage::AttachmentMaterializing as i32
+        FilesystemProgressStage::Materializing => {
+            wire::FilesystemProgressStage::FilesystemMaterializing as i32
         },
-        AttachmentProgressStage::Starting => {
-            wire::AttachmentProgressStage::AttachmentStarting as i32
+        FilesystemProgressStage::Starting => {
+            wire::FilesystemProgressStage::FilesystemStarting as i32
         },
-        AttachmentProgressStage::Mounting => {
-            wire::AttachmentProgressStage::AttachmentMounting as i32
+        FilesystemProgressStage::Mounting => {
+            wire::FilesystemProgressStage::FilesystemMounting as i32
         },
-        AttachmentProgressStage::Stopping => {
-            wire::AttachmentProgressStage::AttachmentStopping as i32
+        FilesystemProgressStage::Stopping => {
+            wire::FilesystemProgressStage::FilesystemStopping as i32
         },
-        AttachmentProgressStage::Retrying => {
-            wire::AttachmentProgressStage::AttachmentRetrying as i32
+        FilesystemProgressStage::Retrying => {
+            wire::FilesystemProgressStage::FilesystemRetrying as i32
         },
-        AttachmentProgressStage::Deleting => {
-            wire::AttachmentProgressStage::AttachmentDeleting as i32
+        FilesystemProgressStage::Deleting => {
+            wire::FilesystemProgressStage::FilesystemDeleting as i32
         },
-        AttachmentProgressStage::Ready => wire::AttachmentProgressStage::AttachmentReady as i32,
-        AttachmentProgressStage::Failed => wire::AttachmentProgressStage::AttachmentFailed as i32,
+        FilesystemProgressStage::Ready => wire::FilesystemProgressStage::FilesystemReady as i32,
+        FilesystemProgressStage::Failed => wire::FilesystemProgressStage::FilesystemFailed as i32,
     }
 }
 
 fn filesystem_runtime(
     v: i32,
     field: &'static str,
-) -> Result<omnifs_core::AttachmentRuntime, FromGrpcError> {
+) -> Result<omnifs_core::FilesystemRuntime, FromGrpcError> {
     match wire::FsRuntime::try_from(v).map_err(|_| FromGrpcError::Invalid(field))? {
-        wire::FsRuntime::FsHost => Ok(omnifs_core::AttachmentRuntime::Host),
-        wire::FsRuntime::FsDocker => Ok(omnifs_core::AttachmentRuntime::Docker),
-        wire::FsRuntime::FsLibkrun => Ok(omnifs_core::AttachmentRuntime::Libkrun),
+        wire::FsRuntime::FsHost => Ok(omnifs_core::FilesystemRuntime::Host),
+        wire::FsRuntime::FsDocker => Ok(omnifs_core::FilesystemRuntime::Docker),
+        wire::FsRuntime::FsLibkrun => Ok(omnifs_core::FilesystemRuntime::Libkrun),
         wire::FsRuntime::Unspecified => Err(FromGrpcError::Unspecified(field)),
     }
 }
 
-fn to_filesystem_runtime(v: omnifs_core::AttachmentRuntime) -> i32 {
+fn to_filesystem_runtime(v: omnifs_core::FilesystemRuntime) -> i32 {
     match v {
-        omnifs_core::AttachmentRuntime::Host => wire::FsRuntime::FsHost as i32,
-        omnifs_core::AttachmentRuntime::Docker => wire::FsRuntime::FsDocker as i32,
-        omnifs_core::AttachmentRuntime::Libkrun => wire::FsRuntime::FsLibkrun as i32,
+        omnifs_core::FilesystemRuntime::Host => wire::FsRuntime::FsHost as i32,
+        omnifs_core::FilesystemRuntime::Docker => wire::FsRuntime::FsDocker as i32,
+        omnifs_core::FilesystemRuntime::Libkrun => wire::FsRuntime::FsLibkrun as i32,
     }
 }
 
@@ -2068,7 +2068,7 @@ fn progress_snapshot(v: &wire::ProgressSnapshot) -> Result<ProgressSnapshot, Fro
     resource_count(v.actions.len())?;
     resource_count(v.providers.len())?;
     resource_count(v.credentials.len())?;
-    resource_count(v.attachments.len())?;
+    resource_count(v.filesystems.len())?;
     Ok(ProgressSnapshot {
         desired_revision: ResourceRevision::new(v.desired_revision),
         observed_revision: v.observed_revision.map(ResourceRevision::new),
@@ -2093,10 +2093,10 @@ fn progress_snapshot(v: &wire::ProgressSnapshot) -> Result<ProgressSnapshot, Fro
             .iter()
             .map(credential_progress)
             .collect::<Result<_, _>>()?,
-        attachments: v
-            .attachments
+        filesystems: v
+            .filesystems
             .iter()
-            .map(attachment_progress)
+            .map(filesystem_progress)
             .collect::<Result<_, _>>()?,
     })
 }
@@ -2114,7 +2114,7 @@ fn to_progress_snapshot(v: &ProgressSnapshot) -> wire::ProgressSnapshot {
             .collect(),
         serving: v.serving.as_ref().map(to_serving_progress),
         credentials: v.credentials.iter().map(to_credential_progress).collect(),
-        attachments: v.attachments.iter().map(to_attachment_progress).collect(),
+        filesystems: v.filesystems.iter().map(to_filesystem_progress).collect(),
     }
 }
 
@@ -2223,23 +2223,23 @@ fn to_credential_progress(v: &CredentialProgress) -> wire::CredentialProgress {
     }
 }
 
-fn attachment_progress(v: &wire::AttachmentProgress) -> Result<AttachmentProgress, FromGrpcError> {
-    let key = resource_key(&req(v.key.clone(), "attachment progress key")?)?;
-    if key.kind != ResourceKind::Attachment {
-        return Err(FromGrpcError::Invalid("attachment progress key"));
+fn filesystem_progress(v: &wire::FilesystemProgress) -> Result<FilesystemProgress, FromGrpcError> {
+    let key = resource_key(&req(v.key.clone(), "filesystem progress key")?)?;
+    if key.kind != ResourceKind::Filesystem {
+        return Err(FromGrpcError::Invalid("filesystem progress key"));
     }
-    Ok(AttachmentProgress {
+    Ok(FilesystemProgress {
         key,
         desired_revision: ResourceRevision::new(v.desired_revision),
-        runtime: filesystem_runtime(v.runtime, "attachment progress runtime")?,
-        stage: attachment_progress_stage(
-            wire::AttachmentProgressStage::try_from(v.stage)
-                .map_err(|_| FromGrpcError::Invalid("attachment progress stage"))?,
+        runtime: filesystem_runtime(v.runtime, "filesystem progress runtime")?,
+        stage: filesystem_progress_stage(
+            wire::FilesystemProgressStage::try_from(v.stage)
+                .map_err(|_| FromGrpcError::Invalid("filesystem progress stage"))?,
         )?,
         completed_bytes: v.completed_bytes,
         total_bytes: v.total_bytes,
-        queued_attachments: v.queued_attachments,
-        active_attachments: v.active_attachments,
+        queued_filesystems: v.queued_filesystems,
+        active_filesystems: v.active_filesystems,
         error_code: v.error_code.clone(),
         detail: v.detail.clone(),
         retry_count: v.retry_count,
@@ -2247,10 +2247,10 @@ fn attachment_progress(v: &wire::AttachmentProgress) -> Result<AttachmentProgres
     })
 }
 
-fn to_attachment_progress(v: &AttachmentProgress) -> wire::AttachmentProgress {
-    wire::AttachmentProgress {
+fn to_filesystem_progress(v: &FilesystemProgress) -> wire::FilesystemProgress {
+    wire::FilesystemProgress {
         key: Some(to_resource_key(&v.key)),
-        stage: to_attachment_progress_stage(v.stage),
+        stage: to_filesystem_progress_stage(v.stage),
         error_code: v.error_code.clone(),
         detail: v.detail.clone(),
         retry_count: v.retry_count,
@@ -2259,8 +2259,8 @@ fn to_attachment_progress(v: &AttachmentProgress) -> wire::AttachmentProgress {
         runtime: to_filesystem_runtime(v.runtime),
         completed_bytes: v.completed_bytes,
         total_bytes: v.total_bytes,
-        queued_attachments: v.queued_attachments,
-        active_attachments: v.active_attachments,
+        queued_filesystems: v.queued_filesystems,
+        active_filesystems: v.active_filesystems,
     }
 }
 
@@ -2278,8 +2278,8 @@ pub fn progress_event(v: &wire::ProgressEvent) -> Result<ProgressEvent, FromGrpc
         wire::progress_event::Event::CredentialProgress(value) => {
             ProgressEventKind::CredentialProgress(credential_progress(&value)?)
         },
-        wire::progress_event::Event::AttachmentProgress(value) => {
-            ProgressEventKind::AttachmentProgress(attachment_progress(&value)?)
+        wire::progress_event::Event::FilesystemProgress(value) => {
+            ProgressEventKind::FilesystemProgress(filesystem_progress(&value)?)
         },
         wire::progress_event::Event::RevisionReady(value) => {
             ProgressEventKind::RevisionReady(ResourceRevision::new(value.revision))
@@ -2331,8 +2331,8 @@ pub fn to_progress_event(v: &ProgressEvent) -> wire::ProgressEvent {
         ProgressEventKind::CredentialProgress(value) => {
             wire::progress_event::Event::CredentialProgress(to_credential_progress(value))
         },
-        ProgressEventKind::AttachmentProgress(value) => {
-            wire::progress_event::Event::AttachmentProgress(to_attachment_progress(value))
+        ProgressEventKind::FilesystemProgress(value) => {
+            wire::progress_event::Event::FilesystemProgress(to_filesystem_progress(value))
         },
         ProgressEventKind::RevisionReady(value) => {
             wire::progress_event::Event::RevisionReady(wire::RevisionReady {
@@ -2533,31 +2533,31 @@ mod tests {
         ResourceName::new(value).unwrap()
     }
 
-    fn supported_attachment() -> AttachmentDefinition {
+    fn supported_filesystem() -> FilesystemDefinition {
         let (protocol, runtime) = if cfg!(target_os = "linux") {
             (
-                omnifs_core::AttachmentProtocol::Fuse,
-                omnifs_core::AttachmentRuntime::Host,
+                omnifs_core::FilesystemProtocol::Fuse,
+                omnifs_core::FilesystemRuntime::Host,
             )
         } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             (
-                omnifs_core::AttachmentProtocol::Fuse,
-                omnifs_core::AttachmentRuntime::Libkrun,
+                omnifs_core::FilesystemProtocol::Fuse,
+                omnifs_core::FilesystemRuntime::Libkrun,
             )
         } else {
             (
-                omnifs_core::AttachmentProtocol::Nfs,
-                omnifs_core::AttachmentRuntime::Host,
+                omnifs_core::FilesystemProtocol::Nfs,
+                omnifs_core::FilesystemRuntime::Host,
             )
         };
-        let location = if runtime == omnifs_core::AttachmentRuntime::Host {
+        let location = if runtime == omnifs_core::FilesystemRuntime::Host {
             PathBuf::from("/tmp/omnifs")
         } else {
-            PathBuf::from(omnifs_core::ATTACHMENT_GUEST_LOCATION)
+            PathBuf::from(omnifs_core::FILESYSTEM_GUEST_LOCATION)
         };
-        AttachmentDefinition {
+        FilesystemDefinition {
             name: new_resource_name("local"),
-            spec: AttachmentSpec::new(protocol, runtime, location, None, None).unwrap(),
+            spec: FilesystemSpec::new(protocol, runtime, location, None, None).unwrap(),
         }
     }
 
@@ -2585,15 +2585,15 @@ mod tests {
                         max_fetch_blob_bytes: Some(1024),
                     }),
                 }),
-                ResourceDefinition::Attachment(supported_attachment()),
+                ResourceDefinition::Filesystem(supported_filesystem()),
             ],
         }
     }
 
     fn action_receipt_for(kind: ActionKind) -> ActionReceipt {
         let target = match kind {
-            ActionKind::RestartAttachment => {
-                ResourceKey::new(ResourceKind::Attachment, new_resource_name("local"))
+            ActionKind::RestartFilesystem => {
+                ResourceKey::new(ResourceKind::Filesystem, new_resource_name("local"))
             },
             ActionKind::SetCredentialMaterial | ActionKind::RevokeCredential => ResourceKey::new(
                 ResourceKind::Credential,
@@ -2667,7 +2667,7 @@ mod tests {
                 if version == "omnifs.dev/v999"
         ));
 
-        let bad_path = wire::AttachmentSpec {
+        let bad_path = wire::FilesystemSpec {
             protocol: wire::FsProtocol::FsFuse as i32,
             runtime: wire::FsRuntime::FsHost as i32,
             location: b"relative".to_vec().into(),
@@ -2675,8 +2675,8 @@ mod tests {
             libkrun_guest_image: None,
         };
         assert!(matches!(
-            attachment_spec(&bad_path),
-            Err(FromGrpcError::Invalid("attachment spec"))
+            filesystem_spec(&bad_path),
+            Err(FromGrpcError::Invalid("filesystem spec"))
         ));
     }
 
@@ -2757,7 +2757,7 @@ mod tests {
         for kind in [
             ActionKind::SetCredentialMaterial,
             ActionKind::RevokeCredential,
-            ActionKind::RestartAttachment,
+            ActionKind::RestartFilesystem,
         ] {
             let receipt = action_receipt_for(kind);
             assert_eq!(
@@ -2848,16 +2848,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn attachment_operations_round_trip_strict_status_and_argv() {
+    fn filesystem_operations_round_trip_strict_status_and_argv() {
         use std::os::unix::ffi::OsStringExt as _;
 
-        let version = AttachmentVersion::from_digest([7; 32]);
-        let status = AttachmentStatus {
-            definition: supported_attachment(),
+        let version = FilesystemVersion::from_digest([7; 32]);
+        let status = FilesystemStatus {
+            definition: supported_filesystem(),
             desired_revision: ResourceRevision::new(9),
             desired_version: version,
             observed_version: Some(version),
-            phase: AttachmentPhase::Ready,
+            phase: FilesystemPhase::Ready,
             runtime_instance: Some("ab".repeat(16)),
             action_generation: 3,
             error_code: None,
@@ -2866,61 +2866,61 @@ mod tests {
             deleting: false,
         };
         assert_eq!(
-            get_attachment_status_response(&to_get_attachment_status_response(Some(&status)))
+            get_filesystem_status_response(&to_get_filesystem_status_response(Some(&status)))
                 .unwrap(),
             Some(status.clone())
         );
         assert_eq!(
-            get_attachment_status_response(&to_get_attachment_status_response(None)).unwrap(),
+            get_filesystem_status_response(&to_get_filesystem_status_response(None)).unwrap(),
             None
         );
 
-        let restart = RestartAttachmentRequest {
+        let restart = RestartFilesystemRequest {
             action_id: ActionId::from_bytes([4; 16]),
             base_action_generation: status.action_generation,
-            attachment: status.definition.name.clone(),
+            filesystem: status.definition.name.clone(),
         };
         assert_eq!(
-            restart_attachment_request(&to_restart_attachment_request(&restart)).unwrap(),
+            restart_filesystem_request(&to_restart_filesystem_request(&restart)).unwrap(),
             restart
         );
-        let receipt = action_receipt_for(ActionKind::RestartAttachment);
+        let receipt = action_receipt_for(ActionKind::RestartFilesystem);
         assert_eq!(
-            restart_attachment_response(&to_restart_attachment_response(&receipt)).unwrap(),
+            restart_filesystem_response(&to_restart_filesystem_response(&receipt)).unwrap(),
             receipt
         );
 
-        let request = GetAttachmentAccessRequest {
-            attachment: status.definition.name.clone(),
+        let request = GetFilesystemAccessRequest {
+            filesystem: status.definition.name.clone(),
             interactive: true,
             shell: Some("/bin/sh".into()),
             command: vec!["printf".into(), "ok".into()],
         };
         assert_eq!(
-            get_attachment_access_request(&to_get_attachment_access_request(&request)).unwrap(),
+            get_filesystem_access_request(&to_get_filesystem_access_request(&request)).unwrap(),
             request
         );
-        let access = AttachmentAccess::Command(AttachmentCommand {
+        let access = FilesystemAccess::Command(FilesystemCommand {
             program: OsString::from_vec(vec![b'd', b'o', b'c', b'k', b'e', b'r']),
             args: vec![OsString::from_vec(vec![b'e', b'x', b'e', b'c', 0x80])],
             current_dir: Some(PathBuf::from("/tmp")),
         });
         assert_eq!(
-            get_attachment_access_response(&to_get_attachment_access_response(&access)).unwrap(),
+            get_filesystem_access_response(&to_get_filesystem_access_response(&access)).unwrap(),
             access
         );
 
-        let mut invalid = to_attachment_status(&status);
+        let mut invalid = to_filesystem_status(&status);
         invalid.observed_version = None;
         assert!(matches!(
-            attachment_status(&invalid),
-            Err(FromGrpcError::Invalid("ready attachment version"))
+            filesystem_status(&invalid),
+            Err(FromGrpcError::Invalid("ready filesystem version"))
         ));
-        let mut invalid = to_attachment_status(&status);
+        let mut invalid = to_filesystem_status(&status);
         invalid.runtime_instance = Some("not-an-instance".into());
         assert!(matches!(
-            attachment_status(&invalid),
-            Err(FromGrpcError::Invalid("attachment runtime instance"))
+            filesystem_status(&invalid),
+            Err(FromGrpcError::Invalid("filesystem runtime instance"))
         ));
     }
 
@@ -2949,9 +2949,9 @@ mod tests {
             providers: Vec::new(),
             serving: None,
             credentials: Vec::new(),
-            attachments: Vec::new(),
+            filesystems: Vec::new(),
         };
-        let attachment_key = ResourceKey::new(ResourceKind::Attachment, new_resource_name("local"));
+        let filesystem_key = ResourceKey::new(ResourceKind::Filesystem, new_resource_name("local"));
         let events = vec![
             ProgressEventKind::Snapshot(snapshot.clone()),
             ProgressEventKind::ProviderPreparation(ProviderPreparationProgress {
@@ -2986,15 +2986,15 @@ mod tests {
                 error_code: None,
                 detail: None,
             }),
-            ProgressEventKind::AttachmentProgress(AttachmentProgress {
-                key: attachment_key,
+            ProgressEventKind::FilesystemProgress(FilesystemProgress {
+                key: filesystem_key,
                 desired_revision: ResourceRevision::new(4),
-                runtime: omnifs_core::AttachmentRuntime::Docker,
-                stage: AttachmentProgressStage::Starting,
+                runtime: omnifs_core::FilesystemRuntime::Docker,
+                stage: FilesystemProgressStage::Starting,
                 completed_bytes: 5,
                 total_bytes: Some(9),
-                queued_attachments: 2,
-                active_attachments: 1,
+                queued_filesystems: 2,
+                active_filesystems: 1,
                 error_code: None,
                 detail: None,
                 retry_count: 4,
@@ -3012,7 +3012,7 @@ mod tests {
             },
             ProgressEventKind::ActionCompleted(action_receipt_for(ActionKind::RevokeCredential)),
             ProgressEventKind::ActionFailed {
-                receipt: action_receipt_for(ActionKind::RestartAttachment),
+                receipt: action_receipt_for(ActionKind::RestartFilesystem),
                 error_code: "failed".into(),
                 detail: "safe".into(),
             },

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use omnifs_core::{AttachmentRuntime, ResourceName};
+use omnifs_core::{FilesystemRuntime, ResourceName};
 
 /// Runtime artifact whose bytes or verification state changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -54,8 +54,8 @@ pub enum ContainerState {
 pub enum RuntimeEvent {
     Stage {
         stage: RuntimeStage,
-        runtime: AttachmentRuntime,
-        attachment: ResourceName,
+        runtime: FilesystemRuntime,
+        filesystem: ResourceName,
         state: RuntimeState,
     },
     Image {
@@ -91,8 +91,8 @@ pub enum RuntimeEvent {
         state: ContainerState,
     },
     MountReady {
-        runtime: AttachmentRuntime,
-        attachment: ResourceName,
+        runtime: FilesystemRuntime,
+        filesystem: ResourceName,
         location: PathBuf,
         container: Option<String>,
     },
@@ -147,8 +147,8 @@ mod tests {
     fn event(state: RuntimeState) -> RuntimeEvent {
         RuntimeEvent::Stage {
             stage: RuntimeStage::StartProcess,
-            runtime: AttachmentRuntime::Host,
-            attachment: ResourceName::new("main").unwrap(),
+            runtime: FilesystemRuntime::Host,
+            filesystem: ResourceName::new("main").unwrap(),
             state,
         }
     }

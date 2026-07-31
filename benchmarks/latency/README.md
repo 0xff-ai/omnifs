@@ -115,7 +115,7 @@ there, cold reflects the upstream fetch and warm reflects the host cache.
 ### Host-native mount
 
 ```bash
-# Copy the attached host location from `target/debug/omnifs attachment ls`.
+# Copy the host location from `target/debug/omnifs fs ls`.
 MOUNT=/absolute/path
 bun benchmarks/latency/run.ts \
   --target "$MOUNT" \
@@ -128,7 +128,7 @@ bun benchmarks/latency/run.ts \
 `cold_first_ms` is only a true first touch if nothing read the path before the
 timed spawn. Two things guarantee that:
 
-1. **Restart the daemon with the Attachment still desired.** Run
+1. **Restart the daemon with the Filesystem still desired.** Run
    `target/debug/omnifs down`, then `target/debug/omnifs status` with the same
    `OMNIFS_HOME`; status starts the daemon and waits for readiness without
    reading the mount. The durable cache under `<profile>/daemon-state/cache`

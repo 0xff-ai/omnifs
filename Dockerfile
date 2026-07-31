@@ -45,7 +45,7 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
 
 # --- Docker-hosted FUSE filesystem ---
 #
-# The daemon's Docker Attachment runtime
+# The daemon's Docker Filesystem runtime
 # (`crates/omnifs-fs-runtime/src/docker/container.rs`) launches a separate,
 # credential-free container that only ever runs the slim `omnifs-thin` binary,
 # attached over TCP to a host-native daemon's shared namespace. It never runs

@@ -8,7 +8,7 @@ pub mod nfs;
 
 use clap::Args;
 use omnifs_core::{
-    AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceName, RuntimeInstanceId,
+    FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName, RuntimeInstanceId,
 };
 use std::path::PathBuf;
 
@@ -37,22 +37,22 @@ impl HostControlArgs {
 
 #[derive(Debug, Args)]
 pub struct RunFsArgs {
-    /// Desired attachment name.
+    /// Desired filesystem name.
     #[arg(long)]
     name: ResourceName,
     /// OS filesystem protocol to serve.
     #[arg(long)]
-    protocol: AttachmentProtocol,
+    protocol: FilesystemProtocol,
     /// Runtime identity supplied by the launcher.
     #[arg(long)]
-    runtime: AttachmentRuntime,
-    /// Mount location resolved in the desired Attachment spec.
+    runtime: FilesystemRuntime,
+    /// Mount location resolved in the desired Filesystem spec.
     #[arg(long)]
     location: PathBuf,
-    /// Docker image reference retained in the exact desired attachment spec.
+    /// Docker image reference retained in the exact desired filesystem spec.
     #[arg(long)]
     docker_image: Option<String>,
-    /// Libkrun guest image reference retained in the exact desired attachment spec.
+    /// Libkrun guest image reference retained in the exact desired filesystem spec.
     #[arg(long)]
     libkrun_guest_image: Option<String>,
     /// Random identity of this launched runtime instance.
@@ -72,7 +72,7 @@ pub struct RunFsArgs {
 }
 
 pub fn run(args: RunFsArgs) -> anyhow::Result<()> {
-    let spec = AttachmentSpec::new(
+    let spec = FilesystemSpec::new(
         args.protocol,
         args.runtime,
         args.location,
@@ -80,7 +80,7 @@ pub fn run(args: RunFsArgs) -> anyhow::Result<()> {
         args.libkrun_guest_image,
     )?;
     let args = RunnerArgs {
-        attachment: args.name,
+        filesystem: args.name,
         spec,
         runtime_instance: args.runtime_instance.into_string(),
         state_dir: args.state_dir,
@@ -90,16 +90,16 @@ pub fn run(args: RunFsArgs) -> anyhow::Result<()> {
     };
     match args.spec.protocol() {
         #[cfg(target_os = "linux")]
-        AttachmentProtocol::Fuse => fuse::run(args),
+        FilesystemProtocol::Fuse => fuse::run(args),
         #[cfg(not(target_os = "linux"))]
-        AttachmentProtocol::Fuse => anyhow::bail!("FUSE is not supported on this platform"),
-        AttachmentProtocol::Nfs => nfs::run(args),
+        FilesystemProtocol::Fuse => anyhow::bail!("FUSE is not supported on this platform"),
+        FilesystemProtocol::Nfs => nfs::run(args),
     }
 }
 
 struct RunnerArgs {
-    attachment: ResourceName,
-    spec: AttachmentSpec,
+    filesystem: ResourceName,
+    spec: FilesystemSpec,
     runtime_instance: String,
     state_dir: Option<PathBuf>,
     attach: Option<PathBuf>,

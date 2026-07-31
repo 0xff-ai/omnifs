@@ -9,6 +9,6 @@ mod source;
 
 pub use evaluator::{EvaluateError, EvaluatedConfig, evaluate};
 pub use source::{
-    AttachmentAuthoring, AuthoringConfig, AuthoringResource, LocalProviderSource,
+    AuthoringConfig, AuthoringResource, FilesystemAuthoring, LocalProviderSource,
     ProviderAuthoring, ProviderSource, SourceResolutionError, resolve_local_source,
 };

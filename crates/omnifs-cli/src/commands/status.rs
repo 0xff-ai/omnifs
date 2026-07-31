@@ -208,7 +208,7 @@ struct StatusResult {
     providers: Vec<ResourceRow>,
     credentials: Vec<ResourceRow>,
     mounts: Vec<ResourceRow>,
-    attachments: Vec<ResourceRow>,
+    filesystems: Vec<ResourceRow>,
 }
 
 impl StatusResult {
@@ -218,7 +218,7 @@ impl StatusResult {
             providers: Vec::new(),
             credentials: Vec::new(),
             mounts: Vec::new(),
-            attachments: Vec::new(),
+            filesystems: Vec::new(),
         };
         let Some(snapshot) = snapshot else {
             return result;
@@ -241,7 +241,7 @@ impl StatusResult {
                 ResourceDefinition::Provider(_) => result.providers.push(row),
                 ResourceDefinition::Credential(_) => result.credentials.push(row),
                 ResourceDefinition::Mount(_) => result.mounts.push(row),
-                ResourceDefinition::Attachment(_) => result.attachments.push(row),
+                ResourceDefinition::Filesystem(_) => result.filesystems.push(row),
             }
         }
         result
@@ -332,7 +332,7 @@ const fn kind_label(kind: ResourceKind) -> &'static str {
         ResourceKind::Provider => "Provider",
         ResourceKind::Credential => "Credential",
         ResourceKind::Mount => "Mount",
-        ResourceKind::Attachment => "Attachment",
+        ResourceKind::Filesystem => "Filesystem",
     }
 }
 

@@ -41,7 +41,7 @@ Rust into Cargo output; generated control Rust is not checked in.
 The sole control package is `omnifs.control.v1`, without a postcard frame or
 separate version prefix. Unary and stream items cap at 1 MiB; log tails cap at
 10,000 lines. Tests cover plan/apply, initial snapshots, terminal events,
-receipt recovery, Attachment identity, and typed conversions.
+receipt recovery, Filesystem identity, and typed conversions.
 
 ### Shared wire and API migrations
 
@@ -80,7 +80,7 @@ Mount, provider, clone, traversal, filesystem, or runtime changes need live
 validation; Rust checks alone are insufficient.
 
 Use `just dev -y`; it applies rendered KCL, waits for terminal revision, then
-opens `attachment shell dev-docker`. Check host-native status directly and use
+opens `fs shell dev-docker`. Check host-native status directly and use
 real traversal and file tools for path changes.
 
 ### CI gates
@@ -93,7 +93,7 @@ for WASM.
 
 Control-plane tests cover fast apply, compare-and-swap, durable receipts,
 bounded progress and resync, cold-cache preparation with the shared engine, and
-Credential or Attachment action recovery. Runtime changes also need host,
+Credential or Filesystem action recovery. Runtime changes also need host,
 Docker, multi-filesystem, down/restore, and live deletion lanes. Run libkrun
 only on an opted-in Apple Silicon host.
 
@@ -103,7 +103,7 @@ The daemon always runs host-native, so host `OMNIFS_HOME` selects one `Profile`
 for logging, control, identity, and `DaemonStatePaths`; bootstrap identity covers
 only pre-RPC safety. Daemon state lives under `<profile>/daemon-state`. Guests
 use `/omnifs` and the sole image entrypoint `/usr/local/bin/omnifs-thin`;
-launchers supply flat Attachment identity arguments.
+launchers supply flat Filesystem identity arguments.
 
 ### Filesystem image artifact
 
@@ -150,7 +150,7 @@ SSH-setup units, and the absence of cloud-init. Release also requires locked
 root and no console, tty1, or hvc0 autologin drop-ins.
 
 A per-launch `OMNIFS-SEED` ISO, never cloud-init, carries the exact audited
-Attachment name, runtime instance, attach address, readiness port, and SSH
+Filesystem name, runtime instance, attach address, readiness port, and SSH
 public key. Guest services invoke flat thin arguments; missing data fails.
 
 Guest boot smoke and conformance are local-only because hosted runners cannot
@@ -170,7 +170,7 @@ downloads and requires `target/guest-image/omnifs-guest.raw`, naming
 
 ### Libkrun conformance lane (local-only, never CI)
 
-`just libkrun-conformance` runs the `fuse-libkrun` matrix through Attachment
+`just libkrun-conformance` runs the `fuse-libkrun` matrix through Filesystem
 shell and proves teardown. It is opt-in, serialized with live mounts, and never
 runs or silently passes in hosted CI.
 

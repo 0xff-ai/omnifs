@@ -40,8 +40,8 @@ fn final_resource_grammar_transcripts() {
     let fixture = Fixture::new();
 
     insta::assert_snapshot!(
-        "attachment_help",
-        fixture.transcript(&fixture.run(&["attachment", "--help"]))
+        "filesystem_help",
+        fixture.transcript(&fixture.run(&["fs", "--help"]))
     );
     insta::assert_snapshot!(
         "provider_help",
@@ -75,6 +75,6 @@ fn logs_and_usage_error_transcripts() {
     insta::assert_snapshot!("logs_missing", fixture.transcript(&fixture.run(&["logs"])));
     insta::assert_snapshot!(
         "non_interactive_mutation_refusal",
-        fixture.transcript(&fixture.run(&["attachment", "add"]))
+        fixture.transcript(&fixture.run(&["fs", "add"]))
     );
 }

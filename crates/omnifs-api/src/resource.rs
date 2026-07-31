@@ -1,12 +1,12 @@
 //! Strict resource declarations, normalization, digesting, and pure planning.
 
 use crate::{
-    AttachmentDefinition, CredentialClientOverrides, CredentialMaterial,
+    CredentialClientOverrides, CredentialMaterial, FilesystemDefinition,
     ProviderPreparationProgress, ServingProgress,
 };
 use omnifs_core::{
-    AttachmentSpec, MutationId, ProviderId, ResourceDigest, ResourceKey, ResourceKind,
-    ResourceName, ResourceRevision, attachment_pair_supported_on_current_host, validate_account,
+    FilesystemSpec, MutationId, ProviderId, ResourceDigest, ResourceKey, ResourceKind,
+    ResourceName, ResourceRevision, filesystem_pair_supported_on_current_host, validate_account,
     validate_key_part,
 };
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ pub enum ResourceDefinition {
     Provider(ProviderDefinition),
     Credential(CredentialDefinition),
     Mount(MountResourceDefinition),
-    Attachment(AttachmentDefinition),
+    Filesystem(FilesystemDefinition),
 }
 
 impl ResourceDefinition {
@@ -57,7 +57,7 @@ impl ResourceDefinition {
             Self::Provider(_) => ResourceKind::Provider,
             Self::Credential(_) => ResourceKind::Credential,
             Self::Mount(_) => ResourceKind::Mount,
-            Self::Attachment(_) => ResourceKind::Attachment,
+            Self::Filesystem(_) => ResourceKind::Filesystem,
         }
     }
 
@@ -67,7 +67,7 @@ impl ResourceDefinition {
             Self::Provider(value) => value.name(),
             Self::Credential(value) => value.name(),
             Self::Mount(value) => value.name(),
-            Self::Attachment(value) => value.name(),
+            Self::Filesystem(value) => value.name(),
         }
     }
 
@@ -201,16 +201,16 @@ fn validate_resource(resource: &ResourceDefinition) -> Result<(), ResourceDefini
                 mount.name.clone(),
             ));
         },
-        ResourceDefinition::Attachment(attachment)
-            if !attachment_pair_supported_on_current_host(
-                attachment.spec.protocol(),
-                attachment.spec.runtime(),
+        ResourceDefinition::Filesystem(filesystem)
+            if !filesystem_pair_supported_on_current_host(
+                filesystem.spec.protocol(),
+                filesystem.spec.runtime(),
             ) =>
         {
-            return Err(ResourceDefinitionError::UnsupportedAttachmentPlatform {
-                attachment: attachment.name.clone(),
-                protocol: attachment.spec.protocol(),
-                runtime: attachment.spec.runtime(),
+            return Err(ResourceDefinitionError::UnsupportedFilesystemPlatform {
+                filesystem: filesystem.name.clone(),
+                protocol: filesystem.spec.protocol(),
+                runtime: filesystem.spec.runtime(),
             });
         },
         _ => {},
@@ -310,21 +310,21 @@ fn digest_resources(resources: &[ResourceDefinition]) -> ResourceDigest {
                     },
                 }
             },
-            ResourceDefinition::Attachment(value) => write_attachment(&mut hasher, &value.spec),
+            ResourceDefinition::Filesystem(value) => write_filesystem(&mut hasher, &value.spec),
         }
     }
     ResourceDigest::from_bytes(*hasher.finalize().as_bytes())
 }
 
-fn write_attachment(hasher: &mut blake3::Hasher, spec: &AttachmentSpec) {
+fn write_filesystem(hasher: &mut blake3::Hasher, spec: &FilesystemSpec) {
     hasher.update(&[match spec.protocol() {
-        omnifs_core::AttachmentProtocol::Fuse => 1,
-        omnifs_core::AttachmentProtocol::Nfs => 2,
+        omnifs_core::FilesystemProtocol::Fuse => 1,
+        omnifs_core::FilesystemProtocol::Nfs => 2,
     }]);
     hasher.update(&[match spec.runtime() {
-        omnifs_core::AttachmentRuntime::Host => 1,
-        omnifs_core::AttachmentRuntime::Docker => 2,
-        omnifs_core::AttachmentRuntime::Libkrun => 3,
+        omnifs_core::FilesystemRuntime::Host => 1,
+        omnifs_core::FilesystemRuntime::Docker => 2,
+        omnifs_core::FilesystemRuntime::Libkrun => 3,
     }]);
     write_bytes(hasher, spec.location().as_os_str().as_encoded_bytes());
     write_optional_string(hasher, spec.docker_image());
@@ -423,12 +423,12 @@ pub fn plan(
                 (None, None) => unreachable!("union keys have one side"),
             };
             let credential = key.kind == ResourceKind::Credential;
-            let attachment = key.kind == ResourceKind::Attachment;
+            let filesystem = key.kind == ResourceKind::Filesystem;
             ResourceChange {
                 key,
                 action,
                 destructive: matches!(action, ResourceChangeAction::Delete)
-                    && (credential || attachment),
+                    && (credential || filesystem),
                 secret_impact: credential && !matches!(action, ResourceChangeAction::Unchanged),
             }
         })
@@ -549,12 +549,12 @@ pub enum ResourceDefinitionError {
     #[error("mount {0} config must be a JSON object")]
     MountConfigNotObject(ResourceName),
     #[error(
-        "Attachment {attachment} uses {protocol}/{runtime}, which this daemon host cannot launch"
+        "Filesystem {filesystem} uses {protocol}/{runtime}, which this daemon host cannot launch"
     )]
-    UnsupportedAttachmentPlatform {
-        attachment: ResourceName,
-        protocol: omnifs_core::AttachmentProtocol,
-        runtime: omnifs_core::AttachmentRuntime,
+    UnsupportedFilesystemPlatform {
+        filesystem: ResourceName,
+        protocol: omnifs_core::FilesystemProtocol,
+        runtime: omnifs_core::FilesystemRuntime,
     },
     #[error("mount {mount} references missing provider {provider}")]
     MissingProvider {
@@ -585,7 +585,7 @@ pub enum ResourceDefinitionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_core::{AttachmentProtocol as Protocol, AttachmentRuntime as Runtime};
+    use omnifs_core::{FilesystemProtocol as Protocol, FilesystemRuntime as Runtime};
     use std::path::PathBuf;
 
     fn name(value: &str) -> ResourceName {
@@ -638,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_references_unknown_fields_and_bad_attachment_pairs() {
+    fn rejects_duplicate_references_unknown_fields_and_bad_filesystem_pairs() {
         assert!(
             ResourceDeclarations {
                 api_version: API_VERSION.into(),
@@ -668,7 +668,7 @@ mod tests {
         let json = r#"{"kind":"Provider","spec":{"name":"github","artifact":"8b8efb357747e21316404e52876f7c9c25bd4a1a0ce8f4cdf883fc386a8ef2e5","unknown":true}}"#;
         assert!(serde_json::from_str::<ResourceDefinition>(json).is_err());
         assert!(
-            AttachmentSpec::new(
+            FilesystemSpec::new(
                 Protocol::Nfs,
                 Runtime::Docker,
                 PathBuf::from("/omnifs"),
@@ -711,10 +711,10 @@ mod tests {
                 .iter()
                 .any(|change| change.action == ResourceChangeAction::Delete && change.destructive)
         );
-        let attachment = NormalizedResourceSet::new(vec![ResourceDefinition::Attachment(
-            AttachmentDefinition {
+        let filesystem = NormalizedResourceSet::new(vec![ResourceDefinition::Filesystem(
+            FilesystemDefinition {
                 name: name("local"),
-                spec: AttachmentSpec::new(
+                spec: FilesystemSpec::new(
                     Protocol::Nfs,
                     Runtime::Host,
                     PathBuf::from("/tmp/omnifs"),
@@ -726,7 +726,7 @@ mod tests {
         )])
         .unwrap();
         assert!(
-            plan(&attachment, &empty)
+            plan(&filesystem, &empty)
                 .iter()
                 .all(|change| change.destructive)
         );

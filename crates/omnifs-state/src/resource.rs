@@ -7,17 +7,17 @@ use crate::db::Db;
 use crate::row::{RowExt as _, sql_int};
 use anyhow::Context as _;
 use omnifs_api::{
-    ApplyReceipt, AttachmentDefinition, NormalizedResourceSet, ResourceChangeAction,
+    ApplyReceipt, FilesystemDefinition, NormalizedResourceSet, ResourceChangeAction,
     ResourceDefinition, plan,
 };
 use omnifs_core::{
-    AttachmentVersion, MutationId, ResourceDigest, ResourceKind, ResourceName, ResourceRevision,
+    FilesystemVersion, MutationId, ResourceDigest, ResourceKind, ResourceName, ResourceRevision,
 };
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnection, SqliteRow};
 use std::collections::{BTreeMap, BTreeSet};
 
-use codec::{decode_resources, encode_attachment, encode_resources};
+use codec::{decode_resources, encode_filesystem, encode_resources};
 
 const APPLY_RECEIPT_LIMIT: i64 = 256;
 const APPLY_INPUT_DOMAIN: &[u8] = b"omnifs-resource-apply-input-v1\0";
@@ -35,12 +35,12 @@ struct StoredResources {
     revisions: BTreeMap<omnifs_core::ResourceKey, ResourceRevision>,
 }
 
-/// One exact desired attachment row with its durable content version and
+/// One exact desired filesystem row with its durable content version and
 /// resource revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DesiredAttachment {
-    pub definition: omnifs_api::AttachmentDefinition,
-    pub version: AttachmentVersion,
+pub struct DesiredFilesystem {
+    pub definition: omnifs_api::FilesystemDefinition,
+    pub version: FilesystemVersion,
     pub revision: ResourceRevision,
 }
 
@@ -149,7 +149,7 @@ impl Db<'_> {
             .next()
             .context("resource revision exhausted")?;
 
-        reconcile_attachment_instances(self.raw(), &changes, &request.desired).await?;
+        reconcile_filesystem_instances(self.raw(), &changes, &request.desired).await?;
         for sidecar in request.credential_secrets {
             self.submit_credential_row(sidecar.document)
                 .await
@@ -269,9 +269,9 @@ async fn read_stored_resources(
     })
 }
 
-pub(crate) async fn desired_attachments(
+pub(crate) async fn desired_filesystems(
     pool: &SqlitePool,
-) -> anyhow::Result<Vec<DesiredAttachment>> {
+) -> anyhow::Result<Vec<DesiredFilesystem>> {
     let mut connection = pool.acquire().await.context("acquire desired resources")?;
     let stored = read_stored_resources(&mut connection).await?;
     stored
@@ -280,7 +280,7 @@ pub(crate) async fn desired_attachments(
         .resources()
         .iter()
         .filter_map(|resource| match resource {
-            ResourceDefinition::Attachment(definition) => Some(definition.clone()),
+            ResourceDefinition::Filesystem(definition) => Some(definition.clone()),
             _ => None,
         })
         .map(|definition| {
@@ -288,9 +288,9 @@ pub(crate) async fn desired_attachments(
                 .revisions
                 .get(&definition.key())
                 .copied()
-                .context("desired attachment has no stored revision")?;
-            let (_, version) = encode_attachment(&definition)?;
-            Ok(DesiredAttachment {
+                .context("desired filesystem has no stored revision")?;
+            let (_, version) = encode_filesystem(&definition)?;
+            Ok(DesiredFilesystem {
                 definition,
                 version,
                 revision,
@@ -299,15 +299,15 @@ pub(crate) async fn desired_attachments(
         .collect()
 }
 
-async fn reconcile_attachment_instances(
+async fn reconcile_filesystem_instances(
     connection: &mut SqliteConnection,
     changes: &[omnifs_api::ResourceChange],
     desired: &NormalizedResourceSet,
 ) -> anyhow::Result<()> {
-    let changed_attachment_names = changes
+    let changed_filesystem_names = changes
         .iter()
         .filter(|change| {
-            change.key.kind == ResourceKind::Attachment
+            change.key.kind == ResourceKind::Filesystem
                 && matches!(
                     change.action,
                     ResourceChangeAction::Create | ResourceChangeAction::Update
@@ -316,22 +316,22 @@ async fn reconcile_attachment_instances(
         .map(|change| change.key.name.clone())
         .collect::<BTreeSet<_>>();
     for definition in desired.resources().iter().filter_map(|resource| {
-        let ResourceDefinition::Attachment(definition) = resource else {
+        let ResourceDefinition::Filesystem(definition) = resource else {
             return None;
         };
-        changed_attachment_names
+        changed_filesystem_names
             .contains(&definition.name)
             .then_some(definition)
     }) {
-        upsert_attachment_instance(connection, definition).await?;
+        upsert_filesystem_instance(connection, definition).await?;
     }
     for name in changes.iter().filter_map(|change| {
-        (change.key.kind == ResourceKind::Attachment
+        (change.key.kind == ResourceKind::Filesystem
             && change.action == ResourceChangeAction::Delete)
             .then_some(&change.key.name)
     }) {
         sqlx::query(
-            "UPDATE attachment_instances \
+            "UPDATE filesystem_instances \
              SET desired_version = NULL, desired_spec = NULL, phase = 'deleting', \
                  deleting = 1, last_error_code = NULL, last_error_detail = NULL, \
                  retry_at = NULL, updated_at = unixepoch() \
@@ -340,25 +340,25 @@ async fn reconcile_attachment_instances(
         .bind(name.as_str())
         .execute(&mut *connection)
         .await
-        .with_context(|| format!("mark attachment resource `{name}` deleting"))?;
+        .with_context(|| format!("mark filesystem resource `{name}` deleting"))?;
     }
     Ok(())
 }
 
-async fn upsert_attachment_instance(
+async fn upsert_filesystem_instance(
     connection: &mut SqliteConnection,
-    definition: &AttachmentDefinition,
+    definition: &FilesystemDefinition,
 ) -> anyhow::Result<()> {
-    let (canonical, version) = encode_attachment(definition)?;
+    let (canonical, version) = encode_filesystem(definition)?;
     sqlx::query(
-        "INSERT INTO attachment_instances(\
+        "INSERT INTO filesystem_instances(\
              name, desired_version, desired_spec, observed_version, observed_spec, phase, \
              runtime_instance, action_generation, last_error_code, last_error_detail, \
              retry_at, deleting, updated_at\
          ) VALUES (?1, ?2, ?3, NULL, NULL, 'pending', NULL, 0, NULL, NULL, NULL, 0, unixepoch()) \
          ON CONFLICT(name) DO UPDATE SET \
              desired_version = excluded.desired_version, desired_spec = excluded.desired_spec, \
-             phase = CASE WHEN attachment_instances.observed_version = excluded.desired_version \
+             phase = CASE WHEN filesystem_instances.observed_version = excluded.desired_version \
                  THEN 'ready' ELSE 'pending' END, \
              last_error_code = NULL, last_error_detail = NULL, retry_at = NULL, \
              deleting = 0, updated_at = excluded.updated_at",
@@ -368,7 +368,7 @@ async fn upsert_attachment_instance(
     .bind(canonical)
     .execute(connection)
     .await
-    .with_context(|| format!("initialize observed attachment state `{}`", definition.name))?;
+    .with_context(|| format!("initialize observed filesystem state `{}`", definition.name))?;
     Ok(())
 }
 

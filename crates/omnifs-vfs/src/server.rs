@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{NamespaceEpoch, NamespaceLease, ServingNamespace};
-use omnifs_core::{AttachmentSpec, ResourceName};
+use omnifs_core::{FilesystemSpec, ResourceName};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -55,11 +55,11 @@ pub enum ListenerEvent {
     Exited { endpoint: Endpoint },
 }
 
-/// One live VFS session, keyed by its desired attachment name.
+/// One live VFS session, keyed by its desired filesystem name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
-    pub attachment: ResourceName,
-    pub spec: AttachmentSpec,
+    pub filesystem: ResourceName,
+    pub spec: FilesystemSpec,
     pub runtime_instance: String,
 }
 
@@ -89,7 +89,7 @@ struct VfsState {
 }
 
 struct SessionEntry {
-    spec: AttachmentSpec,
+    spec: FilesystemSpec,
     runtime_instance: String,
     connections: usize,
 }
@@ -148,12 +148,12 @@ impl Sessions {
 
     fn connected(
         &self,
-        attachment: ResourceName,
-        spec: &AttachmentSpec,
+        filesystem: ResourceName,
+        spec: &FilesystemSpec,
         runtime_instance: &str,
         control: watch::Sender<SessionControl>,
     ) -> Result<u64, String> {
-        let key = SessionKey(attachment);
+        let key = SessionKey(filesystem);
         let mut state = self
             .state
             .lock()
@@ -162,16 +162,16 @@ impl Sessions {
             return Err("daemon is draining and is not accepting VFS sessions".to_owned());
         }
         let requested = Session {
-            attachment: key.0.clone(),
+            filesystem: key.0.clone(),
             spec: spec.clone(),
             runtime_instance: runtime_instance.to_owned(),
         };
         if let Some(stopping) = state.stop_fences.get(&key) {
             return Err(if stopping == &requested {
-                format!("attachment `{}` is stopping its exact VFS session", key.0)
+                format!("filesystem `{}` is stopping its exact VFS session", key.0)
             } else {
                 format!(
-                    "attachment `{}` has a stop fence for a different exact VFS session",
+                    "filesystem `{}` has a stop fence for a different exact VFS session",
                     key.0
                 )
             });
@@ -179,20 +179,20 @@ impl Sessions {
         if let Some(existing) = state.entries.get(&key) {
             if existing.spec != *spec {
                 return Err(format!(
-                    "attachment `{}` already has a VFS session with a different exact spec",
+                    "filesystem `{}` already has a VFS session with a different exact spec",
                     key.0
                 ));
             }
             if existing.runtime_instance != runtime_instance {
                 return Err(format!(
-                    "attachment `{}` already has a VFS session for a different runtime instance; supervisor replacement approval is required",
+                    "filesystem `{}` already has a VFS session for a different runtime instance; supervisor replacement approval is required",
                     key.0
                 ));
             }
         } else if let Some(approved) = state.replacements.get(&key) {
             if approved != &requested {
                 return Err(format!(
-                    "attachment `{}` has a supervisor-approved replacement for a different exact runtime identity",
+                    "filesystem `{}` has a supervisor-approved replacement for a different exact runtime identity",
                     key.0
                 ));
             }
@@ -218,7 +218,7 @@ impl Sessions {
             });
         Self::publish_locked(&mut state, &self.changed);
         tracing::debug!(
-            attachment = %key.0,
+            filesystem = %key.0,
             runtime_instance,
             connections = state.entries.get(&key).map_or(0, |entry| entry.connections),
             "wire: VFS session connected"
@@ -244,22 +244,22 @@ impl Sessions {
         }
         Self::publish_locked(&mut state, &self.changed);
         tracing::debug!(
-            attachment = %key.0,
+            filesystem = %key.0,
             connections = state.entries.get(&key).map_or(0, |entry| entry.connections),
             "wire: VFS session disconnected"
         );
     }
 
     fn begin_replacement(&self, previous: &Session, replacement: &Session) -> Result<(), String> {
-        if previous.attachment != replacement.attachment || previous.spec != replacement.spec {
+        if previous.filesystem != replacement.filesystem || previous.spec != replacement.spec {
             return Err(
-                "VFS session replacement must retain the attachment name and exact spec".to_owned(),
+                "VFS session replacement must retain the filesystem name and exact spec".to_owned(),
             );
         }
         if previous.runtime_instance == replacement.runtime_instance {
             return Err("VFS session replacement requires a new runtime instance".to_owned());
         }
-        let key = SessionKey(previous.attachment.clone());
+        let key = SessionKey(previous.filesystem.clone());
         let controls = {
             let mut state = self
                 .state
@@ -267,16 +267,16 @@ impl Sessions {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(current) = state.entries.get(&key) else {
                 return Err(format!(
-                    "attachment `{}` has no live VFS session to replace",
-                    previous.attachment
+                    "filesystem `{}` has no live VFS session to replace",
+                    previous.filesystem
                 ));
             };
             if current.spec != previous.spec
                 || current.runtime_instance != previous.runtime_instance
             {
                 return Err(format!(
-                    "attachment `{}` changed before VFS session replacement was approved",
-                    previous.attachment
+                    "filesystem `{}` changed before VFS session replacement was approved",
+                    previous.filesystem
                 ));
             }
             state.replacements.insert(key.clone(), replacement.clone());
@@ -294,7 +294,7 @@ impl Sessions {
     }
 
     fn close_stopped(&self, expected: &Session) -> Result<(), String> {
-        let key = SessionKey(expected.attachment.clone());
+        let key = SessionKey(expected.filesystem.clone());
         let controls = {
             let state = self
                 .state
@@ -307,14 +307,14 @@ impl Sessions {
                 || current.runtime_instance != expected.runtime_instance
             {
                 return Err(format!(
-                    "attachment `{}` changed before its stopped VFS session was closed",
-                    expected.attachment
+                    "filesystem `{}` changed before its stopped VFS session was closed",
+                    expected.filesystem
                 ));
             }
             if state.stop_fences.get(&key) != Some(expected) {
                 return Err(format!(
-                    "attachment `{}` has no matching exact stop fence",
-                    expected.attachment
+                    "filesystem `{}` has no matching exact stop fence",
+                    expected.filesystem
                 ));
             }
             state
@@ -331,7 +331,7 @@ impl Sessions {
     }
 
     fn begin_stop(&self, expected: &Session) -> Result<(), String> {
-        let key = SessionKey(expected.attachment.clone());
+        let key = SessionKey(expected.filesystem.clone());
         let controls = {
             let mut state = self
                 .state
@@ -342,8 +342,8 @@ impl Sessions {
                     return Ok(());
                 }
                 return Err(format!(
-                    "attachment `{}` already has a stop fence for a different exact VFS session",
-                    expected.attachment
+                    "filesystem `{}` already has a stop fence for a different exact VFS session",
+                    expected.filesystem
                 ));
             }
             if let Some(current) = state.entries.get(&key)
@@ -351,8 +351,8 @@ impl Sessions {
                     || current.runtime_instance != expected.runtime_instance)
             {
                 return Err(format!(
-                    "attachment `{}` changed before its exact VFS session stop began",
-                    expected.attachment
+                    "filesystem `{}` changed before its exact VFS session stop began",
+                    expected.filesystem
                 ));
             }
             state.stop_fences.insert(key.clone(), expected.clone());
@@ -370,15 +370,15 @@ impl Sessions {
     }
 
     fn finish_stop(&self, expected: &Session) -> Result<(), String> {
-        let key = SessionKey(expected.attachment.clone());
+        let key = SessionKey(expected.filesystem.clone());
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(current) = state.entries.get(&key) {
             return Err(format!(
-                "attachment `{}` still has a live VFS session for runtime instance `{}`",
-                expected.attachment, current.runtime_instance
+                "filesystem `{}` still has a live VFS session for runtime instance `{}`",
+                expected.filesystem, current.runtime_instance
             ));
         }
         match state.stop_fences.get(&key) {
@@ -387,8 +387,8 @@ impl Sessions {
                 Ok(())
             },
             Some(_) => Err(format!(
-                "attachment `{}` has a stop fence for a different exact VFS session",
-                expected.attachment
+                "filesystem `{}` has a stop fence for a different exact VFS session",
+                expected.filesystem
             )),
             None => Ok(()),
         }
@@ -403,7 +403,7 @@ impl Sessions {
             .entries
             .iter()
             .map(|(key, entry)| Session {
-                attachment: key.0.clone(),
+                filesystem: key.0.clone(),
                 spec: entry.spec.clone(),
                 runtime_instance: entry.runtime_instance.clone(),
             })
@@ -463,7 +463,7 @@ impl Sessions {
             .entries
             .iter()
             .map(|(key, entry)| Session {
-                attachment: key.0.clone(),
+                filesystem: key.0.clone(),
                 spec: entry.spec.clone(),
                 runtime_instance: entry.runtime_instance.clone(),
             })
@@ -635,7 +635,7 @@ impl VfsServer {
     }
 
     /// Stop one exact live session and reject every reconnect for that
-    /// attachment until its runtime owner completes the stop fence.
+    /// filesystem until its runtime owner completes the stop fence.
     pub fn begin_session_stop(&self, expected: &Session) -> Result<(), String> {
         self.sessions.begin_stop(expected)
     }
@@ -1046,7 +1046,7 @@ where
     let mut events = namespace.subscribe();
     let session_guard = if let Some(sessions) = sessions {
         let id = match sessions.connected(
-            hello.attachment,
+            hello.filesystem,
             &hello.spec,
             &hello.runtime_instance,
             control_tx.clone(),
@@ -1139,8 +1139,8 @@ async fn wait_for_session_close(mut control: watch::Receiver<SessionControl>) {
 /// Read the client's `Hello` and check the protocol. The caller performs
 /// session admission before sending `Welcome`.
 struct AttachHello {
-    attachment: ResourceName,
-    spec: AttachmentSpec,
+    filesystem: ResourceName,
+    spec: FilesystemSpec,
     runtime_instance: String,
 }
 
@@ -1158,7 +1158,7 @@ where
     let hello: Handshake = postcard::from_bytes(&frame.body)?;
     let Handshake::Hello {
         protocol,
-        attachment,
+        filesystem,
         spec,
         runtime_instance,
     } = hello
@@ -1182,7 +1182,7 @@ where
         },
     };
     Ok(AttachHello {
-        attachment,
+        filesystem,
         spec,
         runtime_instance,
     })

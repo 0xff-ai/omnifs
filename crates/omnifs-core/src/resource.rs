@@ -103,7 +103,7 @@ pub enum ResourceKind {
     Provider,
     Credential,
     Mount,
-    Attachment,
+    Filesystem,
 }
 
 impl ResourceKind {
@@ -113,7 +113,7 @@ impl ResourceKind {
             Self::Provider => 1,
             Self::Credential => 2,
             Self::Mount => 3,
-            Self::Attachment => 4,
+            Self::Filesystem => 4,
         }
     }
 }
@@ -124,7 +124,7 @@ impl fmt::Display for ResourceKind {
             Self::Provider => "Provider",
             Self::Credential => "Credential",
             Self::Mount => "Mount",
-            Self::Attachment => "Attachment",
+            Self::Filesystem => "Filesystem",
         })
     }
 }

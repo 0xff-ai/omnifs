@@ -4,7 +4,7 @@
 //! identity, launch, probe, stop, and stale-cleanup operations. Callers own
 //! desired state, retry policy, daemon RPC, profile resolution, and terminal
 //! output. Every path enters through [`RuntimePaths`], while exact runtime
-//! configuration enters through `omnifs_core::AttachmentSpec`.
+//! configuration enters through `omnifs_core::FilesystemSpec`.
 
 mod docker;
 mod driver;
@@ -22,7 +22,7 @@ pub use docker::{
     OwnedFilesystemContainer, resolve_filesystem_image,
 };
 pub use driver::{
-    AttachEndpoints, AttachmentRuntimePaths, Candidate, ConfirmedRuntime, LaunchRequest,
+    AttachEndpoints, Candidate, ConfirmedRuntime, FilesystemRuntimePaths, LaunchRequest,
     RuntimeDriver, RuntimePaths, err_after_rollback, owned_filesystems,
 };
 pub use events::{

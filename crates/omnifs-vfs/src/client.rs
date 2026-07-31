@@ -21,7 +21,7 @@ use crate::{
     NamespaceEvent, NsError, NsEvent, ReadAnswer,
 };
 use futures::future::{BoxFuture, FutureExt};
-use omnifs_core::{AttachmentSpec, ResourceName, path::Path};
+use omnifs_core::{FilesystemSpec, ResourceName, path::Path};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::runtime::Handle;
@@ -115,12 +115,12 @@ impl AttachTarget {
     /// Connect with backoff. With a `deadline`, a transient failure past the
     /// deadline surfaces as [`WireError::ConnectTimeout`]; without one,
     /// transient failures retry forever. Every attempt sends the same exact
-    /// attachment identity, since a fresh connection is a fresh handshake.
+    /// filesystem identity, since a fresh connection is a fresh handshake.
     async fn connect_with_backoff(
         &self,
         deadline: Option<Instant>,
-        attachment: &ResourceName,
-        spec: &AttachmentSpec,
+        filesystem: &ResourceName,
+        spec: &FilesystemSpec,
         runtime_instance: &str,
     ) -> Result<Connection, WireError> {
         let mut backoff = INITIAL_BACKOFF;
@@ -129,7 +129,7 @@ impl AttachTarget {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 match timeout(
                     remaining,
-                    self.connect_once(attachment, spec, runtime_instance),
+                    self.connect_once(filesystem, spec, runtime_instance),
                 )
                 .await
                 {
@@ -143,7 +143,7 @@ impl AttachTarget {
                     }),
                 }
             } else {
-                self.connect_once(attachment, spec, runtime_instance).await
+                self.connect_once(filesystem, spec, runtime_instance).await
             };
             match attempt {
                 Ok(value) => return Ok(value),
@@ -186,8 +186,8 @@ impl AttachTarget {
     /// fail without entering the reconnect loop.
     async fn connect_once(
         &self,
-        attachment: &ResourceName,
-        spec: &AttachmentSpec,
+        filesystem: &ResourceName,
+        spec: &FilesystemSpec,
         runtime_instance: &str,
     ) -> Result<Connection, WireError> {
         match self {
@@ -195,7 +195,7 @@ impl AttachTarget {
                 let stream = UnixStream::connect(path).await?;
                 handshake_over(
                     stream,
-                    attachment.clone(),
+                    filesystem.clone(),
                     spec.clone(),
                     runtime_instance.to_owned(),
                 )
@@ -205,7 +205,7 @@ impl AttachTarget {
                 let stream = TcpStream::connect(addr.as_str()).await?;
                 handshake_over(
                     stream,
-                    attachment.clone(),
+                    filesystem.clone(),
                     spec.clone(),
                     runtime_instance.to_owned(),
                 )
@@ -218,7 +218,7 @@ impl AttachTarget {
                     let stream = tokio_vsock::VsockStream::connect(addr).await?;
                     handshake_over(
                         stream,
-                        attachment.clone(),
+                        filesystem.clone(),
                         spec.clone(),
                         runtime_instance.to_owned(),
                     )
@@ -226,7 +226,7 @@ impl AttachTarget {
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    let _ = (port, attachment, spec, runtime_instance);
+                    let _ = (port, filesystem, spec, runtime_instance);
                     Err(WireError::VsockUnsupported)
                 }
             },
@@ -311,7 +311,7 @@ pub struct WireNamespace {
 
 impl WireNamespace {
     /// Connect to the namespace target, perform the handshake, and return a
-    /// namespace multiplexed over the connection. The attachment name, exact
+    /// namespace multiplexed over the connection. The filesystem name, exact
     /// desired spec, and random runtime instance identify every Hello,
     /// including reconnects, so the server can track one live session.
     /// Retries the initial connect with backoff up to a 30s deadline; a later
@@ -324,28 +324,28 @@ impl WireNamespace {
     /// the handshake is rejected.
     pub async fn attach(
         target: AttachTarget,
-        attachment: ResourceName,
-        spec: AttachmentSpec,
+        filesystem: ResourceName,
+        spec: FilesystemSpec,
         runtime_instance: String,
         rt: Handle,
     ) -> Result<Arc<Self>, WireError> {
         let (teardown_tx, teardown_rx) = mpsc::channel(1);
         drop(teardown_rx);
-        Self::attach_with_teardown(target, attachment, spec, runtime_instance, rt, teardown_tx)
+        Self::attach_with_teardown(target, filesystem, spec, runtime_instance, rt, teardown_tx)
             .await
     }
 
     pub async fn attach_with_teardown(
         target: AttachTarget,
-        attachment: ResourceName,
-        spec: AttachmentSpec,
+        filesystem: ResourceName,
+        spec: FilesystemSpec,
         runtime_instance: String,
         rt: Handle,
         teardown: mpsc::Sender<TeardownRequest>,
     ) -> Result<Arc<Self>, WireError> {
         let deadline = Instant::now() + ATTACH_DEADLINE;
         let connection = target
-            .connect_with_backoff(Some(deadline), &attachment, &spec, &runtime_instance)
+            .connect_with_backoff(Some(deadline), &filesystem, &spec, &runtime_instance)
             .await?;
 
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<Outgoing>(OUTGOING_QUEUE_CAPACITY);
@@ -354,7 +354,7 @@ impl WireNamespace {
         let manager = rt.spawn(
             ManagerState {
                 target,
-                attachment,
+                filesystem,
                 spec,
                 runtime_instance,
                 connection,
@@ -510,10 +510,10 @@ impl Namespace for WireNamespace {
 /// The manager's owned connection and request state.
 struct ManagerState {
     target: AttachTarget,
-    /// Exact attachment identity sent in every reconnect's Hello (the initial
+    /// Exact filesystem identity sent in every reconnect's Hello (the initial
     /// connect sends it too, before the manager task is spawned).
-    attachment: ResourceName,
-    spec: AttachmentSpec,
+    filesystem: ResourceName,
+    spec: FilesystemSpec,
     runtime_instance: String,
     connection: Connection,
     current_epoch: NamespaceEpoch,
@@ -713,14 +713,14 @@ impl ManagerState {
 
     fn start_reconnect(&self) -> tokio::task::JoinHandle<Result<Connection, WireError>> {
         let target = self.target.clone();
-        let attachment = self.attachment.clone();
+        let filesystem = self.filesystem.clone();
         let spec = self.spec.clone();
         let runtime_instance = self.runtime_instance.clone();
         tokio::spawn(async move {
             target
                 .connect_with_backoff(
                     Some(Instant::now() + ATTACH_DEADLINE),
-                    &attachment,
+                    &filesystem,
                     &spec,
                     &runtime_instance,
                 )
@@ -823,12 +823,12 @@ impl Drop for Connection {
 }
 
 /// Spawn the reader/writer pumps over `stream` and complete the handshake,
-/// sending the attachment's exact desired and runtime identities. Generic over
+/// sending the filesystem's exact desired and runtime identities. Generic over
 /// the stream type so both transports share one handshake path.
 async fn handshake_over<S>(
     stream: S,
-    attachment: ResourceName,
-    spec: AttachmentSpec,
+    filesystem: ResourceName,
+    spec: FilesystemSpec,
     runtime_instance: String,
 ) -> Result<Connection, WireError>
 where
@@ -838,7 +838,7 @@ where
 
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
-        attachment,
+        filesystem,
         spec,
         runtime_instance,
     })?;

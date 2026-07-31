@@ -220,7 +220,7 @@ pub(crate) fn sentence(text: &str, caps: Capabilities) -> String {
         .join("\n")
 }
 
-/// A bold section heading word (`Attachments`, `Mounts`). Plain bold, not the
+/// A bold section heading word (`Filesystems`, `Mounts`). Plain bold, not the
 /// blue heading role: this uses plain bold for report sections.
 pub(crate) fn heading(text: &str, caps: Capabilities) -> String {
     style::bold(text, caps.color)
@@ -533,10 +533,10 @@ mod tests {
     #[test]
     fn heading_is_bold_only_when_color_is_on() {
         assert_eq!(
-            heading("Attachments", caps(120, true)),
-            style::bold("Attachments", true)
+            heading("Filesystems", caps(120, true)),
+            style::bold("Filesystems", true)
         );
-        assert_eq!(heading("Attachments", caps(120, false)), "Attachments");
+        assert_eq!(heading("Filesystems", caps(120, false)), "Filesystems");
     }
 
     #[test]
@@ -585,7 +585,7 @@ mod tests {
     /// A second hint attached to the same error (e.g. `with_hint` called
     /// twice) must still reach the human block, not just the JSON envelope:
     /// the first hint renders as `Fix:`, every hint after it as `Try:`, in
-    /// attachment order.
+    /// filesystem order.
     #[test]
     fn built_error_block_renders_every_hint_not_just_the_first() {
         let messages = vec!["lease conflict".to_owned()];
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn key_field_width_matches_ledger_key_width_for_the_same_keys() {
-        let keys = ["providers", "daemon", "mounts", "attachments"];
+        let keys = ["providers", "daemon", "mounts", "filesystems"];
         let rows = keys
             .iter()
             .map(|key| LedgerRow::new(Glyph::Done, (*key).to_owned(), String::new()))
@@ -613,7 +613,7 @@ mod tests {
         assert_eq!(
             key_field_width(&keys),
             11,
-            "`attachments` is the longest key"
+            "`filesystems` is the longest key"
         );
     }
 

@@ -5,14 +5,14 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result};
 use omnifs_api::{
-    ApplyReceipt, AttachmentDefinition, MountResourceDefinition, ProgressSnapshot,
+    ApplyReceipt, FilesystemDefinition, MountResourceDefinition, ProgressSnapshot,
     ProviderDefinition, ProviderMetadata, ResourceDeclarations, ResourceDefinition, ResourceLimits,
 };
 use omnifs_core::{ResourceKind, ResourceName};
 use omnifs_provider::ProviderManifest;
 use serde::Serialize;
 
-use crate::commands::{attachment, daemon_start, resource_flow};
+use crate::commands::{daemon_start, filesystem, resource_flow};
 use crate::error::ExitCode;
 use crate::provider_catalog::{
     align_provider_catalog_rows, needs_no_sign_in, provider_catalog_row,
@@ -26,7 +26,7 @@ use crate::ui::output::{Output, ResultVerdict};
 struct SetupResult {
     providers: Vec<ResourceName>,
     mounts: Vec<ResourceName>,
-    attachment: Option<ResourceName>,
+    filesystem: Option<ResourceName>,
     receipt: Option<ApplyReceipt>,
     snapshot: Option<ProgressSnapshot>,
 }
@@ -40,7 +40,7 @@ struct PreparedSetup {
     declarations: ResourceDeclarations,
     provider_names: Vec<ResourceName>,
     mount_names: Vec<ResourceName>,
-    attachment_name: Option<ResourceName>,
+    filesystem_name: Option<ResourceName>,
 }
 
 pub async fn run(output: Output) -> Result<ExitCode> {
@@ -93,7 +93,7 @@ pub async fn run(output: Output) -> Result<ExitCode> {
     let result = SetupResult {
         providers: prepared.provider_names,
         mounts: prepared.mount_names,
-        attachment: prepared.attachment_name,
+        filesystem: prepared.filesystem_name,
         receipt,
         snapshot,
     };
@@ -111,8 +111,8 @@ pub async fn run(output: Output) -> Result<ExitCode> {
                     .join(", ")
             ));
         }
-        if let Some(name) = &result.attachment {
-            output.report(format!("Attachment {name} ready\n"));
+        if let Some(name) = &result.filesystem {
+            output.report(format!("Filesystem {name} ready\n"));
         }
         output.outro(format!("All set in {}s.", started.elapsed().as_secs()));
     }
@@ -143,13 +143,13 @@ async fn prepare_setup(rpc: &RpcClient, output: &Output) -> Result<PreparedSetup
         crate::ui::consent::resolve_confirm(output.prompt_mode(), question, true, false, output)?
     };
 
-    let recommended = attachment::recommended_definition()?;
-    let add_attachment = if let Some(definition) = recommended.as_ref() {
-        !has_attachment_pair(&current.resources, definition)
+    let recommended = filesystem::recommended_definition()?;
+    let add_filesystem = if let Some(definition) = recommended.as_ref() {
+        !has_filesystem_pair(&current.resources, definition)
             && crate::ui::consent::resolve_confirm(
                 output.prompt_mode(),
                 format!(
-                    "Create the recommended Attachment ({} {} at {})?",
+                    "Create the recommended Filesystem ({} {} at {})?",
                     definition.spec.protocol(),
                     definition.spec.runtime(),
                     definition.spec.location().display()
@@ -199,10 +199,10 @@ async fn prepare_setup(rpc: &RpcClient, output: &Output) -> Result<PreparedSetup
         }
     }
 
-    let attachment_name = if add_attachment {
-        let definition = recommended.context("recommended Attachment disappeared")?;
+    let filesystem_name = if add_filesystem {
+        let definition = recommended.context("recommended Filesystem disappeared")?;
         let name = definition.name.clone();
-        upsert(&mut resources, ResourceDefinition::Attachment(definition));
+        upsert(&mut resources, ResourceDefinition::Filesystem(definition));
         Some(name)
     } else {
         None
@@ -215,7 +215,7 @@ async fn prepare_setup(rpc: &RpcClient, output: &Output) -> Result<PreparedSetup
         },
         provider_names,
         mount_names,
-        attachment_name,
+        filesystem_name,
     })
 }
 
@@ -265,11 +265,11 @@ fn render_catalog(entries: &[CatalogEntry], output: &Output) {
     }
 }
 
-fn has_attachment_pair(resources: &[ResourceDefinition], candidate: &AttachmentDefinition) -> bool {
+fn has_filesystem_pair(resources: &[ResourceDefinition], candidate: &FilesystemDefinition) -> bool {
     resources.iter().any(|resource| {
         matches!(
             resource,
-            ResourceDefinition::Attachment(definition)
+            ResourceDefinition::Filesystem(definition)
                 if definition.spec.protocol() == candidate.spec.protocol()
                     && definition.spec.runtime() == candidate.spec.runtime()
         )
@@ -331,39 +331,39 @@ fn count(value: usize, noun: &str) -> String {
 mod tests {
     use super::*;
     use omnifs_core::{
-        ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec,
+        FILESYSTEM_GUEST_LOCATION, FilesystemProtocol, FilesystemRuntime, FilesystemSpec,
     };
     use omnifs_provider::LimitDeclarations;
     use std::path::PathBuf;
 
-    fn attachment(
+    fn filesystem(
         name: &str,
-        protocol: AttachmentProtocol,
-        runtime: AttachmentRuntime,
-    ) -> AttachmentDefinition {
-        AttachmentDefinition {
+        protocol: FilesystemProtocol,
+        runtime: FilesystemRuntime,
+    ) -> FilesystemDefinition {
+        FilesystemDefinition {
             name: ResourceName::new(name).unwrap(),
-            spec: AttachmentSpec::new(
+            spec: FilesystemSpec::new(
                 protocol,
                 runtime,
-                if runtime == AttachmentRuntime::Host {
+                if runtime == FilesystemRuntime::Host {
                     PathBuf::from("/tmp/omnifs")
                 } else {
-                    PathBuf::from(ATTACHMENT_GUEST_LOCATION)
+                    PathBuf::from(FILESYSTEM_GUEST_LOCATION)
                 },
-                (runtime == AttachmentRuntime::Docker).then(|| "image".to_owned()),
-                (runtime == AttachmentRuntime::Libkrun).then(|| "guest".to_owned()),
+                (runtime == FilesystemRuntime::Docker).then(|| "image".to_owned()),
+                (runtime == FilesystemRuntime::Libkrun).then(|| "guest".to_owned()),
             )
             .unwrap(),
         }
     }
 
     #[test]
-    fn attachment_offer_is_pair_based() {
-        let existing = attachment("one", AttachmentProtocol::Nfs, AttachmentRuntime::Host);
-        let candidate = attachment("two", AttachmentProtocol::Nfs, AttachmentRuntime::Host);
-        assert!(has_attachment_pair(
-            &[ResourceDefinition::Attachment(existing)],
+    fn filesystem_offer_is_pair_based() {
+        let existing = filesystem("one", FilesystemProtocol::Nfs, FilesystemRuntime::Host);
+        let candidate = filesystem("two", FilesystemProtocol::Nfs, FilesystemRuntime::Host);
+        assert!(has_filesystem_pair(
+            &[ResourceDefinition::Filesystem(existing)],
             &candidate
         ));
     }

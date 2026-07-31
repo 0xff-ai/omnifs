@@ -22,11 +22,11 @@ pub struct CredentialActionRequest {
     pub operation: CredentialActionOperation,
 }
 
-/// Non-secret request to restart one desired attachment runtime.
+/// Non-secret request to restart one desired filesystem runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttachmentActionRequest {
+pub struct FilesystemActionRequest {
     pub action_id: ActionId,
-    pub attachment: ResourceName,
+    pub filesystem: ResourceName,
     pub base_action_generation: u64,
 }
 
@@ -201,21 +201,21 @@ impl Db<'_> {
         Ok(receipt)
     }
 
-    pub(crate) async fn accept_attachment_action(
+    pub(crate) async fn accept_filesystem_action(
         &mut self,
-        request: AttachmentActionRequest,
+        request: FilesystemActionRequest,
     ) -> Result<ActionReceipt, ActionWriteError> {
-        let request_digest = attachment_action_digest(&request);
-        self.transact("attachment action acceptance", async move |db| {
-            db.accept_attachment_action_in_transaction(request, request_digest)
+        let request_digest = filesystem_action_digest(&request);
+        self.transact("filesystem action acceptance", async move |db| {
+            db.accept_filesystem_action_in_transaction(request, request_digest)
                 .await
         })
         .await
     }
 
-    async fn accept_attachment_action_in_transaction(
+    async fn accept_filesystem_action_in_transaction(
         &mut self,
-        request: AttachmentActionRequest,
+        request: FilesystemActionRequest,
         request_digest: ResourceDigest,
     ) -> Result<ActionReceipt, ActionWriteError> {
         if let Some(receipt) =
@@ -223,34 +223,34 @@ impl Db<'_> {
         {
             return Ok(receipt);
         }
-        attachment_action_target(self.raw(), &request.attachment).await?;
+        filesystem_action_target(self.raw(), &request.filesystem).await?;
         if let Some(action_id) =
-            pending_action_for_target(self.raw(), ResourceKind::Attachment, &request.attachment)
+            pending_action_for_target(self.raw(), ResourceKind::Filesystem, &request.filesystem)
                 .await?
         {
             return Err(ActionWriteError::Busy {
-                target: ResourceKey::new(ResourceKind::Attachment, request.attachment),
+                target: ResourceKey::new(ResourceKind::Filesystem, request.filesystem),
                 action_id,
             });
         }
         let actual_generation =
-            attachment_action_generation(self.raw(), &request.attachment).await?;
+            filesystem_action_generation(self.raw(), &request.filesystem).await?;
         if actual_generation != request.base_action_generation {
             return Err(ActionWriteError::GenerationConflict {
-                target: ResourceKey::new(ResourceKind::Attachment, request.attachment),
+                target: ResourceKey::new(ResourceKind::Filesystem, request.filesystem),
                 expected: request.base_action_generation,
                 actual: actual_generation,
             });
         }
         let accepted_generation = actual_generation
             .checked_add(1)
-            .context("attachment action generation exhausted")?;
-        persist_attachment_action_generation(self.raw(), &request.attachment, accepted_generation)
+            .context("filesystem action generation exhausted")?;
+        persist_filesystem_action_generation(self.raw(), &request.filesystem, accepted_generation)
             .await?;
         let receipt = ActionReceipt {
             action_id: request.action_id,
-            kind: ActionKind::RestartAttachment,
-            target: ResourceKey::new(ResourceKind::Attachment, request.attachment),
+            kind: ActionKind::RestartFilesystem,
+            target: ResourceKey::new(ResourceKind::Filesystem, request.filesystem),
             action_generation: accepted_generation,
             phase: ActionPhase::Accepted,
             error_code: None,
@@ -498,9 +498,9 @@ async fn pending_action_for_target(
         .context("decode pending credential action id")
 }
 
-async fn attachment_action_target(
+async fn filesystem_action_target(
     connection: &mut SqliteConnection,
-    attachment: &ResourceName,
+    filesystem: &ResourceName,
 ) -> Result<(), ActionWriteError> {
     let snapshot = crate::resource::read_resource_snapshot(connection).await?;
     snapshot
@@ -510,39 +510,39 @@ async fn attachment_action_target(
         .any(|resource| {
             matches!(
                 resource,
-                omnifs_api::ResourceDefinition::Attachment(definition)
-                    if definition.name == *attachment
+                omnifs_api::ResourceDefinition::Filesystem(definition)
+                    if definition.name == *filesystem
             )
         })
         .then_some(())
         .ok_or_else(|| ActionWriteError::ResourceNotFound {
-            target: ResourceKey::new(ResourceKind::Attachment, attachment.clone()),
+            target: ResourceKey::new(ResourceKind::Filesystem, filesystem.clone()),
         })
 }
 
-async fn attachment_action_generation(
+async fn filesystem_action_generation(
     connection: &mut SqliteConnection,
-    attachment: &ResourceName,
+    filesystem: &ResourceName,
 ) -> anyhow::Result<u64> {
     let generation = sqlx::query_scalar::<_, i64>(
-        "SELECT action_generation FROM attachment_instances WHERE name = ?1",
+        "SELECT action_generation FROM filesystem_instances WHERE name = ?1",
     )
-    .bind(attachment.as_str())
+    .bind(filesystem.as_str())
     .fetch_optional(connection)
     .await
-    .context("read attachment action generation")?;
+    .context("read filesystem action generation")?;
     generation.map_or(Ok(0), |value| {
-        u64::try_from(value).context("stored attachment action generation is negative")
+        u64::try_from(value).context("stored filesystem action generation is negative")
     })
 }
 
-async fn persist_attachment_action_generation(
+async fn persist_filesystem_action_generation(
     connection: &mut SqliteConnection,
-    attachment: &ResourceName,
+    filesystem: &ResourceName,
     generation: u64,
 ) -> anyhow::Result<()> {
     sqlx::query(
-        "INSERT INTO attachment_instances(\
+        "INSERT INTO filesystem_instances(\
              name, desired_version, observed_version, phase, runtime_instance, \
              action_generation, last_error_code, last_error_detail, retry_at, deleting, updated_at\
          ) VALUES (?1, NULL, NULL, 'pending', NULL, ?2, NULL, NULL, NULL, 0, unixepoch()) \
@@ -550,20 +550,20 @@ async fn persist_attachment_action_generation(
              action_generation = excluded.action_generation, \
              updated_at = excluded.updated_at",
     )
-    .bind(attachment.as_str())
-    .bind(sql_int(generation, "attachment action generation")?)
+    .bind(filesystem.as_str())
+    .bind(sql_int(generation, "filesystem action generation")?)
     .execute(connection)
     .await
-    .context("persist attachment action generation")?;
+    .context("persist filesystem action generation")?;
     Ok(())
 }
 
-fn attachment_action_digest(request: &AttachmentActionRequest) -> ResourceDigest {
+fn filesystem_action_digest(request: &FilesystemActionRequest) -> ResourceDigest {
     let mut hasher = blake3::Hasher::new();
     hasher.update(ACTION_INPUT_DOMAIN);
-    hasher.update(&[action_kind_tag(ActionKind::RestartAttachment)]);
-    hasher.update(&[ResourceKind::Attachment.tag()]);
-    let target = request.attachment.as_str().as_bytes();
+    hasher.update(&[action_kind_tag(ActionKind::RestartFilesystem)]);
+    hasher.update(&[ResourceKind::Filesystem.tag()]);
+    let target = request.filesystem.as_str().as_bytes();
     hasher.update(
         u64::try_from(target.len())
             .expect("resource name length fits u64")
@@ -699,7 +699,7 @@ const fn action_kind_tag(kind: ActionKind) -> u8 {
     match kind {
         ActionKind::SetCredentialMaterial => 1,
         ActionKind::RevokeCredential => 2,
-        ActionKind::RestartAttachment => 3,
+        ActionKind::RestartFilesystem => 3,
     }
 }
 
@@ -707,7 +707,7 @@ const fn action_kind_str(kind: ActionKind) -> &'static str {
     match kind {
         ActionKind::SetCredentialMaterial => "set-credential-material",
         ActionKind::RevokeCredential => "revoke-credential",
-        ActionKind::RestartAttachment => "restart-attachment",
+        ActionKind::RestartFilesystem => "restart-filesystem",
     }
 }
 
@@ -715,7 +715,7 @@ fn parse_action_kind(value: &str) -> anyhow::Result<ActionKind> {
     match value {
         "set-credential-material" => Ok(ActionKind::SetCredentialMaterial),
         "revoke-credential" => Ok(ActionKind::RevokeCredential),
-        "restart-attachment" => Ok(ActionKind::RestartAttachment),
+        "restart-filesystem" => Ok(ActionKind::RestartFilesystem),
         _ => anyhow::bail!("stored action kind `{value}` is invalid"),
     }
 }
@@ -768,7 +768,7 @@ fn validate_transition_fields(
 const fn resource_kind_str(kind: ResourceKind) -> &'static str {
     match kind {
         ResourceKind::Credential => "credential",
-        ResourceKind::Attachment => "attachment",
+        ResourceKind::Filesystem => "filesystem",
         ResourceKind::Provider => "provider",
         ResourceKind::Mount => "mount",
     }
@@ -777,7 +777,7 @@ const fn resource_kind_str(kind: ResourceKind) -> &'static str {
 fn parse_resource_kind(value: &str) -> anyhow::Result<ResourceKind> {
     match value {
         "credential" => Ok(ResourceKind::Credential),
-        "attachment" => Ok(ResourceKind::Attachment),
+        "filesystem" => Ok(ResourceKind::Filesystem),
         _ => anyhow::bail!("stored action target kind `{value}` is invalid"),
     }
 }

@@ -134,7 +134,7 @@ mod tests {
                     secret_impact: true,
                 },
                 ResourceChange {
-                    key: key(ResourceKind::Attachment, "same"),
+                    key: key(ResourceKind::Filesystem, "same"),
                     action: ResourceChangeAction::Unchanged,
                     destructive: false,
                     secret_impact: false,

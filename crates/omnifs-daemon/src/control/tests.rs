@@ -438,7 +438,7 @@ async fn tonic_inventory_and_status_use_generated_messages() {
     assert_eq!(inventory.durable_revision, inventory.serving_revision);
     assert!(inventory.mounts.is_empty());
     assert!(inventory.credentials.is_empty());
-    assert!(inventory.attachments.is_empty());
+    assert!(inventory.filesystems.is_empty());
     let status = c
         .get_status(wire::Empty {})
         .await

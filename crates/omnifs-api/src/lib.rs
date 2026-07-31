@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-mod attachment;
 mod control;
 mod credential;
+mod filesystem;
 mod mount;
 mod progress;
 mod resource;
@@ -15,10 +15,6 @@ mod resource;
 /// Protobuf wire types and strict conversions for the local control API.
 pub mod grpc;
 
-pub use attachment::{
-    AttachmentAccess, AttachmentCommand, AttachmentDefinition, AttachmentPhase, AttachmentStatus,
-    GetAttachmentAccessRequest, RestartAttachmentRequest,
-};
 pub use control::{
     ActionKind, ActionPhase, ActionReceipt, CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MESSAGE_MAX_BYTES,
     CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_RESOURCE_MAX_COUNT, CONTROL_SHUTDOWN_DRAIN_SECS,
@@ -31,9 +27,13 @@ pub use credential::{
     CredentialClientOverrides, CredentialKey, CredentialKind, CredentialMaterial, CredentialStatus,
     CredentialStatusKind, CredentialSubmission, SecretBytes,
 };
+pub use filesystem::{
+    FilesystemAccess, FilesystemCommand, FilesystemDefinition, FilesystemPhase, FilesystemStatus,
+    GetFilesystemAccessRequest, RestartFilesystemRequest,
+};
 pub use mount::{MountCredential, MountDefinition, MountHealth, MountLimits, MountRecord};
 pub use progress::{
-    AttachmentProgress, AttachmentProgressStage, CredentialProgress, CredentialProgressStage,
+    CredentialProgress, CredentialProgressStage, FilesystemProgress, FilesystemProgressStage,
     ProgressEvent, ProgressEventKind, ProgressSnapshot, ProgressTarget,
     ProviderPreparationProgress, ProviderPreparationStage, ServingProgress, ServingProgressStage,
 };
@@ -166,7 +166,7 @@ pub struct DaemonInventory {
     pub health: DaemonHealth,
     pub mounts: Vec<MountRecord>,
     pub credentials: Vec<CredentialStatus>,
-    pub attachments: Vec<AttachmentDefinition>,
+    pub filesystems: Vec<FilesystemDefinition>,
 }
 
 /// Current daemon lifecycle phase.
@@ -191,8 +191,8 @@ pub struct DaemonStatus {
     pub executable: PathBuf,
     /// TCP namespace endpoint this daemon bound for guest filesystems.
     pub attach_tcp: Option<SocketAddr>,
-    /// Every configured Attachment currently attached to the shared namespace.
-    pub attachments: Vec<AttachmentDefinition>,
+    /// Every configured Filesystem currently attached to the shared namespace.
+    pub filesystems: Vec<FilesystemDefinition>,
     /// Provider mounts loaded in the registry.
     pub mounts: Vec<MountInfo>,
     /// Daemon-owned health for runtime subsystems. CLI status renders these

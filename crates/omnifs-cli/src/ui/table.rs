@@ -1,7 +1,7 @@
 //! Human-only responsive resource tables.
 //!
 //! This module deliberately has no serde surface and no knowledge of mounts,
-//! providers, or Attachments. Commands provide cells and state tokens; the
+//! providers, or Filesystems. Commands provide cells and state tokens; the
 //! renderer owns layout, terminal width, and action placement.
 
 use std::fmt::Write as _;
@@ -526,7 +526,7 @@ mod tests {
             Column::new("Details", Priority::Detail, WidthPolicy::Auto),
         ];
         let action = Action::fix("omnifs mount reauth github");
-        let mut table = ResourceTable::new("Attachments", "2 configured", columns);
+        let mut table = ResourceTable::new("Filesystems", "2 configured", columns);
         table.push(
             ResourceRow::new(
                 [
@@ -562,7 +562,7 @@ mod tests {
             width: 120,
             color: false,
         });
-        assert!(output.starts_with("Attachments  2 configured\n"));
+        assert!(output.starts_with("Filesystems  2 configured\n"));
         assert!(output.contains("Name"));
         assert!(output.contains("Location"));
         assert!(!output.contains('│'));

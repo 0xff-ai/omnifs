@@ -1,9 +1,9 @@
 //! Core omnifs protocol types.
 
-pub mod attachment;
 mod auth_fingerprint;
 mod content_type;
 mod file;
+pub mod filesystem;
 mod mutation;
 mod operation;
 pub mod path;
@@ -12,15 +12,15 @@ mod provider_id;
 pub mod resource;
 mod state_version;
 
-pub use attachment::{
-    ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec,
-    AttachmentSpecError, AttachmentVersion, ParseAttachmentProtocolError,
-    ParseAttachmentRuntimeError, RuntimeInstanceId, RuntimeInstanceIdError,
-    attachment_pair_supported_on_current_host,
-};
 pub use auth_fingerprint::{AuthRuntimeFingerprint, AuthRuntimeFingerprintParseError};
 pub use content_type::ContentType;
 pub use file::{FileSize, ReadMode, Stability};
+pub use filesystem::{
+    FILESYSTEM_GUEST_LOCATION, FilesystemProtocol, FilesystemRuntime, FilesystemSpec,
+    FilesystemSpecError, FilesystemVersion, ParseFilesystemProtocolError,
+    ParseFilesystemRuntimeError, RuntimeInstanceId, RuntimeInstanceIdError,
+    filesystem_pair_supported_on_current_host,
+};
 pub use mutation::{MutationId, MutationIdError};
 pub use operation::{ActionId, ActionIdError};
 pub use path::{ParseError, Path, Segment};

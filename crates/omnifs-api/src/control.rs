@@ -63,7 +63,7 @@ pub enum ControlErrorCode {
 pub enum ActionKind {
     SetCredentialMaterial,
     RevokeCredential,
-    RestartAttachment,
+    RestartFilesystem,
 }
 
 /// Current durable action phase.

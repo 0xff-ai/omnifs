@@ -54,7 +54,7 @@ impl GrpcControlService {
                 ),
                 mounts: Vec::new(),
                 credentials: Vec::new(),
-                attachments: Vec::new(),
+                filesystems: Vec::new(),
             }),
             ControlPhase::Recovery(recovery) => Ok(DaemonInventory {
                 info: self.control.context.daemon_info(None, None),
@@ -68,7 +68,7 @@ impl GrpcControlService {
                 ),
                 mounts: Vec::new(),
                 credentials: Vec::new(),
-                attachments: Vec::new(),
+                filesystems: Vec::new(),
             }),
             ControlPhase::Ready(daemon) => daemon.inventory().await.map_err(grpc_internal),
             ControlPhase::ShuttingDown => Err(grpc_status(ControlPhase::shutting_down())),
@@ -287,16 +287,16 @@ impl wire::control_server::Control for GrpcControlService {
         let ControlPhase::Ready(daemon) = self.phase() else {
             let _ = self.control.shutdown_tx.send(true);
             return Ok(Response::new(wire::ShutdownResponse {
-                detached: 0,
-                still_attached: Vec::new(),
+                stopped: 0,
+                still_running: Vec::new(),
             }));
         };
         daemon.resources.shutdown();
-        let supervisor = Arc::clone(daemon.attachment_supervisor().map_err(grpc_internal)?);
+        let supervisor = Arc::clone(daemon.filesystem_supervisor().map_err(grpc_internal)?);
         let vfs = Arc::clone(&daemon.vfs);
         let shutdown_tx = daemon.shutdown_tx.clone();
         let result = tokio::spawn(async move {
-            let (detached, still_attached) = if stop_filesystems {
+            let (stopped, still_running) = if stop_filesystems {
                 let before = vfs.sessions().len();
                 let still = supervisor.stop_all().await?;
                 (
@@ -307,15 +307,15 @@ impl wire::control_server::Control for GrpcControlService {
                 (0, Vec::new())
             };
             let _ = shutdown_tx.send(true);
-            anyhow::Ok((detached, still_attached))
+            anyhow::Ok((stopped, still_running))
         })
         .await
         .map_err(|error| grpc_internal(error.to_string()))?
         .map_err(grpc_internal)?;
-        let (detached, still_attached) = result;
+        let (stopped, still_running) = result;
         Ok(Response::new(wire::ShutdownResponse {
-            detached: u32::try_from(detached).map_err(grpc_internal)?,
-            still_attached,
+            stopped: u32::try_from(stopped).map_err(grpc_internal)?,
+            still_running,
         }))
     }
 
@@ -554,51 +554,51 @@ impl wire::control_server::Control for GrpcControlService {
         }))
     }
 
-    async fn get_attachment_status(
+    async fn get_filesystem_status(
         &self,
-        request: Request<wire::GetAttachmentStatusRequest>,
-    ) -> Result<Response<wire::GetAttachmentStatusResponse>, Status> {
+        request: Request<wire::GetFilesystemStatusRequest>,
+    ) -> Result<Response<wire::GetFilesystemStatusResponse>, Status> {
         let daemon = self.daemon()?;
-        let name = omnifs_core::ResourceName::new(request.into_inner().attachment_name)
+        let name = omnifs_core::ResourceName::new(request.into_inner().filesystem_name)
             .map_err(grpc_invalid)?;
         let status = daemon
-            .attachment_status(&name)
+            .filesystem_status(&name)
             .await
             .map_err(grpc_internal)?;
-        Ok(Response::new(grpc::to_get_attachment_status_response(
+        Ok(Response::new(grpc::to_get_filesystem_status_response(
             status.as_ref(),
         )))
     }
 
-    async fn restart_attachment(
+    async fn restart_filesystem(
         &self,
-        request: Request<wire::RestartAttachmentRequest>,
-    ) -> Result<Response<wire::RestartAttachmentResponse>, Status> {
+        request: Request<wire::RestartFilesystemRequest>,
+    ) -> Result<Response<wire::RestartFilesystemResponse>, Status> {
         let daemon = self.daemon()?;
         let request =
-            grpc::restart_attachment_request(&request.into_inner()).map_err(grpc_invalid)?;
+            grpc::restart_filesystem_request(&request.into_inner()).map_err(grpc_invalid)?;
         let receipt = daemon
             .resources
-            .restart_attachment(request)
+            .restart_filesystem(request)
             .await
             .map_err(|error| resource_control_status(&error))?;
-        Ok(Response::new(grpc::to_restart_attachment_response(
+        Ok(Response::new(grpc::to_restart_filesystem_response(
             &receipt,
         )))
     }
 
-    async fn get_attachment_access(
+    async fn get_filesystem_access(
         &self,
-        request: Request<wire::GetAttachmentAccessRequest>,
-    ) -> Result<Response<wire::GetAttachmentAccessResponse>, Status> {
+        request: Request<wire::GetFilesystemAccessRequest>,
+    ) -> Result<Response<wire::GetFilesystemAccessResponse>, Status> {
         let daemon = self.daemon()?;
         let request =
-            grpc::get_attachment_access_request(&request.into_inner()).map_err(grpc_invalid)?;
+            grpc::get_filesystem_access_request(&request.into_inner()).map_err(grpc_invalid)?;
         let access = daemon
-            .attachment_access(request)
+            .filesystem_access(request)
             .await
             .map_err(grpc_status)?;
-        Ok(Response::new(grpc::to_get_attachment_access_response(
+        Ok(Response::new(grpc::to_get_filesystem_access_response(
             &access,
         )))
     }

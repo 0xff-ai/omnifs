@@ -5,12 +5,12 @@ use bytes::Bytes;
 use hyper_util::rt::TokioIo;
 use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
-    ActionReceipt, ApplyReceipt, ApplyResourcesRequest, AttachmentAccess, AttachmentStatus,
-    CONTROL_LOG_TAIL_MAX_LINES, CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS,
-    CONTROL_STREAM_PAYLOAD_MAX_BYTES, CredentialKey, CredentialReceipt, CredentialStatus,
-    DaemonInventory, GetAttachmentAccessRequest, ProgressEvent, ProgressTarget,
+    ActionReceipt, ApplyReceipt, ApplyResourcesRequest, CONTROL_LOG_TAIL_MAX_LINES,
+    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES,
+    CredentialKey, CredentialReceipt, CredentialStatus, DaemonInventory, FilesystemAccess,
+    FilesystemStatus, GetFilesystemAccessRequest, ProgressEvent, ProgressTarget,
     ProviderImportReceipt, ProviderMetadata, ResourceDeclarations, ResourcePlan, ResourceSnapshot,
-    RestartAttachmentRequest, RevokeCredentialRequest, SetCredentialMaterialRequest,
+    RestartFilesystemRequest, RevokeCredentialRequest, SetCredentialMaterialRequest,
 };
 use omnifs_bootstrap::Profile;
 use omnifs_core::{ProviderId, ResourceName};
@@ -53,8 +53,8 @@ macro_rules! bounded_unary {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ShutdownResult {
-    pub(crate) detached: usize,
-    pub(crate) still_attached: Vec<String>,
+    pub(crate) stopped: usize,
+    pub(crate) still_running: Vec<String>,
 }
 
 pub(crate) struct ProgressWatch {
@@ -143,8 +143,8 @@ impl RpcClient {
         )
         .into_inner();
         Ok(Some(ShutdownResult {
-            detached: response.detached as usize,
-            still_attached: response.still_attached,
+            stopped: response.stopped as usize,
+            still_running: response.still_running,
         }))
     }
 
@@ -347,45 +347,45 @@ impl RpcClient {
         grpc::apply_resources_response(&response).map_err(Into::into)
     }
 
-    pub(crate) async fn attachment_status(
+    pub(crate) async fn filesystem_status(
         &self,
         name: ResourceName,
-    ) -> anyhow::Result<Option<AttachmentStatus>> {
+    ) -> anyhow::Result<Option<FilesystemStatus>> {
         let response = bounded_unary!(
             self,
-            get_attachment_status,
-            wire::GetAttachmentStatusRequest {
-                attachment_name: name.to_string(),
+            get_filesystem_status,
+            wire::GetFilesystemStatusRequest {
+                filesystem_name: name.to_string(),
             }
         )
         .into_inner();
-        grpc::get_attachment_status_response(&response).map_err(Into::into)
+        grpc::get_filesystem_status_response(&response).map_err(Into::into)
     }
 
-    pub(crate) async fn restart_attachment(
+    pub(crate) async fn restart_filesystem(
         &self,
-        request: &RestartAttachmentRequest,
+        request: &RestartFilesystemRequest,
     ) -> anyhow::Result<ActionReceipt> {
         let response = bounded_unary!(
             self,
-            restart_attachment,
-            grpc::to_restart_attachment_request(request)
+            restart_filesystem,
+            grpc::to_restart_filesystem_request(request)
         )
         .into_inner();
-        grpc::restart_attachment_response(&response).map_err(Into::into)
+        grpc::restart_filesystem_response(&response).map_err(Into::into)
     }
 
-    pub(crate) async fn attachment_access(
+    pub(crate) async fn filesystem_access(
         &self,
-        request: &GetAttachmentAccessRequest,
-    ) -> anyhow::Result<AttachmentAccess> {
+        request: &GetFilesystemAccessRequest,
+    ) -> anyhow::Result<FilesystemAccess> {
         let response = bounded_unary!(
             self,
-            get_attachment_access,
-            grpc::to_get_attachment_access_request(request)
+            get_filesystem_access,
+            grpc::to_get_filesystem_access_request(request)
         )
         .into_inner();
-        grpc::get_attachment_access_response(&response).map_err(Into::into)
+        grpc::get_filesystem_access_response(&response).map_err(Into::into)
     }
 
     pub(crate) async fn set_credential_material(

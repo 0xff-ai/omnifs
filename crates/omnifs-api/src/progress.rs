@@ -24,7 +24,7 @@ pub struct ProgressSnapshot {
     pub providers: Vec<ProviderPreparationProgress>,
     pub serving: Option<ServingProgress>,
     pub credentials: Vec<CredentialProgress>,
-    pub attachments: Vec<AttachmentProgress>,
+    pub filesystems: Vec<FilesystemProgress>,
 }
 
 /// Closed provider-preparation stages.
@@ -66,10 +66,10 @@ pub enum CredentialProgressStage {
     Failed,
 }
 
-/// Closed attachment-operation stages.
+/// Closed filesystem-operation stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AttachmentProgressStage {
+pub enum FilesystemProgressStage {
     Queued,
     WaitingForNamespace,
     PullingImage,
@@ -127,18 +127,18 @@ pub struct CredentialProgress {
     pub detail: Option<String>,
 }
 
-/// Progress for one attachment resource.
+/// Progress for one filesystem resource.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AttachmentProgress {
+pub struct FilesystemProgress {
     pub key: ResourceKey,
     pub desired_revision: ResourceRevision,
-    pub runtime: omnifs_core::AttachmentRuntime,
-    pub stage: AttachmentProgressStage,
+    pub runtime: omnifs_core::FilesystemRuntime,
+    pub stage: FilesystemProgressStage,
     pub completed_bytes: u64,
     pub total_bytes: Option<u64>,
-    pub queued_attachments: u32,
-    pub active_attachments: u32,
+    pub queued_filesystems: u32,
+    pub active_filesystems: u32,
     pub error_code: Option<String>,
     pub detail: Option<String>,
     pub retry_count: u32,
@@ -154,7 +154,7 @@ pub enum ProgressEventKind {
     ProviderPreparation(ProviderPreparationProgress),
     ServingProgress(ServingProgress),
     CredentialProgress(CredentialProgress),
-    AttachmentProgress(AttachmentProgress),
+    FilesystemProgress(FilesystemProgress),
     RevisionReady(ResourceRevision),
     RevisionFailed {
         revision: ResourceRevision,

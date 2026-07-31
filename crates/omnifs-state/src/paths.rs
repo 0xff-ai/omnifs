@@ -19,7 +19,7 @@ pub(crate) const PROJECTION_CACHE_DIR: &str = "projection";
 pub(crate) const WASMTIME_CACHE_DIR: &str = "wasmtime";
 pub(crate) const CLONE_CACHE_DIR: &str = "git";
 pub(crate) const GUEST_IMAGES_CACHE_DIR: &str = "guest-images";
-pub(crate) const ATTACHMENTS_DIR: &str = "attachments";
+pub(crate) const FILESYSTEMS_DIR: &str = "filesystems";
 
 /// Headroom multiplier reserved against the disk budget for one import.
 const PROVIDER_DISK_MULTIPLIER: u64 = 3;
@@ -93,21 +93,21 @@ impl DaemonStatePaths {
         self.root.join(RUNTIME_DIR)
     }
 
-    /// Private directory containing one runtime subdirectory per attachment.
+    /// Private directory containing one runtime subdirectory per filesystem.
     #[must_use]
-    pub fn attachments_runtime(&self) -> PathBuf {
-        self.runtime().join(ATTACHMENTS_DIR)
+    pub fn filesystems_runtime(&self) -> PathBuf {
+        self.runtime().join(FILESYSTEMS_DIR)
     }
 
-    /// Private runtime directory for one validated attachment name.
+    /// Private runtime directory for one validated filesystem name.
     #[must_use]
-    pub fn attachment_runtime(&self, name: &ResourceName) -> PathBuf {
-        self.attachments_runtime().join(name.as_str())
+    pub fn filesystem_runtime(&self, name: &ResourceName) -> PathBuf {
+        self.filesystems_runtime().join(name.as_str())
     }
 
-    /// Create and restrict one attachment's private runtime directory.
-    pub fn prepare_attachment_runtime(&self, name: &ResourceName) -> anyhow::Result<PathBuf> {
-        let path = self.attachment_runtime(name);
+    /// Create and restrict one filesystem's private runtime directory.
+    pub fn prepare_filesystem_runtime(&self, name: &ResourceName) -> anyhow::Result<PathBuf> {
+        let path = self.filesystem_runtime(name);
         ensure_private_dir(&path)?;
         Ok(path)
     }
@@ -118,35 +118,35 @@ impl DaemonStatePaths {
         self.cache().join(GUEST_IMAGES_CACHE_DIR)
     }
 
-    /// Private directory containing one daemon-owned attachment log per name.
+    /// Private directory containing one daemon-owned filesystem log per name.
     #[must_use]
-    pub fn attachment_logs(&self) -> PathBuf {
-        self.logs().join(ATTACHMENTS_DIR)
+    pub fn filesystem_logs(&self) -> PathBuf {
+        self.logs().join(FILESYSTEMS_DIR)
     }
 
-    /// Private log path for one validated attachment name.
+    /// Private log path for one validated filesystem name.
     #[must_use]
-    pub fn attachment_log(&self, name: &ResourceName) -> PathBuf {
-        self.attachment_logs()
+    pub fn filesystem_log(&self, name: &ResourceName) -> PathBuf {
+        self.filesystem_logs()
             .join(format!("{}.log", name.as_str()))
     }
 
-    /// Open one attachment log with private file permissions.
-    pub fn open_attachment_log(&self, name: &ResourceName) -> anyhow::Result<std::fs::File> {
+    /// Open one filesystem log with private file permissions.
+    pub fn open_filesystem_log(&self, name: &ResourceName) -> anyhow::Result<std::fs::File> {
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
         ensure_private_dir(&self.root)?;
         ensure_private_dir(&self.logs())?;
-        ensure_private_dir(&self.attachment_logs())?;
-        let path = self.attachment_log(name);
+        ensure_private_dir(&self.filesystem_logs())?;
+        let path = self.filesystem_log(name);
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o600)
             .open(&path)
-            .with_context(|| format!("open attachment log {}", path.display()))?;
+            .with_context(|| format!("open filesystem log {}", path.display()))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("restrict attachment log {}", path.display()))?;
+            .with_context(|| format!("restrict filesystem log {}", path.display()))?;
         Ok(file)
     }
 
@@ -158,8 +158,8 @@ impl DaemonStatePaths {
             self.cache(),
             self.runtime(),
             self.logs(),
-            self.attachments_runtime(),
-            self.attachment_logs(),
+            self.filesystems_runtime(),
+            self.filesystem_logs(),
             self.guest_images_cache(),
         ] {
             ensure_private_dir(&path)?;

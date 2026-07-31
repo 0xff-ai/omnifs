@@ -16,13 +16,13 @@ use bytes::Bytes;
 use hyper_util::rt::TokioIo;
 use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
-    ActionPhase, ApplyResourcesRequest, AttachmentDefinition, CONTROL_REQUEST_TIMEOUT_SECS,
-    CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInfo, DaemonStatus, MountResourceDefinition,
-    ProgressEventKind, ProgressTarget, ProviderDefinition, ProviderImportReceipt,
-    ResourceDeclarations, ResourceDefinition, RestartAttachmentRequest,
+    ActionPhase, ApplyResourcesRequest, CONTROL_REQUEST_TIMEOUT_SECS,
+    CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInfo, DaemonStatus, FilesystemDefinition,
+    MountResourceDefinition, ProgressEventKind, ProgressTarget, ProviderDefinition,
+    ProviderImportReceipt, ResourceDeclarations, ResourceDefinition, RestartFilesystemRequest,
 };
 use omnifs_core::{
-    ActionId, AttachmentProtocol, AttachmentRuntime, AttachmentSpec, MutationId, ProviderId,
+    ActionId, FilesystemProtocol, FilesystemRuntime, FilesystemSpec, MutationId, ProviderId,
     ResourceKind, ResourceName,
 };
 use tempfile::TempDir;
@@ -266,7 +266,7 @@ pub struct NativeDaemon {
 impl Drop for NativeDaemon {
     fn drop(&mut self) {
         if matches!(self.daemon.try_wait(), Ok(None)) {
-            best_effort_remove_attachment(self.home.path(), "native");
+            best_effort_remove_filesystem(self.home.path(), "native");
         }
         self.detach_mount();
         sigterm(&self.daemon);
@@ -310,7 +310,7 @@ impl NativeDaemon {
 /// attached over one shared namespace. Torn down on drop.
 pub struct MultiFilesystemDaemon {
     daemon: Child,
-    attachment_names: Vec<String>,
+    filesystem_names: Vec<String>,
     pub mount_points: Vec<PathBuf>,
     home: TempDir,
     /// Cross-process NFS serialization lock, held for the lane's lifetime.
@@ -320,8 +320,8 @@ pub struct MultiFilesystemDaemon {
 impl Drop for MultiFilesystemDaemon {
     fn drop(&mut self) {
         if matches!(self.daemon.try_wait(), Ok(None)) {
-            for name in &self.attachment_names {
-                best_effort_remove_attachment(self.home.path(), name);
+            for name in &self.filesystem_names {
+                best_effort_remove_filesystem(self.home.path(), name);
             }
         }
         for mount_point in &self.mount_points {
@@ -435,25 +435,25 @@ pub fn start_multi_filesystem_daemon(kinds: &[&str]) -> Option<MultiFilesystemDa
     }
     seed_test_namespace(&control_socket);
 
-    let mut attachment_names = Vec::with_capacity(kinds.len());
+    let mut filesystem_names = Vec::with_capacity(kinds.len());
     for ((index, kind), mount_point) in kinds.iter().enumerate().zip(&mount_points) {
         let id = format!("live-{index}");
         match *kind {
-            "fuse" | "nfs" => ensure_host_attachment(home.path(), &id, kind, mount_point),
+            "fuse" | "nfs" => ensure_host_filesystem(home.path(), &id, kind, mount_point),
             other => panic!("unsupported filesystem kind `{other}`"),
         }
-        attachment_names.push(id);
+        filesystem_names.push(id);
     }
 
     let mut daemon = MultiFilesystemDaemon {
         daemon,
-        attachment_names,
+        filesystem_names,
         mount_points,
         home,
         _nfs_lock: nfs_lock,
     };
 
-    // Wait for every daemon-owned Attachment to serve the projected tree.
+    // Wait for every daemon-owned Filesystem to serve the projected tree.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let all_serving = daemon
@@ -663,7 +663,7 @@ fn wire_filesystem(
 
     // The out-of-process renderer attaches over the requested transport and
     // mounts the tree: `--attach <socket>` for Unix, or the VFS TCP env pair.
-    let state_dir = home_path.join("daemon-state/runtime/attachments/wire");
+    let state_dir = home_path.join("daemon-state/runtime/filesystems/wire");
     let attach_socket = home_path.join("daemon-state/local.sock");
     let mut filesystem_cmd = thin_host_runner_command(
         "wire",
@@ -775,72 +775,72 @@ fn control_socket_ready(socket: &Path) -> bool {
     control_ready(socket)
 }
 
-/// Apply one daemon-owned host Attachment and wait for its revision to reach
+/// Apply one daemon-owned host Filesystem and wait for its revision to reach
 /// the ready phase. Live acceptance fixtures use this path instead of taking
 /// ownership of a runner process themselves.
-fn ensure_host_attachment(home: &Path, name: &str, protocol: &str, location: &Path) {
+fn ensure_host_filesystem(home: &Path, name: &str, protocol: &str, location: &Path) {
     let protocol = protocol
-        .parse::<AttachmentProtocol>()
-        .unwrap_or_else(|error| panic!("invalid test Attachment protocol: {error}"));
-    ensure_attachment(
+        .parse::<FilesystemProtocol>()
+        .unwrap_or_else(|error| panic!("invalid test Filesystem protocol: {error}"));
+    ensure_filesystem(
         &home.join("control.sock"),
-        AttachmentDefinition {
-            name: ResourceName::new(name).expect("valid test Attachment name"),
-            spec: AttachmentSpec::new(
+        FilesystemDefinition {
+            name: ResourceName::new(name).expect("valid test Filesystem name"),
+            spec: FilesystemSpec::new(
                 protocol,
-                AttachmentRuntime::Host,
+                FilesystemRuntime::Host,
                 location.to_path_buf(),
                 None,
                 None,
             )
-            .expect("valid host Attachment spec"),
+            .expect("valid host Filesystem spec"),
         },
     );
 }
 
-/// Add or replace one desired Attachment through the same typed apply and
+/// Add or replace one desired Filesystem through the same typed apply and
 /// progress protocol used by the CLI, preserving every other desired resource.
-pub fn ensure_attachment(socket: &Path, definition: AttachmentDefinition) {
-    update_attachment(socket, Some(definition), None);
+pub fn ensure_filesystem(socket: &Path, definition: FilesystemDefinition) {
+    update_filesystem(socket, Some(definition), None);
 }
 
-fn best_effort_remove_attachment(home: &Path, name: &str) {
+fn best_effort_remove_filesystem(home: &Path, name: &str) {
     let socket = home.join("control.sock");
-    let _ = std::panic::catch_unwind(|| remove_attachment(&socket, name));
+    let _ = std::panic::catch_unwind(|| remove_filesystem(&socket, name));
 }
 
-/// Remove one desired Attachment through the typed resource apply protocol.
-pub fn remove_attachment(socket: &Path, name: &str) {
-    update_attachment(socket, None, Some(name));
+/// Remove one desired Filesystem through the typed resource apply protocol.
+pub fn remove_filesystem(socket: &Path, name: &str) {
+    update_filesystem(socket, None, Some(name));
 }
 
-fn update_attachment(
+fn update_filesystem(
     socket: &Path,
-    definition: Option<AttachmentDefinition>,
+    definition: Option<FilesystemDefinition>,
     remove_name: Option<&str>,
 ) {
     block_on(async {
         let mut client = connect(socket.to_path_buf())
             .await
-            .expect("connect to update test Attachment");
+            .expect("connect to update test Filesystem");
         let snapshot = client
             .get_resources(Request::new(wire::Empty {}))
             .await
-            .expect("get resources before updating test Attachment")
+            .expect("get resources before updating test Filesystem")
             .into_inner();
         let snapshot = grpc::get_resources_response(&snapshot).expect("decode resource snapshot");
         let mut resources = snapshot.resources;
         if let Some(remove_name) = remove_name {
             resources.retain(|resource| {
-                resource.kind() != ResourceKind::Attachment
+                resource.kind() != ResourceKind::Filesystem
                     || resource.name().as_str() != remove_name
             });
         }
         if let Some(definition) = definition {
             resources.retain(|resource| {
-                resource.kind() != ResourceKind::Attachment || resource.name() != &definition.name
+                resource.kind() != ResourceKind::Filesystem || resource.name() != &definition.name
             });
-            resources.push(ResourceDefinition::Attachment(definition));
+            resources.push(ResourceDefinition::Filesystem(definition));
         }
         let declarations = ResourceDeclarations {
             api_version: omnifs_api::API_VERSION.to_owned(),
@@ -850,53 +850,53 @@ fn update_attachment(
     });
 }
 
-/// Restart one desired Attachment through the durable typed action protocol
+/// Restart one desired Filesystem through the durable typed action protocol
 /// and wait for its terminal receipt.
-pub fn restart_attachment(socket: &Path, name: &str) {
+pub fn restart_filesystem(socket: &Path, name: &str) {
     block_on(async {
         let mut client = connect(socket.to_path_buf())
             .await
-            .expect("connect to restart test Attachment");
+            .expect("connect to restart test Filesystem");
         let status = client
-            .get_attachment_status(Request::new(wire::GetAttachmentStatusRequest {
-                attachment_name: name.to_owned(),
+            .get_filesystem_status(Request::new(wire::GetFilesystemStatusRequest {
+                filesystem_name: name.to_owned(),
             }))
             .await
-            .expect("get test Attachment status before restart")
+            .expect("get test Filesystem status before restart")
             .into_inner();
-        let status = grpc::get_attachment_status_response(&status)
-            .expect("decode test Attachment status")
-            .expect("test Attachment is desired");
+        let status = grpc::get_filesystem_status_response(&status)
+            .expect("decode test Filesystem status")
+            .expect("test Filesystem is desired");
         let action_id = next_action_id();
         let response = client
-            .restart_attachment(Request::new(grpc::to_restart_attachment_request(
-                &RestartAttachmentRequest {
+            .restart_filesystem(Request::new(grpc::to_restart_filesystem_request(
+                &RestartFilesystemRequest {
                     action_id,
                     base_action_generation: status.action_generation,
-                    attachment: status.definition.name,
+                    filesystem: status.definition.name,
                 },
             )))
             .await
-            .expect("accept test Attachment restart")
+            .expect("accept test Filesystem restart")
             .into_inner();
         let receipt =
-            grpc::restart_attachment_response(&response).expect("decode Attachment action receipt");
+            grpc::restart_filesystem_response(&response).expect("decode Filesystem action receipt");
         assert_eq!(receipt.action_id, action_id);
 
         let mut stream = client
             .watch_progress(grpc::to_progress_target(ProgressTarget::Action(action_id)))
             .await
-            .expect("watch test Attachment restart")
+            .expect("watch test Filesystem restart")
             .into_inner();
         let deadline = tokio::time::Instant::now() + Duration::from_mins(3);
         loop {
             let message = tokio::time::timeout_at(deadline, stream.message())
                 .await
-                .expect("test Attachment restart reaches a terminal state")
-                .expect("read test Attachment action progress")
-                .expect("test Attachment action stream remains open");
+                .expect("test Filesystem restart reaches a terminal state")
+                .expect("read test Filesystem action progress")
+                .expect("test Filesystem action stream remains open");
             match grpc::progress_event(&message)
-                .expect("decode test Attachment action progress")
+                .expect("decode test Filesystem action progress")
                 .event
             {
                 ProgressEventKind::Snapshot(snapshot) | ProgressEventKind::Resync(snapshot) => {
@@ -908,7 +908,7 @@ pub fn restart_attachment(socket: &Path, name: &str) {
                         match receipt.phase {
                             ActionPhase::Ready => return,
                             ActionPhase::Failed => {
-                                panic!("test Attachment restart failed: {:?}", receipt.detail)
+                                panic!("test Filesystem restart failed: {:?}", receipt.detail)
                             },
                             ActionPhase::Accepted
                             | ActionPhase::Running
@@ -924,7 +924,7 @@ pub fn restart_attachment(socket: &Path, name: &str) {
                     error_code,
                     detail,
                 } if receipt.action_id == action_id => {
-                    panic!("test Attachment restart failed ({error_code}): {detail}");
+                    panic!("test Filesystem restart failed ({error_code}): {detail}");
                 },
                 _ => {},
             }
@@ -950,7 +950,7 @@ async fn apply_and_wait(
             credential_material: Vec::new(),
         }))
         .await
-        .expect("apply test Attachment resources")
+        .expect("apply test Filesystem resources")
         .into_inner();
     let receipt = grpc::apply_resources_response(&response).expect("decode apply receipt");
     let mut stream = client
@@ -958,17 +958,17 @@ async fn apply_and_wait(
             receipt.revision,
         )))
         .await
-        .expect("watch test Attachment revision")
+        .expect("watch test Filesystem revision")
         .into_inner();
     let deadline = tokio::time::Instant::now() + Duration::from_mins(3);
     loop {
         let message = tokio::time::timeout_at(deadline, stream.message())
             .await
-            .expect("test Attachment revision reaches a terminal state")
-            .expect("read test Attachment progress")
-            .expect("test Attachment progress stream remains open");
+            .expect("test Filesystem revision reaches a terminal state")
+            .expect("read test Filesystem progress")
+            .expect("test Filesystem progress stream remains open");
         match grpc::progress_event(&message)
-            .expect("decode test Attachment progress")
+            .expect("decode test Filesystem progress")
             .event
         {
             ProgressEventKind::Snapshot(snapshot) | ProgressEventKind::Resync(snapshot)
@@ -978,10 +978,10 @@ async fn apply_and_wait(
             },
             ProgressEventKind::RevisionReady(revision) if revision == receipt.revision => return,
             ProgressEventKind::RevisionFailed { detail, .. } => {
-                panic!("test Attachment revision failed: {detail}")
+                panic!("test Filesystem revision failed: {detail}")
             },
             ProgressEventKind::RevisionSuperseded { replaced_by, .. } => {
-                panic!("test Attachment revision was superseded by {replaced_by}")
+                panic!("test Filesystem revision was superseded by {replaced_by}")
             },
             _ => {},
         }
@@ -1261,7 +1261,7 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
     let protocol = "fuse";
     #[cfg(not(target_os = "linux"))]
     let protocol = "nfs";
-    ensure_host_attachment(hermetic.home.path(), "native", protocol, &mount_point);
+    ensure_host_filesystem(hermetic.home.path(), "native", protocol, &mount_point);
 
     let mut daemon = NativeDaemon {
         daemon,

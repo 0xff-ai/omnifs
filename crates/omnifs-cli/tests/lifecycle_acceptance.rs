@@ -14,14 +14,14 @@ use common::{omnifs_bin, release_wasm_dir};
 use hyper_util::rt::TokioIo;
 use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
-    API_VERSION, ApplyReceipt, ApplyResourcesRequest, AttachmentDefinition, AttachmentPhase,
-    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInventory,
+    API_VERSION, ApplyReceipt, ApplyResourcesRequest, CONTROL_REQUEST_TIMEOUT_SECS,
+    CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInventory, FilesystemDefinition, FilesystemPhase,
     MountResourceDefinition, ProviderDefinition, ResourceDeclarations, ResourceDefinition,
     ResourcePhase, ResourceSnapshot,
 };
 use omnifs_bootstrap::Profile;
 use omnifs_core::{
-    AttachmentProtocol, AttachmentRuntime, AttachmentSpec, MutationId, ProviderId, ResourceKind,
+    FilesystemProtocol, FilesystemRuntime, FilesystemSpec, MutationId, ProviderId, ResourceKind,
     ResourceName,
 };
 use std::path::Path;
@@ -354,51 +354,51 @@ async fn wait_for_resource_ready(
     }
 }
 
-fn attachment_definition(name: &str, location: &Path) -> AttachmentDefinition {
+fn filesystem_definition(name: &str, location: &Path) -> FilesystemDefinition {
     #[cfg(target_os = "macos")]
-    let protocol = AttachmentProtocol::Nfs;
+    let protocol = FilesystemProtocol::Nfs;
     #[cfg(not(target_os = "macos"))]
-    let protocol = AttachmentProtocol::Fuse;
-    AttachmentDefinition {
-        name: ResourceName::new(name).expect("valid Attachment name"),
-        spec: AttachmentSpec::new(
+    let protocol = FilesystemProtocol::Fuse;
+    FilesystemDefinition {
+        name: ResourceName::new(name).expect("valid Filesystem name"),
+        spec: FilesystemSpec::new(
             protocol,
-            AttachmentRuntime::Host,
+            FilesystemRuntime::Host,
             location.to_owned(),
             None,
             None,
         )
-        .expect("valid host Attachment spec"),
+        .expect("valid host Filesystem spec"),
     }
 }
 
-async fn wait_for_attachment_ready(
+async fn wait_for_filesystem_ready(
     control: &mut ControlClient,
     name: &ResourceName,
-) -> omnifs_api::AttachmentStatus {
+) -> omnifs_api::FilesystemStatus {
     let deadline = tokio::time::Instant::now() + PROVIDER_IMPORT_TIMEOUT;
     loop {
         let response = control
-            .get_attachment_status(unary(wire::GetAttachmentStatusRequest {
-                attachment_name: name.to_string(),
+            .get_filesystem_status(unary(wire::GetFilesystemStatusRequest {
+                filesystem_name: name.to_string(),
             }))
             .await
-            .expect("get Attachment status")
+            .expect("get Filesystem status")
             .into_inner();
         if let Some(status) =
-            grpc::get_attachment_status_response(&response).expect("decode Attachment status")
+            grpc::get_filesystem_status_response(&response).expect("decode Filesystem status")
         {
             match status.phase {
-                AttachmentPhase::Ready => return status,
-                AttachmentPhase::Failed => {
-                    panic!("Attachment {name} failed: {:?}", status.detail)
+                FilesystemPhase::Ready => return status,
+                FilesystemPhase::Failed => {
+                    panic!("Filesystem {name} failed: {:?}", status.detail)
                 },
                 _ => {},
             }
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "Attachment {name} did not become ready"
+            "Filesystem {name} did not become ready"
         );
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -541,21 +541,21 @@ async fn declarative_apply_receipts_converge_after_lost_replies() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn down_stops_runtime_but_preserves_desired_attachment_across_restart() {
+async fn down_stops_runtime_but_preserves_desired_filesystem_across_restart() {
     let fixture = Fixture::new();
     let location = fixture.home_path().join("mount-point");
     std::fs::create_dir_all(&location).expect("mount point");
     let mut daemon = fixture.start_daemon().await;
     let socket = fixture.endpoint().control_socket();
     let mut control = client(&socket).await.expect("control client");
-    let attachment = attachment_definition("kept", &location);
+    let filesystem = filesystem_definition("kept", &location);
     let receipt = apply_resources(
         &mut control,
-        vec![ResourceDefinition::Attachment(attachment.clone())],
+        vec![ResourceDefinition::Filesystem(filesystem.clone())],
     )
     .await;
     assert!(receipt.changed);
-    let status = wait_for_attachment_ready(&mut control, &attachment.name).await;
+    let status = wait_for_filesystem_ready(&mut control, &filesystem.name).await;
     assert_eq!(status.desired_revision, receipt.revision);
     assert!(
         !fixture
@@ -575,18 +575,18 @@ async fn down_stops_runtime_but_preserves_desired_attachment_across_restart() {
 
     let mut restarted = fixture.start_daemon().await;
     let mut control = client(&socket).await.expect("control client");
-    let restored = wait_for_attachment_ready(&mut control, &attachment.name).await;
+    let restored = wait_for_filesystem_ready(&mut control, &filesystem.name).await;
     assert_eq!(restored.desired_revision, receipt.revision);
-    let listed = fixture.run(&["--output", "json", "attachment", "ls"]);
-    assert_success(&listed, "attachment ls");
+    let listed = fixture.run(&["--output", "json", "fs", "ls"]);
+    assert_success(&listed, "fs ls");
     let json: serde_json::Value = serde_json::from_slice(&listed.stdout)
-        .expect("attachment ls --output json must produce valid JSON");
-    let attachments = json["result"]["attachments"]
+        .expect("fs ls --output json must produce valid JSON");
+    let filesystems = json["result"]["filesystems"]
         .as_array()
-        .expect("attachment ls result.attachments array");
-    assert_eq!(attachments.len(), 1);
-    assert_eq!(attachments[0]["name"], "kept");
-    assert_eq!(attachments[0]["phase"], "ready");
+        .expect("fs ls result.filesystems array");
+    assert_eq!(filesystems.len(), 1);
+    assert_eq!(filesystems[0]["name"], "kept");
+    assert_eq!(filesystems[0]["phase"], "ready");
 
     assert!(!fixture.home_path().join("client/filesystems").exists());
     restarted.stop().await;
@@ -617,14 +617,14 @@ async fn no_input_setup_boots_and_orients_without_mounting_or_attaching() {
         "a --no-input run must not mount anything"
     );
 
-    let filesystems = fixture.run(&["--output", "json", "attachment", "ls"]);
-    assert_success(&filesystems, "attachment ls");
+    let filesystems = fixture.run(&["--output", "json", "fs", "ls"]);
+    assert_success(&filesystems, "fs ls");
     let filesystems_json: serde_json::Value = serde_json::from_slice(&filesystems.stdout)
-        .expect("attachment ls --output json must produce valid JSON");
+        .expect("fs ls --output json must produce valid JSON");
     assert_eq!(
-        filesystems_json["result"]["attachments"]
+        filesystems_json["result"]["filesystems"]
             .as_array()
-            .expect("attachment ls result.attachments array")
+            .expect("fs ls result.filesystems array")
             .len(),
         0,
         "a --no-input run must not attach anything"

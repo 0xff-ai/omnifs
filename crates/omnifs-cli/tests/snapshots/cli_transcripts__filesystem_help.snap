@@ -1,20 +1,20 @@
 ---
 source: crates/omnifs-cli/tests/cli_transcripts.rs
-expression: "fixture.transcript(&fixture.run(&[\"attachment\", \"--help\"]))"
+expression: "fixture.transcript(&fixture.run(&[\"fs\", \"--help\"]))"
 ---
 exit: 0
 stdout:
-Add, list, inspect, remove, restart, or enter Attachments
+Add, list, inspect, remove, restart, or enter Filesystems
 
-Usage: omnifs attachment [OPTIONS] <COMMAND>
+Usage: omnifs fs [OPTIONS] <COMMAND>
 
 Commands:
-  add      Add a platform-supported Attachment
-  ls       List desired Attachments and their observed state
-  show     Show one desired Attachment and its observed state
-  rm       Remove an Attachment from desired state
-  restart  Restart an Attachment through a durable action
-  shell    Enter the Attachment or run a command in its runtime
+  add      Add a platform-supported Filesystem
+  ls       List desired Filesystems and their observed state
+  show     Show one desired Filesystem and its observed state
+  rm       Remove a Filesystem from desired state
+  restart  Restart a Filesystem through a durable action
+  shell    Enter the Filesystem or run a command in its runtime
   help     Print this message or the help of the given subcommand(s)
 
 Options:

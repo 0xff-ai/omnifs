@@ -118,8 +118,8 @@ pub(crate) struct WireReply {
 pub(crate) enum Handshake {
     Hello {
         protocol: u32,
-        attachment: omnifs_core::ResourceName,
-        spec: omnifs_core::AttachmentSpec,
+        filesystem: omnifs_core::ResourceName,
+        spec: omnifs_core::FilesystemSpec,
         runtime_instance: String,
     },
     Welcome {

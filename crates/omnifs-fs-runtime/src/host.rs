@@ -6,7 +6,7 @@ use crate::{
     RuntimeState, advise,
 };
 use anyhow::{Context as _, Result, ensure};
-use omnifs_core::{AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceName};
+use omnifs_core::{FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName};
 use omnifs_mtab::{RunnerClaim, RunnerRecord};
 use omnifs_thin::host_control::{
     RunnerControlClient, RunnerPhase, StopOutcome, control_socket_for,
@@ -19,8 +19,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
 const STOP_TIMEOUT: Duration = Duration::from_secs(6);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-pub(crate) fn probe(protocol: AttachmentProtocol) -> Result<()> {
-    if protocol == AttachmentProtocol::Fuse && !Path::new("/dev/fuse").exists() {
+pub(crate) fn probe(protocol: FilesystemProtocol) -> Result<()> {
+    if protocol == FilesystemProtocol::Fuse && !Path::new("/dev/fuse").exists() {
         anyhow::bail!("/dev/fuse is not available on this host");
     }
     Ok(())
@@ -77,8 +77,8 @@ impl HostDriver {
     /// example, stop it) does not have to re-read the record from disk.
     pub async fn confirmed(
         &self,
-        attachment: &ResourceName,
-        spec: &AttachmentSpec,
+        filesystem: &ResourceName,
+        spec: &FilesystemSpec,
     ) -> Result<Option<(RunnerRecord, RunnerPhase)>> {
         let mount_point = spec.location();
         let Some(record) = RunnerRecord::read(&self.state_dir)? else {
@@ -93,7 +93,7 @@ impl HostDriver {
             }
             return Ok(None);
         };
-        ensure_record_matches(&record.attachment, &record.spec, attachment, spec)?;
+        ensure_record_matches(&record.filesystem, &record.spec, filesystem, spec)?;
         let state = RunnerControlClient::new(&record)
             .ping()
             .await
@@ -112,25 +112,25 @@ impl HostDriver {
         probe(request.spec.protocol())?;
         self.events.emit(RuntimeEvent::Stage {
             stage: RuntimeStage::StartProcess,
-            runtime: AttachmentRuntime::Host,
-            attachment: request.attachment.clone(),
+            runtime: FilesystemRuntime::Host,
+            filesystem: request.filesystem.clone(),
             state: RuntimeState::Active,
         });
         PendingHostFilesystem::spawn(PendingHostSpawn {
             state_dir: &self.state_dir,
             log_path: &self.log_path,
             executable: &self.executable,
-            attachment: request.attachment,
+            filesystem: request.filesystem,
             runtime_instance: request.runtime_instance,
             spec: request.spec,
             attach_socket: request.endpoints.attach_unix()?,
             control_socket: self.control_socket.as_deref(),
         })?
-        .wait_until_mounted(request.attachment, request.spec)
+        .wait_until_mounted(request.filesystem, request.spec)
         .await?;
         self.events.emit(RuntimeEvent::MountReady {
-            runtime: AttachmentRuntime::Host,
-            attachment: request.attachment.clone(),
+            runtime: FilesystemRuntime::Host,
+            filesystem: request.filesystem.clone(),
             location: request.spec.location().to_path_buf(),
             container: None,
         });
@@ -212,9 +212,9 @@ struct PendingHostSpawn<'a> {
     state_dir: &'a Path,
     log_path: &'a Path,
     executable: &'a Path,
-    attachment: &'a ResourceName,
+    filesystem: &'a ResourceName,
     runtime_instance: &'a str,
-    spec: &'a AttachmentSpec,
+    spec: &'a FilesystemSpec,
     attach_socket: &'a Path,
     control_socket: Option<&'a Path>,
 }
@@ -225,7 +225,7 @@ impl PendingHostFilesystem {
             state_dir,
             log_path,
             executable,
-            attachment,
+            filesystem,
             runtime_instance,
             spec,
             attach_socket,
@@ -257,7 +257,7 @@ impl PendingHostFilesystem {
         command
             .arg("run-fs")
             .arg("--name")
-            .arg(attachment.as_str())
+            .arg(filesystem.as_str())
             .arg("--protocol")
             .arg(spec.protocol().as_str())
             .arg("--runtime")
@@ -308,8 +308,8 @@ impl PendingHostFilesystem {
 
     async fn wait_until_mounted(
         self,
-        attachment: &ResourceName,
-        spec: &AttachmentSpec,
+        filesystem: &ResourceName,
+        spec: &FilesystemSpec,
     ) -> Result<()> {
         // Bundled (including `spec`) so the check closure captures nothing
         // from the enclosing scope and takes everything by explicit `&mut`
@@ -318,13 +318,13 @@ impl PendingHostFilesystem {
         // an argument can.
         struct Wait<'a> {
             pending: PendingHostFilesystem,
-            attachment: &'a ResourceName,
-            spec: &'a AttachmentSpec,
+            filesystem: &'a ResourceName,
+            spec: &'a FilesystemSpec,
             last_phase: Option<RunnerPhase>,
         }
         let mut wait = Wait {
             pending: self,
-            attachment,
+            filesystem,
             spec,
             last_phase: None,
         };
@@ -342,7 +342,7 @@ impl PendingHostFilesystem {
                         return Err(advise(
                             anyhow::anyhow!(
                                 "host filesystem `{}` exited with {status}",
-                                wait.attachment
+                                wait.filesystem
                             ),
                             RuntimeAdvice::HostLog(wait.pending.log_path.clone()),
                         ));
@@ -350,9 +350,9 @@ impl PendingHostFilesystem {
                     match RunnerRecord::read(&wait.pending.state_dir) {
                         Ok(Some(record)) if record.instance_id == wait.pending.instance_id => {
                             ensure_record_matches(
-                                &record.attachment,
+                                &record.filesystem,
                                 &record.spec,
-                                wait.attachment,
+                                wait.filesystem,
                                 wait.spec,
                             )?;
                             if let Ok(state) = RunnerControlClient::new(&record).ping().await {
@@ -363,7 +363,7 @@ impl PendingHostFilesystem {
                                         return Err(advise(
                                             anyhow::anyhow!(
                                                 "host filesystem `{}` failed: {message}",
-                                                wait.attachment
+                                                wait.filesystem
                                             ),
                                             RuntimeAdvice::HostLog(wait.pending.log_path.clone()),
                                         ));
@@ -402,7 +402,7 @@ impl PendingHostFilesystem {
         ready?.map_or_else(
             || {
                 Err(mount_startup_timeout(
-                    attachment,
+                    filesystem,
                     wait.last_phase.clone(),
                     &wait.pending.instance_id,
                     &wait.pending.log_path,
@@ -414,7 +414,7 @@ impl PendingHostFilesystem {
 }
 
 fn mount_startup_timeout(
-    attachment: &ResourceName,
+    filesystem: &ResourceName,
     last_phase: Option<RunnerPhase>,
     instance_id: &str,
     log_path: &Path,
@@ -422,7 +422,7 @@ fn mount_startup_timeout(
     let phase = phase_label(last_phase);
     advise(
         anyhow::anyhow!(
-            "host filesystem `{attachment}` did not confirm mount startup within {}s; \
+            "host filesystem `{filesystem}` did not confirm mount startup within {}s; \
              last proved phase was {phase}; runner {instance_id} was left alive for safe cleanup",
             STARTUP_TIMEOUT.as_secs(),
         ),
@@ -527,14 +527,14 @@ mod tests {
             instance_id: "0123456789abcdef0123456789abcdef".to_owned(),
             pid: 42,
             process_group: 42,
-            attachment: ResourceName::new("main").unwrap(),
-            spec: AttachmentSpec::new(
+            filesystem: ResourceName::new("main").unwrap(),
+            spec: FilesystemSpec::new(
                 if cfg!(target_os = "linux") {
-                    AttachmentProtocol::Fuse
+                    FilesystemProtocol::Fuse
                 } else {
-                    AttachmentProtocol::Nfs
+                    FilesystemProtocol::Nfs
                 },
-                AttachmentRuntime::Host,
+                FilesystemRuntime::Host,
                 mount_point.clone(),
                 None,
                 None,
@@ -579,10 +579,10 @@ mod tests {
             instance_id: "0123456789abcdef0123456789abcdef".to_owned(),
             pid: 42,
             process_group: 42,
-            attachment: valid_id,
-            spec: AttachmentSpec::new(
-                AttachmentProtocol::Nfs,
-                AttachmentRuntime::Host,
+            filesystem: valid_id,
+            spec: FilesystemSpec::new(
+                FilesystemProtocol::Nfs,
+                FilesystemRuntime::Host,
                 PathBuf::from("/mnt/valid"),
                 None,
                 None,

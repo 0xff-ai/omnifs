@@ -1,7 +1,7 @@
 //! Bounded, non-blocking progress fanout with complete snapshot recovery.
 
 use omnifs_api::{
-    ActionPhase, AttachmentProgress, CredentialProgress, ProgressEvent, ProgressEventKind,
+    ActionPhase, CredentialProgress, FilesystemProgress, ProgressEvent, ProgressEventKind,
     ProgressSnapshot, ProgressTarget, ProviderPreparationProgress, ResourcePhase, ServingProgress,
 };
 use omnifs_core::ResourceRevision;
@@ -279,19 +279,19 @@ impl ProgressHub {
         })
     }
 
-    pub(crate) fn record_attachment(
+    pub(crate) fn record_filesystem(
         &self,
         target: ProgressTarget,
-        progress: AttachmentProgress,
+        progress: FilesystemProgress,
     ) -> u64 {
-        let event = ProgressEventKind::AttachmentProgress(progress.clone());
+        let event = ProgressEventKind::FilesystemProgress(progress.clone());
         self.record(target, event, move |snapshot| {
             snapshot
-                .attachments
+                .filesystems
                 .retain(|current| current.key != progress.key);
-            snapshot.attachments.push(progress);
+            snapshot.filesystems.push(progress);
             snapshot
-                .attachments
+                .filesystems
                 .sort_by(|left, right| left.key.cmp(&right.key));
         })
     }
@@ -550,7 +550,7 @@ fn filter_snapshot(
                 .credentials
                 .retain(|progress| resource_names.contains(&progress.key.name));
             filtered
-                .attachments
+                .filesystems
                 .retain(|progress| resource_names.contains(&progress.key.name));
         },
         ProgressTarget::Action(action_id) => {
@@ -570,7 +570,7 @@ fn filter_snapshot(
                 .credentials
                 .retain(|progress| affected.as_ref() == Some(&progress.key));
             filtered
-                .attachments
+                .filesystems
                 .retain(|progress| affected.as_ref() == Some(&progress.key));
         },
     }
@@ -699,7 +699,7 @@ mod tests {
             providers: Vec::new(),
             serving: None,
             credentials: Vec::new(),
-            attachments: Vec::new(),
+            filesystems: Vec::new(),
         }
     }
 

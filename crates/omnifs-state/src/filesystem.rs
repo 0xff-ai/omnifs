@@ -1,16 +1,16 @@
-//! Durable observed state for daemon-owned attachment runtimes.
+//! Durable observed state for daemon-owned filesystem runtimes.
 
 use crate::db::Db;
 use crate::row::{RowExt as _, sql_int};
 use anyhow::Context as _;
-use omnifs_api::AttachmentDefinition;
-use omnifs_core::{AttachmentSpec, AttachmentVersion, ResourceName};
+use omnifs_api::FilesystemDefinition;
+use omnifs_core::{FilesystemSpec, FilesystemVersion, ResourceName};
 use sqlx::sqlite::{SqliteConnection, SqliteRow};
 use sqlx::{Row as _, SqlitePool};
 
-/// Closed lifecycle stages persisted for one attachment runtime.
+/// Closed lifecycle stages persisted for one filesystem runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttachmentPhase {
+pub enum FilesystemPhase {
     Pending,
     WaitingForNamespace,
     Starting,
@@ -21,7 +21,7 @@ pub enum AttachmentPhase {
     Deleting,
 }
 
-impl AttachmentPhase {
+impl FilesystemPhase {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -45,24 +45,24 @@ impl AttachmentPhase {
             "retrying" => Ok(Self::Retrying),
             "failed" => Ok(Self::Failed),
             "deleting" => Ok(Self::Deleting),
-            other => anyhow::bail!("stored attachment phase `{other}` is not recognized"),
+            other => anyhow::bail!("stored filesystem phase `{other}` is not recognized"),
         }
     }
 }
 
-/// The durable identity and observed lifecycle state for one attachment.
+/// The durable identity and observed lifecycle state for one filesystem.
 ///
 /// A row may outlive its desired resource while deletion is in progress.  In
 /// that case `desired_version` is absent and `deleting` remains true until the
 /// supervisor has proved that the exact runtime is gone.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttachmentInstance {
+pub struct FilesystemInstance {
     pub name: ResourceName,
-    pub desired_version: Option<AttachmentVersion>,
-    pub desired_spec: Option<AttachmentSpec>,
-    pub observed_version: Option<AttachmentVersion>,
-    pub observed_spec: Option<AttachmentSpec>,
-    pub phase: AttachmentPhase,
+    pub desired_version: Option<FilesystemVersion>,
+    pub desired_spec: Option<FilesystemSpec>,
+    pub observed_version: Option<FilesystemVersion>,
+    pub observed_spec: Option<FilesystemSpec>,
+    pub phase: FilesystemPhase,
     pub runtime_instance: Option<String>,
     pub action_generation: u64,
     pub last_error_code: Option<String>,
@@ -72,31 +72,31 @@ pub struct AttachmentInstance {
     pub updated_at: i64,
 }
 
-/// One fenced supervisor update to an attachment's observed lifecycle state.
+/// One fenced supervisor update to a filesystem's observed lifecycle state.
 ///
 /// Resource apply owns desired fields and deletion state. Durable action
 /// acceptance owns `action_generation`. A supervisor carries all three facts
 /// it observed before an effect, so a stale result cannot become visible.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttachmentObservation {
+pub struct FilesystemObservation {
     pub name: ResourceName,
-    pub expected_desired_version: Option<AttachmentVersion>,
+    pub expected_desired_version: Option<FilesystemVersion>,
     pub expected_action_generation: u64,
     pub expected_runtime_instance: Option<String>,
-    pub observed_version: Option<AttachmentVersion>,
-    pub observed_spec: Option<AttachmentSpec>,
-    pub phase: AttachmentPhase,
+    pub observed_version: Option<FilesystemVersion>,
+    pub observed_spec: Option<FilesystemSpec>,
+    pub phase: FilesystemPhase,
     pub runtime_instance: Option<String>,
     pub last_error_code: Option<String>,
     pub last_error_detail: Option<String>,
     pub retry_at: Option<i64>,
 }
 
-impl AttachmentObservation {
+impl FilesystemObservation {
     /// Construct a fenced write from one exact durable row read before an
-    /// attachment effect. Callers can change only observed lifecycle fields.
+    /// filesystem effect. Callers can change only observed lifecycle fields.
     #[must_use]
-    pub fn from_instance(instance: &AttachmentInstance) -> Self {
+    pub fn from_instance(instance: &FilesystemInstance) -> Self {
         Self {
             name: instance.name.clone(),
             expected_desired_version: instance.desired_version,
@@ -115,40 +115,40 @@ impl AttachmentObservation {
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.observed_version.is_some() == self.observed_spec.is_some(),
-            "attachment observed version and spec presence differ"
+            "filesystem observed version and spec presence differ"
         );
         validate_runtime_instance(
             self.expected_runtime_instance.as_deref(),
-            "expected attachment runtime instance",
+            "expected filesystem runtime instance",
         )?;
         validate_runtime_instance(
             self.runtime_instance.as_deref(),
-            "attachment runtime instance",
+            "filesystem runtime instance",
         )?;
         if let Some(retry_at) = self.retry_at {
-            anyhow::ensure!(retry_at >= 0, "attachment retry_at is negative");
+            anyhow::ensure!(retry_at >= 0, "filesystem retry_at is negative");
         }
         if let Some(code) = &self.last_error_code {
-            anyhow::ensure!(!code.is_empty(), "attachment error code cannot be empty");
+            anyhow::ensure!(!code.is_empty(), "filesystem error code cannot be empty");
         }
         if let Some(detail) = &self.last_error_detail {
             anyhow::ensure!(
                 !detail.is_empty(),
-                "attachment error detail cannot be empty"
+                "filesystem error detail cannot be empty"
             );
         }
-        if self.phase == AttachmentPhase::Ready {
+        if self.phase == FilesystemPhase::Ready {
             anyhow::ensure!(
                 self.expected_desired_version.is_some()
                     && self.observed_version == self.expected_desired_version,
-                "a ready attachment observation must match its expected desired version"
+                "a ready filesystem observation must match its expected desired version"
             );
         }
         Ok(())
     }
 }
 
-impl AttachmentInstance {
+impl FilesystemInstance {
     #[must_use]
     pub fn pending(name: ResourceName) -> Self {
         Self {
@@ -157,7 +157,7 @@ impl AttachmentInstance {
             desired_spec: None,
             observed_version: None,
             observed_spec: None,
-            phase: AttachmentPhase::Pending,
+            phase: FilesystemPhase::Pending,
             runtime_instance: None,
             action_generation: 0,
             last_error_code: None,
@@ -169,29 +169,29 @@ impl AttachmentInstance {
     }
 
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(self.updated_at >= 0, "attachment updated_at is negative");
+        anyhow::ensure!(self.updated_at >= 0, "filesystem updated_at is negative");
         anyhow::ensure!(
             self.desired_version.is_some() == self.desired_spec.is_some(),
-            "attachment desired version and spec presence differ"
+            "filesystem desired version and spec presence differ"
         );
         anyhow::ensure!(
             self.observed_version.is_some() == self.observed_spec.is_some(),
-            "attachment observed version and spec presence differ"
+            "filesystem observed version and spec presence differ"
         );
         validate_runtime_instance(
             self.runtime_instance.as_deref(),
-            "attachment runtime instance",
+            "filesystem runtime instance",
         )?;
         if let Some(retry_at) = self.retry_at {
-            anyhow::ensure!(retry_at >= 0, "attachment retry_at is negative");
+            anyhow::ensure!(retry_at >= 0, "filesystem retry_at is negative");
         }
         if let Some(code) = &self.last_error_code {
-            anyhow::ensure!(!code.is_empty(), "attachment error code cannot be empty");
+            anyhow::ensure!(!code.is_empty(), "filesystem error code cannot be empty");
         }
         if let Some(detail) = &self.last_error_detail {
             anyhow::ensure!(
                 !detail.is_empty(),
-                "attachment error detail cannot be empty"
+                "filesystem error detail cannot be empty"
             );
         }
         Ok(())
@@ -199,14 +199,14 @@ impl AttachmentInstance {
 }
 
 impl Db<'_> {
-    pub(crate) async fn write_attachment_observation(
+    pub(crate) async fn write_filesystem_observation(
         &mut self,
-        observation: AttachmentObservation,
-    ) -> anyhow::Result<Option<AttachmentInstance>> {
+        observation: FilesystemObservation,
+    ) -> anyhow::Result<Option<FilesystemInstance>> {
         observation.validate()?;
-        self.transact("attachment observation", async move |db| {
+        self.transact("filesystem observation", async move |db| {
             let result = sqlx::query(
-                "UPDATE attachment_instances SET \
+                "UPDATE filesystem_instances SET \
                      observed_version = ?1, observed_spec = ?2, phase = ?3, \
                      runtime_instance = ?4, last_error_code = ?5, last_error_detail = ?6, \
                      retry_at = ?7, updated_at = unixepoch() \
@@ -238,33 +238,33 @@ impl Db<'_> {
             )
             .bind(sql_int(
                 observation.expected_action_generation,
-                "expected attachment action generation",
+                "expected filesystem action generation",
             )?)
             .bind(observation.expected_runtime_instance.as_deref())
             .execute(db.raw())
             .await
-            .with_context(|| format!("write attachment observation `{}`", observation.name))?;
+            .with_context(|| format!("write filesystem observation `{}`", observation.name))?;
             if result.rows_affected() == 0 {
                 return Ok(None);
             }
             load_instance(db.raw(), &observation.name)
                 .await?
                 .map(Some)
-                .context("attachment instance disappeared after observation write")
+                .context("filesystem instance disappeared after observation write")
         })
         .await
     }
 
-    pub(crate) async fn delete_attachment_instance_if_deleting(
+    pub(crate) async fn delete_filesystem_instance_if_deleting(
         &mut self,
         name: ResourceName,
         runtime_instance: Option<String>,
     ) -> anyhow::Result<bool> {
         self.transact(
-            "conditional attachment instance deletion",
+            "conditional filesystem instance deletion",
             async move |db| {
                 let result = sqlx::query(
-                    "DELETE FROM attachment_instances \
+                    "DELETE FROM filesystem_instances \
                  WHERE name = ?1 AND desired_version IS NULL AND deleting = 1 \
                    AND ((runtime_instance IS NULL AND ?2 IS NULL) OR runtime_instance = ?2)",
                 )
@@ -272,7 +272,7 @@ impl Db<'_> {
                 .bind(runtime_instance.as_deref())
                 .execute(db.raw())
                 .await
-                .with_context(|| format!("conditionally delete attachment instance `{name}`"))?;
+                .with_context(|| format!("conditionally delete filesystem instance `{name}`"))?;
                 Ok(result.rows_affected() == 1)
             },
         )
@@ -283,67 +283,67 @@ impl Db<'_> {
 pub(crate) async fn load_instance(
     connection: &mut SqliteConnection,
     name: &ResourceName,
-) -> anyhow::Result<Option<AttachmentInstance>> {
+) -> anyhow::Result<Option<FilesystemInstance>> {
     sqlx::query(
         "SELECT name, desired_version, desired_spec, observed_version, observed_spec, phase, runtime_instance, \
                 action_generation, last_error_code, last_error_detail, retry_at, deleting, updated_at \
-         FROM attachment_instances WHERE name = ?1",
+         FROM filesystem_instances WHERE name = ?1",
     )
     .bind(name.as_str())
     .fetch_optional(connection)
     .await
-    .context("read attachment instance")?
+    .context("read filesystem instance")?
     .map(|row| decode_instance(&row))
     .transpose()
 }
 
-pub(crate) async fn list_instances(pool: &SqlitePool) -> anyhow::Result<Vec<AttachmentInstance>> {
+pub(crate) async fn list_instances(pool: &SqlitePool) -> anyhow::Result<Vec<FilesystemInstance>> {
     sqlx::query(
         "SELECT name, desired_version, desired_spec, observed_version, observed_spec, phase, runtime_instance, \
                 action_generation, last_error_code, last_error_detail, retry_at, deleting, updated_at \
-         FROM attachment_instances ORDER BY name",
+         FROM filesystem_instances ORDER BY name",
     )
     .fetch_all(pool)
     .await
-    .context("list attachment instances")?
+    .context("list filesystem instances")?
     .iter()
     .map(decode_instance)
     .collect()
 }
 
-fn decode_instance(row: &SqliteRow) -> anyhow::Result<AttachmentInstance> {
+fn decode_instance(row: &SqliteRow) -> anyhow::Result<FilesystemInstance> {
     let name_text = row.text("name")?;
     let name = ResourceName::new(name_text.clone())
-        .with_context(|| format!("decode attachment instance name `{name_text}`"))?;
+        .with_context(|| format!("decode filesystem instance name `{name_text}`"))?;
     let phase_text = row.text("phase")?;
     let deleting: i64 = row
         .try_get("deleting")
-        .context("read attachment deletion flag")?;
+        .context("read filesystem deletion flag")?;
     let deleting = match deleting {
         0 => false,
         1 => true,
-        value => anyhow::bail!("stored attachment deletion flag is {value}, expected 0 or 1"),
+        value => anyhow::bail!("stored filesystem deletion flag is {value}, expected 0 or 1"),
     };
     let updated_at: i64 = row
         .try_get("updated_at")
-        .context("read attachment updated_at")?;
+        .context("read filesystem updated_at")?;
     let action_generation = row.unsigned("action_generation")?;
     let retry_at: Option<i64> = row
         .try_get("retry_at")
-        .context("read attachment retry_at")?;
+        .context("read filesystem retry_at")?;
     if retry_at.is_some_and(|value| value < 0) {
-        anyhow::bail!("stored attachment retry_at is negative");
+        anyhow::bail!("stored filesystem retry_at is negative");
     }
     let runtime_instance: Option<String> = row
         .try_get("runtime_instance")
-        .context("read attachment runtime instance")?;
-    let instance = AttachmentInstance {
+        .context("read filesystem runtime instance")?;
+    let instance = FilesystemInstance {
         name,
         desired_version: decode_optional_version(row, "desired_version")?,
         desired_spec: None,
         observed_version: decode_optional_version(row, "observed_version")?,
         observed_spec: None,
-        phase: AttachmentPhase::parse(&phase_text)?,
+        phase: FilesystemPhase::parse(&phase_text)?,
         runtime_instance,
         action_generation,
         last_error_code: row.optional_text("last_error_code")?,
@@ -369,59 +369,59 @@ fn decode_instance(row: &SqliteRow) -> anyhow::Result<AttachmentInstance> {
 
 fn encode_spec(
     name: &ResourceName,
-    spec: Option<&AttachmentSpec>,
-    version: Option<AttachmentVersion>,
+    spec: Option<&FilesystemSpec>,
+    version: Option<FilesystemVersion>,
 ) -> anyhow::Result<Option<Vec<u8>>> {
     match (spec, version) {
         (None, None) => Ok(None),
         (Some(spec), Some(expected)) => {
-            let definition = AttachmentDefinition {
+            let definition = FilesystemDefinition {
                 name: name.clone(),
                 spec: spec.clone(),
             };
-            let (canonical, actual) = crate::resource::codec::encode_attachment(&definition)?;
+            let (canonical, actual) = crate::resource::codec::encode_filesystem(&definition)?;
             anyhow::ensure!(
                 actual == expected,
-                "attachment spec version does not match canonical bytes"
+                "filesystem spec version does not match canonical bytes"
             );
             Ok(Some(canonical))
         },
-        _ => anyhow::bail!("attachment spec and version presence differ"),
+        _ => anyhow::bail!("filesystem spec and version presence differ"),
     }
 }
 
 fn decode_spec(
     name: &ResourceName,
     canonical: Option<&[u8]>,
-    version: Option<AttachmentVersion>,
-) -> anyhow::Result<Option<AttachmentSpec>> {
+    version: Option<FilesystemVersion>,
+) -> anyhow::Result<Option<FilesystemSpec>> {
     match (canonical, version) {
         (None, None) => Ok(None),
         (Some(canonical), Some(version)) => {
-            let definition = crate::resource::codec::decode_attachment(canonical, version)?;
+            let definition = crate::resource::codec::decode_filesystem(canonical, version)?;
             anyhow::ensure!(
                 definition.name == *name,
-                "stored attachment instance spec name does not match row name"
+                "stored filesystem instance spec name does not match row name"
             );
             Ok(Some(definition.spec))
         },
-        _ => anyhow::bail!("stored attachment spec and version presence differ"),
+        _ => anyhow::bail!("stored filesystem spec and version presence differ"),
     }
 }
 
 fn decode_optional_version(
     row: &SqliteRow,
     column: &str,
-) -> anyhow::Result<Option<AttachmentVersion>> {
+) -> anyhow::Result<Option<FilesystemVersion>> {
     row.optional_bytes(column)?
         .map(|bytes| {
             let digest: [u8; 32] = bytes.clone().try_into().map_err(|_| {
                 anyhow::anyhow!(
-                    "stored attachment `{column}` has {} bytes; expected 32",
+                    "stored filesystem `{column}` has {} bytes; expected 32",
                     bytes.len()
                 )
             })?;
-            Ok(AttachmentVersion::from_digest(digest))
+            Ok(FilesystemVersion::from_digest(digest))
         })
         .transpose()
 }

@@ -52,13 +52,13 @@ fn dual_filesystem_serves_one_namespace() {
         return;
     };
 
-    // Live status, not durable daemon metadata, owns live attachments.
+    // Live status, not durable daemon metadata, owns live filesystems.
     let status = daemon.status();
     assert_eq!(
-        status.attachments.len(),
+        status.filesystems.len(),
         2,
         "the VFS server must observe both served filesystems, got {:?}",
-        status.attachments
+        status.filesystems
     );
 
     let fuse_root = daemon.tree_root(0);

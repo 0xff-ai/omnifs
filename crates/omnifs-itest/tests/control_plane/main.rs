@@ -498,7 +498,7 @@ fn two_daemons_two_homes_resolve_through_their_own_sockets() {
         "status A must report A's pid"
     );
     assert!(
-        inventory_a["attachments"]
+        inventory_a["filesystems"]
             .as_array()
             .is_some_and(Vec::is_empty)
     );
@@ -516,7 +516,7 @@ fn two_daemons_two_homes_resolve_through_their_own_sockets() {
         "status B must report B's pid"
     );
     assert!(
-        json_b["result"]["inventory"]["attachments"]
+        json_b["result"]["inventory"]["filesystems"]
             .as_array()
             .is_some_and(Vec::is_empty)
     );

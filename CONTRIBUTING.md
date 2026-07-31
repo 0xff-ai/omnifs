@@ -4,16 +4,16 @@ Reference for the contributor workflow, build and validation commands, runtime d
 
 ## Getting started
 
-The primary contributor workflow is `just dev`, which runs `scripts/dev.ts`. The script builds providers and the native CLI, starts a host daemon, renders KCL desired resources, applies them with `target/debug/omnifs apply <file> --yes`, waits for the terminal revision, and opens an Attachment shell inside `dev-docker` at `/omnifs`.
+The primary contributor workflow is `just dev`, which runs `scripts/dev.ts`. The script builds providers and the native CLI, starts a host daemon, renders KCL desired resources, applies them with `target/debug/omnifs apply <file> --yes`, waits for the terminal revision, and opens a Filesystem shell inside `dev-docker` at `/omnifs`.
 
 ```bash
 just dev            # build providers and the CLI, apply dev resources, wait for ready, open /omnifs
 target/debug/omnifs status                     # host-native: runs directly, no docker exec needed
-target/debug/omnifs attachment shell dev-docker -- pwd # run one command at /omnifs in the guest
+target/debug/omnifs fs shell dev-docker -- pwd # run one command at /omnifs in the guest
 FILESYSTEM=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
 docker exec -it -w /omnifs "$FILESYSTEM" /bin/sh # reattach to the browsing shell
-target/debug/omnifs attachment rm dev-docker # request Docker runner teardown
-target/debug/omnifs attachment rm dev-host   # request host filesystem teardown
+target/debug/omnifs fs rm dev-docker # request Docker runner teardown
+target/debug/omnifs fs rm dev-host   # request host filesystem teardown
 target/debug/omnifs down                       # stop the daemon
 ```
 
@@ -53,7 +53,7 @@ For mount, provider, clone, traversal, or runtime behavior changes, do not stop 
 ```bash
 just dev -y
 target/debug/omnifs status
-target/debug/omnifs --output json status | jq '.result | {attachments, mounts, providers, credentials}'
+target/debug/omnifs --output json status | jq '.result | {filesystems, mounts, providers, credentials}'
 FILESYSTEM=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
 docker exec "$FILESYSTEM" sh -c 'ls /omnifs/github/0xff-ai/omnifs/issues/open'
 tail -n 80 ~/.omnifs-dev/daemon-state/logs/daemon.log

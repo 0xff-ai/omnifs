@@ -628,8 +628,8 @@ async fn finish_publication(
             Some(post_publish_errors.join("; ")),
         );
     }
-    let has_attachment_work = resources.mark_namespace_ready(revision);
-    if !has_attachment_work {
+    let has_filesystem_work = resources.mark_namespace_ready(revision);
+    if !has_filesystem_work {
         resources.progress().publish(
             ProgressTarget::DesiredRevision(revision),
             ProgressEventKind::RevisionReady(revision),
@@ -672,7 +672,7 @@ async fn complete_actions_after_publish(
             revoke_actions.push(*action_id);
             continue;
         }
-        if receipt.kind == ActionKind::RestartAttachment {
+        if receipt.kind == ActionKind::RestartFilesystem {
             continue;
         }
         match state
@@ -842,14 +842,14 @@ async fn start_pending_actions(
     Ok(actions)
 }
 
-/// Reconstruct the non-secret action stage after daemon restart. Attachments
+/// Reconstruct the non-secret action stage after daemon restart. Filesystems
 /// have their own reconciler and intentionally do not enter this generation
 /// owner.
 const fn pending_credential_action_stage(kind: ActionKind) -> Option<CredentialProgressStage> {
     match kind {
         ActionKind::SetCredentialMaterial => Some(CredentialProgressStage::Refreshing),
         ActionKind::RevokeCredential => Some(CredentialProgressStage::Revoking),
-        ActionKind::RestartAttachment => None,
+        ActionKind::RestartFilesystem => None,
     }
 }
 
@@ -987,7 +987,7 @@ fn mark_resources_preparing(resources: &ResourceControl, revision: ResourceRevis
                     continue;
                 }
                 status.phase = match status.key.kind {
-                    ResourceKind::Attachment => ResourcePhase::Pending,
+                    ResourceKind::Filesystem => ResourcePhase::Pending,
                     ResourceKind::Provider | ResourceKind::Credential | ResourceKind::Mount => {
                         ResourcePhase::Preparing
                     },
@@ -1138,7 +1138,7 @@ fn publish_failure(
                     continue;
                 }
                 let failed = match (error.provider, status.key.kind) {
-                    (_, ResourceKind::Attachment) | (None, ResourceKind::Provider) => false,
+                    (_, ResourceKind::Filesystem) | (None, ResourceKind::Provider) => false,
                     (Some(_), ResourceKind::Provider) => {
                         failed_provider_names.contains(&status.key.name)
                     },
@@ -1245,7 +1245,7 @@ mod tests {
             providers: Vec::new(),
             serving: None,
             credentials: Vec::new(),
-            attachments: Vec::new(),
+            filesystems: Vec::new(),
         }
     }
 
@@ -1292,7 +1292,7 @@ mod tests {
             Some(CredentialProgressStage::Revoking)
         );
         assert_eq!(
-            pending_credential_action_stage(ActionKind::RestartAttachment),
+            pending_credential_action_stage(ActionKind::RestartFilesystem),
             None
         );
     }

@@ -1,21 +1,21 @@
-//! Daemon-owned reconciliation of desired attachments into exact runtimes.
+//! Daemon-owned reconciliation of desired filesystems into exact runtimes.
 
 use crate::progress::ProgressHub;
 use crate::resource_control::ResourceControl;
 use anyhow::Context as _;
 use omnifs_api::{
-    ActionKind, ActionPhase, ActionReceipt, AttachmentProgress, AttachmentProgressStage,
+    ActionKind, ActionPhase, ActionReceipt, FilesystemProgress, FilesystemProgressStage,
     ProgressEventKind, ProgressTarget, ResourcePhase,
 };
 use omnifs_core::{
-    AttachmentRuntime, AttachmentSpec, ResourceKey, ResourceKind, ResourceName, ResourceRevision,
+    FilesystemRuntime, FilesystemSpec, ResourceKey, ResourceKind, ResourceName, ResourceRevision,
 };
 use omnifs_fs_runtime::{
     AttachEndpoints, ConfirmedRuntime, RuntimeDriver, RuntimeEvent, RuntimeEventReceiver,
     RuntimeEventSink, RuntimePaths, RuntimeStage, RuntimeState,
 };
 use omnifs_state::{
-    AttachmentInstance, AttachmentObservation, AttachmentPhase, DesiredAttachment, StateStore,
+    DesiredFilesystem, FilesystemInstance, FilesystemObservation, FilesystemPhase, StateStore,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
-const MAX_ACTIVE_ATTACHMENTS: usize = 4;
+const MAX_ACTIVE_FILESYSTEMS: usize = 4;
 const RUNTIME_EVENT_CAPACITY: usize = 32;
 const SESSION_WAIT: Duration = Duration::from_secs(30);
 const SESSION_LIVENESS_POLL: Duration = Duration::from_millis(250);
@@ -35,8 +35,8 @@ const MAX_RETRY_ATTEMPTS: u32 = 5;
 
 type StopAllReply = tokio::sync::oneshot::Sender<anyhow::Result<Vec<ResourceName>>>;
 
-/// Sole daemon owner of Attachment runtime sequencing and recovery.
-pub(crate) struct AttachmentSupervisor {
+/// Sole daemon owner of Filesystem runtime sequencing and recovery.
+pub(crate) struct FilesystemSupervisor {
     shutdown: watch::Sender<bool>,
     /// Interrupts an in-flight reconciliation pass before the command or
     /// shutdown path performs exact durable-identity cleanup.
@@ -59,8 +59,8 @@ struct ReconcileContext {
 
 struct Work {
     name: ResourceName,
-    desired: Option<DesiredAttachment>,
-    instance: AttachmentInstance,
+    desired: Option<DesiredFilesystem>,
+    instance: FilesystemInstance,
     action: Option<ActionReceipt>,
     retry_count: u32,
 }
@@ -70,7 +70,7 @@ enum WorkOutcome {
     Retry,
 }
 
-impl AttachmentSupervisor {
+impl FilesystemSupervisor {
     pub(crate) fn spawn(
         state: Arc<StateStore>,
         resources: Arc<ResourceControl>,
@@ -87,7 +87,7 @@ impl AttachmentSupervisor {
             vfs,
             paths,
             endpoints,
-            launch_slots: Arc::new(Semaphore::new(MAX_ACTIVE_ATTACHMENTS)),
+            launch_slots: Arc::new(Semaphore::new(MAX_ACTIVE_FILESYSTEMS)),
             queued: Arc::new(AtomicU32::new(0)),
             active: Arc::new(AtomicU32::new(0)),
         };
@@ -100,7 +100,7 @@ impl AttachmentSupervisor {
         })
     }
 
-    /// Stop every exact runtime while preserving desired attachment rows.
+    /// Stop every exact runtime while preserving desired filesystem rows.
     pub(crate) async fn stop_all(&self) -> anyhow::Result<Vec<ResourceName>> {
         self.interrupt.send_modify(|generation| {
             *generation = generation.saturating_add(1);
@@ -109,10 +109,10 @@ impl AttachmentSupervisor {
         self.commands
             .send(reply)
             .await
-            .context("attachment supervisor stopped before stop-all")?;
+            .context("filesystem supervisor stopped before stop-all")?;
         receive
             .await
-            .context("attachment supervisor dropped stop-all reply")?
+            .context("filesystem supervisor dropped stop-all reply")?
     }
 
     pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
@@ -123,7 +123,7 @@ impl AttachmentSupervisor {
         let Some(task) = self.task.lock().await.take() else {
             return Ok(());
         };
-        task.await.context("join attachment supervisor")?
+        task.await.context("join filesystem supervisor")?
     }
 }
 
@@ -226,14 +226,14 @@ async fn reconcile_latest(
 ) -> anyhow::Result<ReconcilePass> {
     let desired = context
         .state
-        .desired_attachments()
+        .desired_filesystems()
         .await?
         .into_iter()
-        .map(|attachment| (attachment.definition.name.clone(), attachment))
+        .map(|filesystem| (filesystem.definition.name.clone(), filesystem))
         .collect::<BTreeMap<_, _>>();
     let instances = context
         .state
-        .attachment_instances()
+        .filesystem_instances()
         .await?
         .into_iter()
         .map(|instance| (instance.name.clone(), instance))
@@ -243,7 +243,7 @@ async fn reconcile_latest(
         .pending_actions()
         .await?
         .into_iter()
-        .filter(|action| action.kind == ActionKind::RestartAttachment)
+        .filter(|action| action.kind == ActionKind::RestartFilesystem)
         .map(|action| (action.target.name.clone(), action))
         .collect::<BTreeMap<_, _>>();
     let names = desired
@@ -260,7 +260,7 @@ async fn reconcile_latest(
         let instance = instances
             .get(&name)
             .cloned()
-            .unwrap_or_else(|| AttachmentInstance::pending(name.clone()));
+            .unwrap_or_else(|| FilesystemInstance::pending(name.clone()));
         if let Some(retry_at) = instance.retry_at
             && retry_at > now
         {
@@ -304,7 +304,7 @@ async fn reconcile_latest(
             },
         };
         let Some(joined) = joined else { break };
-        let (name, outcome) = joined.context("join attachment reconciliation task")??;
+        let (name, outcome) = joined.context("join filesystem reconciliation task")??;
         match outcome {
             WorkOutcome::Done => {
                 retries.remove(&name);
@@ -332,7 +332,7 @@ async fn reconcile_one(
         .clone()
         .acquire_owned()
         .await
-        .context("attachment launch semaphore closed")?;
+        .context("filesystem launch semaphore closed")?;
     context.queued.fetch_sub(1, Ordering::AcqRel);
     context.active.fetch_add(1, Ordering::AcqRel);
     let result = reconcile_one_active(context, current_revision, &mut work).await;
@@ -343,7 +343,7 @@ async fn reconcile_one(
 
 #[allow(
     clippy::too_many_lines,
-    reason = "the attachment state machine stays linear so each durable fence precedes its effect"
+    reason = "the filesystem state machine stays linear so each durable fence precedes its effect"
 )]
 async fn reconcile_one_active(
     context: &ReconcileContext,
@@ -363,7 +363,7 @@ async fn reconcile_one_active(
     let Some(desired) = work.desired.clone() else {
         return reconcile_deletion(context, current_revision, work).await;
     };
-    if work.instance.phase == AttachmentPhase::Failed
+    if work.instance.phase == FilesystemPhase::Failed
         && work.instance.observed_version == Some(desired.version)
         && work.action.is_none()
     {
@@ -371,7 +371,7 @@ async fn reconcile_one_active(
     }
     if !namespace_ready(context.resources.progress(), desired.revision) {
         if !update_observation(&context.state, &mut work.instance, |observation| {
-            observation.phase = AttachmentPhase::WaitingForNamespace;
+            observation.phase = FilesystemPhase::WaitingForNamespace;
             observation.retry_at = None;
             observation.last_error_code = None;
             observation.last_error_detail = None;
@@ -380,7 +380,7 @@ async fn reconcile_one_active(
         {
             return Ok(WorkOutcome::Done);
         }
-        context.resources.mark_attachment_phase(
+        context.resources.mark_filesystem_phase(
             current_revision,
             &work.name,
             ResourcePhase::Pending,
@@ -391,7 +391,7 @@ async fn reconcile_one_active(
             context,
             &desired,
             work.action.as_ref(),
-            AttachmentProgressStage::WaitingForNamespace,
+            FilesystemProgressStage::WaitingForNamespace,
             PhaseReport {
                 retry_count: work.retry_count,
                 ..PhaseReport::default()
@@ -408,18 +408,18 @@ async fn reconcile_one_active(
         let observed_version = work
             .instance
             .observed_version
-            .context("attachment observed spec has no version")?;
+            .context("filesystem observed spec has no version")?;
         let driver = match runtime_driver(context, &work.name, &observed_spec) {
             Ok(driver) => driver,
             Err(error) => {
-                tracing::warn!(attachment = %work.name, %error, "stored attachment runtime spec is invalid");
+                tracing::warn!(filesystem = %work.name, %error, "stored filesystem runtime spec is invalid");
                 return terminal_failure(
                     context,
                     current_revision,
                     &desired,
                     work,
-                    "attachment_runtime_config_invalid",
-                    "the stored attachment runtime specification is invalid",
+                    "filesystem_runtime_config_invalid",
+                    "the stored filesystem runtime specification is invalid",
                 )
                 .await;
             },
@@ -428,9 +428,9 @@ async fn reconcile_one_active(
         match confirmed {
             Ok(Some(confirmed)) if !restart && confirmed.is_running() => {
                 tracing::debug!(
-                    attachment = %work.name,
+                    filesystem = %work.name,
                     %runtime_instance,
-                    "confirmed retained attachment runtime; waiting for its exact VFS session"
+                    "confirmed retained filesystem runtime; waiting for its exact VFS session"
                 );
                 let expected = session(&work.name, &observed_spec, &runtime_instance);
                 match wait_for_confirmed_session(context, &driver, &expected, &runtime_instance)
@@ -438,7 +438,7 @@ async fn reconcile_one_active(
                 {
                     ConfirmedSession::Attached => {
                         if !update_observation(&context.state, &mut work.instance, |observation| {
-                            observation.phase = AttachmentPhase::Ready;
+                            observation.phase = FilesystemPhase::Ready;
                             observation.retry_at = None;
                             observation.last_error_code = None;
                             observation.last_error_detail = None;
@@ -469,14 +469,14 @@ async fn reconcile_one_active(
                         )
                         .await
                         {
-                            tracing::warn!(attachment = %work.name, %error, "unready attachment runtime stop failed");
+                            tracing::warn!(filesystem = %work.name, %error, "unready filesystem runtime stop failed");
                             return retry_or_fail(
                                 context,
                                 current_revision,
                                 &desired,
                                 work,
-                                "attachment_stop_failed",
-                                "the previous attachment runtime could not be stopped",
+                                "filesystem_stop_failed",
+                                "the previous filesystem runtime could not be stopped",
                             )
                             .await;
                         }
@@ -488,9 +488,9 @@ async fn reconcile_one_active(
             },
             Ok(Some(confirmed)) => {
                 tracing::debug!(
-                    attachment = %work.name,
+                    filesystem = %work.name,
                     %runtime_instance,
-                    "confirmed attachment runtime requires replacement"
+                    "confirmed filesystem runtime requires replacement"
                 );
                 if !record_stopping(context, current_revision, &desired, work).await? {
                     return Ok(WorkOutcome::Done);
@@ -504,14 +504,14 @@ async fn reconcile_one_active(
                 )
                 .await
                 {
-                    tracing::warn!(attachment = %work.name, %error, "attachment restart stop failed");
+                    tracing::warn!(filesystem = %work.name, %error, "filesystem restart stop failed");
                     return retry_or_fail(
                         context,
                         current_revision,
                         &desired,
                         work,
-                        "attachment_stop_failed",
-                        "the previous attachment runtime could not be stopped",
+                        "filesystem_stop_failed",
+                        "the previous filesystem runtime could not be stopped",
                     )
                     .await;
                 }
@@ -521,9 +521,9 @@ async fn reconcile_one_active(
             },
             Ok(None) => {
                 tracing::debug!(
-                    attachment = %work.name,
+                    filesystem = %work.name,
                     %runtime_instance,
-                    "durable attachment runtime is absent; clearing its observation"
+                    "durable filesystem runtime is absent; clearing its observation"
                 );
                 if !clear_observed(context, current_revision, work).await? {
                     return Ok(WorkOutcome::Done);
@@ -531,18 +531,18 @@ async fn reconcile_one_active(
             },
             Err(error) => {
                 tracing::warn!(
-                    attachment = %work.name,
+                    filesystem = %work.name,
                     version = %observed_version,
                     %error,
-                    "attachment runtime identity could not be proved"
+                    "filesystem runtime identity could not be proved"
                 );
                 return terminal_failure(
                     context,
                     current_revision,
                     &desired,
                     work,
-                    "attachment_identity_conflict",
-                    "the existing attachment runtime does not match its durable identity",
+                    "filesystem_identity_conflict",
+                    "the existing filesystem runtime does not match its durable identity",
                 )
                 .await;
             },
@@ -560,7 +560,7 @@ async fn reconcile_one_active(
         observation.observed_version = Some(desired.version);
         observation.observed_spec = Some(desired.definition.spec.clone());
         observation.runtime_instance = Some(runtime_instance.clone());
-        observation.phase = AttachmentPhase::Starting;
+        observation.phase = FilesystemPhase::Starting;
         observation.retry_at = None;
         observation.last_error_code = None;
         observation.last_error_detail = None;
@@ -569,7 +569,7 @@ async fn reconcile_one_active(
     {
         return Ok(WorkOutcome::Done);
     }
-    context.resources.mark_attachment_phase(
+    context.resources.mark_filesystem_phase(
         current_revision,
         &work.name,
         ResourcePhase::Preparing,
@@ -580,7 +580,7 @@ async fn reconcile_one_active(
         context,
         &desired,
         work.action.as_ref(),
-        AttachmentProgressStage::Starting,
+        FilesystemProgressStage::Starting,
         PhaseReport {
             retry_count: work.retry_count,
             ..PhaseReport::default()
@@ -605,7 +605,7 @@ async fn reconcile_one_active(
     ) {
         Ok(driver) => driver,
         Err(error) => {
-            tracing::warn!(attachment = %work.name, %error, "desired attachment runtime spec is invalid");
+            tracing::warn!(filesystem = %work.name, %error, "desired filesystem runtime spec is invalid");
             event_task.abort();
             let _ = event_task.await;
             return terminal_failure(
@@ -613,8 +613,8 @@ async fn reconcile_one_active(
                 current_revision,
                 &desired,
                 work,
-                "attachment_runtime_config_invalid",
-                "the desired attachment runtime specification is invalid",
+                "filesystem_runtime_config_invalid",
+                "the desired filesystem runtime specification is invalid",
             )
             .await;
         },
@@ -634,14 +634,14 @@ async fn reconcile_one_active(
         .await
         .context("join runtime progress forwarder")?;
     if let Err(error) = launch {
-        tracing::warn!(attachment = %work.name, stage = ?error.stage(), %error, "attachment launch failed");
+        tracing::warn!(filesystem = %work.name, stage = ?error.stage(), %error, "filesystem launch failed");
         return retry_or_fail(
             context,
             current_revision,
             &desired,
             work,
-            "attachment_launch_failed",
-            "the attachment runtime could not start",
+            "filesystem_launch_failed",
+            "the filesystem runtime could not start",
         )
         .await;
     }
@@ -651,19 +651,19 @@ async fn reconcile_one_active(
             current_revision,
             &desired,
             work,
-            "attachment_session_timeout",
-            "the attachment runtime did not establish its exact VFS session",
+            "filesystem_session_timeout",
+            "the filesystem runtime did not establish its exact VFS session",
         )
         .await;
     }
-    let latest = context.state.desired_attachments().await?;
+    let latest = context.state.desired_filesystems().await?;
     if !latest.iter().any(|candidate| {
         candidate.definition.name == work.name && candidate.version == desired.version
     }) {
         let driver = match runtime_driver(context, &work.name, &desired.definition.spec) {
             Ok(driver) => driver,
             Err(error) => {
-                tracing::warn!(attachment = %work.name, %error, "superseded attachment runtime spec is invalid");
+                tracing::warn!(filesystem = %work.name, %error, "superseded filesystem runtime spec is invalid");
                 return Ok(WorkOutcome::Done);
             },
         };
@@ -678,18 +678,18 @@ async fn reconcile_one_active(
                 )
                 .await
                 {
-                    tracing::warn!(attachment = %work.name, %error, "superseded attachment stop will retry against the latest desired version");
+                    tracing::warn!(filesystem = %work.name, %error, "superseded filesystem stop will retry against the latest desired version");
                 }
             },
             Ok(None) => {},
             Err(error) => {
-                tracing::warn!(attachment = %work.name, %error, "superseded attachment probe will retry against the latest desired version");
+                tracing::warn!(filesystem = %work.name, %error, "superseded filesystem probe will retry against the latest desired version");
             },
         }
         return Ok(WorkOutcome::Done);
     }
     if !update_observation(&context.state, &mut work.instance, |observation| {
-        observation.phase = AttachmentPhase::Ready;
+        observation.phase = FilesystemPhase::Ready;
         observation.retry_at = None;
         observation.last_error_code = None;
         observation.last_error_detail = None;
@@ -718,9 +718,9 @@ async fn reconcile_deletion(
     revision: ResourceRevision,
     work: &mut Work,
 ) -> anyhow::Result<WorkOutcome> {
-    fail_action_for_deleted_attachment(context, work).await?;
+    fail_action_for_deleted_filesystem(context, work).await?;
     if !update_observation(&context.state, &mut work.instance, |observation| {
-        observation.phase = AttachmentPhase::Deleting;
+        observation.phase = FilesystemPhase::Deleting;
         observation.retry_at = None;
     })
     .await?
@@ -735,13 +735,13 @@ async fn reconcile_deletion(
         let driver = match runtime_driver(context, &work.name, &spec) {
             Ok(driver) => driver,
             Err(error) => {
-                tracing::warn!(attachment = %work.name, %error, "deleting attachment runtime spec is invalid");
+                tracing::warn!(filesystem = %work.name, %error, "deleting filesystem runtime spec is invalid");
                 return retry_deleted(
                     context,
                     revision,
                     work,
-                    "attachment_delete_runtime_config_invalid",
-                    "the deleting attachment runtime specification is invalid",
+                    "filesystem_delete_runtime_config_invalid",
+                    "the deleting filesystem runtime specification is invalid",
                 )
                 .await;
             },
@@ -751,12 +751,12 @@ async fn reconcile_deletion(
                 if let Err(error) =
                     stop_exact(context, &work.name, &spec, &runtime_instance, confirmed).await
                 {
-                    tracing::warn!(attachment = %work.name, %error, "attachment deletion stop failed");
+                    tracing::warn!(filesystem = %work.name, %error, "filesystem deletion stop failed");
                     return retry_deleted(
                         context,
                         revision,
                         work,
-                        "attachment_delete_stop_failed",
+                        "filesystem_delete_stop_failed",
                         "the deleting runtime could not be stopped",
                     )
                     .await;
@@ -764,25 +764,25 @@ async fn reconcile_deletion(
             },
             Ok(None) => {},
             Err(error) => {
-                tracing::warn!(attachment = %work.name, %error, "attachment deletion identity check failed");
+                tracing::warn!(filesystem = %work.name, %error, "filesystem deletion identity check failed");
                 return terminal_deleted_failure(
                     context,
                     revision,
                     work,
-                    "attachment_delete_identity_conflict",
+                    "filesystem_delete_identity_conflict",
                     "the deleting runtime no longer matches its durable identity",
                 )
                 .await;
             },
         }
         if let Err(error) = wait_for_session_absence(context, &work.name, &runtime_instance).await {
-            tracing::warn!(attachment = %work.name, %error, "attachment deletion session did not drain");
+            tracing::warn!(filesystem = %work.name, %error, "filesystem deletion session did not drain");
             return retry_deleted(
                 context,
                 revision,
                 work,
-                "attachment_delete_session_drain_failed",
-                "the deleting attachment session did not drain",
+                "filesystem_delete_session_drain_failed",
+                "the deleting filesystem session did not drain",
             )
             .await;
         }
@@ -793,18 +793,18 @@ async fn reconcile_deletion(
                     context,
                     revision,
                     work,
-                    "attachment_delete_incomplete",
-                    "the attachment runtime is still present after stop",
+                    "filesystem_delete_incomplete",
+                    "the filesystem runtime is still present after stop",
                 )
                 .await;
             },
             Err(error) => {
-                tracing::warn!(attachment = %work.name, %error, "attachment deletion absence check failed");
+                tracing::warn!(filesystem = %work.name, %error, "filesystem deletion absence check failed");
                 return retry_deleted(
                     context,
                     revision,
                     work,
-                    "attachment_delete_probe_failed",
+                    "filesystem_delete_probe_failed",
                     "the deleting runtime absence check failed",
                 )
                 .await;
@@ -813,7 +813,7 @@ async fn reconcile_deletion(
     }
     let cleared = context
         .state
-        .clear_attachment_instance_if_deleting(
+        .clear_filesystem_instance_if_deleting(
             work.name.clone(),
             work.instance.runtime_instance.clone(),
         )
@@ -826,19 +826,19 @@ async fn reconcile_deletion(
     }
     let terminal = context
         .resources
-        .clear_deleted_attachment(revision, &work.name);
+        .clear_deleted_filesystem(revision, &work.name);
     if terminal {
         publish_revision_ready(context.resources.progress(), revision);
     }
     Ok(WorkOutcome::Done)
 }
 
-async fn fail_action_for_deleted_attachment(
+async fn fail_action_for_deleted_filesystem(
     context: &ReconcileContext,
     work: &mut Work,
 ) -> anyhow::Result<()> {
-    const CODE: &str = "attachment_deleted";
-    const DETAIL: &str = "the attachment was removed from desired state before restart completed";
+    const CODE: &str = "filesystem_deleted";
+    const DETAIL: &str = "the filesystem was removed from desired state before restart completed";
 
     let Some(action) = &mut work.action else {
         return Ok(());
@@ -865,7 +865,7 @@ async fn fail_action_for_deleted_attachment(
 }
 
 async fn stop_all_runtimes(context: &ReconcileContext) -> anyhow::Result<Vec<ResourceName>> {
-    let instances = context.state.attachment_instances().await?;
+    let instances = context.state.filesystem_instances().await?;
     let mut stragglers = BTreeSet::new();
     for mut instance in instances {
         let (Some(spec), Some(runtime_instance)) = (
@@ -875,7 +875,7 @@ async fn stop_all_runtimes(context: &ReconcileContext) -> anyhow::Result<Vec<Res
             continue;
         };
         if !update_observation(&context.state, &mut instance, |observation| {
-            observation.phase = AttachmentPhase::Stopping;
+            observation.phase = FilesystemPhase::Stopping;
             observation.retry_at = None;
         })
         .await?
@@ -886,7 +886,7 @@ async fn stop_all_runtimes(context: &ReconcileContext) -> anyhow::Result<Vec<Res
         let driver = match runtime_driver(context, &instance.name, &spec) {
             Ok(driver) => driver,
             Err(error) => {
-                tracing::warn!(attachment = %instance.name, %error, "could not open attachment runtime during shutdown");
+                tracing::warn!(filesystem = %instance.name, %error, "could not open filesystem runtime during shutdown");
                 stragglers.insert(instance.name.clone());
                 continue;
             },
@@ -897,14 +897,14 @@ async fn stop_all_runtimes(context: &ReconcileContext) -> anyhow::Result<Vec<Res
                 {
                     Ok(()) => true,
                     Err(error) => {
-                        tracing::warn!(attachment = %instance.name, %error, "attachment runtime did not stop during shutdown");
+                        tracing::warn!(filesystem = %instance.name, %error, "filesystem runtime did not stop during shutdown");
                         false
                     },
                 }
             },
             Ok(None) => true,
             Err(error) => {
-                tracing::warn!(attachment = %instance.name, %error, "attachment runtime identity could not be proved during shutdown");
+                tracing::warn!(filesystem = %instance.name, %error, "filesystem runtime identity could not be proved during shutdown");
                 false
             },
         };
@@ -919,7 +919,7 @@ async fn stop_all_runtimes(context: &ReconcileContext) -> anyhow::Result<Vec<Res
         if instance.deleting || instance.desired_version.is_none() {
             let _ = context
                 .state
-                .clear_attachment_instance_if_deleting(
+                .clear_filesystem_instance_if_deleting(
                     instance.name.clone(),
                     instance.runtime_instance.clone(),
                 )
@@ -928,7 +928,7 @@ async fn stop_all_runtimes(context: &ReconcileContext) -> anyhow::Result<Vec<Res
             observation.observed_version = None;
             observation.observed_spec = None;
             observation.runtime_instance = None;
-            observation.phase = AttachmentPhase::Pending;
+            observation.phase = FilesystemPhase::Pending;
             observation.retry_at = None;
         })
         .await?
@@ -942,7 +942,7 @@ async fn stop_all_runtimes(context: &ReconcileContext) -> anyhow::Result<Vec<Res
             .drain_sessions(SESSION_DRAIN)
             .await
             .into_iter()
-            .map(|session| session.attachment),
+            .map(|session| session.filesystem),
     );
     Ok(stragglers.into_iter().collect())
 }
@@ -950,18 +950,18 @@ async fn stop_all_runtimes(context: &ReconcileContext) -> anyhow::Result<Vec<Res
 async fn record_stopping(
     context: &ReconcileContext,
     current_revision: ResourceRevision,
-    desired: &DesiredAttachment,
+    desired: &DesiredFilesystem,
     work: &mut Work,
 ) -> anyhow::Result<bool> {
     if !update_observation(&context.state, &mut work.instance, |observation| {
-        observation.phase = AttachmentPhase::Stopping;
+        observation.phase = FilesystemPhase::Stopping;
         observation.retry_at = None;
     })
     .await?
     {
         return Ok(false);
     }
-    context.resources.mark_attachment_phase(
+    context.resources.mark_filesystem_phase(
         current_revision,
         &work.name,
         ResourcePhase::Preparing,
@@ -972,7 +972,7 @@ async fn record_stopping(
         context,
         desired,
         work.action.as_ref(),
-        AttachmentProgressStage::Stopping,
+        FilesystemProgressStage::Stopping,
         PhaseReport {
             retry_count: work.retry_count,
             ..PhaseReport::default()
@@ -983,28 +983,28 @@ async fn record_stopping(
 
 async fn finish_ready(
     context: &ReconcileContext,
-    desired: &DesiredAttachment,
+    desired: &DesiredFilesystem,
     action: Option<&ActionReceipt>,
-    _instance: &AttachmentInstance,
+    _instance: &FilesystemInstance,
     current_revision: ResourceRevision,
 ) -> anyhow::Result<()> {
     publish_phase(
         context,
         desired,
         action,
-        AttachmentProgressStage::Ready,
+        FilesystemProgressStage::Ready,
         PhaseReport::default(),
     );
     let desired_terminal = context
         .resources
-        .mark_attachment_ready(desired.revision, &desired.definition.name);
+        .mark_filesystem_ready(desired.revision, &desired.definition.name);
     if desired_terminal {
         publish_revision_ready(context.resources.progress(), desired.revision);
     }
     if current_revision != desired.revision
         && context
             .resources
-            .mark_attachment_ready(current_revision, &desired.definition.name)
+            .mark_filesystem_ready(current_revision, &desired.definition.name)
     {
         publish_revision_ready(context.resources.progress(), current_revision);
     }
@@ -1025,7 +1025,7 @@ async fn finish_ready(
 async fn retry_or_fail(
     context: &ReconcileContext,
     current_revision: ResourceRevision,
-    desired: &DesiredAttachment,
+    desired: &DesiredFilesystem,
     work: &mut Work,
     code: &str,
     detail: &str,
@@ -1037,7 +1037,7 @@ async fn retry_or_fail(
     let retry_at =
         unix_seconds().saturating_add(i64::try_from(next.as_secs().max(1)).unwrap_or(i64::MAX));
     if !update_observation(&context.state, &mut work.instance, |observation| {
-        observation.phase = AttachmentPhase::Retrying;
+        observation.phase = FilesystemPhase::Retrying;
         observation.retry_at = Some(retry_at);
         observation.last_error_code = Some(code.to_owned());
         observation.last_error_detail = Some(detail.to_owned());
@@ -1057,7 +1057,7 @@ async fn retry_or_fail(
         context,
         desired,
         work.action.as_ref(),
-        AttachmentProgressStage::Retrying,
+        FilesystemProgressStage::Retrying,
         PhaseReport {
             retry_count: work.retry_count.saturating_add(1),
             error_code: Some(code.to_owned()),
@@ -1082,13 +1082,13 @@ async fn retry_or_fail(
 async fn terminal_failure(
     context: &ReconcileContext,
     current_revision: ResourceRevision,
-    desired: &DesiredAttachment,
+    desired: &DesiredFilesystem,
     work: &mut Work,
     code: &str,
     detail: &str,
 ) -> anyhow::Result<WorkOutcome> {
     if !update_observation(&context.state, &mut work.instance, |observation| {
-        observation.phase = AttachmentPhase::Failed;
+        observation.phase = FilesystemPhase::Failed;
         observation.retry_at = None;
         observation.last_error_code = Some(code.to_owned());
         observation.last_error_detail = Some(detail.to_owned());
@@ -1101,7 +1101,7 @@ async fn terminal_failure(
         context,
         desired,
         work.action.as_ref(),
-        AttachmentProgressStage::Failed,
+        FilesystemProgressStage::Failed,
         PhaseReport {
             retry_count: work.retry_count,
             error_code: Some(code.to_owned()),
@@ -1156,7 +1156,7 @@ async fn retry_deleted(
     detail: &str,
 ) -> anyhow::Result<WorkOutcome> {
     if !update_observation(&context.state, &mut work.instance, |observation| {
-        observation.phase = AttachmentPhase::Retrying;
+        observation.phase = FilesystemPhase::Retrying;
         observation.retry_at = Some(unix_seconds().saturating_add(1));
         observation.last_error_code = Some(code.to_owned());
         observation.last_error_detail = Some(detail.to_owned());
@@ -1177,7 +1177,7 @@ async fn terminal_deleted_failure(
     detail: &str,
 ) -> anyhow::Result<WorkOutcome> {
     if !update_observation(&context.state, &mut work.instance, |observation| {
-        observation.phase = AttachmentPhase::Failed;
+        observation.phase = FilesystemPhase::Failed;
         observation.retry_at = None;
         observation.last_error_code = Some(code.to_owned());
         observation.last_error_detail = Some(detail.to_owned());
@@ -1216,26 +1216,26 @@ struct PhaseReport {
 
 fn publish_phase(
     context: &ReconcileContext,
-    desired: &DesiredAttachment,
+    desired: &DesiredFilesystem,
     action: Option<&ActionReceipt>,
-    stage: AttachmentProgressStage,
+    stage: FilesystemProgressStage,
     report: PhaseReport,
 ) {
-    let progress = AttachmentProgress {
+    let progress = FilesystemProgress {
         key: desired.definition.key(),
         desired_revision: desired.revision,
         runtime: desired.definition.spec.runtime(),
         stage,
         completed_bytes: report.completed_bytes,
         total_bytes: None,
-        queued_attachments: context.queued.load(Ordering::Acquire),
-        active_attachments: context.active.load(Ordering::Acquire),
+        queued_filesystems: context.queued.load(Ordering::Acquire),
+        active_filesystems: context.active.load(Ordering::Acquire),
         error_code: report.error_code,
         detail: report.detail,
         retry_count: report.retry_count,
         next_retry_unix_ms: report.next_retry_unix_ms,
     };
-    context.resources.progress().record_attachment(
+    context.resources.progress().record_filesystem(
         ProgressTarget::DesiredRevision(desired.revision),
         progress.clone(),
     );
@@ -1243,7 +1243,7 @@ fn publish_phase(
         context
             .resources
             .progress()
-            .record_attachment(ProgressTarget::Action(action.action_id), progress);
+            .record_filesystem(ProgressTarget::Action(action.action_id), progress);
     }
 }
 
@@ -1253,18 +1253,18 @@ fn publish_deletion(context: &ReconcileContext, revision: ResourceRevision, work
         .observed_spec
         .as_ref()
         .or(work.instance.desired_spec.as_ref())
-        .map_or(AttachmentRuntime::Host, AttachmentSpec::runtime);
-    context.resources.progress().record_attachment(
+        .map_or(FilesystemRuntime::Host, FilesystemSpec::runtime);
+    context.resources.progress().record_filesystem(
         ProgressTarget::DesiredRevision(revision),
-        AttachmentProgress {
-            key: ResourceKey::new(ResourceKind::Attachment, work.name.clone()),
+        FilesystemProgress {
+            key: ResourceKey::new(ResourceKind::Filesystem, work.name.clone()),
             desired_revision: revision,
             runtime,
-            stage: AttachmentProgressStage::Deleting,
+            stage: FilesystemProgressStage::Deleting,
             completed_bytes: 0,
             total_bytes: None,
-            queued_attachments: context.queued.load(Ordering::Acquire),
-            active_attachments: context.active.load(Ordering::Acquire),
+            queued_filesystems: context.queued.load(Ordering::Acquire),
+            active_filesystems: context.active.load(Ordering::Acquire),
             error_code: work.instance.last_error_code.clone(),
             detail: work.instance.last_error_detail.clone(),
             retry_count: work.retry_count,
@@ -1295,13 +1295,13 @@ fn mark_resource_phase(
 ) {
     context
         .resources
-        .mark_attachment_phase(revision, name, phase, error_code, detail);
+        .mark_filesystem_phase(revision, name, phase, error_code, detail);
 }
 
 async fn forward_runtime_events(
     mut receiver: RuntimeEventReceiver,
     resources: Arc<ResourceControl>,
-    desired: DesiredAttachment,
+    desired: DesiredFilesystem,
     action: Option<ActionReceipt>,
     queued: Arc<AtomicU32>,
     active: Arc<AtomicU32>,
@@ -1311,70 +1311,70 @@ async fn forward_runtime_events(
         let Some(stage) = stage else {
             continue;
         };
-        let progress = AttachmentProgress {
+        let progress = FilesystemProgress {
             key: desired.definition.key(),
             desired_revision: desired.revision,
             runtime: desired.definition.spec.runtime(),
             stage,
             completed_bytes,
             total_bytes,
-            queued_attachments: queued.load(Ordering::Acquire),
-            active_attachments: active.load(Ordering::Acquire),
+            queued_filesystems: queued.load(Ordering::Acquire),
+            active_filesystems: active.load(Ordering::Acquire),
             error_code: None,
             detail: None,
             retry_count: 0,
             next_retry_unix_ms: None,
         };
-        resources.progress().record_attachment(
+        resources.progress().record_filesystem(
             ProgressTarget::DesiredRevision(desired.revision),
             progress.clone(),
         );
         if let Some(action) = &action {
             resources
                 .progress()
-                .record_attachment(ProgressTarget::Action(action.action_id), progress);
+                .record_filesystem(ProgressTarget::Action(action.action_id), progress);
         }
     }
 }
 
-fn runtime_progress(event: &RuntimeEvent) -> (Option<AttachmentProgressStage>, u64, Option<u64>) {
+fn runtime_progress(event: &RuntimeEvent) -> (Option<FilesystemProgressStage>, u64, Option<u64>) {
     match event {
         RuntimeEvent::Download {
             completed_bytes,
             total_bytes,
             ..
         } => (
-            Some(AttachmentProgressStage::PullingImage),
+            Some(FilesystemProgressStage::PullingImage),
             *completed_bytes,
             *total_bytes,
         ),
         RuntimeEvent::DownloadFinished {
             completed_bytes, ..
         } => (
-            Some(AttachmentProgressStage::Materializing),
+            Some(FilesystemProgressStage::Materializing),
             completed_bytes.unwrap_or(0),
             *completed_bytes,
         ),
         RuntimeEvent::Stage { stage, state, .. } => {
             let stage = match stage {
-                RuntimeStage::Probe => AttachmentProgressStage::Queued,
-                RuntimeStage::MaterializeImage => AttachmentProgressStage::Materializing,
+                RuntimeStage::Probe => FilesystemProgressStage::Queued,
+                RuntimeStage::MaterializeImage => FilesystemProgressStage::Materializing,
                 RuntimeStage::StartProcess
                 | RuntimeStage::StartContainer
-                | RuntimeStage::StartVm => AttachmentProgressStage::Starting,
-                RuntimeStage::WaitForOsMount => AttachmentProgressStage::Mounting,
-                RuntimeStage::WaitForVfsSession => AttachmentProgressStage::WaitingForNamespace,
-                RuntimeStage::Stop => AttachmentProgressStage::Stopping,
+                | RuntimeStage::StartVm => FilesystemProgressStage::Starting,
+                RuntimeStage::WaitForOsMount => FilesystemProgressStage::Mounting,
+                RuntimeStage::WaitForVfsSession => FilesystemProgressStage::WaitingForNamespace,
+                RuntimeStage::Stop => FilesystemProgressStage::Stopping,
             };
             let stage = match state {
-                RuntimeState::Stopped if stage == AttachmentProgressStage::Stopping => {
-                    AttachmentProgressStage::Queued
+                RuntimeState::Stopped if stage == FilesystemProgressStage::Stopping => {
+                    FilesystemProgressStage::Queued
                 },
                 _ => stage,
             };
             (Some(stage), 0, None)
         },
-        RuntimeEvent::MountReady { .. } => (Some(AttachmentProgressStage::Mounting), 0, None),
+        RuntimeEvent::MountReady { .. } => (Some(FilesystemProgressStage::Mounting), 0, None),
         RuntimeEvent::Image { .. }
         | RuntimeEvent::ImageRetry { .. }
         | RuntimeEvent::Container { .. }
@@ -1386,7 +1386,7 @@ fn runtime_progress(event: &RuntimeEvent) -> (Option<AttachmentProgressStage>, u
 fn runtime_driver(
     context: &ReconcileContext,
     name: &ResourceName,
-    spec: &AttachmentSpec,
+    spec: &FilesystemSpec,
 ) -> anyhow::Result<RuntimeDriver> {
     runtime_driver_with_events(context, name, spec, RuntimeEventSink::discard())
 }
@@ -1394,7 +1394,7 @@ fn runtime_driver(
 fn runtime_driver_with_events(
     context: &ReconcileContext,
     name: &ResourceName,
-    spec: &AttachmentSpec,
+    spec: &FilesystemSpec,
     events: RuntimeEventSink,
 ) -> anyhow::Result<RuntimeDriver> {
     RuntimeDriver::new(&context.paths, name.clone(), spec.clone(), events)
@@ -1403,13 +1403,13 @@ fn runtime_driver_with_events(
 async fn stop_exact(
     context: &ReconcileContext,
     name: &ResourceName,
-    spec: &AttachmentSpec,
+    spec: &FilesystemSpec,
     runtime_instance: &str,
     confirmed: omnifs_fs_runtime::ConfirmedRuntime,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         confirmed.runtime_instance() == runtime_instance,
-        "confirmed attachment runtime instance changed before exact stop"
+        "confirmed filesystem runtime instance changed before exact stop"
     );
     let expected_session = session(name, spec, runtime_instance);
     context
@@ -1424,7 +1424,7 @@ async fn stop_exact(
         .map_err(anyhow::Error::new)?;
     anyhow::ensure!(
         driver.confirmed(runtime_instance).await?.is_none(),
-        "attachment runtime is still present after exact stop"
+        "filesystem runtime is still present after exact stop"
     );
     context
         .vfs
@@ -1447,7 +1447,7 @@ async fn wait_for_session_absence(
     let mut changed = context.vfs.session_changes();
     loop {
         if !context.vfs.sessions().iter().any(|session| {
-            &session.attachment == name && session.runtime_instance == runtime_instance
+            &session.filesystem == name && session.runtime_instance == runtime_instance
         }) {
             return Ok(());
         }
@@ -1464,11 +1464,11 @@ async fn wait_for_session_absence(
 
 fn session(
     name: &ResourceName,
-    spec: &AttachmentSpec,
+    spec: &FilesystemSpec,
     runtime_instance: &str,
 ) -> omnifs_vfs::Session {
     omnifs_vfs::Session {
-        attachment: name.clone(),
+        filesystem: name.clone(),
         spec: spec.clone(),
         runtime_instance: runtime_instance.to_owned(),
     }
@@ -1530,12 +1530,12 @@ async fn clear_observed(
         observation.observed_version = None;
         observation.observed_spec = None;
         observation.runtime_instance = None;
-        observation.phase = AttachmentPhase::Pending;
+        observation.phase = FilesystemPhase::Pending;
         observation.retry_at = None;
     })
     .await?;
     if updated {
-        context.resources.mark_attachment_phase(
+        context.resources.mark_filesystem_phase(
             current_revision,
             &work.name,
             ResourcePhase::Pending,
@@ -1548,12 +1548,12 @@ async fn clear_observed(
 
 async fn update_observation(
     state: &StateStore,
-    instance: &mut AttachmentInstance,
-    update: impl FnOnce(&mut AttachmentObservation),
+    instance: &mut FilesystemInstance,
+    update: impl FnOnce(&mut FilesystemObservation),
 ) -> anyhow::Result<bool> {
-    let mut observation = AttachmentObservation::from_instance(instance);
+    let mut observation = FilesystemObservation::from_instance(instance);
     update(&mut observation);
-    let Some(updated) = state.write_attachment_observation(observation).await? else {
+    let Some(updated) = state.write_filesystem_observation(observation).await? else {
         return Ok(false);
     };
     *instance = updated;
@@ -1562,7 +1562,7 @@ async fn update_observation(
 
 fn random_runtime_instance() -> anyhow::Result<String> {
     let mut bytes = [0_u8; 16];
-    getrandom::fill(&mut bytes).context("generate attachment runtime instance")?;
+    getrandom::fill(&mut bytes).context("generate filesystem runtime instance")?;
     Ok(hex::encode(bytes))
 }
 
@@ -1605,10 +1605,10 @@ fn publish_revision_ready(progress: &ProgressHub, revision: ResourceRevision) {
 mod tests {
     use super::*;
     use omnifs_api::{
-        AttachmentDefinition, NormalizedResourceSet, ProgressSnapshot, ResourceDefinition,
+        FilesystemDefinition, NormalizedResourceSet, ProgressSnapshot, ResourceDefinition,
     };
-    use omnifs_core::{ActionId, AttachmentSpec, MutationId};
-    use omnifs_state::{AttachmentActionRequest, ResourceApplyRequest, StateStoreOptions};
+    use omnifs_core::{ActionId, FilesystemSpec, MutationId};
+    use omnifs_state::{FilesystemActionRequest, ResourceApplyRequest, StateStoreOptions};
     use std::future::Future;
     use std::path::PathBuf;
     use std::pin::Pin;
@@ -1731,17 +1731,17 @@ mod tests {
         async fn work(&self) -> Work {
             let desired = self
                 .state
-                .desired_attachments()
+                .desired_filesystems()
                 .await
                 .unwrap()
                 .into_iter()
-                .find(|attachment| attachment.definition.name == self.name);
+                .find(|filesystem| filesystem.definition.name == self.name);
             let instance = self
                 .state
-                .attachment_instance(&self.name)
+                .filesystem_instance(&self.name)
                 .await
                 .unwrap()
-                .unwrap_or_else(|| AttachmentInstance::pending(self.name.clone()));
+                .unwrap_or_else(|| FilesystemInstance::pending(self.name.clone()));
             Work {
                 name: self.name.clone(),
                 desired,
@@ -1776,7 +1776,7 @@ mod tests {
                 .unwrap(),
         );
         let name = ResourceName::new("supervisor-test").unwrap();
-        let desired = attachment_set(name.clone(), PathBuf::from("/tmp/omnifs-supervisor-test"));
+        let desired = filesystem_set(name.clone(), PathBuf::from("/tmp/omnifs-supervisor-test"));
         let snapshot = state.resource_snapshot().await.unwrap();
         state
             .apply_resources(ResourceApplyRequest {
@@ -1788,7 +1788,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let resources = ResourceControl::new(Arc::clone(&state), "attachment-supervisor-test")
+        let resources = ResourceControl::new(Arc::clone(&state), "filesystem-supervisor-test")
             .await
             .unwrap();
         let root = temp.path().join("runtime");
@@ -1799,13 +1799,13 @@ mod tests {
             paths: RuntimePaths::daemon_owned(
                 temp.path().to_path_buf(),
                 false,
-                root.join("attachments"),
+                root.join("filesystems"),
                 root.join("logs"),
                 root.join("images"),
                 PathBuf::from("/usr/bin/false"),
             ),
             endpoints: AttachEndpoints::default(),
-            launch_slots: Arc::new(Semaphore::new(MAX_ACTIVE_ATTACHMENTS)),
+            launch_slots: Arc::new(Semaphore::new(MAX_ACTIVE_FILESYSTEMS)),
             queued: Arc::new(AtomicU32::new(0)),
             active: Arc::new(AtomicU32::new(0)),
         };
@@ -1818,15 +1818,15 @@ mod tests {
         }
     }
 
-    fn attachment_set(name: ResourceName, location: PathBuf) -> NormalizedResourceSet {
+    fn filesystem_set(name: ResourceName, location: PathBuf) -> NormalizedResourceSet {
         let protocol = if cfg!(target_os = "linux") {
-            omnifs_core::AttachmentProtocol::Fuse
+            omnifs_core::FilesystemProtocol::Fuse
         } else {
-            omnifs_core::AttachmentProtocol::Nfs
+            omnifs_core::FilesystemProtocol::Nfs
         };
         let spec =
-            AttachmentSpec::new(protocol, AttachmentRuntime::Host, location, None, None).unwrap();
-        NormalizedResourceSet::new(vec![ResourceDefinition::Attachment(AttachmentDefinition {
+            FilesystemSpec::new(protocol, FilesystemRuntime::Host, location, None, None).unwrap();
+        NormalizedResourceSet::new(vec![ResourceDefinition::Filesystem(FilesystemDefinition {
             name,
             spec,
         })])
@@ -1849,15 +1849,15 @@ mod tests {
             total_bytes: None,
             source: "registry".to_owned(),
         });
-        assert_eq!(stage, Some(AttachmentProgressStage::PullingImage));
+        assert_eq!(stage, Some(FilesystemProgressStage::PullingImage));
         assert_eq!(completed, 41);
         assert_eq!(total, None);
     }
 
     #[test]
-    fn newer_serving_generation_satisfies_an_unchanged_attachment() {
+    fn newer_serving_generation_satisfies_an_unchanged_filesystem() {
         let progress = ProgressHub::new(
-            "attachment-supervisor-test",
+            "filesystem-supervisor-test",
             ProgressSnapshot {
                 desired_revision: ResourceRevision::new(2),
                 observed_revision: Some(ResourceRevision::new(2)),
@@ -1876,7 +1876,7 @@ mod tests {
                     next_retry_unix_ms: None,
                 }),
                 credentials: Vec::new(),
-                attachments: Vec::new(),
+                filesystems: Vec::new(),
             },
         );
 
@@ -1898,25 +1898,25 @@ mod tests {
 
         let instance = fixture
             .state
-            .attachment_instance(&fixture.name)
+            .filesystem_instance(&fixture.name)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(instance.phase, AttachmentPhase::WaitingForNamespace);
+        assert_eq!(instance.phase, FilesystemPhase::WaitingForNamespace);
         assert!(instance.runtime_instance.is_none());
         let (_, progress) = fixture
             .resources
             .progress()
             .snapshot_for(ProgressTarget::DesiredRevision(revision));
-        assert!(progress.attachments.iter().any(|attachment| {
-            attachment.key.name == fixture.name
-                && attachment.stage == AttachmentProgressStage::WaitingForNamespace
+        assert!(progress.filesystems.iter().any(|filesystem| {
+            filesystem.key.name == fixture.name
+                && filesystem.stage == FilesystemProgressStage::WaitingForNamespace
         }));
         fixture.state.shutdown().await.unwrap();
     }
 
     #[tokio::test]
-    async fn retained_attachment_readiness_and_loss_track_the_current_restart_revision() {
+    async fn retained_filesystem_readiness_and_loss_track_the_current_restart_revision() {
         let fixture = fixture().await;
         let work = fixture.work().await;
         let desired = work.desired.unwrap();
@@ -1938,7 +1938,7 @@ mod tests {
                 providers: Vec::new(),
                 serving: None,
                 credentials: Vec::new(),
-                attachments: Vec::new(),
+                filesystems: Vec::new(),
             },
         );
 
@@ -1963,7 +1963,7 @@ mod tests {
             Some(current_revision)
         );
 
-        fixture.resources.mark_attachment_phase(
+        fixture.resources.mark_filesystem_phase(
             current_revision,
             &desired.definition.name,
             ResourcePhase::Pending,
@@ -1988,14 +1988,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleting_an_attachment_finishes_its_pending_restart_action() {
+    async fn deleting_an_filesystem_finishes_its_pending_restart_action() {
         let fixture = fixture().await;
         let action_id = ActionId::from_bytes([0x61; 16]);
         let accepted = fixture
             .state
-            .accept_attachment_action(AttachmentActionRequest {
+            .accept_filesystem_action(FilesystemActionRequest {
                 action_id,
-                attachment: fixture.name.clone(),
+                filesystem: fixture.name.clone(),
                 base_action_generation: 0,
             })
             .await
@@ -2019,12 +2019,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(receipt.phase, ActionPhase::Failed);
-        assert_eq!(receipt.error_code.as_deref(), Some("attachment_deleted"));
+        assert_eq!(receipt.error_code.as_deref(), Some("filesystem_deleted"));
         assert!(fixture.state.pending_actions().await.unwrap().is_empty());
         assert!(
             fixture
                 .state
-                .attachment_instance(&fixture.name)
+                .filesystem_instance(&fixture.name)
                 .await
                 .unwrap()
                 .is_none()
@@ -2045,14 +2045,14 @@ mod tests {
                     desired.revision,
                     &desired,
                     &mut work,
-                    "attachment_launch_failed",
-                    "the attachment runtime could not start",
+                    "filesystem_launch_failed",
+                    "the filesystem runtime could not start",
                 )
                 .await
                 .unwrap(),
                 WorkOutcome::Retry
             ));
-            assert_eq!(work.instance.phase, AttachmentPhase::Retrying);
+            assert_eq!(work.instance.phase, FilesystemPhase::Retrying);
             assert!(work.instance.retry_at.is_some());
         }
         work.retry_count = MAX_RETRY_ATTEMPTS - 1;
@@ -2062,8 +2062,8 @@ mod tests {
                 desired.revision,
                 &desired,
                 &mut work,
-                "attachment_launch_failed",
-                "the attachment runtime could not start",
+                "filesystem_launch_failed",
+                "the filesystem runtime could not start",
             )
             .await
             .unwrap(),
@@ -2071,14 +2071,14 @@ mod tests {
         ));
         let instance = fixture
             .state
-            .attachment_instance(&fixture.name)
+            .filesystem_instance(&fixture.name)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(instance.phase, AttachmentPhase::Failed);
+        assert_eq!(instance.phase, FilesystemPhase::Failed);
         assert_eq!(
             instance.last_error_code.as_deref(),
-            Some("attachment_launch_failed")
+            Some("filesystem_launch_failed")
         );
         assert_eq!(instance.retry_at, None);
         fixture.state.shutdown().await.unwrap();
@@ -2088,7 +2088,7 @@ mod tests {
     async fn superseded_work_cannot_publish_a_stale_retry_observation() {
         let fixture = fixture().await;
         let mut stale_work = fixture.work().await;
-        let replacement = attachment_set(
+        let replacement = filesystem_set(
             fixture.name.clone(),
             PathBuf::from("/tmp/omnifs-supervisor-test-replaced"),
         );
@@ -2101,8 +2101,8 @@ mod tests {
                 stale_desired.revision,
                 &stale_desired,
                 &mut stale_work,
-                "attachment_launch_failed",
-                "the attachment runtime could not start",
+                "filesystem_launch_failed",
+                "the filesystem runtime could not start",
             )
             .await
             .unwrap(),
@@ -2111,11 +2111,11 @@ mod tests {
 
         let instance = fixture
             .state
-            .attachment_instance(&fixture.name)
+            .filesystem_instance(&fixture.name)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(instance.phase, AttachmentPhase::Pending);
+        assert_eq!(instance.phase, FilesystemPhase::Pending);
         assert_eq!(instance.last_error_code, None);
         assert_eq!(instance.retry_at, None);
         assert_ne!(
@@ -2126,9 +2126,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_all_joins_without_deleting_desired_attachments() {
+    async fn stop_all_joins_without_deleting_desired_filesystems() {
         let fixture = fixture().await;
-        let supervisor = AttachmentSupervisor::spawn(
+        let supervisor = FilesystemSupervisor::spawn(
             Arc::clone(&fixture.state),
             Arc::clone(&fixture.resources),
             Arc::clone(&fixture.context.vfs),
@@ -2141,9 +2141,9 @@ mod tests {
             .expect("stop-all must not wait for a namespace")
             .unwrap();
         assert!(stopped.is_empty());
-        assert_eq!(fixture.state.desired_attachments().await.unwrap().len(), 1);
+        assert_eq!(fixture.state.desired_filesystems().await.unwrap().len(), 1);
         supervisor.shutdown().await.unwrap();
-        assert_eq!(fixture.state.desired_attachments().await.unwrap().len(), 1);
+        assert_eq!(fixture.state.desired_filesystems().await.unwrap().len(), 1);
         fixture.state.shutdown().await.unwrap();
     }
 }

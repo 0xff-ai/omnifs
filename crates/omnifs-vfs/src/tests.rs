@@ -37,25 +37,25 @@ fn path(value: &str) -> Path {
 
 /// A canned identity for tests that don't care about the specific value, only
 /// that a `Hello` carries one.
-fn test_attachment() -> omnifs_core::ResourceName {
+fn test_filesystem() -> omnifs_core::ResourceName {
     "test".parse().unwrap()
 }
 
-fn test_identity() -> omnifs_core::AttachmentSpec {
+fn test_identity() -> omnifs_core::FilesystemSpec {
     let (protocol, runtime, location) = if cfg!(target_os = "linux") {
         (
-            omnifs_core::AttachmentProtocol::Fuse,
-            omnifs_core::AttachmentRuntime::Host,
+            omnifs_core::FilesystemProtocol::Fuse,
+            omnifs_core::FilesystemRuntime::Host,
             PathBuf::from("/mnt/test"),
         )
     } else {
         (
-            omnifs_core::AttachmentProtocol::Nfs,
-            omnifs_core::AttachmentRuntime::Host,
+            omnifs_core::FilesystemProtocol::Nfs,
+            omnifs_core::FilesystemRuntime::Host,
             PathBuf::from("/mnt/test"),
         )
     };
-    omnifs_core::AttachmentSpec::new(protocol, runtime, location, None, None).unwrap()
+    omnifs_core::FilesystemSpec::new(protocol, runtime, location, None, None).unwrap()
 }
 
 fn test_runtime_instance() -> String {
@@ -251,7 +251,7 @@ impl ServingNamespace for StaticServingNamespace {
 async fn client_handshake(io: &mut DuplexStream, protocol: u32) -> Result<(), WireError> {
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol,
-        attachment: test_attachment(),
+        filesystem: test_filesystem(),
         spec: test_identity(),
         runtime_instance: test_runtime_instance(),
     })
@@ -603,7 +603,7 @@ async fn handshake_version_mismatch_is_rejected() {
     // The client offers the immediately previous strict protocol version.
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL - 1,
-        attachment: test_attachment(),
+        filesystem: test_filesystem(),
         spec: test_identity(),
         runtime_instance: test_runtime_instance(),
     })
@@ -627,7 +627,7 @@ async fn malformed_runtime_instance_is_rejected_before_session_admission() {
     let (mut io, server) = serve_over_duplex(stub);
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
-        attachment: test_attachment(),
+        filesystem: test_filesystem(),
         spec: test_identity(),
         runtime_instance: "not-an-exact-runtime-instance".to_owned(),
     })
@@ -685,7 +685,7 @@ async fn unix_listener_end_to_end() {
 
     let namespace = WireNamespace::attach(
         AttachTarget::Unix(socket),
-        test_attachment(),
+        test_filesystem(),
         test_identity(),
         test_runtime_instance(),
         tokio::runtime::Handle::current(),
@@ -717,7 +717,7 @@ async fn startup_gate_holds_listener_until_ready_publication() {
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let hello = postcard::to_allocvec(&Handshake::Hello {
         protocol: PROTOCOL,
-        attachment: test_attachment(),
+        filesystem: test_filesystem(),
         spec: test_identity(),
         runtime_instance: test_runtime_instance(),
     })
@@ -757,7 +757,7 @@ async fn tcp_listener_end_to_end() {
         AttachTarget::Tcp {
             addr: addr.to_string(),
         },
-        test_attachment(),
+        test_filesystem(),
         test_identity(),
         test_runtime_instance(),
         tokio::runtime::Handle::current(),
@@ -776,7 +776,7 @@ async fn one_name_allows_reconnect_overlap_but_rejects_conflicting_resolved_fiel
     let server = start_local_server(StubNamespace::new(), &socket);
     let first = WireNamespace::attach(
         AttachTarget::Unix(socket.clone()),
-        test_attachment(),
+        test_filesystem(),
         test_identity(),
         test_runtime_instance(),
         tokio::runtime::Handle::current(),
@@ -785,7 +785,7 @@ async fn one_name_allows_reconnect_overlap_but_rejects_conflicting_resolved_fiel
     .unwrap();
     let overlap = WireNamespace::attach(
         AttachTarget::Unix(socket.clone()),
-        test_attachment(),
+        test_filesystem(),
         test_identity(),
         test_runtime_instance(),
         tokio::runtime::Handle::current(),
@@ -794,24 +794,24 @@ async fn one_name_allows_reconnect_overlap_but_rejects_conflicting_resolved_fiel
     .unwrap();
     assert_eq!(server.sessions().len(), 1);
 
-    let conflicting = omnifs_core::AttachmentSpec::new(
-        omnifs_core::AttachmentProtocol::Fuse,
-        omnifs_core::AttachmentRuntime::Docker,
-        PathBuf::from(omnifs_core::ATTACHMENT_GUEST_LOCATION),
+    let conflicting = omnifs_core::FilesystemSpec::new(
+        omnifs_core::FilesystemProtocol::Fuse,
+        omnifs_core::FilesystemRuntime::Docker,
+        PathBuf::from(omnifs_core::FILESYSTEM_GUEST_LOCATION),
         None,
         None,
     )
     .unwrap();
     let error = WireNamespace::attach(
         AttachTarget::Unix(socket),
-        test_attachment(),
+        test_filesystem(),
         conflicting,
         test_runtime_instance(),
         tokio::runtime::Handle::current(),
     )
     .await
     .err()
-    .expect("one attachment name must not carry conflicting exact specs");
+    .expect("one filesystem name must not carry conflicting exact specs");
     assert!(
         matches!(error, WireError::Rejected(reason) if reason.contains("different exact spec"))
     );
@@ -828,7 +828,7 @@ async fn unapproved_runtime_instance_replacement_is_rejected() {
     let server = start_local_server(StubNamespace::new(), &socket);
     let first = WireNamespace::attach(
         AttachTarget::Unix(socket.clone()),
-        test_attachment(),
+        test_filesystem(),
         test_identity(),
         test_runtime_instance(),
         tokio::runtime::Handle::current(),
@@ -837,7 +837,7 @@ async fn unapproved_runtime_instance_replacement_is_rejected() {
     .unwrap();
     let second = WireNamespace::attach(
         AttachTarget::Unix(socket),
-        test_attachment(),
+        test_filesystem(),
         test_identity(),
         "fedcba9876543210fedcba9876543210".to_owned(),
         tokio::runtime::Handle::current(),
@@ -858,18 +858,18 @@ async fn supervisor_approved_replacement_fences_the_old_session() {
     let server = start_local_server(StubNamespace::new(), &socket);
     let old_instance = test_runtime_instance();
     let old = Session {
-        attachment: test_attachment(),
+        filesystem: test_filesystem(),
         spec: test_identity(),
         runtime_instance: old_instance.clone(),
     };
     let replacement = Session {
-        attachment: test_attachment(),
+        filesystem: test_filesystem(),
         spec: test_identity(),
         runtime_instance: "fedcba9876543210fedcba9876543210".to_owned(),
     };
     let first = WireNamespace::attach(
         AttachTarget::Unix(socket.clone()),
-        old.attachment.clone(),
+        old.filesystem.clone(),
         old.spec.clone(),
         old_instance,
         tokio::runtime::Handle::current(),
@@ -887,7 +887,7 @@ async fn supervisor_approved_replacement_fences_the_old_session() {
     }
     let replacement_connection = WireNamespace::attach(
         AttachTarget::Unix(socket),
-        replacement.attachment.clone(),
+        replacement.filesystem.clone(),
         replacement.spec.clone(),
         replacement.runtime_instance.clone(),
         tokio::runtime::Handle::current(),
@@ -910,14 +910,14 @@ async fn exact_session_stop_fences_reconnect_until_runtime_cleanup_finishes() {
     let socket = dir.path().join("ns.sock");
     let server = start_local_server(StubNamespace::new(), &socket);
     let expected = Session {
-        attachment: test_attachment(),
+        filesystem: test_filesystem(),
         spec: test_identity(),
         runtime_instance: test_runtime_instance(),
     };
     let (teardown_tx, mut teardown_rx) = tokio::sync::mpsc::channel(1);
     let namespace = WireNamespace::attach_with_teardown(
         AttachTarget::Unix(socket.clone()),
-        expected.attachment.clone(),
+        expected.filesystem.clone(),
         expected.spec.clone(),
         expected.runtime_instance.clone(),
         tokio::runtime::Handle::current(),
@@ -939,7 +939,7 @@ async fn exact_session_stop_fences_reconnect_until_runtime_cleanup_finishes() {
     assert_eq!(request.reason(), crate::TeardownReason::ServerStop);
     let rejected = WireNamespace::attach(
         AttachTarget::Unix(socket.clone()),
-        expected.attachment.clone(),
+        expected.filesystem.clone(),
         expected.spec.clone(),
         expected.runtime_instance.clone(),
         tokio::runtime::Handle::current(),
@@ -960,7 +960,7 @@ async fn exact_session_stop_fences_reconnect_until_runtime_cleanup_finishes() {
     server.finish_session_stop(&expected).unwrap();
     let replacement = WireNamespace::attach(
         AttachTarget::Unix(socket),
-        expected.attachment.clone(),
+        expected.filesystem.clone(),
         expected.spec.clone(),
         expected.runtime_instance.clone(),
         tokio::runtime::Handle::current(),
@@ -979,7 +979,7 @@ async fn exact_session_stop_fences_reconnect_when_the_session_is_already_gone() 
     let socket = dir.path().join("ns.sock");
     let server = start_local_server(StubNamespace::new(), &socket);
     let expected = Session {
-        attachment: test_attachment(),
+        filesystem: test_filesystem(),
         spec: test_identity(),
         runtime_instance: test_runtime_instance(),
     };
@@ -987,7 +987,7 @@ async fn exact_session_stop_fences_reconnect_when_the_session_is_already_gone() 
     server.begin_session_stop(&expected).unwrap();
     let rejected = WireNamespace::attach(
         AttachTarget::Unix(socket.clone()),
-        expected.attachment.clone(),
+        expected.filesystem.clone(),
         expected.spec.clone(),
         expected.runtime_instance.clone(),
         tokio::runtime::Handle::current(),
@@ -1000,7 +1000,7 @@ async fn exact_session_stop_fences_reconnect_when_the_session_is_already_gone() 
     server.finish_session_stop(&expected).unwrap();
     let replacement = WireNamespace::attach(
         AttachTarget::Unix(socket),
-        expected.attachment.clone(),
+        expected.filesystem.clone(),
         expected.spec.clone(),
         expected.runtime_instance.clone(),
         tokio::runtime::Handle::current(),
@@ -1020,7 +1020,7 @@ async fn server_stop_reaches_client_and_drain_waits_for_detach() {
     let (teardown_tx, mut teardown_rx) = tokio::sync::mpsc::channel(1);
     let namespace = WireNamespace::attach_with_teardown(
         AttachTarget::Unix(socket),
-        test_attachment(),
+        test_filesystem(),
         test_identity(),
         test_runtime_instance(),
         tokio::runtime::Handle::current(),
@@ -1059,7 +1059,7 @@ async fn busy_client_remains_a_named_drain_straggler_and_new_admission_is_reject
     let (teardown_tx, mut teardown_rx) = tokio::sync::mpsc::channel(1);
     let namespace = WireNamespace::attach_with_teardown(
         AttachTarget::Unix(socket.clone()),
-        test_attachment(),
+        test_filesystem(),
         test_identity(),
         test_runtime_instance(),
         tokio::runtime::Handle::current(),
@@ -1077,19 +1077,19 @@ async fn busy_client_remains_a_named_drain_straggler_and_new_admission_is_reject
     request.complete(crate::TeardownOutcome::Busy);
     let stragglers = server.drain_sessions(Duration::from_millis(20)).await;
     assert_eq!(stragglers.len(), 1);
-    assert_eq!(stragglers[0].attachment, test_attachment());
+    assert_eq!(stragglers[0].filesystem, test_filesystem());
     assert_eq!(stragglers[0].spec, test_identity());
 
     let rejected = WireNamespace::attach(
         AttachTarget::Unix(socket),
-        test_attachment(),
+        test_filesystem(),
         test_identity(),
         test_runtime_instance(),
         tokio::runtime::Handle::current(),
     )
     .await
     .err()
-    .expect("draining server must reject a new attachment");
+    .expect("draining server must reject a new filesystem");
     assert!(matches!(rejected, WireError::Rejected(_)));
     drop(namespace);
     server.shutdown().await;
@@ -1131,7 +1131,7 @@ async fn newer_reply_resets_before_acceptance_and_stale_reply_retries() {
         AttachTarget::Tcp {
             addr: addr.to_string(),
         },
-        test_attachment(),
+        test_filesystem(),
         test_identity(),
         test_runtime_instance(),
         tokio::runtime::Handle::current(),
@@ -1232,7 +1232,7 @@ async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
         AttachTarget::Tcp {
             addr: stalled_addr.to_string(),
         },
-        test_attachment(),
+        test_filesystem(),
         test_identity(),
         test_runtime_instance(),
         stalled_rt,
@@ -1272,7 +1272,7 @@ async fn tcp_disconnect_invalidates_root_and_queued_path_request_reconnects() {
     };
     let attach_task = rt.spawn(WireNamespace::attach(
         attach_target,
-        test_attachment(),
+        test_filesystem(),
         test_identity(),
         test_runtime_instance(),
         rt.clone(),

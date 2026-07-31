@@ -135,7 +135,7 @@ pub(crate) fn resource_control_error(
         | ResourceControlError::Definition(
             omnifs_api::ResourceDefinitionError::InvalidCredentialField(_)
             | omnifs_api::ResourceDefinitionError::MountConfigNotObject(_)
-            | omnifs_api::ResourceDefinitionError::UnsupportedAttachmentPlatform { .. }
+            | omnifs_api::ResourceDefinitionError::UnsupportedFilesystemPlatform { .. }
             | omnifs_api::ResourceDefinitionError::MissingProvider { .. }
             | omnifs_api::ResourceDefinitionError::MissingCredentialProvider { .. }
             | omnifs_api::ResourceDefinitionError::MissingCredential { .. }

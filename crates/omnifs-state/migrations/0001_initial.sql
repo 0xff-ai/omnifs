@@ -102,11 +102,11 @@ CREATE TABLE action_receipts (
         kind IN (
             'set-credential-material',
             'revoke-credential',
-            'restart-attachment'
+            'restart-filesystem'
         )
     ),
     target_kind TEXT NOT NULL CHECK (
-        target_kind IN ('credential', 'attachment')
+        target_kind IN ('credential', 'filesystem')
     ),
     target_name TEXT NOT NULL CHECK (
         length(target_name) BETWEEN 1 AND 32
@@ -135,7 +135,7 @@ CREATE UNIQUE INDEX action_receipts_one_pending_target_idx
 CREATE INDEX action_receipts_created_at_idx
     ON action_receipts(created_at);
 
-CREATE TABLE attachment_instances (
+CREATE TABLE filesystem_instances (
     name TEXT PRIMARY KEY CHECK (
         length(name) BETWEEN 1 AND 32
         AND substr(name, 1, 1) GLOB '[a-z0-9]'
@@ -177,5 +177,5 @@ CREATE TABLE attachment_instances (
     CHECK ((observed_version IS NULL) = (observed_spec IS NULL))
 ) STRICT;
 
-CREATE INDEX attachment_instances_phase_idx
-    ON attachment_instances(phase, updated_at);
+CREATE INDEX filesystem_instances_phase_idx
+    ON filesystem_instances(phase, updated_at);

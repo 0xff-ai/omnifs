@@ -5,10 +5,10 @@ Repository guide for agents and contributors working on `omnifs`.
 
 ## Start here
 
-`omnifs` projects external services as native filesystems. Providers own
-meaning: what paths exist and what bytes they hold. The host owns trust,
-authorization, callouts, caching, and I/O. FUSE and NFS translate one shared
-projected namespace into OS protocol behavior.
+`omnifs` is a filesystem projection system. It projects external services into
+one shared virtual namespace. Providers own meaning: what paths exist and what
+bytes they hold. The host owns trust, authorization, callouts, caching, and
+I/O. FUSE and NFS expose the namespace to the OS as one or more filesystems.
 
 Before changing the repository:
 
@@ -41,10 +41,10 @@ the same change.
 - Host caching is opaque byte and fact storage. Providers do not add private
   LRUs or expiration policy.
 - SQLite is the sole desired-state authority for Provider, Credential, Mount,
-  and Attachment resources; the CLI has no desired-state journal.
+  and Filesystem resources; the CLI has no desired-state journal.
   `ApplyResources` ends after validation, one SQLite transaction, and a
   non-blocking reconcile wakeup; daemon workers reconcile after the reply.
-- The daemon owns provider preparation, namespace publication, Attachment
+- The daemon owns provider preparation, namespace publication, Filesystem
   lifecycle, and live VFS sessions. Filesystems stay out of process.
 - Credentials and other secret bytes never enter resources, KCL, status,
   progress, receipts, logs, Debug output, Inspector, or dedupe hashes.
@@ -114,7 +114,7 @@ Before the first broad build, test, Git write, or networked command:
 - `omnifs-api`: resource domain and typed local control protocol.
 - `omnifs-bootstrap`: pre-RPC profile, socket, spawn lock, and daemon identity.
 - `omnifs-state`: SQLite desired state, actions, observations, and caches.
-- `omnifs-daemon`: reconciliation, local control, Attachments, and VFS serving.
+- `omnifs-daemon`: reconciliation, local control, Filesystems, and VFS serving.
 - `omnifs-engine`: trusted provider runtime and projection semantics.
 - `omnifs-vfs`: namespace facade, wire protocol, reconnect, and sessions.
 - `omnifs-fuse`, `omnifs-nfs`, `omnifs-mtab`: OS protocol adapters and mount

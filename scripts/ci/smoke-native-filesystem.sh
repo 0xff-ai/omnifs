@@ -67,7 +67,7 @@ read_first_open_issue_title() {
 echo "== host mount read (native daemon) =="
 status_json="$("$OMNIFS_CLI" status --output json)"
 jq -e \
-  '.result.attachments[] | select(.name == "dev-host" and .phase == "ready")' \
+  '.result.filesystems[] | select(.name == "dev-host" and .phase == "ready")' \
   >/dev/null <<<"$status_json"
 mount_point="$OMNIFS_HOME/mnt"
 test -d "$mount_point"

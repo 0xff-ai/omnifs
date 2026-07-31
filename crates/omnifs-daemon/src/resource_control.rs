@@ -6,16 +6,16 @@ use omnifs_api::{
     ActionKind, ApplyReceipt, ApplyResourcesRequest, CredentialReceipt, CredentialStatusKind,
     NormalizedResourceSet, ProgressSnapshot, ProgressTarget, ResourceChangeAction,
     ResourceDeclarations, ResourceDefinition, ResourceDefinitionError, ResourcePhase, ResourcePlan,
-    ResourceStatus, RestartAttachmentRequest, RevokeCredentialRequest,
+    ResourceStatus, RestartFilesystemRequest, RevokeCredentialRequest,
     SetCredentialMaterialRequest, plan,
 };
 use omnifs_core::{
     ActionId, ProviderId, ResourceKey, ResourceKind, ResourceName, ResourceRevision,
 };
 use omnifs_state::{
-    ActionWriteError, AttachmentActionRequest, AttachmentInstance, AttachmentPhase,
-    CredentialActionOperation, CredentialActionRequest, CredentialSecretSidecar,
-    ResourceApplyError, ResourceApplyRequest as StateApplyRequest, StateStore,
+    ActionWriteError, CredentialActionOperation, CredentialActionRequest, CredentialSecretSidecar,
+    FilesystemActionRequest, FilesystemInstance, FilesystemPhase, ResourceApplyError,
+    ResourceApplyRequest as StateApplyRequest, StateStore,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -57,7 +57,7 @@ impl ResourceControl {
                 .ok()
                 .map(|serving| ResourceRevision::new(serving.revision.get()))
         };
-        let attachment_instances = state.attachment_instances().await?;
+        let filesystem_instances = state.filesystem_instances().await?;
         let mut statuses = current
             .resources
             .resources()
@@ -76,20 +76,20 @@ impl ResourceControl {
                 detail: None,
             })
             .collect::<Vec<_>>();
-        reconstruct_attachment_statuses(
+        reconstruct_filesystem_statuses(
             &current.resources,
             current.revision,
             serving_revision,
-            &attachment_instances,
+            &filesystem_instances,
             &mut statuses,
         );
         // A persisted serving revision is not enough to claim the full
-        // revision is observed. Deletion tombstones and non-ready attachment
+        // revision is observed. Deletion tombstones and non-ready filesystem
         // instances remain work until the supervisor proves their exact
         // runtime state.
         let observed_revision =
             startup_observed_revision(serving_revision, current.revision, &statuses);
-        let (providers, serving, credentials, attachments) = existing_progress
+        let (providers, serving, credentials, filesystems) = existing_progress
             .as_ref()
             .map(|progress| {
                 let (_, snapshot) = progress.snapshot_for(ProgressTarget::Current);
@@ -97,7 +97,7 @@ impl ResourceControl {
                     snapshot.providers,
                     snapshot.serving,
                     snapshot.credentials,
-                    snapshot.attachments,
+                    snapshot.filesystems,
                 )
             })
             .unwrap_or_default();
@@ -109,7 +109,7 @@ impl ResourceControl {
             providers,
             serving,
             credentials,
-            attachments,
+            filesystems,
         };
         let progress = existing_progress
             .unwrap_or_else(|| ProgressHub::new(daemon_instance_id, snapshot.clone()));
@@ -307,16 +307,16 @@ impl ResourceControl {
         })
     }
 
-    pub(crate) async fn restart_attachment(
+    pub(crate) async fn restart_filesystem(
         &self,
-        request: RestartAttachmentRequest,
+        request: RestartFilesystemRequest,
     ) -> Result<omnifs_api::ActionReceipt, ResourceControlError> {
         self.ensure_admitted()?;
         let action = self
             .state
-            .accept_attachment_action(AttachmentActionRequest {
+            .accept_filesystem_action(FilesystemActionRequest {
                 action_id: request.action_id,
-                attachment: request.attachment,
+                filesystem: request.filesystem,
                 base_action_generation: request.base_action_generation,
             })
             .await?;
@@ -429,23 +429,23 @@ impl ResourceControl {
     }
 
     /// Publish that the provider-backed namespace for one desired revision is
-    /// serving. Attachment statuses stay pending until their separate runtime
+    /// serving. Filesystem statuses stay pending until their separate runtime
     /// owner records exact VFS sessions.
     ///
-    /// Returns true when the revision contains attachment work and therefore
+    /// Returns true when the revision contains filesystem work and therefore
     /// is not terminal yet.
     pub(crate) fn mark_namespace_ready(&self, revision: ResourceRevision) -> bool {
-        let mut has_attachment = false;
+        let mut has_filesystem = false;
         let updated = self
             .progress
             .update_revision_snapshot(revision, |snapshot| {
-                has_attachment = snapshot.resources.iter().any(|status| {
+                has_filesystem = snapshot.resources.iter().any(|status| {
                     status.desired_revision == revision
-                        && status.key.kind == ResourceKind::Attachment
+                        && status.key.kind == ResourceKind::Filesystem
                 });
                 for status in &mut snapshot.resources {
                     if status.desired_revision != revision
-                        || status.key.kind == ResourceKind::Attachment
+                        || status.key.kind == ResourceKind::Filesystem
                     {
                         continue;
                     }
@@ -454,31 +454,31 @@ impl ResourceControl {
                     status.error_code = None;
                     status.detail = None;
                 }
-                if !has_attachment {
+                if !has_filesystem {
                     snapshot.observed_revision = Some(revision);
                 }
             });
         if updated {
             self.namespace_wakeup.send_replace(Some(revision));
         }
-        has_attachment
+        has_filesystem
     }
 
-    pub(crate) fn mark_attachment_ready(
+    pub(crate) fn mark_filesystem_ready(
         &self,
         revision: ResourceRevision,
         name: &ResourceName,
     ) -> bool {
-        self.finish_attachment_status(revision, name, false)
+        self.finish_filesystem_status(revision, name, false)
     }
 
-    /// Mark one Attachment non-ready in the current revision snapshot.
+    /// Mark one Filesystem non-ready in the current revision snapshot.
     ///
-    /// The durable Attachment row is updated before this call. Keeping the
+    /// The durable Filesystem row is updated before this call. Keeping the
     /// expected revision explicit prevents stale reconciliation work from
     /// downgrading a newer apply. A non-ready resource also makes the whole
     /// revision non-terminal until the supervisor proves a new exact session.
-    pub(crate) fn mark_attachment_phase(
+    pub(crate) fn mark_filesystem_phase(
         &self,
         revision: ResourceRevision,
         name: &ResourceName,
@@ -487,7 +487,7 @@ impl ResourceControl {
         detail: Option<&str>,
     ) {
         debug_assert_ne!(phase, ResourcePhase::Ready);
-        let key = ResourceKey::new(ResourceKind::Attachment, name.clone());
+        let key = ResourceKey::new(ResourceKind::Filesystem, name.clone());
         self.progress
             .update_revision_snapshot(revision, |snapshot| {
                 if let Some(status) = snapshot
@@ -504,28 +504,28 @@ impl ResourceControl {
             });
     }
 
-    pub(crate) fn clear_deleted_attachment(
+    pub(crate) fn clear_deleted_filesystem(
         &self,
         revision: ResourceRevision,
         name: &ResourceName,
     ) -> bool {
-        self.finish_attachment_status(revision, name, true)
+        self.finish_filesystem_status(revision, name, true)
     }
 
-    fn finish_attachment_status(
+    fn finish_filesystem_status(
         &self,
         revision: ResourceRevision,
         name: &ResourceName,
         deleted: bool,
     ) -> bool {
-        let key = ResourceKey::new(ResourceKind::Attachment, name.clone());
+        let key = ResourceKey::new(ResourceKind::Filesystem, name.clone());
         let mut terminal = false;
         let updated = self
             .progress
             .update_revision_snapshot(revision, |snapshot| {
                 if deleted {
                     snapshot.resources.retain(|status| status.key != key);
-                    snapshot.attachments.retain(|progress| progress.key != key);
+                    snapshot.filesystems.retain(|progress| progress.key != key);
                 } else if let Some(status) = snapshot
                     .resources
                     .iter_mut()
@@ -564,7 +564,7 @@ fn credential_action_status(
     use omnifs_api::ActionPhase;
     match (kind, phase) {
         (ActionKind::SetCredentialMaterial, ActionPhase::Failed)
-        | (ActionKind::RestartAttachment, _) => CredentialStatusKind::Blocked,
+        | (ActionKind::RestartFilesystem, _) => CredentialStatusKind::Blocked,
         (ActionKind::SetCredentialMaterial, _) => CredentialStatusKind::Active,
         (ActionKind::RevokeCredential, ActionPhase::Ready) => CredentialStatusKind::Deleted,
         (ActionKind::RevokeCredential, ActionPhase::Failed) => {
@@ -643,15 +643,15 @@ fn next_resource_statuses(
     statuses
 }
 
-/// Rebuild attachment resource status from the durable observed rows before
+/// Rebuild filesystem resource status from the durable observed rows before
 /// the daemon starts reconciliation. This includes deletion tombstones, which
 /// no longer have a desired resource row but still block revision readiness
 /// until the exact runtime has been removed.
-fn reconstruct_attachment_statuses(
+fn reconstruct_filesystem_statuses(
     desired: &NormalizedResourceSet,
     revision: ResourceRevision,
     serving_revision: Option<ResourceRevision>,
-    instances: &[AttachmentInstance],
+    instances: &[FilesystemInstance],
     statuses: &mut Vec<ResourceStatus>,
 ) {
     let by_name: BTreeMap<_, _> = instances
@@ -662,19 +662,19 @@ fn reconstruct_attachment_statuses(
         .resources()
         .iter()
         .filter_map(|resource| match resource {
-            ResourceDefinition::Attachment(definition) => Some(definition.name.clone()),
+            ResourceDefinition::Filesystem(definition) => Some(definition.name.clone()),
             _ => None,
         })
         .collect();
 
     for status in statuses.iter_mut() {
-        if status.key.kind != ResourceKind::Attachment {
+        if status.key.kind != ResourceKind::Filesystem {
             continue;
         }
         let Some(instance) = by_name.get(&status.key.name) else {
             continue;
         };
-        let (phase, observed_revision) = attachment_status_phase(
+        let (phase, observed_revision) = filesystem_status_phase(
             instance,
             serving_revision,
             revision,
@@ -694,9 +694,9 @@ fn reconstruct_attachment_statuses(
             continue;
         }
         let (phase, observed_revision) =
-            attachment_status_phase(instance, serving_revision, revision, false);
+            filesystem_status_phase(instance, serving_revision, revision, false);
         statuses.push(ResourceStatus {
-            key: ResourceKey::new(ResourceKind::Attachment, instance.name.clone()),
+            key: ResourceKey::new(ResourceKind::Filesystem, instance.name.clone()),
             desired_revision: revision,
             observed_revision,
             phase,
@@ -706,36 +706,36 @@ fn reconstruct_attachment_statuses(
     }
 }
 
-fn attachment_status_phase(
-    instance: &AttachmentInstance,
+fn filesystem_status_phase(
+    instance: &FilesystemInstance,
     serving_revision: Option<ResourceRevision>,
     revision: ResourceRevision,
     desired_exists: bool,
 ) -> (ResourcePhase, Option<ResourceRevision>) {
     if !desired_exists {
         let phase = match instance.phase {
-            AttachmentPhase::Retrying => ResourcePhase::Retrying,
-            AttachmentPhase::Failed => ResourcePhase::Failed,
+            FilesystemPhase::Retrying => ResourcePhase::Retrying,
+            FilesystemPhase::Failed => ResourcePhase::Failed,
             _ => ResourcePhase::Deleting,
         };
         return (phase, None);
     }
 
     let phase = match instance.phase {
-        AttachmentPhase::Ready
+        FilesystemPhase::Ready
             if instance.desired_version.is_some()
                 && instance.observed_version == instance.desired_version
                 && serving_revision.is_some_and(|serving| serving >= revision) =>
         {
             ResourcePhase::Ready
         },
-        AttachmentPhase::Retrying => ResourcePhase::Retrying,
-        AttachmentPhase::Failed => ResourcePhase::Failed,
-        AttachmentPhase::Pending | AttachmentPhase::WaitingForNamespace => ResourcePhase::Pending,
-        AttachmentPhase::Starting | AttachmentPhase::Stopping | AttachmentPhase::Ready => {
+        FilesystemPhase::Retrying => ResourcePhase::Retrying,
+        FilesystemPhase::Failed => ResourcePhase::Failed,
+        FilesystemPhase::Pending | FilesystemPhase::WaitingForNamespace => ResourcePhase::Pending,
+        FilesystemPhase::Starting | FilesystemPhase::Stopping | FilesystemPhase::Ready => {
             ResourcePhase::Preparing
         },
-        AttachmentPhase::Deleting => ResourcePhase::Preparing,
+        FilesystemPhase::Deleting => ResourcePhase::Preparing,
     };
     let observed_revision = (phase == ResourcePhase::Ready).then_some(revision);
     (phase, observed_revision)
@@ -1001,14 +1001,14 @@ mod tests {
     #[test]
     fn startup_reconstructs_failed_deletion_tombstone_before_namespace_ready() {
         let name = ResourceName::new("gone").unwrap();
-        let mut tombstone = AttachmentInstance::pending(name.clone());
-        tombstone.phase = AttachmentPhase::Failed;
+        let mut tombstone = FilesystemInstance::pending(name.clone());
+        tombstone.phase = FilesystemPhase::Failed;
         tombstone.deleting = true;
-        tombstone.last_error_code = Some("attachment_delete_probe_failed".to_owned());
+        tombstone.last_error_code = Some("filesystem_delete_probe_failed".to_owned());
         tombstone.last_error_detail = Some("runtime still present".to_owned());
         let mut statuses = Vec::new();
 
-        reconstruct_attachment_statuses(
+        reconstruct_filesystem_statuses(
             &NormalizedResourceSet::empty(),
             ResourceRevision::new(7),
             Some(ResourceRevision::new(7)),
@@ -1019,13 +1019,13 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(
             statuses[0].key,
-            ResourceKey::new(ResourceKind::Attachment, name)
+            ResourceKey::new(ResourceKind::Filesystem, name)
         );
         assert_eq!(statuses[0].phase, ResourcePhase::Failed);
         assert_eq!(statuses[0].observed_revision, None);
         assert_eq!(
             statuses[0].error_code.as_deref(),
-            Some("attachment_delete_probe_failed")
+            Some("filesystem_delete_probe_failed")
         );
         assert_eq!(
             startup_observed_revision(

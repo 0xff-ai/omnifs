@@ -51,7 +51,7 @@ fi
 
 "$root/scripts/guest-image/make-seed-iso.sh" \
   --out "$seed_iso" \
-  --attachment-name "smoke" \
+  --filesystem-name "smoke" \
   --runtime-instance "00000000000000000000000000000000" \
   --attach-addr "vsock:1024" \
   --libkrun-guest-image "$image" \

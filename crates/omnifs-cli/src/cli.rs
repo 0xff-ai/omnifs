@@ -74,7 +74,7 @@ pub enum Commands {
 
     /// Stop the daemon and clean up
     ///
-    /// Asks attached attachments to stop, drains them for a bounded time, then
+    /// Asks Filesystems to stop, drains them for a bounded time, then
     /// stops the daemon. Busy stragglers are reported for `omnifs doctor`.
     Down,
     /// Tail the daemon log
@@ -90,8 +90,9 @@ pub enum Commands {
     /// Manage declared credential slots and their secret material
     Credential(commands::credential::CredentialArgs),
 
-    /// Add, list, inspect, remove, restart, or enter Attachments
-    Attachment(commands::attachment::AttachmentArgs),
+    /// Add, list, inspect, remove, restart, or enter Filesystems
+    #[command(name = "fs")]
+    Filesystem(commands::filesystem::FilesystemArgs),
 
     /// Start the daemon and offer a resource-based quick start
     #[command(after_help = "Examples:\n  omnifs setup")]
@@ -117,7 +118,7 @@ pub enum Commands {
     #[command(hide = true)]
     Daemon,
 
-    /// Run a host attachment. Internal: launched by attachment lifecycle commands.
+    /// Run a host filesystem. Internal: launched by filesystem lifecycle commands.
     #[command(hide = true)]
     RunFs(omnifs_thin::RunFsArgs),
 }
@@ -204,15 +205,15 @@ impl Commands {
                     commands::credential::CredentialCommand::Revoke { .. } => "credential.revoke",
                 },
             ),
-            Self::Attachment(args) => (
-                Some("attachment"),
+            Self::Filesystem(args) => (
+                Some("fs"),
                 match &args.command {
-                    commands::attachment::AttachmentCommand::Add => "attachment.add",
-                    commands::attachment::AttachmentCommand::Ls => "attachment.ls",
-                    commands::attachment::AttachmentCommand::Show { .. } => "attachment.show",
-                    commands::attachment::AttachmentCommand::Rm { .. } => "attachment.rm",
-                    commands::attachment::AttachmentCommand::Restart { .. } => "attachment.restart",
-                    commands::attachment::AttachmentCommand::Shell(_) => "attachment.shell",
+                    commands::filesystem::FilesystemCommand::Add => "fs.add",
+                    commands::filesystem::FilesystemCommand::Ls => "fs.ls",
+                    commands::filesystem::FilesystemCommand::Show { .. } => "fs.show",
+                    commands::filesystem::FilesystemCommand::Rm { .. } => "fs.rm",
+                    commands::filesystem::FilesystemCommand::Restart { .. } => "fs.restart",
+                    commands::filesystem::FilesystemCommand::Shell(_) => "fs.shell",
                 },
             ),
             Self::Setup => (Some("setup"), "setup"),
@@ -265,7 +266,7 @@ impl Commands {
             Self::Provider(args) => args.run(output).await,
             Self::Mount(args) => args.run(output).await,
             Self::Credential(args) => args.run(output).await,
-            Self::Attachment(args) => args.run(output).await,
+            Self::Filesystem(args) => args.run(output).await,
             Self::Setup => Box::pin(commands::setup::run(output)).await,
             Self::Skill(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Completions(args) => args.run(&output).map(|()| ExitCode::Success),
@@ -380,7 +381,7 @@ fn fresh_profile_screen(
 /// The one actionable fact behind a `Degraded` verdict on a mount-less
 /// profile, if any: `Inventory::verdict` (inventory.rs) has two disjuncts
 /// that can still fire when `mounts` is empty (a daemon that failed or went
-/// unreachable, or a attachment severe enough to flip the verdict while the
+/// unreachable, or a filesystem severe enough to flip the verdict while the
 /// daemon is otherwise up), and the mount-related disjuncts are moot on an
 /// empty mount list. Returns the label and the one action selected by
 /// `Inventory::next_action`.
@@ -399,18 +400,18 @@ fn fresh_profile_degradation(inventory: &crate::inventory::Inventory) -> Option<
             command,
         )),
         crate::inventory::NextAction::Doctor {
-            target: crate::inventory::ActionTarget::Attachment(id),
+            target: crate::inventory::ActionTarget::Filesystem(id),
         } => inventory
-            .attachments
+            .filesystems
             .iter()
-            .find(|attachment| attachment.name == id)
-            .map(|attachment| {
+            .find(|filesystem| filesystem.name == id)
+            .map(|filesystem| {
                 (
                     format!(
-                        "{} ({}) attachment is {}",
-                        attachment.spec.protocol().as_str(),
-                        attachment.spec.runtime().as_str(),
-                        attachment.state.label()
+                        "{} ({}) filesystem is {}",
+                        filesystem.spec.protocol().as_str(),
+                        filesystem.spec.runtime().as_str(),
+                        filesystem.state.label()
                     ),
                     command,
                 )
@@ -511,28 +512,28 @@ mod tests {
         );
     }
 
-    /// A failed Attachment can flip the verdict to `Degraded` while the daemon
+    /// A failed Filesystem can flip the verdict to `Degraded` while the daemon
     /// is otherwise running and there are still zero mounts; the screen must
-    /// name that Attachment and reuse its own `fix` field verbatim.
+    /// name that Filesystem and reuse its own `fix` field verbatim.
     #[test]
-    fn fresh_profile_screen_names_a_failed_attachment_while_daemon_is_up() {
-        let attachment = crate::inventory::AttachmentAccessStatus {
+    fn fresh_profile_screen_names_a_failed_filesystem_while_daemon_is_up() {
+        let filesystem = crate::inventory::FilesystemAccessStatus {
             name: "test".parse().unwrap(),
-            spec: omnifs_core::AttachmentSpec::new(
-                omnifs_core::AttachmentProtocol::Fuse,
-                omnifs_core::AttachmentRuntime::Docker,
-                omnifs_core::ATTACHMENT_GUEST_LOCATION.into(),
+            spec: omnifs_core::FilesystemSpec::new(
+                omnifs_core::FilesystemProtocol::Fuse,
+                omnifs_core::FilesystemRuntime::Docker,
+                omnifs_core::FILESYSTEM_GUEST_LOCATION.into(),
                 None,
                 None,
             )
             .unwrap(),
-            state: crate::inventory::AttachmentAccessState::Failed,
+            state: crate::inventory::FilesystemAccessState::Failed,
             mount_count: 0,
             fix: Some("omnifs logs (container exited)".to_owned()),
         };
         let inventory = crate::inventory::Inventory::test(
             crate::inventory::DaemonHealth::Running,
-            vec![attachment],
+            vec![filesystem],
             Vec::new(),
         );
         assert_eq!(
@@ -542,13 +543,13 @@ mod tests {
         assert_eq!(
             super::fresh_profile_degradation(&inventory),
             Some((
-                "fuse (docker) attachment is failed".to_owned(),
+                "fuse (docker) filesystem is failed".to_owned(),
                 "omnifs doctor".to_owned()
             ))
         );
         let screen = super::fresh_profile_screen(&inventory, caps(false));
         assert!(
-            screen.contains("fuse (docker) attachment is failed:  `omnifs doctor`"),
+            screen.contains("fuse (docker) filesystem is failed:  `omnifs doctor`"),
             "{screen}"
         );
     }
@@ -582,9 +583,8 @@ mod tests {
         for argv in [
             &["omnifs", "up"][..],
             &["omnifs", "up", "--offline"][..],
-            &["omnifs", "fs", "ls"][..],
-            &["omnifs", "attachment", "attach", "main"][..],
-            &["omnifs", "attachment", "detach", "main"][..],
+            &["omnifs", "fs", "attach", "main"][..],
+            &["omnifs", "fs", "detach", "main"][..],
         ] {
             let Err(error) = Cli::try_parse_from(argv) else {
                 panic!("obsolete command parsed: {argv:?}");

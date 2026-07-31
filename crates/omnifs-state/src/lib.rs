@@ -1,10 +1,10 @@
 //! Daemon-private durable state.
 
 mod action;
-mod attachment;
 mod blob;
 mod credential;
 mod db;
+mod filesystem;
 mod paths;
 mod provider;
 mod resource;
@@ -35,21 +35,21 @@ use provider::{
 use writer::StateWriter;
 
 pub use action::{
-    ActionWriteError, AttachmentActionRequest, CredentialActionOperation, CredentialActionRequest,
+    ActionWriteError, CredentialActionOperation, CredentialActionRequest, FilesystemActionRequest,
 };
-pub use attachment::{AttachmentInstance, AttachmentObservation, AttachmentPhase};
 pub use credential::{
     CredentialDocument, CredentialRefreshKind, CredentialRefreshOutcome,
     CredentialRevocationFinish, CredentialState, CredentialSummary, SecretMaterial,
     StoredCredential, next_submitted,
 };
+pub use filesystem::{FilesystemInstance, FilesystemObservation, FilesystemPhase};
 pub use paths::DaemonStatePaths;
 pub use provider::{
     ProviderImportDisposition, ProviderImportOutcome, ProviderUpload, StoredProvider,
     StoredProviderMetadata, ValidatedProviderUpload,
 };
 pub use resource::{
-    CredentialSecretSidecar, DesiredAttachment, ResourceApplyError, ResourceApplyRequest,
+    CredentialSecretSidecar, DesiredFilesystem, ResourceApplyError, ResourceApplyRequest,
     ResourceSnapshot,
 };
 
@@ -216,16 +216,16 @@ impl StateStore {
             .await?
     }
 
-    /// Accept one non-secret attachment restart action and its durable receipt
+    /// Accept one non-secret filesystem restart action and its durable receipt
     /// in one writer transaction.
-    pub async fn accept_attachment_action(
+    pub async fn accept_filesystem_action(
         &self,
-        request: AttachmentActionRequest,
+        request: FilesystemActionRequest,
     ) -> Result<omnifs_api::ActionReceipt, ActionWriteError> {
         self.writer
             .call(move |mut connection| async move {
                 let result = Db::new(&mut connection)
-                    .accept_attachment_action(request)
+                    .accept_filesystem_action(request)
                     .await;
                 (connection, result)
             })
@@ -262,43 +262,43 @@ impl StateStore {
         action::action_receipts(&mut connection).await
     }
 
-    /// Read one exact observed attachment instance, including a deleting
+    /// Read one exact observed filesystem instance, including a deleting
     /// tombstone that no longer has a desired resource.
-    pub async fn attachment_instance(
+    pub async fn filesystem_instance(
         &self,
         name: &omnifs_core::ResourceName,
-    ) -> anyhow::Result<Option<AttachmentInstance>> {
+    ) -> anyhow::Result<Option<FilesystemInstance>> {
         let mut connection = self
             .reads
             .acquire()
             .await
-            .context("acquire attachment instance reader")?;
-        attachment::load_instance(&mut connection, name).await
+            .context("acquire filesystem instance reader")?;
+        filesystem::load_instance(&mut connection, name).await
     }
 
-    /// Read all observed attachment instances in stable name order.
-    pub async fn attachment_instances(&self) -> anyhow::Result<Vec<AttachmentInstance>> {
-        attachment::list_instances(&self.reads).await
+    /// Read all observed filesystem instances in stable name order.
+    pub async fn filesystem_instances(&self) -> anyhow::Result<Vec<FilesystemInstance>> {
+        filesystem::list_instances(&self.reads).await
     }
 
-    /// Read all desired attachment definitions with their durable versions.
-    pub async fn desired_attachments(&self) -> anyhow::Result<Vec<DesiredAttachment>> {
-        resource::desired_attachments(&self.reads).await
+    /// Read all desired filesystem definitions with their durable versions.
+    pub async fn desired_filesystems(&self) -> anyhow::Result<Vec<DesiredFilesystem>> {
+        resource::desired_filesystems(&self.reads).await
     }
 
-    /// Record one observed attachment phase after checking the exact desired,
+    /// Record one observed filesystem phase after checking the exact desired,
     /// action, and runtime identity observed before the supervisor effect.
     ///
     /// A stale write returns `None` and cannot change desired state, deletion
     /// state, or action generation.
-    pub async fn write_attachment_observation(
+    pub async fn write_filesystem_observation(
         &self,
-        observation: AttachmentObservation,
-    ) -> anyhow::Result<Option<AttachmentInstance>> {
+        observation: FilesystemObservation,
+    ) -> anyhow::Result<Option<FilesystemInstance>> {
         self.writer
             .call(move |mut connection| async move {
                 let result = Db::new(&mut connection)
-                    .write_attachment_observation(observation)
+                    .write_filesystem_observation(observation)
                     .await;
                 (connection, result)
             })
@@ -307,7 +307,7 @@ impl StateStore {
 
     /// Clear a deletion tombstone only if its desired row and exact runtime
     /// identity have not changed since the teardown proof.
-    pub async fn clear_attachment_instance_if_deleting(
+    pub async fn clear_filesystem_instance_if_deleting(
         &self,
         name: omnifs_core::ResourceName,
         runtime_instance: Option<String>,
@@ -315,7 +315,7 @@ impl StateStore {
         self.writer
             .call(move |mut connection| async move {
                 let result = Db::new(&mut connection)
-                    .delete_attachment_instance_if_deleting(name, runtime_instance)
+                    .delete_filesystem_instance_if_deleting(name, runtime_instance)
                     .await;
                 (connection, result)
             })

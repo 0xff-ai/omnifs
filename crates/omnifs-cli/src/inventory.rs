@@ -10,8 +10,8 @@ use omnifs_api::DaemonPhase;
 use omnifs_api::{CredentialHealth, DaemonInventory, HealthState, MountHealth, MountRecord};
 use omnifs_core::ResourceRevision;
 #[cfg(test)]
-use omnifs_core::{ATTACHMENT_GUEST_LOCATION, AttachmentProtocol};
-use omnifs_core::{AttachmentRuntime, AttachmentSpec, ResourceName};
+use omnifs_core::{FILESYSTEM_GUEST_LOCATION, FilesystemProtocol};
+use omnifs_core::{FilesystemRuntime, FilesystemSpec, ResourceName};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,7 @@ pub(crate) struct Inventory {
     pub(crate) durable_revision: Option<ResourceRevision>,
     pub(crate) serving_revision: Option<ResourceRevision>,
     pub(crate) daemon: DaemonFacts,
-    pub(crate) attachments: Vec<AttachmentAccessStatus>,
+    pub(crate) filesystems: Vec<FilesystemAccessStatus>,
     pub(crate) mounts: Vec<MountStatus>,
 }
 
@@ -59,10 +59,10 @@ impl DaemonHealth {
     /// daemon row both start from this instead of each spelling out its own
     /// six-variant match. `Running` renders plainly as "running" here;
     /// status's context strip additionally folds in the whole profile's
-    /// verdict (mounts and attachments, not just the daemon) to show
+    /// verdict (mounts and filesystems, not just the daemon) to show
     /// "healthy" instead when everything else is clean too, a distinction
     /// doctor's daemon-only row deliberately does not make (mount and
-    /// attachment problems get their own rows there).
+    /// filesystem problems get their own rows there).
     pub(crate) const fn descriptor(self) -> (Severity, &'static str) {
         match self {
             Self::Running => (Severity::Positive, "running"),
@@ -136,7 +136,7 @@ impl DaemonFacts {
                 ),
                 mounts: Vec::new(),
                 credentials: Vec::new(),
-                attachments: Vec::new(),
+                filesystems: Vec::new(),
             }),
         };
         Self { status, probe }
@@ -185,22 +185,22 @@ pub(crate) enum Severity {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct AttachmentAccessStatus {
+pub(crate) struct FilesystemAccessStatus {
     pub(crate) name: ResourceName,
     #[serde(flatten)]
-    pub(crate) spec: AttachmentSpec,
-    pub(crate) state: AttachmentAccessState,
+    pub(crate) spec: FilesystemSpec,
+    pub(crate) state: FilesystemAccessState,
     pub(crate) mount_count: usize,
     pub(crate) fix: Option<String>,
 }
 
-impl PartialOrd for AttachmentAccessStatus {
+impl PartialOrd for FilesystemAccessStatus {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for AttachmentAccessStatus {
+impl Ord for FilesystemAccessStatus {
     fn cmp(&self, other: &Self) -> Ordering {
         self.spec
             .runtime()
@@ -217,18 +217,18 @@ impl Ord for AttachmentAccessStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum AttachmentAccessState {
-    Attached,
-    Detached,
+pub(crate) enum FilesystemAccessState {
+    Ready,
+    Stopped,
     Unknown,
     Failed,
 }
 
-impl AttachmentAccessState {
+impl FilesystemAccessState {
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Attached => "attached",
-            Self::Detached => "detached",
+            Self::Ready => "ready",
+            Self::Stopped => "stopped",
             Self::Unknown => "unknown",
             Self::Failed => "failed",
         }
@@ -236,8 +236,8 @@ impl AttachmentAccessState {
 
     pub(crate) const fn severity(self) -> Severity {
         match self {
-            Self::Attached => Severity::Positive,
-            Self::Detached => Severity::Neutral,
+            Self::Ready => Severity::Positive,
+            Self::Stopped => Severity::Neutral,
             Self::Unknown => Severity::Attention,
             Self::Failed => Severity::Failure,
         }
@@ -246,16 +246,16 @@ impl AttachmentAccessState {
     pub(crate) const fn fix(self) -> Option<&'static str> {
         match self {
             Self::Failed => Some("omnifs logs"),
-            Self::Attached | Self::Detached | Self::Unknown => None,
+            Self::Ready | Self::Stopped | Self::Unknown => None,
         }
     }
 
-    /// Whether a attachment in this state counts as a live access surface
+    /// Whether a filesystem in this state counts as a live access surface
     /// The one owner of that predicate: the access lines,
-    /// `status`'s attachment count, and each mount's `access_count` all filter
+    /// `status`'s filesystem count, and each mount's `access_count` all filter
     /// through it.
     pub(crate) const fn provides_access(self) -> bool {
-        matches!(self, Self::Attached)
+        matches!(self, Self::Ready)
     }
 }
 
@@ -306,8 +306,8 @@ impl MountStatus {
             || matches!(self.serving, ServingState::Failed { .. })
     }
 
-    /// The host attachment path this mount's files are reachable at, or
-    /// empty when the mount isn't live or no host attachment is attached.
+    /// The host filesystem path this mount's files are reachable at, or
+    /// empty when the mount isn't live or no host filesystem is attached.
     pub(crate) fn access_path(&self, host_location: Option<&Path>) -> String {
         if self.serving != ServingState::Live {
             return String::new();
@@ -526,17 +526,17 @@ impl ServingState {
 pub(crate) enum ActionTarget {
     Profile,
     Mount(String),
-    Attachment(ResourceName),
+    Filesystem(ResourceName),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NextAction {
     Doctor { target: ActionTarget },
     Reauthenticate { mount: String },
-    WaitForAttachment { id: ResourceName },
-    CreateAttachment,
+    WaitForFilesystem { id: ResourceName },
+    CreateFilesystem,
     Browse { path: PathBuf },
-    EnterAttachment { id: ResourceName },
+    EnterFilesystem { id: ResourceName },
 }
 
 impl Inventory {
@@ -577,8 +577,8 @@ impl Inventory {
             },
         };
         let mount_count = mounts.len();
-        let attachments = daemon_status.as_ref().map_or_else(Vec::new, |status| {
-            attachment_access_statuses(&status.attachments, Some(status), daemon_known, mount_count)
+        let filesystems = daemon_status.as_ref().map_or_else(Vec::new, |status| {
+            filesystem_access_statuses(&status.filesystems, Some(status), daemon_known, mount_count)
         });
         let mut inventory = Self {
             home: endpoint.root().to_path_buf(),
@@ -589,40 +589,40 @@ impl Inventory {
                 .as_ref()
                 .and_then(|status| status.serving_revision),
             daemon,
-            attachments,
+            filesystems,
             mounts,
         };
-        let access_count = inventory.ready_attachment_count();
+        let access_count = inventory.ready_filesystem_count();
         for mount in &mut inventory.mounts {
             mount.access_count = access_count;
         }
         Ok(inventory)
     }
 
-    /// Attachment rows that provide live access, in inventory order.
-    pub(crate) fn ready_attachments(&self) -> impl Iterator<Item = &AttachmentAccessStatus> {
-        self.attachments
+    /// Filesystem rows that provide live access, in inventory order.
+    pub(crate) fn ready_filesystems(&self) -> impl Iterator<Item = &FilesystemAccessStatus> {
+        self.filesystems
             .iter()
-            .filter(|attachment| attachment.state.provides_access())
+            .filter(|filesystem| filesystem.state.provides_access())
     }
 
-    /// Count of attachment rows that provide live access. The one owner
+    /// Count of filesystem rows that provide live access. The one owner
     /// `collect_rpc` uses to seed every mount's `access_count`, so counting
     /// again from a rendered `Inventory` can never drift from what was
     /// recorded at collection time.
-    pub(crate) fn ready_attachment_count(&self) -> usize {
-        self.ready_attachments().count()
+    pub(crate) fn ready_filesystem_count(&self) -> usize {
+        self.ready_filesystems().count()
     }
 
-    /// The first attached host attachment's location, if any.
+    /// The first attached host filesystem's location, if any.
     pub(crate) fn primary_host_location(&self) -> Option<&Path> {
-        self.ready_attachments()
-            .find(|attachment| attachment.spec.runtime() == AttachmentRuntime::Host)
-            .map(|attachment| attachment.spec.location())
+        self.ready_filesystems()
+            .find(|filesystem| filesystem.spec.runtime() == FilesystemRuntime::Host)
+            .map(|filesystem| filesystem.spec.location())
     }
 
     pub(crate) fn verdict(&self) -> ResultVerdict {
-        let degraded = self.attachments.iter().any(|entry| {
+        let degraded = self.filesystems.iter().any(|entry| {
             entry.state.severity() >= Severity::Attention
                 && matches!(
                     self.daemon.health(),
@@ -658,14 +658,14 @@ impl Inventory {
                 target: ActionTarget::Mount(mount.name.clone()),
             });
         }
-        if let Some(attachment) = self.attachments.iter().find(|attachment| {
+        if let Some(filesystem) = self.filesystems.iter().find(|filesystem| {
             matches!(
-                attachment.state,
-                AttachmentAccessState::Unknown | AttachmentAccessState::Failed
+                filesystem.state,
+                FilesystemAccessState::Unknown | FilesystemAccessState::Failed
             )
         }) {
             return Some(NextAction::Doctor {
-                target: ActionTarget::Attachment(attachment.name.clone()),
+                target: ActionTarget::Filesystem(filesystem.name.clone()),
             });
         }
         if let Some(mount) = self
@@ -677,31 +677,31 @@ impl Inventory {
                 mount: mount.name.clone(),
             });
         }
-        if let Some(attachment) = self
-            .attachments
+        if let Some(filesystem) = self
+            .filesystems
             .iter()
-            .find(|attachment| attachment.state == AttachmentAccessState::Detached)
+            .find(|filesystem| filesystem.state == FilesystemAccessState::Stopped)
         {
-            return Some(NextAction::WaitForAttachment {
-                id: attachment.name.clone(),
+            return Some(NextAction::WaitForFilesystem {
+                id: filesystem.name.clone(),
             });
         }
-        if self.attachments.is_empty() && !self.mounts.is_empty() {
-            return Some(NextAction::CreateAttachment);
+        if self.filesystems.is_empty() && !self.mounts.is_empty() {
+            return Some(NextAction::CreateFilesystem);
         }
         let first_mount = self
             .mounts
             .iter()
             .find(|mount| mount.serving == ServingState::Live)
             .or_else(|| self.mounts.first());
-        if let Some(attachment) = self.attachments.iter().find(|attachment| {
-            attachment.state.provides_access()
-                && attachment.spec.runtime() == AttachmentRuntime::Host
+        if let Some(filesystem) = self.filesystems.iter().find(|filesystem| {
+            filesystem.state.provides_access()
+                && filesystem.spec.runtime() == FilesystemRuntime::Host
         }) {
             let path = first_mount.map_or_else(
-                || attachment.spec.location().to_path_buf(),
+                || filesystem.spec.location().to_path_buf(),
                 |mount| {
-                    attachment
+                    filesystem
                         .spec
                         .location()
                         .join(mount.root.strip_prefix("/").unwrap_or(mount.root.as_path()))
@@ -709,21 +709,21 @@ impl Inventory {
             );
             return Some(NextAction::Browse { path });
         }
-        self.attachments
+        self.filesystems
             .iter()
-            .find(|attachment| {
-                attachment.state.provides_access()
-                    && attachment.spec.runtime() != AttachmentRuntime::Host
+            .find(|filesystem| {
+                filesystem.state.provides_access()
+                    && filesystem.spec.runtime() != FilesystemRuntime::Host
             })
-            .map(|attachment| NextAction::EnterAttachment {
-                id: attachment.name.clone(),
+            .map(|filesystem| NextAction::EnterFilesystem {
+                id: filesystem.name.clone(),
             })
     }
 
     #[cfg(test)]
     pub(crate) fn test(
         state: DaemonHealth,
-        attachments: Vec<AttachmentAccessStatus>,
+        filesystems: Vec<FilesystemAccessStatus>,
         mounts: Vec<MountStatus>,
     ) -> Self {
         Self {
@@ -731,46 +731,46 @@ impl Inventory {
             durable_revision: None,
             serving_revision: None,
             daemon: DaemonFacts::test(state),
-            attachments,
+            filesystems,
             mounts,
         }
     }
 }
 
-/// Build canonical attachment rows from the daemon's live attachments.
-pub(crate) fn attachment_access_statuses(
-    configured: &[omnifs_api::AttachmentDefinition],
+/// Build canonical filesystem rows from the daemon's live filesystems.
+pub(crate) fn filesystem_access_statuses(
+    configured: &[omnifs_api::FilesystemDefinition],
     daemon: Option<&DaemonInventory>,
     daemon_known: bool,
     mount_count: usize,
-) -> Vec<AttachmentAccessStatus> {
+) -> Vec<FilesystemAccessStatus> {
     let mut rows = configured
         .iter()
         .map(|definition| {
             let spec = &definition.spec;
             let observed = daemon.and_then(|status| {
                 status
-                    .attachments
+                    .filesystems
                     .iter()
                     .find(|observed| observed.name == definition.name)
             });
             let attached = observed.is_some_and(|observed| observed.spec == *spec);
             let identity_conflict = observed.is_some() && !attached;
             let state = if !daemon_known {
-                AttachmentAccessState::Unknown
+                FilesystemAccessState::Unknown
             } else if identity_conflict
                 || attached
                     && daemon.is_some_and(|status| {
                         status.health.overall_state() == HealthState::Unhealthy
                     })
             {
-                AttachmentAccessState::Failed
+                FilesystemAccessState::Failed
             } else if attached {
-                AttachmentAccessState::Attached
+                FilesystemAccessState::Ready
             } else {
-                AttachmentAccessState::Detached
+                FilesystemAccessState::Stopped
             };
-            AttachmentAccessStatus {
+            FilesystemAccessStatus {
                 name: definition.name.clone(),
                 spec: spec.clone(),
                 state,
@@ -787,20 +787,20 @@ pub(crate) fn attachment_access_statuses(
     if let Some(daemon) = daemon {
         rows.extend(
             daemon
-                .attachments
+                .filesystems
                 .iter()
                 .filter(|observed| {
                     !configured
                         .iter()
                         .any(|definition| definition.name == observed.name)
                 })
-                .map(|observed| AttachmentAccessStatus {
+                .map(|observed| FilesystemAccessStatus {
                     name: observed.name.clone(),
                     spec: observed.spec.clone(),
                     state: if daemon.health.overall_state() == HealthState::Unhealthy {
-                        AttachmentAccessState::Failed
+                        FilesystemAccessState::Failed
                     } else {
-                        AttachmentAccessState::Attached
+                        FilesystemAccessState::Ready
                     },
                     mount_count,
                     fix: None,
@@ -888,7 +888,7 @@ mod tests {
                 ),
                 mounts: Vec::new(),
                 credentials: Vec::new(),
-                attachments: Vec::new(),
+                filesystems: Vec::new(),
             };
             assert_eq!(DaemonFacts::from(Ok(Some(status))).health(), expected);
         }
@@ -896,55 +896,55 @@ mod tests {
 
     #[test]
     fn daemon_down_inventory_has_no_filesystem_rows() {
-        let rows = attachment_access_statuses(&[], None, true, 1);
+        let rows = filesystem_access_statuses(&[], None, true, 1);
         assert!(rows.is_empty());
     }
 
     #[test]
-    fn daemon_down_inventory_retains_configured_detached_attachments() {
-        let spec = AttachmentSpec::new(
-            AttachmentProtocol::Nfs,
-            AttachmentRuntime::Host,
+    fn daemon_down_inventory_retains_configured_stopped_filesystems() {
+        let spec = FilesystemSpec::new(
+            FilesystemProtocol::Nfs,
+            FilesystemRuntime::Host,
             PathBuf::from("/mnt/local"),
             None,
             None,
         )
         .unwrap();
-        let definition = omnifs_api::AttachmentDefinition {
+        let definition = omnifs_api::FilesystemDefinition {
             name: "local".parse().unwrap(),
             spec,
         };
-        let rows = attachment_access_statuses(&[definition], None, true, 1);
+        let rows = filesystem_access_statuses(&[definition], None, true, 1);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name.as_str(), "local");
-        assert_eq!(rows[0].state, AttachmentAccessState::Detached);
+        assert_eq!(rows[0].state, FilesystemAccessState::Stopped);
     }
 
     #[test]
-    fn configured_identity_conflict_is_failed_not_hidden_as_detached() {
-        let spec = AttachmentSpec::new(
-            AttachmentProtocol::Nfs,
-            AttachmentRuntime::Host,
+    fn configured_identity_conflict_is_failed_not_hidden_as_stopped() {
+        let spec = FilesystemSpec::new(
+            FilesystemProtocol::Nfs,
+            FilesystemRuntime::Host,
             PathBuf::from("/mnt/local"),
             None,
             None,
         )
         .unwrap();
         let mut daemon = DaemonFacts::test(DaemonHealth::Running).status.unwrap();
-        daemon.attachments.push(omnifs_api::AttachmentDefinition {
+        daemon.filesystems.push(omnifs_api::FilesystemDefinition {
             name: "local".parse().unwrap(),
-            spec: AttachmentSpec::new(
-                AttachmentProtocol::Fuse,
-                AttachmentRuntime::Docker,
-                PathBuf::from(ATTACHMENT_GUEST_LOCATION),
+            spec: FilesystemSpec::new(
+                FilesystemProtocol::Fuse,
+                FilesystemRuntime::Docker,
+                PathBuf::from(FILESYSTEM_GUEST_LOCATION),
                 Some("image".to_owned()),
                 None,
             )
             .unwrap(),
         });
 
-        let rows = attachment_access_statuses(
-            &[omnifs_api::AttachmentDefinition {
+        let rows = filesystem_access_statuses(
+            &[omnifs_api::FilesystemDefinition {
                 name: "local".parse().unwrap(),
                 spec,
             }],
@@ -953,7 +953,7 @@ mod tests {
             1,
         );
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].state, AttachmentAccessState::Failed);
+        assert_eq!(rows[0].state, FilesystemAccessState::Failed);
         assert_eq!(rows[0].fix.as_deref(), Some("omnifs doctor"));
     }
 
@@ -989,17 +989,17 @@ mod tests {
         let mut unmanaged = base.clone();
         unmanaged.daemon = DaemonFacts::test(DaemonHealth::Running);
         let protocol = if cfg!(target_os = "linux") {
-            AttachmentProtocol::Fuse
+            FilesystemProtocol::Fuse
         } else {
-            AttachmentProtocol::Nfs
+            FilesystemProtocol::Nfs
         };
-        unmanaged.attachments.push(AttachmentAccessStatus {
+        unmanaged.filesystems.push(FilesystemAccessStatus {
             name: "test".parse().unwrap(),
-            spec: AttachmentSpec::new(protocol, AttachmentRuntime::Host, "/mnt".into(), None, None)
+            spec: FilesystemSpec::new(protocol, FilesystemRuntime::Host, "/mnt".into(), None, None)
                 .unwrap(),
-            state: AttachmentAccessState::Failed,
+            state: FilesystemAccessState::Failed,
             mount_count: 1,
-            fix: Some("omnifs attachment rm test".into()),
+            fix: Some("omnifs fs rm test".into()),
         });
         assert_eq!(unmanaged.verdict(), ResultVerdict::Degraded);
         let mut unreachable = base;
@@ -1022,24 +1022,24 @@ mod tests {
             serving: ServingState::Live,
             access_count: 1,
         };
-        let attachment = AttachmentAccessStatus {
+        let filesystem = FilesystemAccessStatus {
             name: "host".parse().unwrap(),
-            spec: AttachmentSpec::new(
-                AttachmentProtocol::Nfs,
-                AttachmentRuntime::Host,
+            spec: FilesystemSpec::new(
+                FilesystemProtocol::Nfs,
+                FilesystemRuntime::Host,
                 "/mnt/omnifs".into(),
                 None,
                 None,
             )
             .unwrap(),
-            state: AttachmentAccessState::Attached,
+            state: FilesystemAccessState::Ready,
             mount_count: 1,
             fix: None,
         };
 
         let healthy = Inventory::test(
             DaemonHealth::Running,
-            vec![attachment.clone()],
+            vec![filesystem.clone()],
             vec![mount.clone()],
         );
         assert_eq!(
@@ -1049,11 +1049,11 @@ mod tests {
             })
         );
 
-        let mut detached = healthy.clone();
-        detached.attachments[0].state = AttachmentAccessState::Detached;
+        let mut stopped = healthy.clone();
+        stopped.filesystems[0].state = FilesystemAccessState::Stopped;
         assert_eq!(
-            detached.next_action(),
-            Some(NextAction::WaitForAttachment {
+            stopped.next_action(),
+            Some(NextAction::WaitForFilesystem {
                 id: "host".parse().unwrap()
             })
         );
@@ -1061,7 +1061,7 @@ mod tests {
         let no_filesystem = Inventory::test(DaemonHealth::Running, Vec::new(), vec![mount.clone()]);
         assert_eq!(
             no_filesystem.next_action(),
-            Some(NextAction::CreateAttachment)
+            Some(NextAction::CreateFilesystem)
         );
 
         let mut auth = healthy.clone();
@@ -1076,11 +1076,11 @@ mod tests {
         );
 
         let mut broken = auth;
-        broken.attachments[0].state = AttachmentAccessState::Failed;
+        broken.filesystems[0].state = FilesystemAccessState::Failed;
         assert_eq!(
             broken.next_action(),
             Some(NextAction::Doctor {
-                target: ActionTarget::Attachment("host".parse().unwrap())
+                target: ActionTarget::Filesystem("host".parse().unwrap())
             })
         );
 

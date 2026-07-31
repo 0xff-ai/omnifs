@@ -5,8 +5,8 @@ use std::process::Command;
 
 use anyhow::{Context as _, Result, ensure};
 use omnifs_core::{
-    ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceName,
-    attachment_pair_supported_on_current_host,
+    FILESYSTEM_GUEST_LOCATION, FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName,
+    filesystem_pair_supported_on_current_host,
 };
 
 use crate::docker::{DockerClient, DockerContainerIdentity, OwnedFilesystemContainer};
@@ -25,46 +25,46 @@ pub struct RuntimePaths {
     executable: PathBuf,
 }
 
-fn short_attachment_hash(name: &ResourceName) -> String {
+fn short_filesystem_hash(name: &ResourceName) -> String {
     use sha2::{Digest as _, Sha256};
     let digest = Sha256::digest(name.as_str().as_bytes());
     hex::encode(&digest[..8])
 }
 
 impl RuntimePaths {
-    /// Construct daemon-owned attachment paths. The caller supplies daemon
+    /// Construct daemon-owned filesystem paths. The caller supplies daemon
     /// state roots, so this crate never resolves a profile or creates
     /// client-owned state.
     #[must_use]
     pub fn daemon_owned(
         profile_root: PathBuf,
         is_default_profile: bool,
-        attachments_root: PathBuf,
-        attachment_logs_root: PathBuf,
+        filesystems_root: PathBuf,
+        filesystem_logs_root: PathBuf,
         guest_image_cache: PathBuf,
         executable: PathBuf,
     ) -> Self {
         Self {
             profile_root,
             is_default_profile,
-            state_root: attachments_root,
-            host_log_root: attachment_logs_root,
+            state_root: filesystems_root,
+            host_log_root: filesystem_logs_root,
             guest_image_cache,
             executable,
         }
     }
 
     #[must_use]
-    pub fn attachment(&self, name: &ResourceName) -> AttachmentRuntimePaths {
+    pub fn filesystem(&self, name: &ResourceName) -> FilesystemRuntimePaths {
         let state_dir = self.state_root.join(name.as_str());
-        AttachmentRuntimePaths {
+        FilesystemRuntimePaths {
             profile_root: self.profile_root.clone(),
             state_dir: state_dir.clone(),
             host_log: self.host_log_root.join(format!("{name}.log")),
             host_control_socket: self
                 .profile_root
                 .join(".r")
-                .join(format!("{}.sock", short_attachment_hash(name))),
+                .join(format!("{}.sock", short_filesystem_hash(name))),
             libkrun_root: self.state_root.join(name.as_str()).join("libkrun"),
             guest_image_cache: self.guest_image_cache.clone(),
             executable: self.executable.clone(),
@@ -89,7 +89,7 @@ impl RuntimePaths {
 
 /// Exact paths for one configured filesystem runtime.
 #[derive(Debug, Clone)]
-pub struct AttachmentRuntimePaths {
+pub struct FilesystemRuntimePaths {
     profile_root: PathBuf,
     state_dir: PathBuf,
     host_log: PathBuf,
@@ -99,7 +99,7 @@ pub struct AttachmentRuntimePaths {
     executable: PathBuf,
 }
 
-impl AttachmentRuntimePaths {
+impl FilesystemRuntimePaths {
     #[must_use]
     pub fn profile_root(&self) -> &Path {
         &self.profile_root
@@ -164,10 +164,10 @@ impl AttachEndpoints {
 /// One launch, with all config, paths, identity, endpoints, and event delivery
 /// supplied by the caller.
 pub struct LaunchRequest<'a> {
-    pub attachment: &'a ResourceName,
-    pub spec: &'a AttachmentSpec,
+    pub filesystem: &'a ResourceName,
+    pub spec: &'a FilesystemSpec,
     pub runtime_instance: &'a str,
-    pub paths: &'a AttachmentRuntimePaths,
+    pub paths: &'a FilesystemRuntimePaths,
     pub endpoints: &'a AttachEndpoints,
     pub events: &'a RuntimeEventSink,
 }
@@ -181,9 +181,9 @@ enum Backend {
 /// One exact configured runtime with closed host, Docker, and libkrun
 /// dispatch.
 pub struct RuntimeDriver {
-    attachment: ResourceName,
-    spec: AttachmentSpec,
-    paths: AttachmentRuntimePaths,
+    filesystem: ResourceName,
+    spec: FilesystemSpec,
+    paths: FilesystemRuntimePaths,
     events: RuntimeEventSink,
     backend: Backend,
 }
@@ -226,50 +226,50 @@ impl RuntimeDriver {
     /// The only match on the persisted runtime enum.
     pub fn new(
         paths: &RuntimePaths,
-        attachment: ResourceName,
-        spec: AttachmentSpec,
+        filesystem: ResourceName,
+        spec: FilesystemSpec,
         events: RuntimeEventSink,
     ) -> Result<Self> {
         ensure!(
-            attachment_pair_supported_on_current_host(spec.protocol(), spec.runtime()),
+            filesystem_pair_supported_on_current_host(spec.protocol(), spec.runtime()),
             "{}/{} is not supported on this daemon host",
             spec.protocol(),
             spec.runtime()
         );
-        let runtime_paths = paths.attachment(&attachment);
+        let runtime_paths = paths.filesystem(&filesystem);
         let backend = match spec.runtime() {
-            AttachmentRuntime::Host => Backend::Host(HostDriver::new_with_control_socket(
+            FilesystemRuntime::Host => Backend::Host(HostDriver::new_with_control_socket(
                 runtime_paths.state_dir().to_path_buf(),
                 runtime_paths.host_log().to_path_buf(),
                 runtime_paths.host_control_socket().to_path_buf(),
                 runtime_paths.executable().to_path_buf(),
                 events.clone(),
             )),
-            AttachmentRuntime::Docker => {
+            FilesystemRuntime::Docker => {
                 ensure!(
-                    spec.protocol() == AttachmentProtocol::Fuse,
+                    spec.protocol() == FilesystemProtocol::Fuse,
                     "Docker runtime requires the fuse protocol"
                 );
                 ensure!(
-                    spec.location() == Path::new(ATTACHMENT_GUEST_LOCATION),
-                    "Docker runtime requires location {ATTACHMENT_GUEST_LOCATION}"
+                    spec.location() == Path::new(FILESYSTEM_GUEST_LOCATION),
+                    "Docker runtime requires location {FILESYSTEM_GUEST_LOCATION}"
                 );
                 Backend::Docker(DockerClient::for_filesystem(
                     paths.profile_root(),
                     paths.is_default_profile(),
-                    &attachment,
+                    &filesystem,
                     spec.docker_image(),
                     events.clone(),
                 )?)
             },
-            AttachmentRuntime::Libkrun => {
+            FilesystemRuntime::Libkrun => {
                 ensure!(
-                    spec.protocol() == AttachmentProtocol::Fuse,
+                    spec.protocol() == FilesystemProtocol::Fuse,
                     "libkrun runtime requires the fuse protocol"
                 );
                 ensure!(
-                    spec.location() == Path::new(ATTACHMENT_GUEST_LOCATION),
-                    "libkrun runtime requires location {ATTACHMENT_GUEST_LOCATION}"
+                    spec.location() == Path::new(FILESYSTEM_GUEST_LOCATION),
+                    "libkrun runtime requires location {FILESYSTEM_GUEST_LOCATION}"
                 );
                 Backend::Libkrun(LibkrunRunner::new(
                     runtime_paths.libkrun_root().to_path_buf(),
@@ -278,7 +278,7 @@ impl RuntimeDriver {
         };
         Ok(Self {
             spec,
-            attachment,
+            filesystem,
             paths: runtime_paths,
             events,
             backend,
@@ -286,13 +286,13 @@ impl RuntimeDriver {
     }
 
     #[must_use]
-    pub fn spec(&self) -> &AttachmentSpec {
+    pub fn spec(&self) -> &FilesystemSpec {
         &self.spec
     }
 
     #[must_use]
-    pub fn attachment(&self) -> &ResourceName {
-        &self.attachment
+    pub fn filesystem(&self) -> &ResourceName {
+        &self.filesystem
     }
 
     pub async fn confirmed(
@@ -301,7 +301,7 @@ impl RuntimeDriver {
     ) -> std::result::Result<Option<ConfirmedRuntime>, RuntimeError> {
         let result = match &self.backend {
             Backend::Host(runner) => runner
-                .confirmed(&self.attachment, &self.spec)
+                .confirmed(&self.filesystem, &self.spec)
                 .await
                 .and_then(|value| {
                     value
@@ -317,7 +317,7 @@ impl RuntimeDriver {
             Backend::Docker(client) => client
                 .confirmed(
                     self.paths.profile_root(),
-                    &self.attachment,
+                    &self.filesystem,
                     &self.spec,
                     runtime_instance,
                 )
@@ -326,7 +326,7 @@ impl RuntimeDriver {
                     value.map(|(identity, running)| ConfirmedRuntime::Docker(identity, running))
                 }),
             Backend::Libkrun(runner) => runner
-                .confirmed(&self.attachment, &self.spec)
+                .confirmed(&self.filesystem, &self.spec)
                 .await
                 .and_then(|record| {
                     record
@@ -358,7 +358,7 @@ impl RuntimeDriver {
         self.events.emit(RuntimeEvent::Stage {
             stage: RuntimeStage::Stop,
             runtime: self.spec.runtime(),
-            attachment: self.attachment.clone(),
+            filesystem: self.filesystem.clone(),
             state: RuntimeState::Stopping,
         });
         let result: anyhow::Result<()> = match (&self.backend, confirmed) {
@@ -370,7 +370,7 @@ impl RuntimeDriver {
                     .stop_confirmed(
                         &identity,
                         self.paths.profile_root(),
-                        &self.attachment,
+                        &self.filesystem,
                         &self.spec,
                         runtime_instance,
                     )
@@ -381,7 +381,7 @@ impl RuntimeDriver {
             },
             _ => Err(anyhow::anyhow!(
                 "confirmed identity belongs to a different filesystem driver than `{}`",
-                self.attachment
+                self.filesystem
             )),
         };
         result
@@ -389,7 +389,7 @@ impl RuntimeDriver {
                 self.events.emit(RuntimeEvent::Stage {
                     stage: RuntimeStage::Stop,
                     runtime: self.spec.runtime(),
-                    attachment: self.attachment.clone(),
+                    filesystem: self.filesystem.clone(),
                     state: RuntimeState::Stopped,
                 });
             })
@@ -410,7 +410,7 @@ impl RuntimeDriver {
         attached: impl Future<Output = Result<()>>,
     ) -> std::result::Result<(), RuntimeError> {
         let request = LaunchRequest {
-            attachment: &self.attachment,
+            filesystem: &self.filesystem,
             spec: &self.spec,
             runtime_instance,
             paths: &self.paths,
@@ -418,14 +418,14 @@ impl RuntimeDriver {
             events: &self.events,
         };
         let stage = match self.spec.runtime() {
-            AttachmentRuntime::Host => RuntimeStage::StartProcess,
-            AttachmentRuntime::Docker => RuntimeStage::StartContainer,
-            AttachmentRuntime::Libkrun => RuntimeStage::StartVm,
+            FilesystemRuntime::Host => RuntimeStage::StartProcess,
+            FilesystemRuntime::Docker => RuntimeStage::StartContainer,
+            FilesystemRuntime::Libkrun => RuntimeStage::StartVm,
         };
         self.events.emit(RuntimeEvent::Stage {
             stage,
             runtime: self.spec.runtime(),
-            attachment: self.attachment.clone(),
+            filesystem: self.filesystem.clone(),
             state: RuntimeState::Pending,
         });
         let result = match &self.backend {
@@ -477,7 +477,7 @@ pub enum Candidate {
     },
     Docker(OwnedFilesystemContainer),
     Libkrun {
-        attachment: ResourceName,
+        filesystem: ResourceName,
         state_dir: PathBuf,
         confirmed: std::result::Result<Option<omnifs_libkrun::HelperRecord>, String>,
     },
@@ -519,14 +519,14 @@ pub async fn owned_filesystems(
 }
 
 pub(crate) fn ensure_record_matches(
-    record_attachment: &ResourceName,
-    record_spec: &AttachmentSpec,
-    expected_attachment: &ResourceName,
-    expected_spec: &AttachmentSpec,
+    record_filesystem: &ResourceName,
+    record_spec: &FilesystemSpec,
+    expected_filesystem: &ResourceName,
+    expected_spec: &FilesystemSpec,
 ) -> Result<()> {
     ensure!(
-        record_attachment == expected_attachment && record_spec == expected_spec,
-        "runner record does not match configured Attachment `{expected_attachment}`",
+        record_filesystem == expected_filesystem && record_spec == expected_spec,
+        "runner record does not match configured Filesystem `{expected_filesystem}`",
     );
     Ok(())
 }
@@ -572,50 +572,50 @@ mod tests {
     }
 
     fn spec(
-        runtime: AttachmentRuntime,
-        protocol: AttachmentProtocol,
+        runtime: FilesystemRuntime,
+        protocol: FilesystemProtocol,
         location: &str,
-    ) -> AttachmentSpec {
-        AttachmentSpec::new(
+    ) -> FilesystemSpec {
+        FilesystemSpec::new(
             protocol,
             runtime,
             PathBuf::from(location),
-            (runtime == AttachmentRuntime::Docker).then(|| "omnifs-filesystem:dev".into()),
-            (runtime == AttachmentRuntime::Libkrun).then(|| "guest.raw".into()),
+            (runtime == FilesystemRuntime::Docker).then(|| "omnifs-filesystem:dev".into()),
+            (runtime == FilesystemRuntime::Libkrun).then(|| "guest.raw".into()),
         )
         .unwrap()
     }
 
     #[test]
-    fn daemon_owned_paths_stay_under_attachment_state() {
+    fn daemon_owned_paths_stay_under_filesystem_state() {
         let root = Path::new("/tmp/omnifs-daemon");
         let paths = RuntimePaths::daemon_owned(
             root.to_path_buf(),
             false,
-            root.join("runtime/attachments"),
-            root.join("logs/attachments"),
+            root.join("runtime/filesystems"),
+            root.join("logs/filesystems"),
             root.join("cache/guest-images"),
             root.join("omnifs"),
         );
-        let attachment = paths.attachment(&ResourceName::new("work").unwrap());
+        let filesystem = paths.filesystem(&ResourceName::new("work").unwrap());
         assert_eq!(
-            attachment.state_dir(),
-            root.join("runtime/attachments/work")
+            filesystem.state_dir(),
+            root.join("runtime/filesystems/work")
         );
         assert_eq!(
-            attachment.host_log(),
-            root.join("logs/attachments/work.log")
+            filesystem.host_log(),
+            root.join("logs/filesystems/work.log")
         );
         assert_eq!(
-            attachment.host_control_socket(),
+            filesystem.host_control_socket(),
             root.join(".r/00e13ed7af55b276.sock")
         );
         assert_eq!(
-            attachment.libkrun_root(),
-            root.join("runtime/attachments/work/libkrun")
+            filesystem.libkrun_root(),
+            root.join("runtime/filesystems/work/libkrun")
         );
         assert_eq!(
-            attachment.guest_image_cache(),
+            filesystem.guest_image_cache(),
             root.join("cache/guest-images")
         );
     }
@@ -625,13 +625,14 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let paths = paths(temp.path());
         let events = RuntimeEventSink::discard();
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         assert!(matches!(
             RuntimeDriver::new(
                 &paths,
                 name(),
                 spec(
-                    AttachmentRuntime::Host,
-                    AttachmentProtocol::Nfs,
+                    FilesystemRuntime::Host,
+                    FilesystemProtocol::Nfs,
                     "/tmp/main",
                 ),
                 events.clone(),
@@ -645,9 +646,9 @@ mod tests {
                 &paths,
                 name(),
                 spec(
-                    AttachmentRuntime::Docker,
-                    AttachmentProtocol::Fuse,
-                    ATTACHMENT_GUEST_LOCATION,
+                    FilesystemRuntime::Docker,
+                    FilesystemProtocol::Fuse,
+                    FILESYSTEM_GUEST_LOCATION,
                 ),
                 events.clone(),
             )
@@ -661,9 +662,9 @@ mod tests {
                 &paths,
                 name(),
                 spec(
-                    AttachmentRuntime::Libkrun,
-                    AttachmentProtocol::Fuse,
-                    ATTACHMENT_GUEST_LOCATION,
+                    FilesystemRuntime::Libkrun,
+                    FilesystemProtocol::Fuse,
+                    FILESYSTEM_GUEST_LOCATION,
                 ),
                 events,
             )
@@ -677,9 +678,9 @@ mod tests {
                 &paths,
                 name(),
                 spec(
-                    AttachmentRuntime::Libkrun,
-                    AttachmentProtocol::Fuse,
-                    ATTACHMENT_GUEST_LOCATION,
+                    FilesystemRuntime::Libkrun,
+                    FilesystemProtocol::Fuse,
+                    FILESYSTEM_GUEST_LOCATION,
                 ),
                 events,
             )
@@ -699,9 +700,9 @@ mod tests {
 
     #[test]
     fn strict_specs_reject_invalid_guest_runtime_inputs_before_dispatch() {
-        for runtime in [AttachmentRuntime::Docker, AttachmentRuntime::Libkrun] {
-            let result = AttachmentSpec::new(
-                AttachmentProtocol::Nfs,
+        for runtime in [FilesystemRuntime::Docker, FilesystemRuntime::Libkrun] {
+            let result = FilesystemSpec::new(
+                FilesystemProtocol::Nfs,
                 runtime,
                 PathBuf::from("/tmp/not-guest"),
                 None,
@@ -717,10 +718,10 @@ mod tests {
         let error = RuntimeDriver::new(
             &paths(temp.path()),
             name(),
-            AttachmentSpec::new(
-                AttachmentProtocol::Fuse,
-                AttachmentRuntime::Docker,
-                ATTACHMENT_GUEST_LOCATION.into(),
+            FilesystemSpec::new(
+                FilesystemProtocol::Fuse,
+                FilesystemRuntime::Docker,
+                FILESYSTEM_GUEST_LOCATION.into(),
                 Some("   ".to_owned()),
                 None,
             )
@@ -741,24 +742,24 @@ mod tests {
         let root = Path::new("/caller/runtime");
         let paths = paths(root);
         let name = ResourceName::new("work").unwrap();
-        let attachment = paths.attachment(&name);
-        assert_eq!(attachment.state_dir(), root.join("state/work"));
-        assert_eq!(attachment.host_log(), root.join("logs/work.log"));
-        assert_eq!(attachment.libkrun_root(), root.join("state/work/libkrun"));
-        assert_eq!(attachment.guest_image_cache(), root.join("guest-images"));
-        assert_eq!(attachment.executable(), root.join("omnifs"));
+        let filesystem = paths.filesystem(&name);
+        assert_eq!(filesystem.state_dir(), root.join("state/work"));
+        assert_eq!(filesystem.host_log(), root.join("logs/work.log"));
+        assert_eq!(filesystem.libkrun_root(), root.join("state/work/libkrun"));
+        assert_eq!(filesystem.guest_image_cache(), root.join("guest-images"));
+        assert_eq!(filesystem.executable(), root.join("omnifs"));
     }
 
     #[test]
     fn record_and_runtime_identity_rechecks_fail_closed() {
         let recorded = spec(
-            AttachmentRuntime::Host,
-            AttachmentProtocol::Nfs,
+            FilesystemRuntime::Host,
+            FilesystemProtocol::Nfs,
             "/tmp/recorded",
         );
         let configured = spec(
-            AttachmentRuntime::Host,
-            AttachmentProtocol::Nfs,
+            FilesystemRuntime::Host,
+            FilesystemProtocol::Nfs,
             "/tmp/configured",
         );
         assert!(

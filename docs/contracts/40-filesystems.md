@@ -44,7 +44,7 @@ the verified Docker bridge. It owns both tasks; bind failure or later listener
 exit is fatal.
 
 `VfsSession` is observed transport state keyed by `ResourceName`, not
-configuration. Reconnect overlap requires matching Attachment name, full spec,
+configuration. Reconnect overlap requires matching Filesystem name, full spec,
 and runtime instance; conflicting reuse is rejected.
 
 ### FUSE
@@ -54,7 +54,7 @@ FUSE is the Linux host and guest protocol. Host FUSE uses hidden
 arguments.
 
 Docker FUSE stays in the container mount namespace. Killing the exact container
-removes it; restart creates a fresh runtime for the desired Attachment.
+removes it; restart creates a fresh runtime for the desired Filesystem.
 
 Keep FUSE inodes, notifications, mount mechanics, and replies in `omnifs-fuse`;
 shared projection behavior stays in the engine tree.
@@ -78,20 +78,20 @@ publication. NFS preserves path-backed protocol identity across reset while
 clearing derived sizes, reply cache, and listings. Local generations prevent
 late listing or cache completion from repopulating invalidated state.
 
-Attachment identity is `ResourceName` plus the daemon-resolved
-`AttachmentSpec`: protocol, runtime, location, and assets. Every launcher gets
+Filesystem identity is `ResourceName` plus the daemon-resolved
+`FilesystemSpec`: protocol, runtime, location, and assets. Every launcher gets
 that identity through named arguments; transport never infers it.
 
 Host locations are absolute; Docker and libkrun use `/omnifs`. Host and libkrun
-records include Attachment identity plus a random process instance. Docker
-labels name the Attachment, while command inspection proves its full spec.
+records include Filesystem identity plus a random process instance. Docker
+labels name the Filesystem, while command inspection proves its full spec.
 
-`AttachmentSupervisor` serializes lifecycle by name and publishes strict
+`FilesystemSupervisor` serializes lifecycle by name and publishes strict
 runtime records and instance-specific mode-0600 controls. Launch, deletion, and
 Doctor require identity proof; normal teardown never signals a PID from disk.
 
 Runtime records are recovery evidence, not desired truth. Changing the stored
-`AttachmentSpec` shape changes durable identity and the VFS handshake contract,
+`FilesystemSpec` shape changes durable identity and the VFS handshake contract,
 so it requires explicit storage and protocol review.
 
 Support and default selection are separate facts. A host, protocol, and runtime
@@ -115,10 +115,10 @@ the daemon stopped, targets exact identity, and requires confirmation that
 `--yes` cannot bypass.
 
 `omnifs-fs-runtime` owns mechanics, not desired state. Callers supply the
-Attachment, daemon paths, endpoints, and event sink. The crate does not resolve
+Filesystem, daemon paths, endpoints, and event sink. The crate does not resolve
 profiles, read `OMNIFS_HOME`, prompt, render, or depend on CLI or daemon crates.
 Runtime events are closed factual variants with non-blocking delivery. One
-keyed task owns each Attachment; no lock spans a runtime await. The runtime set
+keyed task owns each Filesystem; no lock spans a runtime await. The runtime set
 stays closed until a real fourth implementation exists.
 
 Libkrun uses the same thin binary and VFS protocol as Docker, replacing TCP with
@@ -136,7 +136,7 @@ REST. Detached teardown requires identity-matched Ping and Shutdown; only
 rollback may kill its directly owned unreaped child.
 
 Each launch copies the immutable guest image to mode-0600
-`<profile>/daemon-state/runtime/attachments/<name>/libkrun/root.raw`; libkrun
+`<profile>/daemon-state/runtime/filesystems/<name>/libkrun/root.raw`; libkrun
 never mutates the base. Rollback, replacement, restart, and deletion remove
 launch copies but preserve the base and SSH key.
 
@@ -146,7 +146,7 @@ Libkrun audits the exact seed keys and proves loopback-only networking with no
 `tsi_hijack` argument in live conformance. Either runner fails before launch
 success on any violation.
 
-Libkrun SSH uses a persistent per-Attachment ed25519 key. The seed carries only
+Libkrun SSH uses a persistent per-Filesystem ed25519 key. The seed carries only
 the public key; the guest enables its SSH socket only when that key is present.
 
 ### NFSv4 loopback
@@ -165,7 +165,7 @@ operations remain read-only; macOS readiness and teardown stay in NFS/CLI code.
 
 The shared NFS entrypoint attaches through VFS; host delivery uses hidden
 `omnifs run-fs --protocol nfs`. Runner records and persistent filehandles live
-under `daemon-state/runtime/attachments/<name>`. Restart reuses the recorded
+under `daemon-state/runtime/filesystems/<name>`. Restart reuses the recorded
 server address rather than binding a new port without remounting. Corrupt
 leaves degrade individually.
 
@@ -175,8 +175,8 @@ leaves degrade individually.
 commands. Filesystem and lifecycle code add no duplicate parser, schema, or argv
 builder.
 
-Per-Attachment mtab files hold discovery and teardown state. Mount records carry
-mount point, address, and PID; host records add Attachment identity, process
+Per-Filesystem mtab files hold discovery and teardown state. Mount records carry
+mount point, address, and PID; host records add Filesystem identity, process
 group, and control socket. The colocated NFS filehandle table is protocol
 identity owned by `omnifs-nfs`. Records degrade independently.
 
@@ -221,7 +221,7 @@ single-flight remains in `omnifs-auth`. FUSE has no `DELAY` equivalent.
 - `crates/omnifs-engine/src/tree`
 - `crates/omnifs-vfs/src/server.rs` (`VfsServer`)
 - `crates/omnifs-libkrun/src`
-- `crates/omnifs-daemon/src/attachment_supervisor.rs`
+- `crates/omnifs-daemon/src/filesystem_supervisor.rs`
 - `crates/omnifs-fs-runtime/src/host.rs`, `driver.rs`, `docker`, and `libkrun.rs`
 - `crates/omnifs-thin/src/host_control.rs` and `lifecycle.rs`
 - `crates/omnifs-cli/tests/lifecycle_acceptance.rs`

@@ -1,13 +1,13 @@
-//! Versioned storage encodings for desired resources and Attachment specs.
+//! Versioned storage encodings for desired resources and Filesystem specs.
 
 use anyhow::Context as _;
 use omnifs_api::{
-    AttachmentDefinition, CredentialDefinition, MountResourceDefinition, ProviderDefinition,
+    CredentialDefinition, FilesystemDefinition, MountResourceDefinition, ProviderDefinition,
     ResourceDefinition, ResourceLimits,
 };
 use omnifs_core::{
-    AttachmentProtocol as Protocol, AttachmentRuntime as Runtime, AttachmentSpec,
-    AttachmentVersion, ProviderId, ResourceName, ResourceRevision,
+    FilesystemProtocol as Protocol, FilesystemRuntime as Runtime, FilesystemSpec,
+    FilesystemVersion, ProviderId, ResourceName, ResourceRevision,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -15,8 +15,8 @@ use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 use std::path::PathBuf;
 
 const RESOURCES_PREFIX: &[u8] = b"omnifs.resources.v1\0";
-const ATTACHMENT_PREFIX: &[u8] = b"omnifs.resource.attachment.v1\0";
-const ATTACHMENT_VERSION_DOMAIN: &str = "omnifs resource attachment version v1";
+const FILESYSTEM_PREFIX: &[u8] = b"omnifs.resource.filesystem.v1\0";
+const FILESYSTEM_VERSION_DOMAIN: &str = "omnifs resource filesystem version v1";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredResourceSetV1 {
@@ -42,7 +42,7 @@ enum StoredDefinitionV1 {
         account: String,
     },
     Mount(StoredMountV1),
-    Attachment(StoredAttachmentV1),
+    Filesystem(StoredFilesystemV1),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -61,7 +61,7 @@ struct StoredLimitsV1 {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct StoredAttachmentV1 {
+struct StoredFilesystemV1 {
     name: String,
     protocol: String,
     runtime: String,
@@ -131,8 +131,8 @@ impl StoredDefinitionV1 {
                     .context("encode mount resource config")?,
                 limits: definition.limits.map(StoredLimitsV1::from),
             }),
-            ResourceDefinition::Attachment(definition) => {
-                Self::Attachment(StoredAttachmentV1::from_definition(&definition))
+            ResourceDefinition::Filesystem(definition) => {
+                Self::Filesystem(StoredFilesystemV1::from_definition(&definition))
             },
         })
     }
@@ -168,8 +168,8 @@ impl StoredDefinitionV1 {
                     .context("decode stored mount config")?,
                 limits: definition.limits.map(ResourceLimits::from),
             }),
-            Self::Attachment(definition) => {
-                ResourceDefinition::Attachment(definition.into_definition()?)
+            Self::Filesystem(definition) => {
+                ResourceDefinition::Filesystem(definition.into_definition()?)
             },
         })
     }
@@ -193,8 +193,8 @@ impl From<StoredLimitsV1> for ResourceLimits {
     }
 }
 
-impl StoredAttachmentV1 {
-    fn from_definition(definition: &AttachmentDefinition) -> Self {
+impl StoredFilesystemV1 {
+    fn from_definition(definition: &FilesystemDefinition) -> Self {
         Self {
             name: definition.name.to_string(),
             protocol: definition.spec.protocol().to_string(),
@@ -205,59 +205,59 @@ impl StoredAttachmentV1 {
         }
     }
 
-    fn into_definition(self) -> anyhow::Result<AttachmentDefinition> {
+    fn into_definition(self) -> anyhow::Result<FilesystemDefinition> {
         let runtime = self
             .runtime
             .parse::<Runtime>()
-            .context("invalid stored attachment runtime")?;
+            .context("invalid stored filesystem runtime")?;
         let protocol = self
             .protocol
             .parse::<Protocol>()
-            .context("invalid stored attachment protocol")?;
-        Ok(AttachmentDefinition {
-            name: ResourceName::new(self.name).context("invalid stored attachment name")?,
-            spec: AttachmentSpec::new(
+            .context("invalid stored filesystem protocol")?;
+        Ok(FilesystemDefinition {
+            name: ResourceName::new(self.name).context("invalid stored filesystem name")?,
+            spec: FilesystemSpec::new(
                 protocol,
                 runtime,
                 PathBuf::from(OsString::from_vec(self.location)),
                 self.docker_image,
                 self.libkrun_guest_image,
             )
-            .context("invalid stored attachment spec")?,
+            .context("invalid stored filesystem spec")?,
         })
     }
 }
 
-pub(crate) fn encode_attachment(
-    definition: &AttachmentDefinition,
-) -> anyhow::Result<(Vec<u8>, AttachmentVersion)> {
-    let payload = postcard::to_allocvec(&StoredAttachmentV1::from_definition(definition))
-        .context("encode attachment resource")?;
-    let mut canonical = Vec::with_capacity(ATTACHMENT_PREFIX.len() + payload.len());
-    canonical.extend_from_slice(ATTACHMENT_PREFIX);
+pub(crate) fn encode_filesystem(
+    definition: &FilesystemDefinition,
+) -> anyhow::Result<(Vec<u8>, FilesystemVersion)> {
+    let payload = postcard::to_allocvec(&StoredFilesystemV1::from_definition(definition))
+        .context("encode filesystem resource")?;
+    let mut canonical = Vec::with_capacity(FILESYSTEM_PREFIX.len() + payload.len());
+    canonical.extend_from_slice(FILESYSTEM_PREFIX);
     canonical.extend_from_slice(&payload);
-    let mut hasher = blake3::Hasher::new_derive_key(ATTACHMENT_VERSION_DOMAIN);
+    let mut hasher = blake3::Hasher::new_derive_key(FILESYSTEM_VERSION_DOMAIN);
     hasher.update(&canonical);
     Ok((
         canonical,
-        AttachmentVersion::from_digest(*hasher.finalize().as_bytes()),
+        FilesystemVersion::from_digest(*hasher.finalize().as_bytes()),
     ))
 }
 
-pub(crate) fn decode_attachment(
+pub(crate) fn decode_filesystem(
     canonical: &[u8],
-    stored_version: AttachmentVersion,
-) -> anyhow::Result<AttachmentDefinition> {
+    stored_version: FilesystemVersion,
+) -> anyhow::Result<FilesystemDefinition> {
     let payload = canonical
-        .strip_prefix(ATTACHMENT_PREFIX)
-        .context("attachment resource bytes have an unknown version")?;
-    let stored: StoredAttachmentV1 =
-        postcard::from_bytes(payload).context("decode attachment resource")?;
+        .strip_prefix(FILESYSTEM_PREFIX)
+        .context("filesystem resource bytes have an unknown version")?;
+    let stored: StoredFilesystemV1 =
+        postcard::from_bytes(payload).context("decode filesystem resource")?;
     let definition = stored.into_definition()?;
-    let (_, actual_version) = encode_attachment(&definition)?;
+    let (_, actual_version) = encode_filesystem(&definition)?;
     anyhow::ensure!(
         actual_version == stored_version,
-        "stored attachment resource version does not match canonical bytes"
+        "stored filesystem resource version does not match canonical bytes"
     );
     Ok(definition)
 }

@@ -103,7 +103,7 @@ const DB_IMAGE = "omnifs-dev-db:local";
 const DB_CONTAINER = "omnifs-dev-db";
 const K8S_COMPOSE_PROJECT = "omnifs-devcluster";
 const FILESYSTEM_DEV_IMAGE = "omnifs-filesystem:dev";
-// The fixed guest location in `omnifs_core::attachment`; guest filesystems always mount here.
+// The fixed guest location in `omnifs_core::filesystem`; guest filesystems always mount here.
 const GUEST_MOUNT = "/omnifs";
 // The filesystem image ships a minimal Debian base (fuse3, coreutils, findutils,
 // jq, rsync, tar, xxd) with no bash/zsh (`Dockerfile`'s `filesystem-base`), so
@@ -239,7 +239,7 @@ async function main() {
     try {
       console.log(`Opening a shell in \`dev-docker\` at ${GUEST_MOUNT}`);
       await runInteractive(
-        [omnifsCli, "attachment", "shell", "dev-docker", "--", GUEST_SHELL],
+        [omnifsCli, "fs", "shell", "dev-docker", "--", GUEST_SHELL],
         cliEnv(devHome, { OMNIFS_FILESYSTEM_IMAGE: filesystemImage }),
       );
     } finally {
@@ -599,7 +599,7 @@ function writeDevConfig(
   }
   resources.push(
     {
-      kind: "Attachment",
+      kind: "Filesystem",
       spec: {
         name: "dev-host",
         protocol: hostProtocol,
@@ -608,7 +608,7 @@ function writeDevConfig(
       },
     },
     {
-      kind: "Attachment",
+      kind: "Filesystem",
       spec: {
         name: "dev-docker",
         protocol: "fuse",

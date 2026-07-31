@@ -316,7 +316,7 @@ pub(crate) async fn wait_for_revision(
             progress @ (ProgressEventKind::ProviderPreparation(_)
             | ProgressEventKind::ServingProgress(_)
             | ProgressEventKind::CredentialProgress(_)
-            | ProgressEventKind::AttachmentProgress(_)) => {
+            | ProgressEventKind::FilesystemProgress(_)) => {
                 render_active_progress(output, &progress, &mut renderer);
             },
             ProgressEventKind::RevisionReady(ready) if ready == revision => {
@@ -377,7 +377,7 @@ async fn wait_for_action(
             progress @ (ProgressEventKind::ProviderPreparation(_)
             | ProgressEventKind::ServingProgress(_)
             | ProgressEventKind::CredentialProgress(_)
-            | ProgressEventKind::AttachmentProgress(_)) => {
+            | ProgressEventKind::FilesystemProgress(_)) => {
                 render_active_progress(output, &progress, &mut renderer);
             },
             ProgressEventKind::ActionCompleted(receipt)
@@ -423,7 +423,7 @@ async fn follow_current(
             progress @ (ProgressEventKind::ProviderPreparation(_)
             | ProgressEventKind::ServingProgress(_)
             | ProgressEventKind::CredentialProgress(_)
-            | ProgressEventKind::AttachmentProgress(_)) => {
+            | ProgressEventKind::FilesystemProgress(_)) => {
                 render_active_progress(output, &progress, &mut renderer);
             },
             _ => {},
@@ -521,16 +521,16 @@ fn render_active_progress(
             stage_name(progress.stage),
             format!("credential {} {}", progress.key, stage_name(progress.stage)),
         ),
-        ProgressEventKind::AttachmentProgress(progress) => (
-            format!("attachment:{}", progress.key),
+        ProgressEventKind::FilesystemProgress(progress) => (
+            format!("filesystem:{}", progress.key),
             stage_name(progress.stage),
             format!(
-                "attachment {} {} ({}, queued {}, active {}, retry {})",
+                "filesystem {} {} ({}, queued {}, active {}, retry {})",
                 progress.key,
                 stage_name(progress.stage),
                 byte_progress(progress.completed_bytes, progress.total_bytes),
-                progress.queued_attachments,
-                progress.active_attachments,
+                progress.queued_filesystems,
+                progress.active_filesystems,
                 progress.retry_count,
             ),
         ),
@@ -610,10 +610,10 @@ fn render_progress_snapshot(
             renderer,
         );
     }
-    for attachment in &snapshot.attachments {
+    for filesystem in &snapshot.filesystems {
         render_active_progress(
             output,
-            &ProgressEventKind::AttachmentProgress(attachment.clone()),
+            &ProgressEventKind::FilesystemProgress(filesystem.clone()),
             renderer,
         );
     }
@@ -665,7 +665,7 @@ impl StageName for omnifs_api::CredentialProgressStage {
     }
 }
 
-impl StageName for omnifs_api::AttachmentProgressStage {
+impl StageName for omnifs_api::FilesystemProgressStage {
     fn stage_name(self) -> &'static str {
         match self {
             Self::Queued => "queued",
@@ -754,7 +754,7 @@ mod tests {
             providers: Vec::new(),
             serving: None,
             credentials: Vec::new(),
-            attachments: Vec::new(),
+            filesystems: Vec::new(),
         };
         assert!(!snapshot_outcome(&snapshot, revision).unwrap());
         snapshot.resources[0].phase = ResourcePhase::Ready;
