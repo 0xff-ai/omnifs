@@ -17,14 +17,7 @@ const COMMAND_CAPACITY: usize = 64;
 // Wasmtime compilation is CPU-heavy and cannot be cancelled once it enters
 // the blocking pool. One worker still overlaps store startup while bounding
 // cold-host shutdown latency and cross-profile contention.
-const MAX_PROVIDER_WORKERS: usize = 1;
-
-/// Pick a conservative compiler bound from the host's available parallelism.
-pub(crate) fn default_worker_limit() -> usize {
-    std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .clamp(1, MAX_PROVIDER_WORKERS)
-}
+const PROVIDER_WORKERS: usize = 1;
 
 /// Queue order for one provider digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -147,15 +140,11 @@ pub(crate) struct ProviderPreparerHandle {
 
 impl ProviderPreparer {
     pub(crate) fn start(engine: ComponentEngine, sink: Arc<ProviderProgressSink>) -> Self {
-        Self::start_with_worker_limit(engine, sink, default_worker_limit())
-    }
-
-    pub(crate) fn start_with_worker_limit(
-        engine: ComponentEngine,
-        sink: Arc<ProviderProgressSink>,
-        worker_limit: usize,
-    ) -> Self {
-        Self::start_with_compiler(Arc::new(WasmtimeCompiler { engine }), sink, worker_limit)
+        Self::start_with_compiler(
+            Arc::new(WasmtimeCompiler { engine }),
+            sink,
+            PROVIDER_WORKERS,
+        )
     }
 
     fn start_with_compiler(
@@ -1005,11 +994,6 @@ mod tests {
         limit: usize,
     ) -> ProviderPreparer {
         ProviderPreparer::start_with_compiler(compiler, sink, limit)
-    }
-
-    #[test]
-    fn worker_limit_is_conservative_and_nonzero() {
-        assert!((1..=MAX_PROVIDER_WORKERS).contains(&default_worker_limit()));
     }
 
     #[tokio::test]
