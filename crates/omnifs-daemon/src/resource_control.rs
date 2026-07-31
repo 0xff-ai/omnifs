@@ -411,7 +411,6 @@ impl ResourceControl {
         Ok(prepared)
     }
 
-    #[allow(dead_code, reason = "Plan 003 reconciliation consumes this wakeup")]
     pub(crate) fn subscribe_revisions(&self) -> watch::Receiver<ResourceRevision> {
         self.revision_wakeup.subscribe()
     }
@@ -422,10 +421,6 @@ impl ResourceControl {
         self.namespace_wakeup.subscribe()
     }
 
-    #[allow(
-        dead_code,
-        reason = "Plan 003 action reconciliation consumes this wakeup"
-    )]
     pub(crate) fn subscribe_actions(&self) -> watch::Receiver<Option<ActionId>> {
         self.action_wakeup.subscribe()
     }

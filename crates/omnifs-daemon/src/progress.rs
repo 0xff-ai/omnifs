@@ -7,13 +7,10 @@ use omnifs_api::{
 use omnifs_core::ResourceRevision;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 
 const LIVE_EVENT_CAPACITY: usize = 32;
 const SUBSCRIBER_CAPACITY: usize = 8;
-#[allow(dead_code, reason = "Plan 003 provider work uses this rate")]
-pub(crate) const BYTE_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
 
 struct HubState {
     sequence: u64,
@@ -129,7 +126,6 @@ impl ProgressHub {
 
     /// Publish a typed transient stage. Broadcast send never waits and lagging
     /// receivers recover from the latest complete snapshot.
-    #[allow(dead_code, reason = "Plan 003 reconciliation publishes live stages")]
     pub(crate) fn publish(&self, target: ProgressTarget, event: ProgressEventKind) -> u64 {
         self.publish_inner(target, event, None)
     }
@@ -283,7 +279,6 @@ impl ProgressHub {
         })
     }
 
-    #[allow(dead_code, reason = "Plan 005 attachment reconciliation uses this")]
     pub(crate) fn record_attachment(
         &self,
         target: ProgressTarget,
@@ -671,39 +666,12 @@ fn target_state(snapshot: &ProgressSnapshot, target: ProgressTarget) -> Progress
     }
 }
 
-/// Rate gate for high-frequency real byte counts. Terminal counts always pass.
-#[allow(dead_code, reason = "Plan 003 provider work uses this rate gate")]
-pub(crate) struct ByteProgressGate {
-    last_published: Option<Instant>,
-}
-
-#[allow(dead_code, reason = "Plan 003 provider work uses this rate gate")]
-impl ByteProgressGate {
-    pub(crate) const fn new() -> Self {
-        Self {
-            last_published: None,
-        }
-    }
-
-    pub(crate) fn should_publish(&mut self, now: Instant, terminal: bool) -> bool {
-        if terminal
-            || self
-                .last_published
-                .is_none_or(|last| now.duration_since(last) >= BYTE_PROGRESS_MIN_INTERVAL)
-        {
-            self.last_published = Some(now);
-            true
-        } else {
-            false
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use omnifs_api::{ActionKind, ActionReceipt, ProviderPreparationStage, ResourceStatus};
     use omnifs_core::{ActionId, ResourceKey, ResourceKind, ResourceName, ResourceRevision};
+    use std::time::Duration;
 
     fn name(value: &str) -> ResourceName {
         ResourceName::new(value).unwrap()
@@ -957,15 +925,5 @@ mod tests {
             hub.target_state(ProgressTarget::Action(action_id)),
             ProgressTargetState::Ready
         );
-    }
-
-    #[test]
-    fn byte_progress_is_rate_limited_but_final_counts_always_publish() {
-        let start = Instant::now();
-        let mut gate = ByteProgressGate::new();
-        assert!(gate.should_publish(start, false));
-        assert!(!gate.should_publish(start + Duration::from_millis(10), false));
-        assert!(gate.should_publish(start + BYTE_PROGRESS_MIN_INTERVAL, false));
-        assert!(gate.should_publish(start + BYTE_PROGRESS_MIN_INTERVAL, true));
     }
 }

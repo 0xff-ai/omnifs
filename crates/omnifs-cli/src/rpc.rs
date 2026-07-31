@@ -347,7 +347,6 @@ impl RpcClient {
         grpc::apply_resources_response(&response).map_err(Into::into)
     }
 
-    #[allow(dead_code, reason = "Plan 008 attachment commands consume this RPC")]
     pub(crate) async fn attachment_status(
         &self,
         name: ResourceName,
@@ -363,7 +362,6 @@ impl RpcClient {
         grpc::get_attachment_status_response(&response).map_err(Into::into)
     }
 
-    #[allow(dead_code, reason = "Plan 008 attachment commands consume this RPC")]
     pub(crate) async fn restart_attachment(
         &self,
         request: &RestartAttachmentRequest,
@@ -377,7 +375,6 @@ impl RpcClient {
         grpc::restart_attachment_response(&response).map_err(Into::into)
     }
 
-    #[allow(dead_code, reason = "Plan 008 attachment commands consume this RPC")]
     pub(crate) async fn attachment_access(
         &self,
         request: &GetAttachmentAccessRequest,
@@ -391,7 +388,6 @@ impl RpcClient {
         grpc::get_attachment_access_response(&response).map_err(Into::into)
     }
 
-    #[allow(dead_code, reason = "Plan 008 credential commands consume this RPC")]
     pub(crate) async fn set_credential_material(
         &self,
         request: &SetCredentialMaterialRequest,
@@ -405,7 +401,6 @@ impl RpcClient {
         grpc::set_credential_material_response(&response).map_err(Into::into)
     }
 
-    #[allow(dead_code, reason = "Plan 008 credential commands consume this RPC")]
     pub(crate) async fn revoke_credential(
         &self,
         request: &RevokeCredentialRequest,

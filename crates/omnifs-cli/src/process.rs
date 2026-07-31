@@ -11,41 +11,8 @@ use std::time::Duration;
 /// a fixed `Fut` type cannot express).
 type PollFuture<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<Option<T>>> + 'a>>;
 
-/// Poll `check` at `interval` until it returns `Ok(Some(value))` (ready), an
-/// `Err` (an immediate hard failure, not subject to the deadline), or return
-/// `Ok(None)` once `timeout` elapses without either. `check` returning
-/// `Ok(None)` means "not ready yet, keep polling."
-///
-/// A caller whose own body cannot fail folds any hard-abort condition into
-/// `Ok(Some(value))` instead and ignores the (then-unreachable) `Err` case,
-/// rather than inventing a placeholder error type.
-#[allow(
-    dead_code,
-    reason = "Plan 006 removes the last superseded client runtime caller"
-)]
-pub(crate) async fn poll_until<T, Fut>(
-    timeout: Duration,
-    interval: Duration,
-    mut check: impl FnMut() -> Fut,
-) -> anyhow::Result<Option<T>>
-where
-    Fut: Future<Output = anyhow::Result<Option<T>>>,
-{
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if let Some(value) = check().await? {
-            return Ok(Some(value));
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(None);
-        }
-        tokio::time::sleep(interval).await;
-    }
-}
-
-/// The variant of [`poll_until`] for a `check` that needs `&mut` access to
-/// state across iterations (for example, polling a child process through
-/// `try_wait`, or recording the last observed state for a timeout message).
+/// Poll a `check` that needs `&mut` access to state across iterations until it
+/// returns `Ok(Some(value))`, fails, or reaches `timeout`.
 /// `state` is threaded through as an explicit argument, rather than let
 /// `check` capture it, because an `FnMut` closure cannot itself return a
 /// future that borrows its own captured environment; a fresh reborrow of an

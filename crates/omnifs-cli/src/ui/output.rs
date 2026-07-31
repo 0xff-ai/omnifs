@@ -1,7 +1,7 @@
 //! Invocation-owned output policy for the machine contract.
 //!
 //! [`Output`] owns mode, quiet, prompt, and command-path policy for one
-//! invocation. Commands clone it and pass it to short-lived progress handles.
+//! invocation. Commands clone it instead of consulting process-global state.
 //!
 //! No command should add another boolean cluster or process-global switch.
 
@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub(crate) const SCHEMA_VERSION: u8 = 1;
 
 /// Real terminal capabilities for the flat renderer (`render.rs`), read fresh
-/// per call rather than cached: a prompt or progress handle can change the
-/// terminal state (raw mode, size) between one narration line and the next.
+/// per call rather than cached: a prompt can change terminal state (raw mode,
+/// size) between one narration line and the next.
 /// `pub(crate)` so the top-level error boundary (`error.rs`) can build the
 /// same stderr capabilities the rest of this module's narration uses.
 ///
@@ -473,9 +473,7 @@ impl PromptMode {
     }
 }
 
-/// Output policy owned by one CLI invocation. Commands clone this handle and
-/// pass it through short-lived progress handles instead of consulting
-/// process-global switches.
+/// Output policy owned by one CLI invocation.
 #[derive(Clone)]
 pub(crate) struct Output {
     mode: OutputMode,
@@ -677,20 +675,6 @@ impl Output {
     /// caught before a prompt's own resolution match, for example).
     pub(crate) fn is_closed(&self) -> bool {
         state(self).closed
-    }
-
-    /// Start a spinner whose transient frame and settled row share
-    /// `key_width` with the rest of its ledger block.
-    #[allow(
-        dead_code,
-        reason = "Plan 008 replaces the old runtime spinner with streamed daemon progress"
-    )]
-    pub(crate) fn progress(
-        &self,
-        key: impl Into<String>,
-        key_width: usize,
-    ) -> crate::ui::live::Spinner {
-        crate::ui::live::Spinner::new(self.clone(), key, key_width)
     }
 
     pub(crate) const fn with_no_input(mut self, no_input: bool) -> Self {

@@ -24,7 +24,6 @@ prost = { workspace = true }
 tower = { workspace = true }
 anyhow = { workspace = true }
 blake3 = { workspace = true }
-clap = { workspace = true }
 hex = { workspace = true }
 getrandom = "0.3"
 postcard = { workspace = true }

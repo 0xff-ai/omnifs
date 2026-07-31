@@ -270,7 +270,7 @@ impl ProviderUpload {
             reference,
             metadata,
             length: self.expected_length,
-            permit: self
+            _permit: self
                 .permit
                 .take()
                 .context("provider import permit missing")?,
@@ -285,8 +285,7 @@ pub struct ValidatedProviderUpload {
     metadata: Vec<u8>,
     length: u64,
     /// Held so the single-import gate stays closed until the import commits.
-    #[allow(dead_code)]
-    permit: tokio::sync::OwnedSemaphorePermit,
+    _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl Db<'_> {

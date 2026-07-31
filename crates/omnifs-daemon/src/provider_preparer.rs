@@ -109,8 +109,7 @@ pub(crate) struct ProviderPreparationStatus {
 
 /// Non-blocking progress boundary used by the daemon composition root.
 ///
-/// Implementations must return without waiting for a subscriber. The Plan 002
-/// progress hub satisfies this contract.
+/// Implementations must return without waiting for a subscriber.
 pub(crate) trait ProviderProgressSink: Send + Sync + 'static {
     fn publish(&self, status: ProviderPreparationStatus);
 }
@@ -231,15 +230,6 @@ impl ProviderPreparer {
     }
 
     #[cfg(test)]
-    async fn requeue_repaired(
-        &self,
-        job: ProviderPreparationJob,
-        priority: ProviderPriority,
-    ) -> Result<EnqueueOutcome, ProviderPreparerError> {
-        self.handle.requeue_repaired(job, priority).await
-    }
-
-    #[cfg(test)]
     pub(crate) fn status(&self, provider_id: ProviderId) -> Option<ProviderPreparationStatus> {
         self.handle.status(provider_id)
     }
@@ -311,10 +301,6 @@ impl ProviderPreparerHandle {
             .map_err(|_| ProviderPreparerError::ShuttingDown)?
     }
 
-    #[allow(
-        dead_code,
-        reason = "Plan 003 control/status reads preparation without waiting"
-    )]
     pub(crate) fn status(&self, provider_id: ProviderId) -> Option<ProviderPreparationStatus> {
         let statuses = self
             .shared
@@ -1087,7 +1073,7 @@ mod tests {
         preparer.wait_ready(provider_id).await.unwrap();
         assert_eq!(started.recv().await, Some(provider_id));
         assert_eq!(compiler.calls.load(Ordering::SeqCst), 2);
-        let status = preparer.status(provider_id).unwrap();
+        let status = preparer.handle.status(provider_id).unwrap();
         assert_eq!(status.priority, ProviderPriority::Desired);
         assert_eq!(
             status.resource_names,
@@ -1212,13 +1198,14 @@ mod tests {
         compiler.repair(repaired.provider_id);
         assert_eq!(
             preparer
+                .handle
                 .requeue_repaired(repaired.clone(), ProviderPriority::Desired)
                 .await
                 .unwrap(),
             EnqueueOutcome::Requeued
         );
         preparer.wait_ready(repaired.provider_id).await.unwrap();
-        let status = preparer.status(repaired.provider_id).unwrap();
+        let status = preparer.handle.status(repaired.provider_id).unwrap();
         assert_eq!(status.phase, ProviderPreparationPhase::Ready);
         assert_eq!(status.retry_count, 1);
         assert_eq!(compiler.calls.load(Ordering::SeqCst), 2);

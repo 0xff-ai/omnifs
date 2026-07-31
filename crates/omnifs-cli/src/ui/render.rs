@@ -33,9 +33,7 @@ pub(crate) struct Capabilities {
 /// Measure a string's terminal column width, ignoring SGR escapes and
 /// counting wide glyphs (CJK, emoji) as two columns. Shared by every
 /// alignment computation in this module so key columns, wrapping, and the
-/// error block agree on what "one column" means. `pub(crate)` so callers that
-/// render their own transient frame outside this module (`ui/live.rs`'s
-/// spinner) still measure keys the same way a settled ledger row does.
+/// error block agree on what "one column" means.
 pub(crate) fn display_width(text: &str) -> usize {
     use unicode_width::UnicodeWidthChar as _;
     super::strip_ansi(text)
@@ -45,8 +43,8 @@ pub(crate) fn display_width(text: &str) -> usize {
 }
 
 /// The terminal's current column width, sampled fresh on every call rather
-/// than cached. Callers here are raw-mode frame drawers (`ui/prompt.rs`,
-/// `ui/live.rs`) that redraw repeatedly over one interactive session, and a
+/// than cached. The raw-mode prompt redraws repeatedly over one interactive
+/// session, and a
 /// mid-session resize must be picked up by the very next frame instead of
 /// silently wrapping against a stale width. `80` is the same conservative
 /// fallback `stdout_capabilities`/`stderr_capabilities` fall back to when
@@ -67,11 +65,9 @@ pub(crate) fn terminal_width() -> usize {
 /// once content actually exceeds the column, never on a line that lands
 /// exactly at the edge.
 ///
-/// The one owner of this math: every raw-mode frame drawer that tracks drawn
-/// rows (`ui/prompt.rs`'s `redraw`/`erase`, `ui/live.rs`'s `Spinner`)
-/// computes through this function instead of re-deriving the ceiling
-/// division locally, so a `MoveUp` always targets the row a previous frame
-/// actually wrapped onto.
+/// The prompt computes through this function instead of re-deriving the
+/// ceiling division locally, so a `MoveUp` always targets the row a previous
+/// frame actually wrapped onto.
 pub(crate) fn physical_rows(line: &str, width: usize) -> usize {
     if width == 0 {
         return 1;
@@ -127,10 +123,7 @@ impl LedgerRow {
 /// The fixed gap after the widest key in a block. Derived from the
 /// worked example (`providers` at 9 columns leaves a 3-space gap, `daemon` at
 /// 6 columns leaves a 6-space gap: both resolve to a 12-column key field, i.e.
-/// `max_key_width + 3`). `pub(crate)` so `ui/live.rs`'s transient spinner
-/// frame (which never sees a full `LedgerRow` slice, only a bare key) can
-/// share the exact same pad math as [`ledger_row_line`] instead of
-/// duplicating the constant.
+/// `max_key_width + 3`).
 pub(crate) const LEDGER_GAP: usize = 3;
 
 /// The key width a block of `rows` needs so every row's value column lines
@@ -147,7 +140,7 @@ pub(crate) fn ledger_key_width(rows: &[LedgerRow]) -> usize {
 
 /// The same block-sizing math as [`ledger_key_width`], but from bare key
 /// text rather than fully-formed rows: a flow that emits its rows one at a
-/// time as async work settles (spinner settle, `Output::ledger_row`) knows
+/// time as async work settles knows
 /// every key it might ever print before the first one lands, but not the
 /// values, so it cannot build a `[LedgerRow]` slice up front. Declaring the
 /// key set once and sizing from it here is what keeps such a block aligned
@@ -181,17 +174,6 @@ pub(crate) fn ledger_row_line(row: &LedgerRow, key_width: usize, caps: Capabilit
         " ".repeat(pad),
         style::accentuate(&row.value, caps.color)
     )
-}
-
-/// The column where a ledger row's value begins, counting from the row's own
-/// left edge (glyph column 0). Shared by [`ledger_row_line`] and any caller
-/// that must align a continuation line under a row's value without
-/// duplicating the gap math: doctor's per-row `fix:` line is one
-/// such caller.
-#[cfg(test)]
-pub(crate) fn ledger_value_column(key_width: usize) -> usize {
-    // Glyph (1) + one space (1) precede the key, then the key's own field.
-    key_width + LEDGER_GAP + 2
 }
 
 /// Render one contiguous ledger block. Left-anchored, no leading indent: the
@@ -618,15 +600,6 @@ mod tests {
         let rendered = error_block(&block, caps(120, false));
         assert!(rendered.contains("Fix:  omnifs status"), "{rendered:?}");
         assert!(rendered.contains("Try:  omnifs logs"), "{rendered:?}");
-    }
-
-    #[test]
-    fn ledger_value_column_matches_where_ledger_row_line_actually_starts_the_value() {
-        let row = LedgerRow::new(Glyph::Warn, "credentials", "github token expired");
-        let key_width = ledger_key_width(std::slice::from_ref(&row));
-        let rendered = ledger_row_line(&row, key_width, caps(120, false));
-        let value_start = rendered.find("github").expect("value present");
-        assert_eq!(value_start, ledger_value_column(key_width));
     }
 
     #[test]

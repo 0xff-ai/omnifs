@@ -102,10 +102,6 @@ pub async fn run(output: Output) -> anyhow::Result<ExitCode> {
 /// Follow current, revision, or durable action progress through the typed
 /// daemon stream. Current watches run until Ctrl-C; revision and action
 /// watches return only after their target reaches a terminal outcome.
-#[allow(
-    dead_code,
-    reason = "Plan 008 CLI grammar integration dispatches status follow here"
-)]
 pub(crate) async fn follow(target: FollowTarget, output: Output) -> anyhow::Result<ExitCode> {
     let rpc = RpcClient::resolve()?;
     let outcome = match resource_flow::follow_progress(&rpc, target.into(), &output).await {
