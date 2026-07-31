@@ -1,13 +1,22 @@
 # Async provider runtime
 
 Status: current-architecture
-Scope: provider component execution, async host imports, same-instance concurrency, and callout tracing. Binding rules live in `docs/contracts/`.
+Scope: provider component execution, async host imports, same-instance
+concurrency, and callout tracing.
+
+Read when: changing provider instance lifecycle, async WIT calls, host callouts,
+same-instance scheduling, cancellation, shutdown, or callout tracing.
+
+Binding contracts: `docs/contracts/10-system.md`,
+`docs/contracts/20-provider-sdk.md`, and
+`docs/contracts/60-build-validation.md`.
 
 ## Intended model
 
-Provider code is ordinary async Rust. A handler awaits HTTP, blob, or git work through the SDK. That await reaches a WIT async host import. Wasmtime suspends the component future, the host executes the effect, and the guest future resumes with a typed `callout-result`.
-
-The host owns trust and I/O. Providers do not open sockets, read credentials, or bypass capability checks. Suspension lives in Wasmtime's component async runtime rather than an omnifs-specific continuation export.
+Provider handlers await SDK HTTP, blob, or Git work. The await reaches a WIT
+async import; Wasmtime suspends the component while the trusted host performs
+I/O and returns a typed result. Providers gain no direct socket or credential
+access.
 
 The provider call site is:
 
@@ -18,117 +27,122 @@ let pages = omnifs_sdk::cx::join_all(
 .await?;
 ```
 
-Current responsibilities:
-
-- `Cx` carries operation identity, provider state, and the host-pushed version token.
-- `CalloutFuture` awaits generated WIT async imports directly.
-- `CalloutHost` is the host implementation of those imports.
-- `Instance` keeps one provider store alive inside Wasmtime `run_concurrent`.
-- `Runtime` validates and materializes typed operation payloads together with terminal effects.
+| Owner | Responsibility |
+|---|---|
+| `Cx` | Operation identity, provider state, host-pushed version |
+| `CalloutFuture` | Direct WIT import future |
+| `CalloutHost` | Trusted host implementation |
+| `Instance` | One provider store in `run_concurrent` |
+| `Runtime` | Validate typed payload and terminal effects |
 
 ## WIT boundary
 
-The provider world imports `omnifs:provider/callouts` and exports async namespace and notify methods. Namespace and notify operations return operation-specific typed result/effects tuples directly.
+The provider world imports `omnifs:provider/callouts` and exports async
+namespace and notify methods. Each operation returns its typed result and
+effects directly.
 
-Not part of the provider protocol:
+The protocol retains typed callout records, operation IDs for host attribution,
+and terminal effects. It has no `provider-step`, suspended envelope,
+continuation export, SDK pending table, or host resume loop. Inspector
+correlation follows tracing parents rather than a parallel trace ID.
 
-- `provider-step`
-- the `suspended` operation result envelope
-- the exported continuation interface
-- SDK-managed pending future tables
-- host-side operation resume loops
-
-The protocol retains:
-
-- typed callout request and result records
-- operation ids on callouts for host attribution; Inspector correlation follows
-  tracing parents rather than explicit trace-id parameters
-- terminal effects for canonical stores, filesystem writes, and invalidations
-
-Lifecycle exports remain terminal and synchronous at the WIT level. Because the store is configured for component async, the host still invokes those exports through Wasmtime's concurrent call path.
+Lifecycle exports are terminal and synchronous in WIT but use Wasmtime's
+concurrent call path because the store has component async enabled.
 
 ## Host runtime
 
-`Instance` owns the Wasmtime store on a dedicated driver thread. The driver creates a current-thread Tokio runtime, instantiates the component asynchronously, then enters `Store::run_concurrent`.
+`Instance` owns the Wasmtime store on a dedicated driver thread. It creates a
+current-thread Tokio runtime, instantiates asynchronously, then enters
+`Store::run_concurrent`.
 
-Commands sent to the driver are:
+The driver accepts three kinds of commands:
 
-- `initialize`
-- `start-op`
-- `shutdown`
-- `manifest-json`
-- `close-file`
-- `set-callouts`
+- lifecycle and host-state commands, including initialization, callout
+  installation, and shutdown
+- namespace operations for lookup, listing, whole-file reads, open, ranged
+  reads, and close
+- provider event delivery
 
-`start-op` commands create futures inside the concurrent store. While one provider call is suspended on an async host import, the driver can accept another operation and enter the same component instance. This is the central concurrency property.
-
-Lifecycle and close-file calls use Wasmtime's concurrent typed function path. `initialize` passes owned config bytes so it satisfies the concurrent API's static parameter requirement.
+Namespace and event commands create futures inside the concurrent store. While
+one provider call is suspended on an async host import, the driver can poll
+another operation on the same component instance. Lifecycle and close
+operations use Wasmtime's concurrent typed function path.
 
 ## SDK runtime
 
-The SDK owns no custom executor. The provider macro emits async namespace and notify exports that await router dispatch directly. `Cx` contains no yielded or delivered callout queues.
+The SDK owns no executor. Its macro emits async namespace and notify exports
+that await router dispatch; `Cx` has no yielded or delivered callout queues.
 
-`CalloutFuture` has two states:
+`CalloutFuture` is `Ready` for local builder or breaker failures and `Pending`
+for a generated WIT import future.
 
-- `Ready`, for builder errors or local breaker failures that should not enter the host.
-- `Pending`, wrapping the generated WIT async import future.
-
-`join_all` polls sibling futures before yielding, which starts multiple host imports from one provider operation without positional delivery from a host resume batch.
+`join_all` polls siblings before yielding, starting independent imports without
+positional host resume batches.
 
 ## Callout host and tracing
 
-`CalloutHost` is the single host import implementation for provider effects. It maps each WIT callout to the existing executor:
+`CalloutHost` is the single host import implementation for provider effects.
+HTTP fetch and blob fetch use the asynchronous HTTP stack. Git open shells out
+to `git`, so `CalloutHost` runs it on Tokio's blocking pool. Cached body reads
+occur through `MountResources` and `BodyStore`; they do not make another host
+callout.
 
-- HTTP fetches go through `HttpStack`.
-- Blob fetches and reads go through `BlobExecutor`.
-- Git opens go through `GitExecutor`.
-
-Tracing is preserved at the callout boundary. Namespace requests, provider
-operations, callouts, subtree handoffs, clone operations, cache activity, and
-terminal outcomes use stable structured fields. The provider-instance driver
-captures the current parent span in each async command and instruments the
-component-call future with it, so moving work to the driver thread does not
-require a parallel trace-id channel.
-
-Every host import creates one Inspector callout span with:
-
-- operation id
-- callout index
-- callout kind
-- a redacted summary
-- a terminal outcome
+Each async command captures its tracing parent and instruments the component
+future on the driver thread. Every import creates one Inspector span with
+operation ID, callout index and kind, redacted summary, and terminal outcome.
 
 Executor-specific child spans on the `omnifs_callout` target retain detailed,
 redacted request and response diagnostics for daemon logging. They do not emit
 a second Inspector lifecycle.
 
-`InspectorLayer` is the sole producer of the existing Inspector line stream.
-It translates span open, record, event, and close callbacks into typed records,
-retains bounded history, and broadcasts them to the typed local control
-protocol. `InspectorLine` is the sole newline unit across the daemon
-subscription, file tee, recording, replay, and plain output; its parser and
-serializer own the current JSONL schema at those boundaries.
-Dropping a future closes its span and produces one terminal internal outcome
-unless the operation recorded a more specific result first.
+`InspectorLayer` alone converts span callbacks into typed records, bounded
+history, and the control stream. `InspectorLine` owns the JSONL unit for
+subscription, tee, recording, replay, and plain output. Dropping a future
+closes its span with an internal outcome unless a specific result was recorded.
 
 ## Concurrency and blocking
 
-The driver runs one provider instance on a single event-loop thread, so same-instance concurrency depends on every suspension point yielding that thread rather than blocking it.
+One provider instance runs on one event-loop thread, so concurrency depends on
+each suspension point yielding:
 
-- **Async callouts yield.** HTTP callouts are `async` and return control to the event loop while the host does the work, so other in-flight ops keep progressing.
-- **Synchronous executors are offloaded.** `GitExecutor::open_repo` (which shells out to `git`) and `BlobExecutor::read` (a bounded disk read) are synchronous. `CalloutHost::run` runs them on the Tokio blocking pool via `spawn_blocking`, so a slow clone or read suspends only its own op, not the whole instance. Without this, the blocking call would run inside the host-task future's poll on the event-loop thread and stall every concurrent op.
-- **WASI Preview 2 imports still block the instance.** `wasmtime_wasi::p2::add_to_linker_async` binds WASI functions on the legacy `func_wrap_async` path, which holds the store exclusively across the await (Wasmtime `StoreFiberYield::KeepStore`). A provider that blocks on WASI I/O (a preopened-file read, `wasi:io/poll`) therefore serializes the instance for the duration of that wait, unlike an omnifs callout. This is inherent to WASI p2; only a move to WASI p3 (concurrent host bindings) would change it. Providers do upstream work through omnifs callouts, not WASI, so this is rarely on the hot path.
+- **Async callouts yield.** HTTP returns control to the event loop while host
+  work runs, so other operations progress.
+- **Git opens are offloaded.** `GitExecutor::open_repo` shells out to `git` and
+  blocks. `CalloutHost::run` sends it to Tokio's blocking pool, so a slow clone
+  suspends only its own operation.
+- **WASI Preview 2 imports still block the instance.** With the pinned Wasmtime
+  46.0.1 implementation, `wasmtime_wasi::p2::add_to_linker_async` binds WASI
+  functions on the legacy `func_wrap_async` path, which holds the store
+  exclusively across the await (`StoreFiberYield::KeepStore`). A provider that
+  blocks on WASI I/O therefore serializes the instance for that wait. Only a
+  move to concurrent WASI host bindings changes this property.
+
+## Queue, cancellation, and shutdown
+
+`Instance` sends commands through an unbounded channel. The driver keeps
+namespace and event calls in `FuturesUnordered`; the channel provides no
+backpressure limit.
+
+Dropping a caller after its command was sent drops the reply receiver but does
+not explicitly cancel the provider call. Driver shutdown stops command
+dispatch, invokes the provider lifecycle shutdown export, and then drops
+remaining in-flight call futures as the driver exits. A driver failure closes
+the command and reply channels and surfaces as an engine error to callers.
+
+These are current mechanics, not a provider-visible scheduling guarantee.
+Changes to queue bounds, caller cancellation, draining, or shutdown order need
+an explicit runtime design because they affect every operation on one provider
+instance.
 
 ## Test harness
 
-Provider integration tests need deterministic canned HTTP and blob responses. The harness builds the immutable mount table through `load_mount_table_for_callout_tests`, which enables callout capture while retaining the production runtime-construction path.
-
-This is test-only host plumbing, not a provider continuation export. The component suspends on async host imports. The test controller intercepts HTTP and blob fetch imports, records the callout, and waits for the test to provide the corresponding `callout-result`.
-
-Git imports fall through to the real host executor so tests that rely on a real cached git checkout continue to exercise production behavior.
+`load_mount_table_for_callout_tests` keeps the production construction path but
+captures HTTP and blob imports for deterministic responses. This is host test
+plumbing, not a provider continuation protocol. Git imports still use the real
+executor.
 
 ## Direct `wasi:http` option
 
-The current design keeps omnifs-owned callout WIT records. This preserves the host policy surface without a custom continuation protocol.
-
-Direct `wasi:http` remains possible, but it is a separate boundary change. It would move HTTP policy into `wasmtime-wasi-http` hooks and would need a new design for auth injection, domain enforcement, response body streaming, and provider ergonomics.
+Omnifs-owned callout records preserve host policy without a custom continuation
+protocol. Direct `wasi:http` would move policy into `wasmtime-wasi-http` hooks
+and needs a separate design for auth, domains, body streaming, and SDK use.

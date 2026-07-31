@@ -10,17 +10,17 @@ meaning: what paths exist and what bytes they hold. The host owns trust,
 authorization, callouts, caching, and I/O. FUSE and NFS translate one shared
 projected namespace into OS protocol behavior.
 
-Before changing code:
+Before changing the repository:
 
 1. Read `docs/contracts/00-index.md`, then the one contract for the area.
 2. Read `docs/architecture/00-overview.md` only when you need system rationale;
    it routes to focused architecture notes.
 3. Trace the production call path and its tests before deciding.
 
-Contracts are binding. Architecture notes explain the current design and
-record rejected prior designs. Source code is the final check on current shape.
-If code and a contract disagree, resolve the conflict and update the contract
-in the same change.
+Contracts bind behavior. Architecture notes explain the current design and
+rejected prior designs. Source code is the final check on current shape. If
+code and a contract disagree, resolve the conflict and update the contract in
+the same change.
 
 ## Rule tiers
 
@@ -31,21 +31,21 @@ in the same change.
 
 ## Universal invariants
 
-- The host owns trust. Providers are untrusted, including embedded providers.
+- The host owns trust; all providers, including embedded providers, are
+  untrusted.
 - Providers and the SDK own object identity, canonical assembly, rendering,
-  versioning, preload, revalidation, and route topology.
-- The host knows paths, bytes, attributes, cache facts, capabilities, and
-  effects. It never gains provider-specific object meaning.
+  versioning, preload, revalidation, and route topology. The host knows only
+  paths, bytes, attributes, cache facts, capabilities, and effects.
 - `omnifs-engine` owns shared projection semantics. Filesystems consume only
   the narrow namespace surface and own protocol state, not projection policy.
 - Host caching is opaque byte and fact storage. Providers do not add private
   LRUs or expiration policy.
 - SQLite is the sole desired-state authority for Provider, Credential, Mount,
-  and Attachment resources. The CLI has no desired-state journal.
-- `ApplyResources` ends after validation, one SQLite transaction, and a
-  non-blocking reconcile wakeup. Runtime work happens in daemon workers.
+  and Attachment resources; the CLI has no desired-state journal.
+  `ApplyResources` ends after validation, one SQLite transaction, and a
+  non-blocking reconcile wakeup; daemon workers reconcile after the reply.
 - The daemon owns provider preparation, namespace publication, Attachment
-  lifecycle, and live VFS sessions. Filesystem processes stay out of process.
+  lifecycle, and live VFS sessions. Filesystems stay out of process.
 - Credentials and other secret bytes never enter resources, KCL, status,
   progress, receipts, logs, Debug output, Inspector, or dedupe hashes.
 - A declaration must bind behavior. Permissions, capabilities, schema rules,
@@ -64,9 +64,7 @@ Get explicit approval before changing:
 ## Work rules
 
 - Diagnose root causes before changing code. Preserve the original failure
-  signal until you understand it.
-- Do not weaken tests, fixtures, coverage, or strict parsing to make a failure
-  disappear.
+  signal; do not weaken tests, fixtures, coverage, or strict parsing to hide it.
 - Keep one fact under one owner. Delete duplicate DTOs, compatibility aliases,
   bridge layers, and one-caller forwarding helpers when the direct path exists.
 - This project is pre-alpha and has no backward-compatibility obligation.
@@ -74,13 +72,41 @@ Get explicit approval before changing:
   current interoperability requirement says otherwise.
 - Add an abstraction only for two real callers or one volatile external
   boundary. Prefer parsed domain types over strings, maps, or raw JSON.
-- Public APIs need current callers and enforced invariants.
-- Dependencies must pay for themselves. Remove direct dependencies when their
-  final use disappears.
-- Preserve user changes in dirty worktrees. Do not use destructive Git
-  commands or rewrite history without explicit approval.
+- Public APIs need current callers and enforced invariants. Dependencies must
+  pay for themselves; remove a direct dependency when its final use disappears.
+- Treat WIT, protobuf, VFS wire, shared domain type, and public constructor
+  changes as repository-wide migrations. Update definitions, generated
+  bindings, constructors, patterns, callers, fixtures, and tests together, then
+  validate in dependency order per `docs/contracts/60-build-validation.md`.
+- Before changing a shared lookup, attribute, cache, or identity type, inspect
+  its callers and relevant history; confirm the existing owner before adding a
+  type or cache.
+- Preserve user changes in dirty worktrees. Do not use destructive Git commands
+  or rewrite history without explicit approval.
+- Before stacked Git work, inspect the base, merge state, ancestry, and
+  overlapping worktrees. Do not rebase or replay until the target relationship
+  is explicit.
+- Delegate only disjoint write sets. One agent owns each shared protocol,
+  schema, or public API migration. A handoff states files changed, focused
+  checks run, and pending work; the parent runs the combined gate.
 - Use Conventional Commits when asked to commit. Do not push or open a pull
   request without explicit approval.
+
+## Execution preflight
+
+Before the first broad build, test, Git write, or networked command:
+
+1. Confirm the active worktree and all write targets are writable. A sibling
+   worktree does not inherit the main worktree's permissions.
+2. Check artifacts before treating a missing file as a code failure:
+   provider-backed host tests need `just build providers`; local libkrun use
+   needs `just guest-image`.
+3. Use one narrow command to separate code from environment failures.
+   Permission errors from `sccache`, Cargo or Git locks, cache databases,
+   keyrings, or network access are environment failures.
+4. Rerun a required sandbox-blocked operation with scoped escalation. Do not
+   disable `sccache` or widen validation. Serialize commands that write the
+   same lockfile, provider artifacts, Git index, or live filesystem state.
 
 ## Orientation
 
@@ -106,15 +132,12 @@ run `just check`. Detailed gates and live-lane requirements live in
 `docs/contracts/60-build-validation.md`.
 
 - Host or CLI sanity: `cargo fmt` and focused `cargo nextest run`.
-- Fresh worktree: `just build providers` before host tests that need WASM.
 - Documentation changes: `just docs-check`.
 - Provider manifest changes: `just schema`.
 - Mount, runtime, provider, clone, or traversal changes require the relevant
   live path. Rust checks alone are not enough.
 - Always use `target/debug/omnifs` or `target/release/omnifs`, never bare
   `omnifs`.
-- Preserve the configured compiler cache wrapper. If sandboxing blocks its
-  local service, rerun with scoped escalation instead of disabling it.
 
 ## Active footguns
 
@@ -139,13 +162,20 @@ run `just check`. Detailed gates and live-lane requirements live in
 
 ## Documentation
 
-- Keep contracts about enforced current behavior.
-- Keep architecture notes about the current model, its rationale, and short
-  descriptions of rejected prior designs that must not return.
-- Do not keep completed implementation plans, migration playbooks, temporary
-  ledgers, or campaign checklists in the repository.
-- Do not copy source structs, WIT blocks, or protobuf messages into prose.
-  Name the owning symbols and files.
-- Update a contract when ownership or behavior changes. Update architecture
-  when the model or rationale changes. Delete stale footguns.
+- Contracts contain enforced current behavior. Architecture notes contain the
+  current model, rationale, and rejected prior designs. Do not keep completed
+  plans, migration playbooks, temporary ledgers, or campaign checklists.
+- Update contracts with ownership or behavior; update architecture with the
+  model or rationale; delete stale footguns.
+- Start each focused architecture note with `Status`, `Scope`, `Read when`, and
+  `Binding contracts`.
+- Architecture notes explain a choice, its owner, its effects, its failure
+  boundary, and why rejected designs failed. Put binding `must`, `never`, and
+  `do not` rules in contracts.
+- Use a table when a subsystem has several runtimes, protocols, states, or
+  authority sources. Use prose for rationale and causal flow.
+- Do not copy source structs, WIT blocks, protobuf messages, volatile enums,
+  command flags, or dependency internals into architecture prose. Name the
+  source owner and proof test when exact detail matters; pin external behavior
+  to its version.
 - Run `just docs-check` after documentation changes.

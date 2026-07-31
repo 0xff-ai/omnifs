@@ -1,43 +1,81 @@
 # Control plane contracts
 
 Status: current-contract
-Owns: the CLI/daemon split, typed local RPC, profile layout, mounts and credentials, filesystem runners, and contributor dev state.
+Owns: CLI/daemon ownership, local RPC, profiles, resources, filesystem
+runtimes, and contributor state.
 
 ## Read when
 
-Read this before touching `omnifs-cli`, `omnifs-api`, `omnifs-bootstrap`, `omnifs-daemon`, `omnifs-state`, lifecycle commands, daemon status, mount or credential RPC, filesystem runtimes, logs, or `scripts/dev.ts`.
+Read this before changing CLI, API, bootstrap, daemon, state, lifecycle, status,
+resource RPC, filesystem runtimes, logs, or `scripts/dev.ts`.
 
 ## Rules
 
-## Ownership boundary
+### Ownership boundary
 
-There is no shared workspace store. `omnifs-bootstrap::Profile` resolves one profile root from `OMNIFS_HOME` or `$HOME/.omnifs`, owns only fixed pre-RPC paths, and exposes `SpawnLock` and exact `DaemonIdentity` operations.
+There is no shared workspace store. `Profile` resolves `OMNIFS_HOME` or
+`$HOME/.omnifs`, owns fixed pre-RPC paths, and exposes `SpawnLock` and exact
+`DaemonIdentity` operations.
 
-The CLI owns user-facing commands, OAuth and static-auth UX, profile config, metrics, daemon spawn, and resource authoring. Interactive provider, mount, credential, and attachment commands edit the complete desired resource set through `PlanResources` and `ApplyResources`, then follow `WatchProgress` or a durable action stream. KCL `plan` and `apply --yes` are the automation path; `credential set --from-env` is the only narrow secret automation command. It sends every write through typed local RPC and keeps no desired-state journal or legacy desired-state reader.
+The CLI owns commands, auth UX, profile config, metrics, daemon spawn, and
+resource authoring. Interactive commands edit the complete desired set through
+plan/apply and follow progress or durable actions. KCL plan/apply is the
+automation path; `credential set --from-env` is the sole secret automation
+command. Every write uses typed RPC; the CLI keeps no desired-state reader or
+journal.
 
-The daemon owns providers, credentials, mounts, desired resources, Attachment runtime state and lifecycle, SQLite state and cache, attach endpoints, live VFS sessions, and raw log bytes. Its durable state is under `<profile>/daemon-state/`: `control-store/state.sqlite3`, `cache/`, `runtime/attachments/`, `staging/`, `logs/`, and the engine projection, Wasmtime, clone, and guest-image caches. The daemon never reads client files or chooses client configuration.
+The daemon owns resources, SQLite, caches, provider preparation, Attachment
+lifecycle, attach endpoints, VFS sessions, and raw logs under
+`<profile>/daemon-state/`. It never reads client files or chooses client config.
 
-The control protocol is the only CLI-to-daemon API. It is tonic/protobuf gRPC using the checked-in `omnifs.control.v1` schema and generated Rust from `build.rs`, served only on the profile's local Unix socket. It exposes readiness, status and inventory, provider import and metadata, pure resource planning, transactional complete-set apply, typed progress watches, durable actions, Attachment status and access, recovery and repair, shutdown, Inspector subscription, and bounded raw log streaming. `ApplyResources` performs validation and one SQLite transaction, sends a non-blocking reconcile wakeup, and returns before provider preparation or Attachment work. It cannot compile Wasm, initialize a provider, publish or drain a generation, fetch an image, launch a runtime, mount an OS filesystem, or wait for a VFS session.
+The only CLI-to-daemon API is tonic/protobuf gRPC over the profile Unix socket,
+using checked-in `omnifs.control.v1` and generated Rust. It covers control,
+resources, progress, actions, Attachments, recovery, shutdown, Inspector, and
+bounded logs. `ApplyResources` validates and commits one transaction, wakes
+reconcilers, and returns before any provider or Attachment work.
 
-Each progress subscription starts with a complete snapshot and registers before it reads current state, closing the subscribe-versus-update race. Fanout is bounded and non-blocking. A slow consumer receives a resync snapshot and never delays daemon work. Revision streams include only work that can affect that revision; unused catalog warm-up appears only in current status. Closed provider, serving, credential, Attachment, revision, and action event variants carry closed stage enums, real byte counts, retries, queue counts, and terminal outcomes. They never invent compilation percentages or infer cache hits from time.
+Progress registers before reading its full snapshot. Fanout is bounded and
+non-blocking; slow consumers receive a resync snapshot. Revision streams include
+only relevant work. Closed event variants carry factual stages, counts, retries,
+queues, and outcomes, never inferred percentages or cache hits.
 
-Credential and Attachment restart actions use client-generated action IDs and action-generation preconditions. SQLite accepts at most one non-terminal action per target, retains pending work across daemon restart, and returns a durable typed receipt after reply loss. Secret bytes are neither stored nor hashed for dedupe: the first accepted action ID wins, and new material requires a new ID. Credential material may cross only in request payloads on the local control socket. It never crosses filesystem attach/TCP or appears in responses, status, inventory, logs, Debug, Inspector, progress, or receipts.
+Credential and Attachment restart actions use client IDs and generation
+preconditions. SQLite retains at most one non-terminal action per target across
+restart and returns durable receipts. Action dedupe never stores or hashes the
+submitted secret bytes; the first ID wins. Secrets cross only in request
+payloads on the local control socket and never appear on attach, output, logs,
+or progress.
 
-The daemon listens on the profile's fixed `control.sock`. The profile directory is `0700`; the socket and process identity are `0600`. The VFS namespace is separate: `daemon-state/local.sock` and one profile-derived loopback or Docker-bridge TCP port. TCP has no auth and never binds all interfaces. Both VFS listeners must bind before readiness, and either listener's unexpected exit is fatal.
+The profile is mode `0700`; `control.sock` and process identity are `0600`.
+VFS separately uses `daemon-state/local.sock` and one profile-derived loopback
+or Docker-bridge TCP port. TCP has no auth and never binds all interfaces. Both
+listeners must bind for readiness and remain alive.
 
-The process identity is diagnostic metadata only. RPC status and inventory are authoritative when reachable. Doctor owns stale process and filesystem cleanup and requires a stopped daemon, consent, and fresh exact identity proof before destructive repair.
+Process identity is diagnostic. Reachable RPC status and inventory are
+authoritative. Doctor alone cleans stale processes and filesystems, after a
+stopped-daemon check, consent, and fresh exact identity proof.
 
-## Command grammar
+### Command grammar
 
-The public binary is one `omnifs` executable. The hidden `omnifs daemon` subcommand runs the daemon; `omnifs run-fs` dispatches a host filesystem. Public commands are:
+One public `omnifs` binary hides `daemon` and `run-fs`. Public commands are:
 
-- `omnifs status`, `down`, `logs`, `inspect`, `doctor`, `setup`, `skill`, `completions`, and `version`.
-- `omnifs provider add|ls|show|rm` imports embedded or local Wasm, pins a named Provider resource, and never grants authority by import alone.
-- `omnifs mount add|ls|show|update|reauth|revoke|rm` is interactive resource porcelain. It selects a Provider, collects typed config, host resources, limits, and Credential references, shows the planner's diff, applies the complete desired set, and follows typed revision progress. `reauth` changes secret material; `revoke` performs explicit upstream revocation and leaves the declared slot in `NeedsSecret`.
-- `omnifs credential login|ls|show|rm|revoke` plus `omnifs credential set <name> --from-env <variable>` keep values out of argv and output. `set --from-env` is the one secret automation path; login, removal, and revoke are interactive and follow durable action progress.
-- `omnifs attachment add|ls|show|rm|restart|shell <name>` is the public filesystem lifecycle. Resource presence requests attachment; removal requests teardown. Restart follows its action stream and shell uses typed daemon access. Hidden `run-fs` remains an internal runner.
+- `status`, `plan`, `apply`, `down`, `logs`, `inspect`, `doctor`, `setup`,
+  `skill`, `completions`, and `version`.
+- `provider add|ls|show|rm` imports embedded or local Wasm and pins a Provider;
+  import alone grants no authority.
+- `mount add|ls|show|update|reauth|revoke|rm` collects typed config, host
+  resources, limits, and Credential references, then plans, applies, and
+  follows. `reauth` changes material; `revoke` performs upstream revocation and
+  leaves `NeedsSecret`.
+- `credential login|ls|show|rm|revoke` and
+  `credential set <name> --from-env <variable>` keep values out of argv and
+  output. Only `set --from-env` automates secrets.
+- `attachment add|ls|show|rm|restart|shell <name>` owns public filesystem
+  lifecycle through resources and actions. Hidden `run-fs` stays internal.
 
-Global `--output human|json|jsonl`, `--quiet`, `--no-input`, and `--yes` apply to one invocation after Clap parses it. JSON emits one terminal envelope. JSONL emits stream records followed by one terminal result or error. Clap usage errors exit 2 before output mode applies.
+Global output and interaction flags apply after Clap parsing. JSON emits one
+terminal envelope; JSONL emits stream records then one terminal result or
+error; Clap usage errors exit 2 first.
 
 Human, JSONL, JSON, and quiet mutation commands all wait for terminal
 reconciliation by default. Human and JSONL modes stream typed progress. JSON
@@ -49,17 +87,43 @@ turns it into a completion percentage or cache-hit claim.
 Finite control calls use bounded unary deadlines. Progress and log streams do
 not inherit a unary deadline; their target terminal state or Ctrl-C ends them.
 
+#### Errors and recovery
+
+A CLI error states the blocking condition, the final observed state, and one
+recovery action that can run under that condition. It must not recommend a
+command whose own precondition is the condition that just failed.
+
+Where command grammar permits selector inference, resolve every unambiguous
+selector before reporting a missing-selector error. When the user supplies an
+explicit protocol, runtime, or platform tuple, validate that tuple before a
+broader default-policy guard so the error names the unsupported combination.
+
+Receipts for successful mutations include the next command needed to use or
+inspect the result when that step is not automatic. Acceptance tests assert
+these visible commands and messages, not only the underlying resource state.
+
+Ordinary RPC calls reject incompatible protocol versions. Teardown must remain
+actionable under version skew. If the current CLI can prove that an older
+daemon's shutdown request and response are compatible, it may use only that
+narrow shutdown operation. Otherwise the mismatch error must name an exact
+out-of-band recovery path. It must not tell the user to run `omnifs down` when
+the same version check prevents `omnifs down` from sending `Shutdown`.
+
 Ctrl-C stops only the client watch, exits 130, and prints the exact
 `status --follow --revision <n>` or `status --follow --action <id>` command
 needed to resume. It never cancels daemon work. A plan accepted after an
 interactive prompt applies against that exact base revision; stale apply fails
 and the CLI does not silently re-plan or ask again.
 
-`omnifs setup` starts the daemon, lists every embedded provider with honest auth and config labels, offers no-sign-in providers, creates Provider and Mount resources plus the recommended Attachment in one desired set, and asks for one plan consent. It then follows the returned revision until ready, failed, or superseded. The apply RPC does not wait for compilation or runtime work. There is no `omnifs up` or offline product mode; `omnifs plan <file>` and `omnifs apply <file> --yes` are the automation surface.
+`setup` starts the daemon, presents embedded providers honestly, creates
+Provider and Mount resources plus the recommended Attachment in one consented
+set, and follows its revision. There is no `up` or offline product mode; KCL
+plan and apply are the automation surface.
 
-`omnifs down` rejects new writes, asks `AttachmentSupervisor` to stop every exact observed runtime, waits for the bounded drain, reports stragglers, and stops the daemon without deleting desired Attachment rows. The next daemon reloads and restores desired Attachments.
+`down` rejects writes, drains exact observed runtimes, reports stragglers, and
+stops without deleting desired Attachments, which the next daemon restores.
 
-## KCL authoring boundary
+### KCL authoring boundary
 
 `omnifs plan <file>` and `omnifs apply <file> --yes` evaluate KCL once through
 the official in-process Rust API pinned to one exact upstream revision. They
@@ -74,9 +138,12 @@ KCL schema asset and no generated Rust model derived from KCL. Secrets never
 enter KCL. The evaluator runs once per command so consent applies to the exact
 candidate that reaches `PlanResources` and `ApplyResources`.
 
-## Mounts, providers, and credentials
+### Mounts, providers, and credentials
 
-SQLite is the sole desired-state authority. Provider, Mount, Credential, and Attachment definitions commit as one complete set with an exact base revision and desired digest. The durable apply receipt makes retries safe across lost replies. Public reads may use resource snapshots or typed resource-specific status calls. Resource edits use complete-set apply; operational work uses durable typed actions.
+SQLite alone owns desired Provider, Mount, Credential, and Attachment
+definitions. They commit as one set with exact base revision and digest.
+Durable receipts recover lost replies. Edits use complete-set apply; operations
+use durable actions.
 
 The normalized typed resource set owns digest identity. Do not hash KCL text,
 presentation JSON, protobuf bytes, or SQLite row layout. A resource change must
@@ -84,39 +151,63 @@ update the explicit canonical digest encoding. `ResourceName` has one grammar
 in `omnifs-core` shared by every resource kind. Apply policy belongs in the
 resource transaction owner, not in SQL row codecs.
 
-Provider artifacts live in daemon state. `ImportProvider` accepts a bounded upload or an exact embedded provider name, validates the content digest and metadata, and returns a receipt keyed only by content digest. A dropped upload is simply retried, and importing identical bytes twice returns `Unchanged` rather than a second row.
+`ImportProvider` stores bounded uploads or exact embedded providers in daemon
+state after digest and metadata validation. Receipts key on content digest;
+identical bytes return `Unchanged`.
 
-Credentials live in the daemon's SQLite store. The CLI owns browser, device, and static-token UX, then submits secret material as a request sidecar while the desired Credential resource is planned and applied. The daemon injects credentials only into host callouts. It does not expose credential values, file paths, or a reload command; status reports only non-secret health. Login, set, and revoke follow the returned action through generation refresh, drain, and explicit upstream work.
+Credentials live in daemon SQLite. The CLI owns browser, device, and
+static-token UX and submits material beside the planned Credential resource.
+The daemon injects only into host callouts and exposes no values, file paths, or
+reload command. Status is non-secret; login, set, and revoke follow durable
+actions through refresh, drain, and upstream work.
 
-## Filesystems and attach
+### Filesystems and attach
 
-`omnifs_core::AttachmentSpec` owns the exact protocol, runtime, resolved location, and runtime asset references. SQLite Attachment resources are desired truth. Durable observed rows retain the exact observed spec, version, runtime instance, phase, retry state, action generation, and deletion tombstone until teardown is proved. Host locations are absolute; Docker and libkrun use `/omnifs`.
+`AttachmentSpec` owns protocol, runtime, resolved location, and assets. SQLite
+resources are desired truth; observed rows retain exact spec, version, runtime
+instance, phase, retry, action generation, and tombstone until teardown proof.
+Host locations are absolute; guests use `/omnifs`.
 
-`AttachmentSupervisor` owns bounded host process, Docker, and libkrun launch and teardown through `omnifs-fs-runtime`. It persists exact identity before effects, adopts only an exact current runtime and session, serializes work per Attachment, and keeps pending restart actions durable across daemon restart. Each runner remains out of process and attaches to the shared `omnifs_vfs::Namespace` without provider or credential state.
+`AttachmentSupervisor` owns bounded host, Docker, and libkrun lifecycle through
+`omnifs-fs-runtime`. It persists identity before effects, adopts only exact
+runtime and session matches, serializes each Attachment, and retains restart
+actions across daemon restart. Runners stay out of process and credential-free.
 
-`VfsServer` owns listener tasks, readiness, reconnect, server-pushed stop, and live session records. VFS wire v11 handshakes carry the Attachment name, exact `AttachmentSpec`, and runtime instance. The daemon admits only the expected exact session and rejects conflicting identity. Configured Attachments and live VFS sessions are separate domains.
+`VfsServer` owns listeners, readiness, reconnect, pushed stop, and live
+sessions. VFS v11 handshakes carry Attachment name, exact spec, and runtime
+instance; only the expected identity is admitted. Desired Attachments and live
+sessions remain separate.
 
-## Logs, Inspector, metrics, and dev
+### Logs, Inspector, metrics, and dev
 
-The daemon appends raw bytes to `daemon-state/logs/daemon.log`; `omnifs logs` reads or follows them through `StreamLogs`. Inspector events use the typed subscription stream. The CLI preserves raw log bytes and bounds tail and stream frames.
+The daemon appends raw log bytes; `omnifs logs` reads them through bounded
+`StreamLogs`. Inspector uses its typed stream.
 
 `omnifs-inspector` owns Inspector state, replay and live-event sources, terminal
 lifecycle, and TUI rendering. `omnifs-cli` resolves the profile endpoint,
 dispatches the command, and renders the final session receipt. Inspector
 restores both terminal and prior panic-hook state before returning to the CLI.
 
-CLI dogfood metrics are local client files under `<profile>/metrics/`, controlled by `[metrics].enabled` and `OMNIFS_METRICS`; they are never transmitted and cannot fail a command. Daemon logs and cache data remain daemon-owned.
+CLI dogfood metrics are local files under `<profile>/metrics/`, controlled by
+config or `OMNIFS_METRICS`. They are never sent and cannot fail a command.
 
-`scripts/dev.ts` owns contributor state. It uses a dedicated profile such as `~/.omnifs-dev`, builds the provider bundle and native CLI, renders a temporary or profile-local KCL desired config, sets any dev credential through `target/debug/omnifs credential set --from-env`, invokes `target/debug/omnifs apply <file> --yes`, waits for the terminal revision, and opens `target/debug/omnifs attachment shell dev-docker -- ...` at `/omnifs`. It does not invoke interactive porcelain or create a daemon container.
+`scripts/dev.ts` owns a dedicated contributor profile. It builds providers and
+CLI, renders KCL, sets credentials through `credential set --from-env`, applies
+with `target/debug/omnifs`, waits for the revision, then opens `attachment shell
+dev-docker` at `/omnifs`. It uses no interactive porcelain or daemon container.
 
 ## Must not
 
 - Add a second desired-state or workspace authority beside daemon SQLite.
-- Add `up`, an imperative mutation path separate from the resource planner, or an offline product mode. `omnifs apply` is the KCL complete-set apply command.
+- Add `up`, a second mutation path, or offline mode. `omnifs apply` is the KCL
+  complete-set command.
 - Add a KCL schema authority or `kcl` subprocess.
-- Send credentials through filesystem attach/TCP or expose them in RPC replies, status, inventory, logs, tracing, metrics, Debug, Inspector, or receipts.
-- Make the daemon read client-owned desired state or config, make normal lifecycle write a client-owned filesystem tree, or make the CLI read daemon SQLite tables and logs directly.
-- Add a remote control endpoint or TCP authentication mode. TCP attach remains local loopback or the detected Docker bridge without auth.
+- Send credentials through attach/TCP or expose them in replies, status,
+  inventory, logs, tracing, metrics, Debug, Inspector, or receipts.
+- Let the daemon read client desired state, normal lifecycle write a client
+  filesystem tree, or the CLI read daemon SQLite or logs directly.
+- Add remote control or TCP authentication. TCP attach stays unauthenticated on
+  loopback or the detected Docker bridge.
 - Clear observed Attachment identity or a deletion tombstone before exact runtime and session teardown is proved.
 
 ## Code
@@ -144,5 +235,6 @@ CLI dogfood metrics are local client files under `<profile>/metrics/`, controlle
 ## Validation
 
 - Run `just docs-check` for documentation-only changes.
-- For control protocol changes, run the typed request/reply and lifecycle tests in `crates/omnifs-api`, `crates/omnifs-cli`, `crates/omnifs-daemon`, and `crates/omnifs-itest/tests/control_plane`.
+- Control protocol changes need typed request/reply and lifecycle tests across
+  API, CLI, daemon, and `omnifs-itest/tests/control_plane`.
 - For filesystem behavior, use `just dev -y`, `target/debug/omnifs status`, and the relevant live smoke path.
