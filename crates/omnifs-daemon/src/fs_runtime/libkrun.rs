@@ -170,9 +170,6 @@ pub const fn default_guest_image_for(channel: BuildChannel) -> &'static str {
 /// `omnifs filesystem shell`'s libkrun dispatch calls this before building the ssh
 /// command: `shell_command` itself stays pure construction (no I/O), so the
 /// probe belongs at the one call site that is about to actually run it.
-// The crate fold made this provably uncalled; its first caller lands in a
-// later commit that wires it into the shell dispatch.
-#[allow(dead_code)]
 pub fn ensure_socat_available() -> Result<()> {
     match Command::new("socat")
         .arg("-V")

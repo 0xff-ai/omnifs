@@ -32,6 +32,7 @@ pub(crate) use events::{
     RuntimeState,
 };
 pub(crate) use image::{BUILD_CHANNEL, BuildChannel};
+pub(crate) use libkrun::ensure_socat_available;
 
 /// An operation failure classified by its stable runtime stage.
 #[derive(Debug, thiserror::Error)]

@@ -619,6 +619,14 @@ impl Daemon {
                 status.definition.spec.location().to_path_buf(),
             ));
         }
+        if status.definition.spec.runtime() == omnifs_core::FilesystemRuntime::Libkrun {
+            crate::fs_runtime::ensure_socat_available().map_err(|error| {
+                ControlError::new(
+                    ControlErrorCode::Internal,
+                    format!("socat is required to open this shell: {error:#}"),
+                )
+            })?;
+        }
         let command = driver
             .shell_command(
                 request.interactive,
