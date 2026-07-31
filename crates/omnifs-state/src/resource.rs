@@ -304,7 +304,7 @@ async fn reconcile_attachment_instances(
     changes: &[omnifs_api::ResourceChange],
     desired: &NormalizedResourceSet,
 ) -> anyhow::Result<()> {
-    let changed = changes
+    let changed_attachment_names = changes
         .iter()
         .filter(|change| {
             change.key.kind == ResourceKind::Attachment
@@ -319,7 +319,9 @@ async fn reconcile_attachment_instances(
         let ResourceDefinition::Attachment(definition) = resource else {
             return None;
         };
-        changed.contains(&definition.name).then_some(definition)
+        changed_attachment_names
+            .contains(&definition.name)
+            .then_some(definition)
     }) {
         upsert_attachment_instance(connection, definition).await?;
     }

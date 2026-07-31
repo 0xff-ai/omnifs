@@ -132,7 +132,7 @@ impl StoredDefinitionV1 {
                 limits: definition.limits.map(StoredLimitsV1::from),
             }),
             ResourceDefinition::Attachment(definition) => {
-                Self::Attachment(StoredAttachmentV1::from_definition(definition))
+                Self::Attachment(StoredAttachmentV1::from_definition(&definition))
             },
         })
     }
@@ -194,7 +194,7 @@ impl From<StoredLimitsV1> for ResourceLimits {
 }
 
 impl StoredAttachmentV1 {
-    fn from_definition(definition: AttachmentDefinition) -> Self {
+    fn from_definition(definition: &AttachmentDefinition) -> Self {
         Self {
             name: definition.name.to_string(),
             protocol: definition.spec.protocol().to_string(),
@@ -231,7 +231,7 @@ impl StoredAttachmentV1 {
 pub(crate) fn encode_attachment(
     definition: &AttachmentDefinition,
 ) -> anyhow::Result<(Vec<u8>, AttachmentVersion)> {
-    let payload = postcard::to_allocvec(&StoredAttachmentV1::from_definition(definition.clone()))
+    let payload = postcard::to_allocvec(&StoredAttachmentV1::from_definition(definition))
         .context("encode attachment resource")?;
     let mut canonical = Vec::with_capacity(ATTACHMENT_PREFIX.len() + payload.len());
     canonical.extend_from_slice(ATTACHMENT_PREFIX);
