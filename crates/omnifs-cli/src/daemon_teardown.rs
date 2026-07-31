@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn a_teardown_failure_never_shows_the_filesystems_stay_attached_line() {
+    fn a_teardown_failure_never_shows_the_attachments_stay_attached_line() {
         let outcomes = vec![TeardownOutcome::DaemonShutdownFailed {
             error: "busy".to_owned(),
         }];

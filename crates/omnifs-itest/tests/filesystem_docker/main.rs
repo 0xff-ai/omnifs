@@ -352,7 +352,7 @@ impl Fixture {
             if serde_json::from_slice::<serde_json::Value>(&output.stdout)
                 .ok()
                 .and_then(|value| {
-                    value["result"]["inventory"]["filesystems"]
+                    value["result"]["inventory"]["attachments"]
                         .as_array()
                         .cloned()
                 })

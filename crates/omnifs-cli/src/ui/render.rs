@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn key_field_width_matches_ledger_key_width_for_the_same_keys() {
-        let keys = ["providers", "daemon", "mounts", "filesystems"];
+        let keys = ["providers", "daemon", "mounts", "attachments"];
         let rows = keys
             .iter()
             .map(|key| LedgerRow::new(Glyph::Done, (*key).to_owned(), String::new()))
@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(
             key_field_width(&keys),
             11,
-            "`filesystems` is the longest key"
+            "`attachments` is the longest key"
         );
     }
 

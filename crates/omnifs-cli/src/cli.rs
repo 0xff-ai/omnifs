@@ -553,7 +553,7 @@ mod tests {
     /// is otherwise running and there are still zero mounts; the screen must
     /// name that attachment and reuse its own `fix` field verbatim.
     #[test]
-    fn fresh_profile_screen_names_a_failed_filesystem_while_daemon_is_up() {
+    fn fresh_profile_screen_names_a_failed_attachment_while_daemon_is_up() {
         let attachment = crate::inventory::AttachmentAccessStatus {
             name: "test".parse().unwrap(),
             spec: omnifs_core::AttachmentSpec::new(

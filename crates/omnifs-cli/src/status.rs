@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn running_context_metadata_reports_pid_mounts_and_filesystems_as_one_sentence() {
+    fn running_context_metadata_reports_pid_mounts_and_attachments_as_one_sentence() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
             vec![crate::inventory::AttachmentAccessStatus {
@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_stopped_status_hides_detached_filesystem_rows() {
+    fn clean_stopped_status_hides_detached_attachment_rows() {
         let inventory = Inventory::test(
             DaemonHealth::Stopped,
             vec![crate::inventory::AttachmentAccessStatus {

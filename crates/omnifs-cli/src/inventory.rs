@@ -901,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_down_inventory_retains_configured_detached_filesystems() {
+    fn daemon_down_inventory_retains_configured_detached_attachments() {
         let spec = AttachmentSpec::new(
             AttachmentProtocol::Nfs,
             AttachmentRuntime::Host,
