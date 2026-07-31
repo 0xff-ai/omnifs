@@ -94,7 +94,8 @@ pub enum Commands {
     Attachment(commands::attachment::AttachmentArgs),
 
     /// Start the daemon and offer a resource-based quick start
-    Setup(commands::setup::SetupArgs),
+    #[command(after_help = "Examples:\n  omnifs setup")]
+    Setup,
 
     /// Install omnifs usage skills for agent harnesses
     Skill(commands::skill::SkillArgs),
@@ -214,7 +215,7 @@ impl Commands {
                     commands::attachment::AttachmentCommand::Shell(_) => "attachment.shell",
                 },
             ),
-            Self::Setup(_) => (Some("setup"), "setup"),
+            Self::Setup => (Some("setup"), "setup"),
             Self::Skill(_) => (Some("skill"), "skill"),
             Self::Doctor => (Some("doctor"), "doctor"),
             Self::Completions(_) => (Some("completions"), "completions"),
@@ -265,7 +266,7 @@ impl Commands {
             Self::Mount(args) => args.run(output).await,
             Self::Credential(args) => args.run(output).await,
             Self::Attachment(args) => args.run(output).await,
-            Self::Setup(args) => Box::pin(args.run(output)).await,
+            Self::Setup => Box::pin(commands::setup::run(output)).await,
             Self::Skill(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Completions(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Version => commands::version::run(output).await,

@@ -4,7 +4,6 @@ use std::collections::BTreeSet;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result};
-use clap::Args;
 use omnifs_api::{
     ApplyReceipt, AttachmentDefinition, MountResourceDefinition, ProgressSnapshot,
     ProviderDefinition, ProviderMetadata, ResourceDeclarations, ResourceDefinition, ResourceLimits,
@@ -21,10 +20,6 @@ use crate::provider_catalog::{
 use crate::provider_resolver::ProviderResolver;
 use crate::rpc::RpcClient;
 use crate::ui::output::{Output, ResultVerdict};
-
-#[derive(Args, Debug, Clone, Default)]
-#[command(after_help = "Examples:\n  omnifs setup")]
-pub struct SetupArgs {}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,83 +43,80 @@ struct PreparedSetup {
     attachment_name: Option<ResourceName>,
 }
 
-impl SetupArgs {
-    pub async fn run(self, output: Output) -> Result<ExitCode> {
-        daemon_start::start(&output).await?;
-        let started = Instant::now();
-        let rpc = RpcClient::resolve()?;
-        let prepared = prepare_setup(&rpc, &output).await?;
-        let plan = rpc.plan_resources(&prepared.declarations).await?;
-        if !output.quiet() {
-            output.plan(&resource_flow::plan_preview(
-                "Setup desired resources",
-                &plan,
+pub async fn run(output: Output) -> Result<ExitCode> {
+    daemon_start::start(&output).await?;
+    let started = Instant::now();
+    let rpc = RpcClient::resolve()?;
+    let prepared = prepare_setup(&rpc, &output).await?;
+    let plan = rpc.plan_resources(&prepared.declarations).await?;
+    if !output.quiet() {
+        output.plan(&resource_flow::plan_preview(
+            "Setup desired resources",
+            &plan,
+        ));
+    }
+    let changed = plan
+        .changes
+        .iter()
+        .any(|change| change.action != omnifs_api::ResourceChangeAction::Unchanged);
+    let (receipt, snapshot) = if changed {
+        match crate::ui::consent::Decision::resolve(
+            output.prompt_mode(),
+            false,
+            "Apply setup plan?",
+            "--yes",
+            &output,
+        )? {
+            crate::ui::consent::Decision::Apply => {},
+            crate::ui::consent::Decision::DryRun => {
+                unreachable!("setup has no dry-run mode")
+            },
+        }
+        let applied = match resource_flow::apply_plan_and_wait(
+            &rpc,
+            &output,
+            plan,
+            prepared.declarations,
+            Vec::new(),
+        )
+        .await
+        {
+            Ok(applied) => applied,
+            Err(error) => return resource_flow::finish_resource_error(&output, error),
+        };
+        (Some(applied.receipt), Some(applied.snapshot))
+    } else {
+        let snapshot = resource_flow::wait_for_revision(&rpc, plan.base_revision, &output).await?;
+        (None, Some(snapshot))
+    };
+
+    let result = SetupResult {
+        providers: prepared.provider_names,
+        mounts: prepared.mount_names,
+        attachment: prepared.attachment_name,
+        receipt,
+        snapshot,
+    };
+    if output.is_structured() {
+        output.emit_result(ResultVerdict::Ok, result)?;
+    } else if !output.quiet() {
+        if !result.mounts.is_empty() {
+            output.report(format!(
+                "mounted: {}\n",
+                result
+                    .mounts
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
-        let changed = plan
-            .changes
-            .iter()
-            .any(|change| change.action != omnifs_api::ResourceChangeAction::Unchanged);
-        let (receipt, snapshot) = if changed {
-            match crate::ui::consent::Decision::resolve(
-                output.prompt_mode(),
-                false,
-                "Apply setup plan?",
-                "--yes",
-                &output,
-            )? {
-                crate::ui::consent::Decision::Apply => {},
-                crate::ui::consent::Decision::DryRun => {
-                    unreachable!("setup has no dry-run mode")
-                },
-            }
-            let applied = match resource_flow::apply_plan_and_wait(
-                &rpc,
-                &output,
-                plan,
-                prepared.declarations,
-                Vec::new(),
-            )
-            .await
-            {
-                Ok(applied) => applied,
-                Err(error) => return resource_flow::finish_resource_error(&output, error),
-            };
-            (Some(applied.receipt), Some(applied.snapshot))
-        } else {
-            let snapshot =
-                resource_flow::wait_for_revision(&rpc, plan.base_revision, &output).await?;
-            (None, Some(snapshot))
-        };
-
-        let result = SetupResult {
-            providers: prepared.provider_names,
-            mounts: prepared.mount_names,
-            attachment: prepared.attachment_name,
-            receipt,
-            snapshot,
-        };
-        if output.is_structured() {
-            output.emit_result(ResultVerdict::Ok, result)?;
-        } else if !output.quiet() {
-            if !result.mounts.is_empty() {
-                output.report(format!(
-                    "mounted: {}\n",
-                    result
-                        .mounts
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-            if let Some(name) = &result.attachment {
-                output.report(format!("Attachment {name} ready\n"));
-            }
-            output.outro(format!("All set in {}s.", started.elapsed().as_secs()));
+        if let Some(name) = &result.attachment {
+            output.report(format!("Attachment {name} ready\n"));
         }
-        Ok(ExitCode::Success)
+        output.outro(format!("All set in {}s.", started.elapsed().as_secs()));
     }
+    Ok(ExitCode::Success)
 }
 
 async fn prepare_setup(rpc: &RpcClient, output: &Output) -> Result<PreparedSetup> {
