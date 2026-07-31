@@ -971,6 +971,12 @@ fn mark_resources_preparing(resources: &ResourceControl, revision: ResourceRevis
     resources
         .progress()
         .update_revision_snapshot(revision, |snapshot| {
+            // A persisted serving revision describes the last daemon's
+            // publication. Once this daemon starts rebuilding the generation,
+            // the current revision is not terminal until publication is
+            // proved again. This also keeps an unchanged apply attached to
+            // real startup work instead of completing from stale observation.
+            snapshot.observed_revision = None;
             for status in &mut snapshot.resources {
                 if status.desired_revision != revision {
                     continue;
@@ -1318,6 +1324,23 @@ mod tests {
             ProgressEventKind::RevisionSuperseded { .. }
         ));
         assert!(stream.recv().await.is_none());
+        state.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn preparing_clears_a_stale_terminal_observation() {
+        let (_temp, state, resources) = fixture(snapshot(1, Some(1))).await;
+        mark_resources_preparing(&resources, ResourceRevision::new(1));
+
+        let (_, current) = resources.progress().snapshot_for(ProgressTarget::Current);
+        assert_eq!(current.observed_revision, None);
+        assert_eq!(current.resources[0].phase, ResourcePhase::Preparing);
+        assert_eq!(
+            resources
+                .progress()
+                .target_state(ProgressTarget::DesiredRevision(ResourceRevision::new(1))),
+            crate::progress::ProgressTargetState::Watching
+        );
         state.shutdown().await.unwrap();
     }
 

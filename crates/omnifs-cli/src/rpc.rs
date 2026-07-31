@@ -60,13 +60,11 @@ pub(crate) struct ShutdownResult {
     pub(crate) still_attached: Vec<String>,
 }
 
-#[allow(dead_code, reason = "Plan 008 command porcelain consumes progress")]
 pub(crate) struct ProgressWatch {
     first: Option<ProgressEvent>,
     stream: tonic::Streaming<wire::ProgressEvent>,
 }
 
-#[allow(dead_code, reason = "Plan 008 command porcelain consumes progress")]
 impl ProgressWatch {
     pub(crate) async fn next(&mut self) -> anyhow::Result<Option<ProgressEvent>> {
         if let Some(first) = self.first.take() {
@@ -364,7 +362,6 @@ impl RpcClient {
         grpc::get_resources_response(&response).map_err(Into::into)
     }
 
-    #[allow(dead_code, reason = "Plan 007 declarative commands consume this RPC")]
     pub(crate) async fn plan_resources(
         &self,
         declarations: &ResourceDeclarations,
@@ -378,7 +375,6 @@ impl RpcClient {
         grpc::plan_resources_response(&response).map_err(Into::into)
     }
 
-    #[allow(dead_code, reason = "Plan 007 declarative commands consume this RPC")]
     pub(crate) async fn apply_resources(
         &self,
         request: &ApplyResourcesRequest,
@@ -467,7 +463,6 @@ impl RpcClient {
     /// Open one target-scoped progress stream. Only stream setup and the
     /// required first snapshot use the request deadline. Once subscribed,
     /// reconciliation can run for as long as it needs.
-    #[allow(dead_code, reason = "Plan 008 command porcelain consumes progress")]
     pub(crate) async fn watch_progress(
         &self,
         target: ProgressTarget,

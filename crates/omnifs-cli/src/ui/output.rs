@@ -175,6 +175,26 @@ struct JsonlResult<T> {
     result: T,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct JsonlEvent<T> {
+    schema_version: u8,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    command: String,
+    event: T,
+}
+
+impl<T> JsonlEvent<T> {
+    fn new(command: impl Into<String>, event: T) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            kind: "event",
+            command: command.into(),
+            event,
+        }
+    }
+}
+
 impl<T> JsonlResult<T> {
     fn new(command: impl Into<String>, verdict: ResultVerdict, result: T) -> Self {
         Self {
@@ -195,6 +215,33 @@ struct JsonlError {
     command: String,
     verdict: ErrorVerdict,
     error: ErrorPayload,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DetailedErrorEnvelope<T> {
+    schema_version: u8,
+    command: String,
+    verdict: ErrorVerdict,
+    error: DetailedErrorPayload<T>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonlDetailedError<T> {
+    schema_version: u8,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    command: String,
+    verdict: ErrorVerdict,
+    error: DetailedErrorPayload<T>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DetailedErrorPayload<T> {
+    id: String,
+    exit_code: i32,
+    message: String,
+    fix: String,
+    details: T,
 }
 
 impl JsonlError {
@@ -242,6 +289,13 @@ impl Output {
         result: T,
     ) -> serde_json::Result<Vec<u8>> {
         serde_json::to_vec(&JsonlResult::new(command, verdict, result))
+    }
+
+    pub(crate) fn jsonl_event_bytes<T: Serialize>(
+        command: impl Into<String>,
+        event: T,
+    ) -> serde_json::Result<Vec<u8>> {
+        serde_json::to_vec(&JsonlEvent::new(command, event))
     }
 
     pub(crate) fn jsonl_error_bytes(error: ErrorEnvelope) -> serde_json::Result<Vec<u8>> {
@@ -396,9 +450,15 @@ impl PromptMode {
             return Ok(default());
         }
         if self.no_input {
+            if flag_hint == "--yes" {
+                anyhow::bail!("`--no-input` needs --yes to accept the default");
+            }
             anyhow::bail!("`--no-input` needs {flag_hint}, or pass --yes to accept the default");
         }
         if !self.interactive {
+            if flag_hint == "--yes" {
+                anyhow::bail!("this step needs a terminal; pass --yes");
+            }
             anyhow::bail!("this step needs a terminal; pass {flag_hint} or --yes");
         }
         prompt()
@@ -759,6 +819,90 @@ impl Output {
         self.settle_result_locked(&mut current, &mut *stdout, verdict, result)
     }
 
+    /// Emit one non-terminal JSONL event. Human and JSON modes intentionally
+    /// do nothing so callers can feed every typed progress update through one
+    /// path without leaking structured bytes into those modes.
+    pub(crate) fn emit_jsonl_event<T: Serialize>(&self, event: T) -> anyhow::Result<()> {
+        if self.mode != OutputMode::Jsonl {
+            return Ok(());
+        }
+        let mut current = state(self);
+        if let Some(error) = current.sticky_error() {
+            return Err(error);
+        }
+        if current.terminal {
+            anyhow::bail!("terminal output has already been settled")
+        }
+        let bytes = Self::jsonl_event_bytes(self.command(), event)?;
+        let mut output = stdout(self);
+        if let Err(error) = Self::write_bytes(&mut *output, &bytes) {
+            current.failure = Some(error.to_string());
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    /// Emit one command-specific terminal error whose typed details must
+    /// survive a lost watch connection after a durable daemon commit.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_detailed_error<T: Serialize>(
+        &self,
+        verdict: ErrorVerdict,
+        id: impl Into<String>,
+        exit_code: i32,
+        message: impl Into<String>,
+        fix: impl Into<String>,
+        details: T,
+    ) -> anyhow::Result<()> {
+        if !self.is_structured() {
+            anyhow::bail!("structured terminal output is unavailable in human mode");
+        }
+        let mut current = state(self);
+        if let Some(error) = current.sticky_error() {
+            return Err(error);
+        }
+        if current.terminal {
+            anyhow::bail!("terminal output has already been settled")
+        }
+        let payload = DetailedErrorPayload {
+            id: id.into(),
+            exit_code,
+            message: message.into(),
+            fix: fix.into(),
+            details,
+        };
+        let serialized = match self.mode {
+            OutputMode::Json => serde_json::to_vec(&DetailedErrorEnvelope {
+                schema_version: SCHEMA_VERSION,
+                command: self.command().to_owned(),
+                verdict,
+                error: payload,
+            }),
+            OutputMode::Jsonl => serde_json::to_vec(&JsonlDetailedError {
+                schema_version: SCHEMA_VERSION,
+                kind: "error",
+                command: self.command().to_owned(),
+                verdict,
+                error: payload,
+            }),
+            OutputMode::Human => unreachable!("structured mode checked above"),
+        };
+        let bytes = if let Ok(bytes) = serialized {
+            bytes
+        } else {
+            let fallback = ErrorEnvelope::serialization_failure(self.command());
+            if self.mode == OutputMode::Jsonl {
+                Self::jsonl_error_bytes(fallback)?
+            } else {
+                Self::error_bytes(&fallback)?
+            }
+        };
+        let mut output = stdout(self);
+        Self::write_bytes(&mut *output, &bytes)?;
+        current.terminal = true;
+        Ok(())
+    }
+
     pub(crate) fn emit_error(&self, error: ErrorEnvelope) -> anyhow::Result<()> {
         let mut current = state(self);
         let mut stdout = stdout(self);
@@ -933,6 +1077,103 @@ mod tests {
     }
 
     #[test]
+    fn jsonl_events_precede_one_terminal_result() {
+        #[derive(Clone)]
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for SharedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let output = Output::new(OutputMode::Jsonl, false)
+            .with_command("apply")
+            .with_writer(SharedWriter(Arc::clone(&bytes)));
+        output
+            .emit_jsonl_event(serde_json::json!({"sequence": 1}))
+            .unwrap();
+        output
+            .emit_result(ResultVerdict::Ok, serde_json::json!({"ready": true}))
+            .unwrap();
+        let bytes = bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let lines = std::str::from_utf8(&bytes).unwrap().lines();
+        let values = lines
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["type"], "event");
+        assert_eq!(values[0]["event"]["sequence"], 1);
+        assert_eq!(values[1]["type"], "result");
+    }
+
+    #[test]
+    fn detailed_cancellation_is_one_terminal_error_after_events() {
+        #[derive(Clone)]
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for SharedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let output = Output::new(OutputMode::Jsonl, false)
+            .with_command("apply")
+            .with_writer(SharedWriter(Arc::clone(&bytes)));
+        output
+            .emit_jsonl_event(serde_json::json!({"sequence": 1}))
+            .unwrap();
+        output
+            .emit_detailed_error(
+                ErrorVerdict::Canceled,
+                "canceled",
+                130,
+                "watch canceled after commit",
+                "omnifs status --follow --revision 7",
+                serde_json::json!({"committed": true, "revision": 7}),
+            )
+            .unwrap();
+
+        let bytes = bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let values = std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["type"], "event");
+        assert_eq!(values[1]["type"], "error");
+        assert_eq!(values[1]["verdict"], "canceled");
+        assert_eq!(values[1]["error"]["exit_code"], 130);
+        assert_eq!(values[1]["error"]["details"]["committed"], true);
+    }
+
+    #[test]
     fn terminal_settlement_is_single_and_writer_failure_is_sticky() {
         struct Broken;
         impl Write for Broken {
@@ -1075,6 +1316,14 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("--name <name>"));
         assert!(error.to_string().contains("terminal"));
+    }
+
+    #[test]
+    fn yes_as_the_only_automation_flag_is_not_repeated() {
+        let error = PromptMode::for_test(false, false, false)
+            .resolve(None, || true, "--yes", || Ok(true))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "this step needs a terminal; pass --yes");
     }
 
     #[test]

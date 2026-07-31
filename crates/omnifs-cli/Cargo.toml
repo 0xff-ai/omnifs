@@ -19,6 +19,7 @@ omnifs-daemon = { workspace = true }
 omnifs-bootstrap = { workspace = true }
 omnifs-state = { workspace = true }
 omnifs-api = { workspace = true }
+omnifs-kcl = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
 omnifs-fs-runtime = { workspace = true }
 omnifs-nfs = { workspace = true }

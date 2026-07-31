@@ -31,7 +31,7 @@ a terminal result.
 | [004](004-extract-filesystem-runtime-drivers.md) | Extract filesystem runtime drivers | P1 | L | 001 | DONE |
 | [005](005-make-daemon-own-attachments.md) | Make the daemon own attachments | P1 | L | 003, 004 | DONE |
 | [006](006-retire-client-filesystem-state-and-narrow-bootstrap.md) | Retire client filesystem state and narrow bootstrap | P1 | L | 005 | DONE |
-| [007](007-add-kcl-plan-and-apply-client.md) | Add KCL plan and apply | P1 | L | 005 | TODO |
+| [007](007-add-kcl-plan-and-apply-client.md) | Add KCL plan and apply | P1 | L | 005 | DONE |
 | [008](008-switch-to-interactive-resource-porcelain.md) | Switch to interactive resource porcelain | P1 | L | 005, 006, 007 | TODO |
 | [009](009-remove-legacy-control-plane-and-finish-migration.md) | Remove the legacy control plane and finish migration | P1 | L | 003, 006, 007, 008 | TODO |
 
@@ -97,7 +97,7 @@ control and CLI files and should run after its prerequisites are integrated.
    daemon profile, add a read-only legacy scanner, and delete
    `client_fs_state.rs`, its registry, claims, paths, config, and tests.
 
-7. **Plan 007, add KCL automation.** After every resource has a real progress
+7. **Plan 007, add KCL automation.** **DONE.** After every resource has a real progress
    publisher, evaluate KCL on the client, convert its result to strict Rust
    declarations, import exact local provider artifacts, and use the same plan,
    apply, and progress RPCs.

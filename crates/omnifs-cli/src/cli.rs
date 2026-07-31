@@ -1,7 +1,8 @@
 //! CLI type definitions: top-level parser and command enum.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use crate::commands;
 use crate::commands::doctor::DoctorVerdict;
@@ -59,6 +60,21 @@ pub enum Commands {
     /// Show daemon, mount, and auth status
     Status,
 
+    /// Initialize or export declarative resource configuration
+    Config(ConfigArgs),
+
+    /// Preview the complete desired resource set from KCL
+    Plan {
+        /// KCL source file. Defaults to ./omnifs.k when it exists.
+        path: Option<PathBuf>,
+    },
+
+    /// Apply the complete desired resource set from KCL
+    Apply {
+        /// KCL source file. Defaults to ./omnifs.k when it exists.
+        path: Option<PathBuf>,
+    },
+
     /// Stop the daemon and clean up
     ///
     /// Asks attached filesystems to stop, drains them for a bounded time, then
@@ -109,6 +125,28 @@ pub enum Commands {
     Fs(commands::fs::FsArgs),
 }
 
+#[derive(Args)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigCommand,
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCommand {
+    /// Print a minimal declarative resource configuration
+    Init,
+    /// Export the daemon's complete desired resource set
+    Export {
+        #[arg(long, value_enum, default_value_t = ConfigFormat::Kcl)]
+        format: ConfigFormat,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ConfigFormat {
+    Kcl,
+}
+
 impl Cli {
     pub(crate) fn runs_daemon(&self) -> bool {
         if matches!(&self.command, Some(Commands::Daemon)) {
@@ -141,6 +179,15 @@ impl Commands {
     fn labels(&self) -> (Option<&'static str>, &'static str) {
         match self {
             Self::Status => (Some("status"), "status"),
+            Self::Config(args) => (
+                Some("config"),
+                match &args.command {
+                    ConfigCommand::Init => "config.init",
+                    ConfigCommand::Export { .. } => "config.export",
+                },
+            ),
+            Self::Plan { .. } => (Some("plan"), "plan"),
+            Self::Apply { .. } => (Some("apply"), "apply"),
             Self::Down => (Some("down"), "down"),
             Self::Logs(_) => (Some("logs"), "logs"),
             Self::Inspect(_) => (Some("inspect"), "inspect"),
@@ -203,6 +250,14 @@ impl Commands {
                 Ok(exit_for_verdict(verdict))
             },
             Self::Status => commands::status::run(output).await,
+            Self::Config(args) => match args.command {
+                ConfigCommand::Init => commands::config::init(&output),
+                ConfigCommand::Export {
+                    format: ConfigFormat::Kcl,
+                } => commands::config::export(output).await,
+            },
+            Self::Plan { path } => commands::plan::run(path, output).await,
+            Self::Apply { path } => commands::apply::run(path, output).await,
             Self::Down => commands::down::run(output).await,
             Self::Logs(args) => args.run(&output).await.map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),
@@ -548,15 +603,29 @@ mod tests {
 
     #[test]
     fn removed_lifecycle_commands_are_not_in_the_user_grammar() {
-        for argv in [
-            &["omnifs", "up"][..],
-            &["omnifs", "apply"][..],
-            &["omnifs", "up", "--offline"][..],
-        ] {
+        for argv in [&["omnifs", "up"][..], &["omnifs", "up", "--offline"][..]] {
             let Err(error) = Cli::try_parse_from(argv) else {
                 panic!("obsolete command parsed: {argv:?}");
             };
             assert_eq!(error.exit_code(), 2);
+        }
+    }
+
+    #[test]
+    fn declarative_resource_commands_are_in_the_user_grammar() {
+        for argv in [
+            &["omnifs", "plan"][..],
+            &["omnifs", "plan", "resources.k"][..],
+            &["omnifs", "apply", "--yes"][..],
+            &["omnifs", "apply", "resources.k", "--yes"][..],
+            &["omnifs", "config", "init"][..],
+            &["omnifs", "config", "export"][..],
+            &["omnifs", "config", "export", "--format", "kcl"][..],
+        ] {
+            assert!(
+                Cli::try_parse_from(argv).is_ok(),
+                "declarative command did not parse: {argv:?}"
+            );
         }
     }
 

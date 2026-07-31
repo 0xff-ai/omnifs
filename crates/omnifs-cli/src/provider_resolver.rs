@@ -8,11 +8,13 @@
 use anyhow::{Context as _, anyhow, bail};
 use omnifs_api::ProviderMetadata;
 use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef, ProviderVersion};
+use omnifs_kcl::{AuthoringResource, EvaluatedConfig, ProviderSource, resolve_local_source};
 use omnifs_provider::ProviderManifest;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::Path;
+use tokio::fs as tokio_fs;
 
 use crate::rpc::RpcClient;
 
@@ -256,6 +258,75 @@ fn is_digest_prefix(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// Resolve KCL provider selectors to daemon-retained content identities.
+/// Local artifacts are read twice so a file replacement between hashing and
+/// upload cannot silently change the declared provider.
+pub(crate) async fn resolve_kcl_sources(
+    evaluated: &EvaluatedConfig,
+    rpc: &RpcClient,
+) -> anyhow::Result<BTreeMap<omnifs_core::ResourceName, ProviderId>> {
+    let config_dir = evaluated
+        .source
+        .parent()
+        .context("KCL source has no parent directory")?;
+    let mut resolved = BTreeMap::new();
+    for resource in &evaluated.config.resources {
+        let AuthoringResource::Provider(provider) = resource else {
+            continue;
+        };
+        let digest = match &provider.source {
+            ProviderSource::Embedded { embedded } => {
+                rpc.import_embedded_provider(embedded.clone())
+                    .await?
+                    .provider
+                    .id
+            },
+            ProviderSource::Digest { digest } => {
+                anyhow::ensure!(
+                    rpc.provider_metadata(*digest).await?.is_some(),
+                    "provider artifact {digest} is not retained"
+                );
+                *digest
+            },
+            ProviderSource::Local { local } => {
+                let (path, digest) = resolve_local_source(local, config_dir)?;
+                let before = tokio_fs::read(&path).await?;
+                let after = tokio_fs::read(&path).await?;
+                validate_local_provider_bytes(digest, &before, &after)?;
+                let file_name = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .context("local provider filename is not valid UTF-8")?
+                    .to_owned();
+                let receipt = rpc.import_provider(file_name, &after).await?;
+                anyhow::ensure!(
+                    receipt.provider.id == digest,
+                    "provider import digest mismatch"
+                );
+                digest
+            },
+        };
+        resolved.insert(provider.name.clone(), digest);
+    }
+    Ok(resolved)
+}
+
+fn validate_local_provider_bytes(
+    expected: ProviderId,
+    before: &[u8],
+    after: &[u8],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        ProviderId::from_wasm_bytes(before) == expected,
+        "local provider changed after digest validation"
+    );
+    anyhow::ensure!(
+        before == after,
+        "local provider changed between digest validation and upload"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +358,19 @@ mod tests {
             reference.meta.version.as_ref().map(ProviderVersion::as_str),
             Some("1.2.3")
         );
+    }
+
+    #[test]
+    fn local_provider_bytes_must_stay_exact_until_upload() {
+        let expected = ProviderId::from_wasm_bytes(b"before");
+        validate_local_provider_bytes(expected, b"before", b"before").unwrap();
+        let error = validate_local_provider_bytes(expected, b"before", b"after").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("between digest validation and upload")
+        );
+        let error = validate_local_provider_bytes(expected, b"changed", b"changed").unwrap_err();
+        assert!(error.to_string().contains("after digest validation"));
     }
 }

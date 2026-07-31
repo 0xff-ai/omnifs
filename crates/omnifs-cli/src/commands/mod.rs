@@ -1,4 +1,6 @@
+pub mod apply;
 pub mod completions;
+pub mod config;
 pub mod credential;
 pub(crate) mod daemon_start;
 pub mod doctor;
@@ -7,6 +9,7 @@ pub mod fs;
 pub mod inspect;
 pub mod logs;
 pub mod mount;
+pub mod plan;
 pub mod receipt;
 pub mod setup;
 pub mod skill;
