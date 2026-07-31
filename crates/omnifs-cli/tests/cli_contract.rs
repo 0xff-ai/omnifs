@@ -39,80 +39,175 @@ fn help_documents_exit_codes() {
 }
 
 #[test]
-fn fs_help_uses_named_instance_lifecycle_commands() {
-    let fs = Command::new(omnifs_bin())
-        .args(["fs", "--help"])
+fn resource_help_exposes_only_the_final_public_grammar() {
+    let top = Command::new(omnifs_bin())
+        .arg("--help")
         .output()
-        .expect("spawn omnifs fs --help");
-    assert!(fs.status.success());
-    let fs_help = String::from_utf8_lossy(&fs.stdout);
-    for command in ["create", "rm", "attach", "detach", "restart", "shell", "ls"] {
-        assert!(fs_help.contains(command), "missing {command}: {fs_help}");
+        .expect("spawn omnifs --help");
+    assert!(top.status.success());
+    let top_help = String::from_utf8_lossy(&top.stdout);
+    for command in ["provider", "mount", "credential", "attachment"] {
+        assert!(top_help.contains(command), "missing {command}: {top_help}");
     }
-    for retired in ["enable", "disable", "delete"] {
-        assert!(!fs_help.contains(retired), "retired {retired} in {fs_help}");
+    assert!(
+        !top_help.contains("\n  fs "),
+        "public fs command remains: {top_help}"
+    );
+
+    for (group, expected) in [
+        ("provider", ["add", "ls", "show", "rm"].as_slice()),
+        (
+            "mount",
+            ["add", "update", "reauth", "revoke", "rm", "ls", "show"].as_slice(),
+        ),
+        (
+            "credential",
+            ["login", "set", "ls", "show", "rm", "revoke"].as_slice(),
+        ),
+        (
+            "attachment",
+            ["add", "ls", "show", "rm", "restart", "shell"].as_slice(),
+        ),
+    ] {
+        let output = Command::new(omnifs_bin())
+            .args([group, "--help"])
+            .output()
+            .unwrap_or_else(|error| panic!("spawn omnifs {group} --help: {error}"));
+        assert!(output.status.success(), "{group}: {output:?}");
+        let help = String::from_utf8_lossy(&output.stdout);
+        for command in expected {
+            assert!(help.contains(command), "missing {group} {command}: {help}");
+        }
+        for retired in ["attach", "detach", "create", "enable", "disable"] {
+            assert!(
+                !help
+                    .lines()
+                    .any(|line| line.trim_start().starts_with(retired)),
+                "retired {group} {retired}: {help}"
+            );
+        }
     }
 
-    let create = Command::new(omnifs_bin())
-        .args(["fs", "create", "--help"])
+    let mount_add = Command::new(omnifs_bin())
+        .args(["mount", "add", "--help"])
         .output()
-        .expect("spawn omnifs fs create --help");
-    assert!(create.status.success());
-    let create_help = String::from_utf8_lossy(&create.stdout);
-    for flag in ["--name", "--protocol", "--runtime", "--location"] {
-        assert!(create_help.contains(flag), "missing {flag}: {create_help}");
+        .expect("spawn omnifs mount add --help");
+    assert!(mount_add.status.success());
+    let mount_help = String::from_utf8_lossy(&mount_add.stdout);
+    for retired in [
+        "--name",
+        "--provider",
+        "--config",
+        "--token",
+        "--account",
+        "--memory",
+    ] {
+        assert!(
+            !mount_help.contains(retired),
+            "flag-heavy authoring option {retired} remains: {mount_help}"
+        );
     }
+
+    let credential_set = Command::new(omnifs_bin())
+        .args(["credential", "set", "--help"])
+        .output()
+        .expect("spawn omnifs credential set --help");
+    assert!(credential_set.status.success());
+    let credential_help = String::from_utf8_lossy(&credential_set.stdout);
+    assert!(credential_help.contains("<NAME>"), "{credential_help}");
+    assert!(credential_help.contains("--from-env"), "{credential_help}");
+    assert!(!credential_help.contains("--token"), "{credential_help}");
 
     let shell = Command::new(omnifs_bin())
-        .args(["fs", "shell", "--help"])
+        .args(["attachment", "shell", "--help"])
         .output()
-        .expect("spawn omnifs fs shell --help");
+        .expect("spawn omnifs attachment shell --help");
     assert!(shell.status.success());
     let shell_help = String::from_utf8_lossy(&shell.stdout);
-    for flag in ["--name", "--shell", "[COMMAND]"] {
-        assert!(shell_help.contains(flag), "missing {flag}: {shell_help}");
+    for argument in ["<NAME>", "[COMMAND]"] {
+        assert!(
+            shell_help.contains(argument),
+            "missing {argument}: {shell_help}"
+        );
     }
-    for retired in ["--protocol", "--runtime", "--mount", "--command"] {
+    for retired in [
+        "--name",
+        "--protocol",
+        "--runtime",
+        "--mount",
+        "--command",
+        "--shell",
+    ] {
         assert!(
             !shell_help.contains(retired),
             "retired {retired} in {shell_help}"
         );
     }
-
-    let fixture = Fixture::new();
-    let missing_args = fixture.run(&["fs", "attach"]);
-    assert_eq!(exit_code(&missing_args), 2, "{missing_args:?}");
-
-    let positional = fixture.run(&["fs", "attach", "main"]);
-    assert_eq!(exit_code(&positional), 2, "{positional:?}");
-    let stderr = String::from_utf8_lossy(&positional.stderr);
-    assert!(stderr.contains("unexpected argument 'main'"), "{stderr}");
 }
 
 #[test]
-fn fs_create_rejects_guest_locations_without_writing_client_state() {
+fn status_follow_requires_one_unambiguous_typed_target() {
     let fixture = Fixture::new();
-    let guest = fixture.run(&[
-        "fs",
-        "create",
-        "--name",
-        "guest",
-        "--protocol",
-        "fuse",
-        "--runtime",
-        "docker",
-        "--location",
-        "/tmp/not-owned-by-docker",
-    ]);
-    assert_ne!(exit_code(&guest), 0, "{guest:?}");
-    assert!(
-        String::from_utf8_lossy(&guest.stderr).contains("--location is not allowed"),
-        "{guest:?}"
-    );
-    assert!(
-        !fixture.home_path().join("client/filesystems").exists(),
-        "validation must not create client-owned filesystem state"
-    );
+    for args in [
+        ["status", "--revision", "7"].as_slice(),
+        ["status", "--action", "00000000000000000000000000000000"].as_slice(),
+        [
+            "status",
+            "--follow",
+            "--revision",
+            "7",
+            "--action",
+            "00000000000000000000000000000000",
+        ]
+        .as_slice(),
+    ] {
+        let output = fixture.run(args);
+        assert_eq!(exit_code(&output), 2, "{args:?}: {output:?}");
+    }
+
+    for args in [
+        ["status", "--follow"].as_slice(),
+        ["status", "--follow", "--revision", "7"].as_slice(),
+        [
+            "status",
+            "--follow",
+            "--action",
+            "00000000000000000000000000000000",
+        ]
+        .as_slice(),
+    ] {
+        let output = fixture.run(args);
+        assert_ne!(
+            exit_code(&output),
+            2,
+            "valid follow grammar was rejected: {args:?}: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn interactive_mutation_refusal_points_automation_to_kcl() {
+    let fixture = Fixture::new();
+    for args in [
+        ["provider", "add"].as_slice(),
+        ["mount", "add"].as_slice(),
+        ["attachment", "add"].as_slice(),
+        ["credential", "login"].as_slice(),
+    ] {
+        let output = fixture.run(args);
+        assert_eq!(exit_code(&output), 4, "{args:?}: {output:?}");
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let combined = combined.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            combined
+                .contains("Use omnifs plan <file> and omnifs apply <file> --yes for automation."),
+            "{args:?}: {combined}"
+        );
+    }
 }
 
 #[test]
@@ -133,31 +228,28 @@ fn legacy_detached_specs_are_read_only_and_never_launched() {
     )
     .expect("write legacy spec");
 
-    let listed = fixture.run(&["fs", "ls", "--output", "json"]);
-    assert_eq!(exit_code(&listed), 0, "{listed:?}");
-    let listed = stdout_json(&listed);
-    assert_eq!(listed["result"]["attachments"][0]["name"], "legacy");
-    assert_eq!(listed["result"]["attachments"][0]["legacy"], true);
-    assert_eq!(
-        listed["result"]["attachments"][0]["state"],
-        "legacy detached config"
+    let doctor = fixture.run(&["doctor", "--output", "json", "--no-input"]);
+    assert_eq!(exit_code(&doctor), 5, "{doctor:?}");
+    let doctor = stdout_json(&doctor);
+    let findings = doctor["result"]["findings"]
+        .as_array()
+        .expect("doctor result.findings");
+    assert!(
+        findings.iter().any(|finding| {
+            finding["check"] == "legacy filesystem spec"
+                && finding["target"] == "legacy"
+                && finding["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("will not be launched"))
+        }),
+        "{findings:?}"
     );
 
-    let attach = fixture.run(&["fs", "attach", "--name", "legacy"]);
-    assert_ne!(
-        exit_code(&attach),
-        0,
-        "legacy specs require explicit import"
-    );
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&attach.stdout),
-        String::from_utf8_lossy(&attach.stderr)
-    );
-    assert!(combined.contains("Import it explicitly"), "{combined}");
+    let fs = fixture.run(&["fs", "attach", "legacy"]);
+    assert_eq!(exit_code(&fs), 2, "{fs:?}");
     assert!(
         !location.exists(),
-        "listing/attach must not launch a legacy runtime"
+        "doctor must not launch a legacy runtime"
     );
 }
 
@@ -194,9 +286,14 @@ fn removed_top_level_commands_are_usage_errors() {
             "unrecognized subcommand 'up'",
         ),
         (["down", "--force"].as_slice(), "--force"),
+        (["fs", "ls"].as_slice(), "unrecognized subcommand 'fs'"),
         (
-            ["fs", "enable"].as_slice(),
-            "unrecognized subcommand 'enable'",
+            ["attachment", "attach", "main"].as_slice(),
+            "unrecognized subcommand 'attach'",
+        ),
+        (
+            ["attachment", "detach", "main"].as_slice(),
+            "unrecognized subcommand 'detach'",
         ),
         (
             ["shell", "--mount", "/tmp/omnifs"].as_slice(),
@@ -286,10 +383,14 @@ fn json_commands_emit_expected_shapes() {
     assert_eq!(status_json["schema_version"], 1);
     assert_eq!(status_json["command"], "status");
     assert!(status_json["verdict"].is_string());
-    assert!(status_json["result"]["mounts"].as_array().is_some());
-    assert_eq!(status_json["result"]["filesystems"], serde_json::json!([]));
-    assert!(status_json["result"]["home"].is_string());
-    assert!(status_json["result"]["daemon"].is_object());
+    for key in ["providers", "credentials", "mounts", "attachments"] {
+        assert!(
+            status_json["result"][key].as_array().is_some(),
+            "missing plural resource array {key}: {status_json}"
+        );
+    }
+    assert!(status_json["result"]["inventory"]["home"].is_string());
+    assert!(status_json["result"]["inventory"]["daemon"].is_object());
 
     let version = fixture.run(&["version", "--output", "json"]);
     assert_eq!(exit_code(&version), 0);

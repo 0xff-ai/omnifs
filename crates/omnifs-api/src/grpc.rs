@@ -1042,6 +1042,7 @@ pub fn to_credential_status(v: &CredentialStatus) -> wire::CredentialStatus {
         auth_fingerprint: v.auth_fingerprint.as_bytes().to_vec().into(),
         version: v.version.get(),
         generation: v.generation.get(),
+        action_generation: v.action_generation,
         status: match v.status {
             CredentialStatusKind::Active => wire::CredentialStatusKind::CredentialActive as i32,
             CredentialStatusKind::Blocked => wire::CredentialStatusKind::CredentialBlocked as i32,
@@ -1096,6 +1097,7 @@ pub fn credential_status(v: &wire::CredentialStatus) -> Result<CredentialStatus,
         auth_fingerprint: auth_fingerprint(&v.auth_fingerprint)?,
         version: CredentialVersion::new(nz(v.version, "credential version")?),
         generation: CredentialGeneration::new(nz(v.generation, "credential generation")?),
+        action_generation: v.action_generation,
         status,
         last_mutation_id: mutation_id(&v.last_mutation_id)?,
     })
@@ -2872,6 +2874,7 @@ mod tests {
             auth_fingerprint: AuthRuntimeFingerprint::from_digest([5; 32]),
             version: CredentialVersion::new(std::num::NonZeroU64::new(1).unwrap()),
             generation: CredentialGeneration::new(std::num::NonZeroU64::new(2).unwrap()),
+            action_generation: 3,
             status: CredentialStatusKind::Active,
             last_mutation_id: MutationId::from_bytes([6; 16]),
         });
@@ -3027,6 +3030,7 @@ mod tests {
             auth_fingerprint: AuthRuntimeFingerprint::from_digest([5; 32]),
             version: CredentialVersion::new(std::num::NonZeroU64::new(1).unwrap()),
             generation: CredentialGeneration::new(std::num::NonZeroU64::new(2).unwrap()),
+            action_generation: 3,
             status: CredentialStatusKind::Active,
             last_mutation_id: MutationId::from_bytes([6; 16]),
         };

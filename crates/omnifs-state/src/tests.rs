@@ -2297,6 +2297,10 @@ async fn credential_actions_are_durable_idempotent_and_generation_guarded() {
     assert_eq!(first.kind, ActionKind::SetCredentialMaterial);
     assert_eq!(first.action_generation, 1);
     assert_eq!(first.phase, ActionPhase::Accepted);
+    assert_eq!(
+        store.list_credentials().await.unwrap()[0].action_generation,
+        1
+    );
     assert_eq!(store.pending_actions().await.unwrap(), vec![first.clone()]);
 
     let mut retry_document = resource_sidecar(provider.id, b"different-secret").document;

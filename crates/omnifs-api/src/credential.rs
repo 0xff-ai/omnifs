@@ -157,6 +157,8 @@ pub struct CredentialStatus {
     pub auth_fingerprint: AuthRuntimeFingerprint,
     pub version: CredentialVersion,
     pub generation: CredentialGeneration,
+    /// Monotonic precondition for durable credential actions.
+    pub action_generation: u64,
     pub status: CredentialStatusKind,
     /// Id of the batch that last wrote this row, for provenance recovery.
     pub last_mutation_id: MutationId,

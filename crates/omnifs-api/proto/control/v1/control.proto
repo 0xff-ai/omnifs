@@ -425,7 +425,7 @@ message OAuthMaterial {
 }
 message CredentialClientOverrides { optional string client_id = 1; optional bytes client_secret = 2; optional string redirect_uri = 3; optional StringList scopes = 4; }
 message StringList { repeated string values = 1; }
-message CredentialStatus { CredentialKey key = 1; bytes provider = 2; CredentialKind kind = 3; repeated string scopes = 4; bytes auth_fingerprint = 5; uint64 version = 6; uint64 generation = 7; CredentialStatusKind status = 8; bytes last_mutation_id = 9; }
+message CredentialStatus { CredentialKey key = 1; bytes provider = 2; CredentialKind kind = 3; repeated string scopes = 4; bytes auth_fingerprint = 5; uint64 version = 6; uint64 generation = 7; CredentialStatusKind status = 8; bytes last_mutation_id = 9; uint64 action_generation = 10; }
 
 message DaemonInfo { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional bytes attach_unix = 5; optional string attach_tcp = 6; }
 message DaemonStatus { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional string attach_tcp = 5; repeated FilesystemSpec filesystems = 6; repeated MountInfo mounts = 7; DaemonHealth health = 8; optional ActiveMutation active_mutation = 9; }

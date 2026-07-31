@@ -1,0 +1,12 @@
+---
+source: crates/omnifs-cli/tests/cli_transcripts.rs
+expression: "fixture.transcript(&fixture.run(&[\"status\", \"--follow\", \"--revision\", \"7\",\n\"--action\", \"00000000000000000000000000000000\",]))"
+---
+exit: 2
+stdout:
+stderr:
+error: the argument '--revision <REVISION>' cannot be used with '--action <ACTION>'
+
+Usage: omnifs status --follow --revision <REVISION>
+
+For more information, try '--help'.

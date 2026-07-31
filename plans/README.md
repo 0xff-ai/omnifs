@@ -32,7 +32,7 @@ a terminal result.
 | [005](005-make-daemon-own-attachments.md) | Make the daemon own attachments | P1 | L | 003, 004 | DONE |
 | [006](006-retire-client-filesystem-state-and-narrow-bootstrap.md) | Retire client filesystem state and narrow bootstrap | P1 | L | 005 | DONE |
 | [007](007-add-kcl-plan-and-apply-client.md) | Add KCL plan and apply | P1 | L | 005 | DONE |
-| [008](008-switch-to-interactive-resource-porcelain.md) | Switch to interactive resource porcelain | P1 | L | 005, 006, 007 | TODO |
+| [008](008-switch-to-interactive-resource-porcelain.md) | Switch to interactive resource porcelain | P1 | L | 005, 006, 007 | DONE |
 | [009](009-remove-legacy-control-plane-and-finish-migration.md) | Remove the legacy control plane and finish migration | P1 | L | 003, 006, 007, 008 | TODO |
 
 ## Dependency graph
@@ -102,7 +102,7 @@ control and CLI files and should run after its prerequisites are integrated.
    declarations, import exact local provider artifacts, and use the same plan,
    apply, and progress RPCs.
 
-8. **Plan 008, finish public UX.** Add interactive Provider, Mount, Credential,
+8. **Plan 008, finish public UX.** **DONE.** Add interactive Provider, Mount, Credential,
    and Attachment porcelain. Remove the transitional imperative `fs` grammar.
    Keep read commands and the narrow secret input scriptable.
 

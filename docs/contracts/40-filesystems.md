@@ -25,7 +25,7 @@ The attachment registry keys logical filesystems by `fs::Id`. Reconnect overlap 
 
 FUSE is the Linux host and guest filesystem protocol. Host FUSE runs through hidden `omnifs run-fs --protocol fuse --runtime host`; Docker and libkrun run the slim `omnifs-thin` binary with the same flat named arguments.
 
-The Docker-hosted FUSE mount lives entirely inside the container's own mount namespace. Killing the exact container removes that mount with it, and `omnifs fs restart --name <id>` creates a fresh container for the same persisted spec.
+The Docker-hosted FUSE mount lives entirely inside the container's own mount namespace. Killing the exact container removes that mount with it, and `omnifs attachment restart <name>` creates a fresh runtime for the same desired Attachment resource.
 
 Keep FUSE inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply types in `omnifs-fuse`. Keep shared projection behavior in `omnifs-engine/src/tree`.
 
@@ -37,7 +37,7 @@ Every attached filesystem has a separate process, container, or VM. Host filesys
 
 Disconnects and broadcast lag are represented by a root reset on the same event stream as ordinary subtree invalidations. FUSE keeps one background event owner and settles each namespace operation before publishing protocol state. NFS preserves path-backed filehandles, opens, stateids, leases, and clients across root refresh while resetting derived sizes, its bounded protocol reply cache, and its listing state. `PendingListings` and the reply cache advance local generations on every subtree invalidation, so a late completion cannot populate fresh state.
 
-The public identity is the daemon-owned, fully resolved Attachment `fs::Spec`: ID, protocol, runtime, and location. Every launcher supplies all four through named flags. Transport never infers identity. Mount and filesystem commands start the daemon when needed. Explicit `down` asks the daemon to stop and drain attachments before it exits while preserving desired Attachment rows.
+The public identity is the daemon-owned, fully resolved Attachment `fs::Spec`: ID, protocol, runtime, and location. `attachment add` asks only for values the daemon cannot infer; the planner resolves the complete spec before apply. Every launcher still receives all four fields through named arguments. Transport never infers identity. Attachment commands start the daemon when needed. Explicit `down` asks the daemon to stop and drain attachments before it exits while preserving desired Attachment rows.
 
 Host locations are absolute and default to an ID-bearing path under the client profile. Docker and libkrun always use `/omnifs`. Host and libkrun runtime records and controls include the full resolved spec plus a separate random process instance ID. Docker labels carry the ID, while exact inspection verifies its full flat command against the stored spec.
 
@@ -45,11 +45,11 @@ Host locations are absolute and default to an ID-bearing path under the client p
 
 ### Filesystem runtime and runner ownership
 
-`omnifs fs create` resolves platform defaults once and commits one strict Attachment resource through the daemon. It never launches a runtime in the CLI.
+`omnifs attachment add` resolves platform defaults once and commits one strict Attachment resource through the daemon. It never launches a runtime in the CLI. Resource presence means desired attached; removing the resource requests teardown.
 
-`attach`, `detach`, `restart`, `rm`, and `shell` select only by `--name` and use daemon resource or action RPCs. Every runtime launch has the same success postcondition: the OS mount completed and the exact spec appears in daemon attachment state. Detach and remove reconcile through the supervisor.
+`restart`, `rm`, and `shell` select by Attachment name and use daemon resource or action RPCs. There is no public attach or detach verb. Every runtime launch has the same success postcondition: the OS mount completed and the exact spec appears in daemon attachment state. Remove reconciles through the supervisor and follows the desired revision until exact teardown clears its tombstone or reaches a stable failure.
 
-`omnifs fs ls` lists daemon desired and observed Attachment state. It may separately report legacy detached specs as read-only import candidates. A failed daemon probe yields `unknown`; it must not invent a stopped or attached runtime fact.
+`omnifs attachment ls` and `omnifs status` list daemon desired and observed Attachment state. `omnifs status --follow`, `--revision <n>`, and `--action <id>` follow typed progress. Legacy detached specs may appear only as read-only import candidates in Doctor. A failed daemon probe yields `unknown`; it must not invent a stopped or attached runtime fact.
 
 Host, Docker, and libkrun lifecycle owners probe and stop only exact ID-bearing runtime state. Doctor alone searches daemon-owned and read-only legacy runtime roots for stray state. Destructive cleanup holds the profile-wide spawn lock for the full repair, proves the daemon stopped before touching an exact identity, and requires interactive confirmation that `--yes` cannot bypass.
 

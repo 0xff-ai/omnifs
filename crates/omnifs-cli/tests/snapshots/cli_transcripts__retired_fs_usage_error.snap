@@ -5,9 +5,8 @@ expression: "fixture.transcript(&fixture.run(&[\"fs\", \"attach\"]))"
 exit: 2
 stdout:
 stderr:
-error: the following required arguments were not provided:
-  --name <NAME>
+error: unrecognized subcommand 'fs'
 
-Usage: omnifs fs attach --name <NAME>
+Usage: omnifs [OPTIONS] [COMMAND]
 
 For more information, try '--help'.

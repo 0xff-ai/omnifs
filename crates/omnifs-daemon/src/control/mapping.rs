@@ -70,6 +70,7 @@ pub(crate) fn api_credential_status_with_scopes(
         auth_fingerprint: summary.auth_fingerprint,
         version: summary.version,
         generation: summary.generation,
+        action_generation: summary.action_generation,
         status: api_credential_status_kind(summary.state),
         last_mutation_id: summary.last_mutation_id,
     }
@@ -130,6 +131,7 @@ fn api_credential_outcome(outcome: omnifs_state::CredentialMutationOutcome) -> C
         auth_fingerprint: outcome.auth_fingerprint,
         version: outcome.version,
         generation: outcome.generation,
+        action_generation: 0,
         status: api_credential_status_kind(outcome.state),
         last_mutation_id: outcome.last_mutation_id,
     }

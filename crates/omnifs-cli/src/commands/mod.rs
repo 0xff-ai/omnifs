@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod attachment;
 pub mod completions;
 pub mod config;
 pub mod credential;
@@ -10,7 +11,9 @@ pub mod inspect;
 pub mod logs;
 pub mod mount;
 pub mod plan;
+pub mod provider;
 pub mod receipt;
+pub(crate) mod resource_flow;
 pub mod setup;
 pub mod skill;
 pub mod status;

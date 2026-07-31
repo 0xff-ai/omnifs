@@ -128,6 +128,8 @@ pub struct CredentialSummary {
     pub auth_fingerprint: AuthRuntimeFingerprint,
     pub version: CredentialVersion,
     pub generation: CredentialGeneration,
+    /// Monotonic precondition for durable credential actions.
+    pub action_generation: u64,
     pub state: CredentialState,
     /// Provenance: the batch that last wrote this row.
     pub last_mutation_id: MutationId,
@@ -140,7 +142,7 @@ macro_rules! credential_summaries_query {
     ($tail:literal) => {
         concat!(
             "SELECT provider_name, scheme, account, provider_digest, kind, \
-             auth_fingerprint, version, generation, status, last_mutation_id \
+             auth_fingerprint, version, generation, action_generation, status, last_mutation_id \
              FROM credentials ",
             $tail
         )
@@ -152,7 +154,7 @@ macro_rules! stored_credentials_query {
     ($tail:literal) => {
         concat!(
             "SELECT provider_name, scheme, account, provider_digest, kind, material, \
-             auth_fingerprint, version, generation, status, last_mutation_id \
+             auth_fingerprint, version, generation, action_generation, status, last_mutation_id \
              FROM credentials ",
             $tail
         )
@@ -164,7 +166,7 @@ macro_rules! pending_revocations_query {
     ($tail:literal) => {
         concat!(
             "SELECT provider_name, scheme, account, provider_digest, kind, material, \
-             auth_fingerprint, version, generation, status, last_mutation_id, revocation_intent \
+             auth_fingerprint, version, generation, action_generation, status, last_mutation_id, revocation_intent \
              FROM credentials ",
             $tail
         )
@@ -186,6 +188,7 @@ impl CredentialSummary {
             auth_fingerprint: AuthRuntimeFingerprint::from_digest(row.digest("auth_fingerprint")?),
             version: CredentialVersion::new(row.counter("version")?),
             generation: CredentialGeneration::new(row.counter("generation")?),
+            action_generation: row.unsigned("action_generation")?,
             state: CredentialState::from_str(&row.text("status")?)?,
             last_mutation_id: row.mutation_id("last_mutation_id")?,
         })
@@ -312,6 +315,9 @@ impl Db<'_> {
                 auth_fingerprint: document.auth_fingerprint,
                 version,
                 generation,
+                action_generation: current
+                    .as_ref()
+                    .map_or(0, |summary| summary.action_generation),
                 state: CredentialState::Active,
                 last_mutation_id: mutation_id,
             },
@@ -588,6 +594,7 @@ impl Db<'_> {
             auth_fingerprint: document.auth_fingerprint,
             version,
             generation,
+            action_generation: current.action_generation,
             state: status,
             last_mutation_id: current.last_mutation_id,
         }))

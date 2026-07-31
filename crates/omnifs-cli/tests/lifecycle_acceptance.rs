@@ -14,12 +14,13 @@ use common::{omnifs_bin, release_wasm_dir};
 use hyper_util::rt::TokioIo;
 use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
+    API_VERSION, ApplyReceipt, ApplyResourcesRequest, AttachmentDefinition, AttachmentPhase,
     CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInventory,
-    MountDefinition,
+    MountResourceDefinition, ProviderDefinition, ResourceDeclarations, ResourceDefinition,
+    ResourcePhase, ResourceSnapshot,
 };
 use omnifs_bootstrap::Profile;
-use omnifs_core::{MountName, ProviderId};
-use prost::Message as _;
+use omnifs_core::{AttachmentSpec, MutationId, ProviderId, ResourceKind, ResourceName, fs};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::Duration;
@@ -34,18 +35,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 type ControlClient = wire::control_client::ControlClient<Channel>;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
 const PROVIDER_IMPORT_TIMEOUT: Duration = Duration::from_mins(3);
-const MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
 const PROVIDER_CHUNK_BYTES: usize = CONTROL_STREAM_PAYLOAD_MAX_BYTES;
 
 fn unary<T>(message: T) -> Request<T> {
     let mut request = Request::new(message);
     request.set_timeout(REQUEST_TIMEOUT);
-    request
-}
-
-fn mutation<T>(message: T) -> Request<T> {
-    let mut request = Request::new(message);
-    request.set_timeout(MUTATION_TIMEOUT);
     request
 }
 
@@ -246,68 +240,158 @@ async fn import_provider(
     grpc::provider_import_receipt(&receipt).map_err(Into::into)
 }
 
-fn random_mutation_id() -> Bytes {
+fn random_mutation_id() -> MutationId {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).expect("generate mutation id");
-    bytes.to_vec().into()
+    MutationId::from_bytes(bytes)
 }
 
-fn mutation_id_of(bytes: &Bytes) -> omnifs_core::MutationId {
-    omnifs_core::MutationId::from_bytes(bytes.as_ref().try_into().expect("mutation id is 16 bytes"))
-}
-
-async fn begin_mutation(control: &mut ControlClient, mutation_id: Bytes) {
-    control
-        .begin_mutation(mutation(wire::BeginMutationRequest { mutation_id }))
-        .await
-        .expect("begin mutation");
-}
-
-async fn apply_mount_create(
-    control: &mut ControlClient,
-    mutation_id: Bytes,
-    definition: &MountDefinition,
-) -> Result<omnifs_api::MountOpResult, Status> {
+async fn resource_snapshot(control: &mut ControlClient) -> ResourceSnapshot {
     let response = control
-        .apply_mutation(mutation(wire::ApplyMutationRequest {
-            mutation_id,
-            ops: vec![wire::MutationOp {
-                op: Some(wire::mutation_op::Op::CreateMount(wire::CreateMountOp {
-                    definition: Some(grpc::to_mount_definition(definition)),
-                })),
-            }],
-        }))
-        .await?
+        .get_resources(unary(wire::Empty {}))
+        .await
+        .expect("get resources")
         .into_inner();
-    let result = response
-        .results
-        .into_iter()
-        .next()
-        .expect("apply reply carries one result per submitted op");
-    match result.result.expect("mutation op result missing its op") {
-        wire::mutation_op_result::Result::Mount(mount) => {
-            Ok(grpc::mount_op_result(&mount).expect("decode mount op result"))
-        },
-        wire::mutation_op_result::Result::Credential(_) => {
-            panic!("expected a mount op result from a mount-create batch")
-        },
+    grpc::get_resources_response(&response).expect("decode resource snapshot")
+}
+
+async fn resource_plan(
+    control: &mut ControlClient,
+    resources: Vec<ResourceDefinition>,
+) -> (ResourceDeclarations, omnifs_api::ResourcePlan) {
+    let declarations = ResourceDeclarations {
+        api_version: API_VERSION.to_owned(),
+        resources,
+    };
+    let response = control
+        .plan_resources(unary(grpc::to_plan_resources_request(&declarations)))
+        .await
+        .expect("plan resources")
+        .into_inner();
+    let plan = grpc::plan_resources_response(&response).expect("decode resource plan");
+    (declarations, plan)
+}
+
+async fn apply_resource_plan(
+    control: &mut ControlClient,
+    mutation_id: MutationId,
+    declarations: ResourceDeclarations,
+    plan: &omnifs_api::ResourcePlan,
+) -> ApplyReceipt {
+    let response = control
+        .apply_resources(unary(grpc::to_apply_resources_request(
+            &ApplyResourcesRequest {
+                mutation_id,
+                base_revision: plan.base_revision,
+                expected_desired_digest: plan.desired_digest,
+                declarations,
+                credential_material: Vec::new(),
+            },
+        )))
+        .await
+        .expect("apply resources")
+        .into_inner();
+    grpc::apply_resources_response(&response).expect("decode apply receipt")
+}
+
+async fn apply_resources(
+    control: &mut ControlClient,
+    resources: Vec<ResourceDefinition>,
+) -> ApplyReceipt {
+    let (declarations, plan) = resource_plan(control, resources).await;
+    apply_resource_plan(control, random_mutation_id(), declarations, &plan).await
+}
+
+fn provider_and_mount(
+    provider: ProviderId,
+    name: &str,
+) -> (ResourceDefinition, ResourceDefinition) {
+    let resource_name = ResourceName::new(name).expect("valid resource name");
+    (
+        ResourceDefinition::Provider(ProviderDefinition {
+            name: resource_name.clone(),
+            artifact: provider,
+        }),
+        ResourceDefinition::Mount(MountResourceDefinition {
+            name: resource_name.clone(),
+            provider: resource_name,
+            credential: None,
+            config: serde_json::json!({}),
+            limits: None,
+        }),
+    )
+}
+
+async fn wait_for_resource_ready(
+    control: &mut ControlClient,
+    kind: ResourceKind,
+    name: &ResourceName,
+) -> ResourceSnapshot {
+    let deadline = tokio::time::Instant::now() + PROVIDER_IMPORT_TIMEOUT;
+    loop {
+        let snapshot = resource_snapshot(control).await;
+        let status = snapshot
+            .resource_statuses
+            .iter()
+            .find(|status| status.key.kind == kind && status.key.name == *name);
+        match status {
+            Some(status) if status.phase == ResourcePhase::Ready => return snapshot,
+            Some(status)
+                if matches!(status.phase, ResourcePhase::Failed | ResourcePhase::Blocked) =>
+            {
+                panic!("resource {kind}/{name} failed: {:?}", status.detail)
+            },
+            _ => {},
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "resource {kind}/{name} did not become ready"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
-/// The structured `ControlErrorCode` a failed control RPC carries, decoded
-/// from its status details the same way the CLI's `rpc.rs` does.
-fn control_error_code(status: &Status) -> Option<omnifs_api::ControlErrorCode> {
-    let detail = wire::ErrorDetail::decode(status.details()).ok()?;
-    grpc::error_detail(&detail).ok().map(|error| error.code)
+fn attachment_definition(name: &str, location: &Path) -> AttachmentDefinition {
+    #[cfg(target_os = "macos")]
+    let protocol = fs::Protocol::Nfs;
+    #[cfg(not(target_os = "macos"))]
+    let protocol = fs::Protocol::Fuse;
+    AttachmentDefinition {
+        name: ResourceName::new(name).expect("valid Attachment name"),
+        spec: AttachmentSpec::new(protocol, fs::Runtime::Host, location.to_owned(), None, None)
+            .expect("valid host Attachment spec"),
+    }
 }
 
-fn mount_definition(provider: ProviderId, name: &str) -> MountDefinition {
-    MountDefinition {
-        name: MountName::new(name.to_owned()).expect("valid test mount name"),
-        provider,
-        auth: None,
-        limits: None,
-        config: br"{}".to_vec(),
+async fn wait_for_attachment_ready(
+    control: &mut ControlClient,
+    name: &ResourceName,
+) -> omnifs_api::AttachmentStatus {
+    let deadline = tokio::time::Instant::now() + PROVIDER_IMPORT_TIMEOUT;
+    loop {
+        let response = control
+            .get_attachment_status(unary(wire::GetAttachmentStatusRequest {
+                attachment_name: name.to_string(),
+            }))
+            .await
+            .expect("get Attachment status")
+            .into_inner();
+        if let Some(status) =
+            grpc::get_attachment_status_response(&response).expect("decode Attachment status")
+        {
+            match status.phase {
+                AttachmentPhase::Ready => return status,
+                AttachmentPhase::Failed => {
+                    panic!("Attachment {name} failed: {:?}", status.detail)
+                },
+                _ => {},
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Attachment {name} did not become ready"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
@@ -357,25 +441,29 @@ async fn provider_and_mount_survive_daemon_restart() {
     assert_eq!(imported.provider.id, provider_id);
 
     let mut control = client(&socket).await.expect("control client");
-    let mutation_id = random_mutation_id();
-    begin_mutation(&mut control, mutation_id.clone()).await;
-    let mount = apply_mount_create(
-        &mut control,
-        mutation_id,
-        &mount_definition(provider_id, "durable"),
-    )
-    .await
-    .expect("create mount");
-    assert_eq!(mount.name.as_str(), "durable");
+    let (provider, mount) = provider_and_mount(provider_id, "durable");
+    let receipt = apply_resources(&mut control, vec![provider, mount]).await;
+    assert!(receipt.changed);
+    let name = ResourceName::new("durable").expect("valid resource name");
+    wait_for_resource_ready(&mut control, ResourceKind::Mount, &name).await;
 
     daemon.stop().await;
     drop(daemon);
     let mut restarted = fixture.start_daemon().await;
-    let inventory = wait_until_ready(&fixture.endpoint()).await;
-    assert_eq!(inventory.mounts.len(), 1);
-    assert_eq!(inventory.mounts[0].definition.name.as_str(), "durable");
-    assert_eq!(inventory.mounts[0].definition.provider, provider_id);
     let mut control = client(&socket).await.expect("control client");
+    let snapshot = wait_for_resource_ready(&mut control, ResourceKind::Mount, &name).await;
+    assert_eq!(snapshot.revision, receipt.revision);
+    assert_eq!(snapshot.serving_revision, Some(receipt.revision));
+    assert!(snapshot.resources.iter().any(|resource| matches!(
+        resource,
+        ResourceDefinition::Provider(definition)
+            if definition.name == name && definition.artifact == provider_id
+    )));
+    assert!(snapshot.resources.iter().any(|resource| matches!(
+        resource,
+        ResourceDefinition::Mount(definition)
+            if definition.name == name && definition.provider == name
+    )));
     let metadata = control
         .get_provider_metadata(unary(wire::GetProviderMetadataRequest {
             provider_id: Bytes::copy_from_slice(provider_id.as_bytes()),
@@ -388,16 +476,11 @@ async fn provider_and_mount_survive_daemon_restart() {
     restarted.stop().await;
 }
 
-/// Provenance is the only recovery mechanism left: a client that lost track
-/// of whether its `ApplyMutation` committed re-reads the target and compares
-/// `last_mutation_id` against the id it journaled, instead of asking the
-/// daemon to remember a receipt. This proves both windows converge:
-/// a batch that reached the daemon stamps its row exactly once, no matter how
-/// many times a confused client re-derives its outcome or retries the whole
-/// logical operation from scratch, and a batch that never got its ops applied
-/// (lease held, nothing written) leaves no trace to be mistaken for success.
+/// A desired-set apply keeps a durable receipt keyed by the client mutation
+/// ID. Repeating the exact request after a lost reply returns that receipt,
+/// while a new ID for the already-current set returns an unchanged receipt.
 #[tokio::test(flavor = "multi_thread")]
-async fn provenance_converges_for_committed_and_not_committed_batches() {
+async fn declarative_apply_receipts_converge_after_lost_replies() {
     let fixture = Fixture::new();
     let provider_bytes = std::fs::read(release_wasm_dir().join("test_provider.wasm"))
         .expect("build the test provider before running acceptance tests");
@@ -408,99 +491,42 @@ async fn provenance_converges_for_committed_and_not_committed_batches() {
         .await
         .expect("import test provider");
 
-    // Window 1: a batch that committed. A client that journaled `first_id`
-    // and lost the reply re-reads the mount and finds its own id stamped on
-    // it, which (the batch being atomic) is exactly the "committed" signal
-    // the journal's provenance check looks for.
     let mut control = client(&socket).await.expect("control client");
+    let (provider, mount) = provider_and_mount(provider_id, "once");
+    let resources = vec![provider, mount];
+    let (declarations, plan) = resource_plan(&mut control, resources.clone()).await;
     let first_id = random_mutation_id();
-    begin_mutation(&mut control, first_id.clone()).await;
-    let created = apply_mount_create(
+    let first = apply_resource_plan(&mut control, first_id, declarations, &plan).await;
+    assert!(first.changed);
+    assert_eq!(first.mutation_id, first_id);
+
+    let replay = apply_resource_plan(
         &mut control,
-        first_id.clone(),
-        &mount_definition(provider_id, "once"),
+        first_id,
+        ResourceDeclarations {
+            api_version: API_VERSION.to_owned(),
+            resources: resources.clone(),
+        },
+        &plan,
     )
-    .await
-    .expect("first mount creation commits");
-    assert_eq!(created.name.as_str(), "once");
-
-    let mounts_after_first = control
-        .list_mounts(unary(wire::Empty {}))
-        .await
-        .expect("list mounts")
-        .into_inner()
-        .mounts;
+    .await;
     assert_eq!(
-        mounts_after_first.len(),
-        1,
-        "exactly one row after the first batch"
-    );
-    let stored = grpc::mount_record(&mounts_after_first[0]).expect("decode mount record");
-    assert_eq!(
-        stored.last_mutation_id,
-        mutation_id_of(&first_id),
-        "the stored row names the batch that actually wrote it"
+        replay, first,
+        "lost-reply retry returns the durable receipt"
     );
 
-    // Re-running the same logical command (a client that never learned the
-    // first attempt committed, so it retries mount creation from scratch
-    // under a fresh id) must not create a duplicate row: the daemon rejects
-    // the retried batch outright, and the row's provenance still names only
-    // the batch that actually wrote it.
-    let retry_id = random_mutation_id();
-    begin_mutation(&mut control, retry_id.clone()).await;
-    let retry_error = apply_mount_create(
+    let (declarations, unchanged_plan) = resource_plan(&mut control, resources).await;
+    let unchanged = apply_resource_plan(
         &mut control,
-        retry_id,
-        &mount_definition(provider_id, "once"),
+        random_mutation_id(),
+        declarations,
+        &unchanged_plan,
     )
-    .await
-    .expect_err("retrying a completed mount creation must fail, not duplicate the row");
-    assert_eq!(
-        control_error_code(&retry_error),
-        Some(omnifs_api::ControlErrorCode::AlreadyExists)
-    );
-    let mounts_after_retry = control
-        .list_mounts(unary(wire::Empty {}))
-        .await
-        .expect("list mounts")
-        .into_inner()
-        .mounts;
-    assert_eq!(
-        mounts_after_retry.len(),
-        1,
-        "the failed retry must not add a second row"
-    );
-    let still_stored = grpc::mount_record(&mounts_after_retry[0]).expect("decode mount record");
-    assert_eq!(
-        still_stored.last_mutation_id, stored.last_mutation_id,
-        "the row's provenance is untouched by the rejected retry"
-    );
-
-    // Window 2: a batch that never got its ops applied (the lease was
-    // acquired, but the client vanished before `ApplyMutation` reached the
-    // daemon). A client that journaled `stalled_id` and later re-reads its
-    // target finds no row at all, which is the "not committed" signal.
-    let stalled_id = random_mutation_id();
-    begin_mutation(&mut control, stalled_id.clone()).await;
-    control
-        .drop_mutation(mutation(wire::DropMutationRequest {
-            mutation_id: stalled_id,
-        }))
-        .await
-        .expect("drop the stalled lease");
-    let absent = control
-        .get_mount(unary(wire::GetMountRequest {
-            name: "never-created".to_owned(),
-        }))
-        .await
-        .expect("get mount request")
-        .into_inner()
-        .mount;
-    assert!(
-        absent.is_none(),
-        "a batch that never applied must leave no row for its target"
-    );
+    .await;
+    assert!(!unchanged.changed);
+    assert_eq!(unchanged.revision, first.revision);
+    let snapshot = resource_snapshot(&mut control).await;
+    assert_eq!(snapshot.resources.len(), 2);
 
     daemon.stop().await;
 }
@@ -510,31 +536,18 @@ async fn down_stops_runtime_but_preserves_desired_attachment_across_restart() {
     let fixture = Fixture::new();
     let location = fixture.home_path().join("mount-point");
     std::fs::create_dir_all(&location).expect("mount point");
-    let location_arg = location.to_string_lossy().into_owned();
-    #[cfg(target_os = "macos")]
-    let protocol = "nfs";
-    #[cfg(not(target_os = "macos"))]
-    let protocol = "fuse";
     let mut daemon = fixture.start_daemon().await;
-    let create = fixture.run(&[
-        "--output",
-        "json",
-        "fs",
-        "create",
-        "--name",
-        "kept",
-        "--protocol",
-        protocol,
-        "--runtime",
-        "host",
-        "--location",
-        &location_arg,
-    ]);
-    assert_success(&create, "fs create");
-    let create_json: serde_json::Value = serde_json::from_slice(&create.stdout)
-        .expect("fs create --output json must produce valid JSON");
-    assert_eq!(create_json["result"]["attachment"]["name"], "kept");
-    assert_eq!(create_json["result"]["state"], "ready");
+    let socket = fixture.endpoint().control_socket();
+    let mut control = client(&socket).await.expect("control client");
+    let attachment = attachment_definition("kept", &location);
+    let receipt = apply_resources(
+        &mut control,
+        vec![ResourceDefinition::Attachment(attachment.clone())],
+    )
+    .await;
+    assert!(receipt.changed);
+    let status = wait_for_attachment_ready(&mut control, &attachment.name).await;
+    assert_eq!(status.desired_revision, receipt.revision);
     assert!(
         !fixture
             .home_path()
@@ -552,27 +565,27 @@ async fn down_stops_runtime_but_preserves_desired_attachment_across_restart() {
     assert!(!fixture.home_path().join("client/filesystems").exists());
 
     let mut restarted = fixture.start_daemon().await;
-    let restored = fixture.run(&["--output", "json", "fs", "attach", "--name", "kept"]);
-    assert_success(&restored, "wait for restored attachment");
-    let listed = fixture.run(&["--output", "json", "fs", "ls"]);
-    assert_success(&listed, "fs ls");
+    let mut control = client(&socket).await.expect("control client");
+    let restored = wait_for_attachment_ready(&mut control, &attachment.name).await;
+    assert_eq!(restored.desired_revision, receipt.revision);
+    let listed = fixture.run(&["--output", "json", "attachment", "ls"]);
+    assert_success(&listed, "attachment ls");
     let json: serde_json::Value = serde_json::from_slice(&listed.stdout)
-        .expect("fs ls --output json must produce valid JSON");
+        .expect("attachment ls --output json must produce valid JSON");
     let attachments = json["result"]["attachments"]
         .as_array()
-        .expect("fs ls result.attachments array");
+        .expect("attachment ls result.attachments array");
     assert_eq!(attachments.len(), 1);
     assert_eq!(attachments[0]["name"], "kept");
-    assert_eq!(attachments[0]["state"], "ready");
+    assert_eq!(attachments[0]["phase"], "ready");
 
     assert!(!fixture.home_path().join("client/filesystems").exists());
     restarted.stop().await;
 }
 
-/// `--no-input setup` boots the daemon and prints the provider catalog and
-/// the `Next:` block, but neither prompt has anything to answer without a
-/// terminal, so it must decline both quick-starts and still exit 0 rather
-/// than mounting or attaching anything on the operator's behalf.
+/// `--no-input setup` may orient and inspect the current desired set, but it
+/// declines both quick-start offers and never applies state on the operator's
+/// behalf.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_input_setup_boots_and_orients_without_mounting_or_attaching() {
     let fixture = Fixture::new();
@@ -580,10 +593,7 @@ async fn no_input_setup_boots_and_orients_without_mounting_or_attaching() {
     assert_success(&setup, "setup");
     let stderr = String::from_utf8_lossy(&setup.stderr);
     assert!(stderr.contains("Providers you can mount"), "{stderr}");
-    assert!(stderr.contains("Next:"), "{stderr}");
-    assert!(stderr.contains("omnifs mount add"), "{stderr}");
-    assert!(stderr.contains("omnifs status"), "{stderr}");
-    assert!(stderr.contains("omnifs fs ls"), "{stderr}");
+    assert!(!stderr.contains("Apply setup plan?"), "{stderr}");
 
     let mounts = fixture.run(&["--output", "json", "mount", "ls"]);
     assert_success(&mounts, "mount ls");
@@ -598,14 +608,14 @@ async fn no_input_setup_boots_and_orients_without_mounting_or_attaching() {
         "a --no-input run must not mount anything"
     );
 
-    let filesystems = fixture.run(&["--output", "json", "fs", "ls"]);
-    assert_success(&filesystems, "fs ls");
+    let filesystems = fixture.run(&["--output", "json", "attachment", "ls"]);
+    assert_success(&filesystems, "attachment ls");
     let filesystems_json: serde_json::Value = serde_json::from_slice(&filesystems.stdout)
-        .expect("fs ls --output json must produce valid JSON");
+        .expect("attachment ls --output json must produce valid JSON");
     assert_eq!(
         filesystems_json["result"]["attachments"]
             .as_array()
-            .expect("fs ls result.attachments array")
+            .expect("attachment ls result.attachments array")
             .len(),
         0,
         "a --no-input run must not attach anything"

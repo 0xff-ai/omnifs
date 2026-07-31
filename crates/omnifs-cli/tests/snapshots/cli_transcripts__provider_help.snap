@@ -1,0 +1,30 @@
+---
+source: crates/omnifs-cli/tests/cli_transcripts.rs
+expression: "fixture.transcript(&fixture.run(&[\"provider\", \"--help\"]))"
+---
+exit: 0
+stdout:
+Add, list, show, or remove Provider resources
+
+Usage: omnifs provider [OPTIONS] <COMMAND>
+
+Commands:
+  add   Add an embedded or local Wasm provider resource
+  ls    List desired Provider resources
+  show  Show one desired Provider resource
+  rm    Remove one Provider resource
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+
+Global options:
+  -v, --verbose...       Increase tracing verbosity. -v = info, -vv = debug with span events.
+                         Overridden by `RUST_LOG`
+      --output <OUTPUT>  Output contract for this invocation [default: human] [possible values:
+                         human, json, jsonl]
+  -q, --quiet            Suppress conversational narration on stderr. Receipts, progress settle
+                         lines, and errors are preserved
+      --no-input         Reject prompts and browser handoffs
+      --yes              Approve confirmation-only decisions
+stderr:

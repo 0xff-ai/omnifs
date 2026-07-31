@@ -33,7 +33,7 @@ The control protocol has one current protobuf package, `omnifs.control.v1`; it d
 
 Mount, provider, clone, traversal, filesystem, or runtime behavior changes need live runtime validation. Rust checks alone are not enough.
 
-Use `just dev -y` for the supported contributor runtime path. Check status with `omnifs status` directly (host-native, no `docker exec` needed). Exercise shell traversal and real file tools for path-surface changes.
+Use `just dev -y` for the supported contributor runtime path. `scripts/dev.ts` renders KCL desired resources and uses `target/debug/omnifs apply <file> --yes`; it waits for the terminal revision before opening `target/debug/omnifs attachment shell dev-docker`. Check status with `target/debug/omnifs status` directly (host-native, no `docker exec` needed). Exercise shell traversal and real file tools for path-surface changes.
 
 ### CI gates
 
@@ -43,7 +43,7 @@ Run `just check` before a push or PR handoff; it composes formatting, justfile a
 
 ### Cross-language facts on the container boundary
 
-The daemon always runs host-native, so `OMNIFS_HOME` resolves from the host environment on every platform. One `omnifs-bootstrap::Profile` feeds daemon logging, control binding, identity publication, and explicit `DaemonStatePaths`; `SpawnLock` and `DaemonIdentity` cover only pre-RPC process safety. Daemon SQLx state, cache, logs, and runtime paths live under `<profile>/daemon-state`; `client/filesystems` is read-only legacy migration input. Guest runtimes use the fixed location `/omnifs`; `fs::Spec` stores it, launchers pass it through `--location`, and `scripts/dev.ts` uses the same value. The image entrypoint contains only `/usr/local/bin/omnifs-thin`; the launcher supplies the flat ID, protocol, runtime, and location arguments.
+The daemon always runs host-native, so `OMNIFS_HOME` resolves from the host environment on every platform. One `omnifs-bootstrap::Profile` feeds daemon logging, control binding, identity publication, and explicit `DaemonStatePaths`; `SpawnLock` and `DaemonIdentity` cover only pre-RPC process safety. Daemon SQLx state, cache, logs, and runtime paths live under `<profile>/daemon-state`; `client/filesystems` is read-only legacy migration input. Guest runtimes use the fixed location `/omnifs`; `AttachmentSpec` stores it, launchers pass it through `--location`, and `scripts/dev.ts` uses the same value. The image entrypoint contains only `/usr/local/bin/omnifs-thin`; the launcher supplies the flat ID, protocol, runtime, and location arguments.
 
 ### Filesystem image artifact
 
@@ -55,7 +55,7 @@ Release replaces the CI Darwin arm64 archive with the same payload signed under 
 
 The Docker-hosted FUSE filesystem ships a minimal image from `Dockerfile`: `filesystem-base`, `filesystem-dev`, and `filesystem-release`. The image runs the flat `omnifs-thin` interface with no engine runtime, Wasmtime, or provider bundle, so neither stage needs a provider-store build context. The launcher supplies `--name`, `--protocol`, `--runtime`, and `--location`, while `OMNIFS_ATTACH_ADDR` remains the only Omnifs launch env variable.
 
-CI builds and pushes the filesystem image per architecture in the PR lane (`filesystem-amd64`/`filesystem-arm64`), smokes it directly with `scripts/ci/smoke-filesystem-image.sh`, and on a `main` push merges the per-arch digests into one multi-platform manifest. The `fuse-docker` job runs `crates/omnifs-itest/tests/filesystem_docker` against a live host-native daemon and the real image: named `fs create|attach|detach|restart|ls` lifecycle, `omnifs down` ordering, cold start, cross-mount byte identity, kill/reattach behavior, and the no-credentials contract.
+CI builds and pushes the filesystem image per architecture in the PR lane (`filesystem-amd64`/`filesystem-arm64`), smokes it directly with `scripts/ci/smoke-filesystem-image.sh`, and on a `main` push merges the per-arch digests into one multi-platform manifest. The `fuse-docker` job runs `crates/omnifs-itest/tests/filesystem_docker` against a live host-native daemon and the real image: named Attachment add/remove/restart lifecycle, `omnifs down` ordering, cold start, cross-mount byte identity, kill/reattach behavior, and the no-credentials contract.
 
 ### Guest disk image artifact (libkrun runtime)
 
@@ -73,7 +73,7 @@ The daemon-owned libkrun runtime mirrors the filesystem image's channel split (`
 
 ### Libkrun conformance lane (local-only, never CI)
 
-`crates/omnifs-itest/tests/filesystem_libkrun` runs the `fuse-libkrun` conformance column against a live guest: it creates and attaches `itest-libkrun`, runs the matrix through `omnifs fs shell --name itest-libkrun -- <cmd>`, and proves detach cleanliness. Run it with `just libkrun-conformance`; it remains a local-only, opt-in lane serialized with other live mount tests.
+`crates/omnifs-itest/tests/filesystem_libkrun` runs the `fuse-libkrun` conformance column against a live guest: it adds `itest-libkrun`, runs the matrix through `target/debug/omnifs attachment shell itest-libkrun -- <cmd>`, and proves teardown cleanliness. Run it with `just libkrun-conformance`; it remains a local-only, opt-in lane serialized with other live mount tests.
 
 This lane can **never** run in GitHub-hosted CI: libkrun boots a libkrun microVM, and GitHub's hosted macOS runners do not support nested virtualization. It stays a declared local-only gate a contributor runs by hand before a libkrun-affecting change, not a lane that silently skips in CI and reads green.
 

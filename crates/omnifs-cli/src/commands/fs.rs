@@ -957,62 +957,6 @@ fn finish_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser as _;
-
-    #[test]
-    fn grammar_uses_named_selectors_only() {
-        let cli = crate::cli::Cli::try_parse_from([
-            "omnifs",
-            "fs",
-            "create",
-            "--name",
-            "work",
-            "--protocol",
-            "nfs",
-        ])
-        .unwrap();
-        let Some(crate::cli::Commands::Fs(args)) = cli.command else {
-            panic!("expected fs command");
-        };
-        let FsCommand::Create(args) = args.command else {
-            panic!("expected create");
-        };
-        assert_eq!(args.name.as_str(), "work");
-        assert_eq!(args.protocol, Some(fs::Protocol::Nfs));
-
-        assert!(crate::cli::Cli::try_parse_from(["omnifs", "fs", "attach", "work"]).is_err());
-
-        let cli = crate::cli::Cli::try_parse_from([
-            "omnifs",
-            "fs",
-            "shell",
-            "--name",
-            "work",
-            "--",
-            "sh",
-            "-lc",
-            "printf '%s' 'two words'",
-        ])
-        .unwrap();
-        let Some(crate::cli::Commands::Fs(args)) = cli.command else {
-            panic!("expected fs command");
-        };
-        let FsCommand::Shell(args) = args.command else {
-            panic!("expected shell");
-        };
-        assert_eq!(
-            args.command,
-            ["sh", "-lc", "printf '%s' 'two words'"],
-            "the parser must preserve argv boundaries"
-        );
-        assert!(
-            crate::cli::Cli::try_parse_from([
-                "omnifs", "fs", "shell", "--name", "work", "--shell", "/bin/zsh", "--", "pwd"
-            ])
-            .is_err(),
-            "--shell and a command have distinct meanings"
-        );
-    }
 
     #[test]
     fn defaults_match_the_platform_matrix() {

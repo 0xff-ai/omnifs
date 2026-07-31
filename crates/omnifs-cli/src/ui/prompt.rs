@@ -35,7 +35,9 @@ impl std::error::Error for Canceled {}
 
 /// Whether an error represents a canceled interactive prompt.
 pub(crate) fn is_canceled(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<Canceled>().is_some()
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<Canceled>().is_some())
 }
 
 /// Whether interactive prompts can safely draw a frame.
@@ -684,6 +686,12 @@ mod tests {
     #[test]
     fn interrupted_is_shared_cancel() {
         let error = prompt_error(io::ErrorKind::Interrupted.into());
+        assert!(is_canceled(&error));
+    }
+
+    #[test]
+    fn wrapped_cancel_remains_a_cancel() {
+        let error = anyhow::Error::new(Canceled).context("daemon work continues");
         assert!(is_canceled(&error));
     }
 

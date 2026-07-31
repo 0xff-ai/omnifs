@@ -61,6 +61,17 @@ impl<'a> ProviderResolver<'a> {
         )
     }
 
+    /// Resolve only a local Wasm path.
+    ///
+    /// Interactive provider authoring calls this after the operator chose the
+    /// local-file branch so a missing path can never fall through to an
+    /// embedded name or retained digest selector.
+    pub(crate) async fn resolve_local(&self, path: &Path) -> anyhow::Result<ResolvedProvider> {
+        let metadata = fs::symlink_metadata(path)
+            .with_context(|| format!("stat local provider {}", path.display()))?;
+        self.resolve_path(path, &metadata).await
+    }
+
     async fn resolve_path(
         &self,
         path: &Path,
