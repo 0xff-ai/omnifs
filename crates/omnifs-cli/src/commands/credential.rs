@@ -499,14 +499,12 @@ async fn remove(name: ResourceName, output: Output) -> anyhow::Result<ExitCode> 
                 ResourceDefinition::Credential(definition) if definition.name == name
             )
         }),
-        "no Credential resource named `{}`",
-        name
+        "no Credential resource named `{name}`"
     );
     let references = mount_references(&snapshot, &name);
     ensure!(
         references.is_empty(),
-        "Credential `{}` is still referenced by Mount resources: {}; update or remove those Mounts first",
-        name,
+        "Credential `{name}` is still referenced by Mount resources: {}; update or remove those Mounts first",
         references
             .iter()
             .map(ResourceName::as_str)
