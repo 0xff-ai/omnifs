@@ -11,7 +11,6 @@ use super::context::DaemonContext;
 use super::provider_bundle::EmbeddedProviders;
 use crate::generation_builder::credential_scopes;
 use crate::log_stream;
-use crate::manager::ManagerError;
 use anyhow::Context as _;
 use bytes::Bytes;
 use omnifs_api::grpc::{self, wire};
@@ -19,9 +18,9 @@ use omnifs_api::{
     CONTROL_MESSAGE_MAX_BYTES, ControlError, ControlErrorCode, CredentialHealth, CredentialKey,
     CredentialKind, CredentialStatus, CredentialStatusKind, DaemonHealth, DaemonInfo,
     DaemonInventory, DaemonPhase, DaemonRecovery, HealthReport, HealthState,
-    MountDefinition as ApiMountDefinition, MountHealth, MountLimits as ApiMountLimits,
-    MountOpResult, MountRecord, MutationOpResult, ProviderImportDisposition, ProviderImportReceipt,
-    ProviderMetadata, ProviderReference, RecoveryId, RepairAction, RepairReceipt,
+    MountDefinition as ApiMountDefinition, MountHealth, MountLimits as ApiMountLimits, MountRecord,
+    ProviderImportDisposition, ProviderImportReceipt, ProviderMetadata, ProviderReference,
+    RecoveryId, RepairAction, RepairReceipt,
 };
 use omnifs_state::StateStore;
 use prost::Message as _;
@@ -36,7 +35,7 @@ use tower::limit::ConcurrencyLimitLayer;
 use tracing::{info, warn};
 
 use crate::daemon::Daemon;
-use mapping::{manager_error, resource_control_error};
+use mapping::resource_control_error;
 use service::GrpcControlService;
 
 const CONTROL_CONNECTION_LIMIT: usize = 64;
@@ -265,12 +264,10 @@ pub(crate) fn grpc_code(code: ControlErrorCode) -> tonic::Code {
         | ControlErrorCode::DesiredDigestMismatch
         | ControlErrorCode::PlanTooLarge => tonic::Code::InvalidArgument,
         ControlErrorCode::Busy => tonic::Code::ResourceExhausted,
-        ControlErrorCode::NotReady
-        | ControlErrorCode::RecoveryRequired
-        | ControlErrorCode::LeaseExpired
-        | ControlErrorCode::LeaseNotHeld => tonic::Code::FailedPrecondition,
-        ControlErrorCode::MutationInProgress
-        | ControlErrorCode::Conflict
+        ControlErrorCode::NotReady | ControlErrorCode::RecoveryRequired => {
+            tonic::Code::FailedPrecondition
+        },
+        ControlErrorCode::Conflict
         | ControlErrorCode::StaleBaseRevision
         | ControlErrorCode::MutationIdReuseMismatch
         | ControlErrorCode::ActionIdReuseMismatch => tonic::Code::Aborted,
@@ -310,10 +307,6 @@ pub(crate) fn resource_grpc_error(error: &omnifs_api::grpc::FromGrpcError) -> St
         _ => ControlErrorCode::InvalidRequest,
     };
     grpc_status(ControlError::new(code, error.to_string()))
-}
-
-pub(crate) fn manager_status(error: &ManagerError) -> Status {
-    grpc_status(manager_error(error))
 }
 
 pub(crate) fn resource_control_status(

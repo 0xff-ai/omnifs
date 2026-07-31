@@ -27,9 +27,19 @@ fn run_with<A: Api>(api: &A, config: &Config, diagnostic: &File) -> Result<(), E
     api.init_log(diagnostic.as_raw_fd())?;
     let bridge = AttachBridge::bind(&config.attach_bridge_socket, &config.attach_socket)?;
     let mut context = Context::configure(api, config)?;
-    let control = Control::bind(&config.control_socket, &config.spec, &config.instance_id)?;
+    let control = Control::bind(
+        &config.control_socket,
+        &config.attachment,
+        &config.spec,
+        &config.instance_id,
+    )?;
     let shutdown_fd = context.shutdown_fd()?;
-    let files = PublishedPid::publish(&config.pid_file, &config.spec, &config.instance_id)?;
+    let files = PublishedPid::publish(
+        &config.pid_file,
+        &config.attachment,
+        &config.spec,
+        &config.instance_id,
+    )?;
     let stop = Arc::new(AtomicBool::new(false));
     let control_thread = control.spawn(shutdown_fd, Arc::clone(&stop));
     let bridge_thread = bridge.spawn(shutdown_fd, Arc::clone(&stop));
@@ -269,7 +279,12 @@ struct Control {
 }
 
 impl Control {
-    fn bind(path: &Path, spec: &omnifs_core::fs::Spec, instance_id: &str) -> Result<Self, Error> {
+    fn bind(
+        path: &Path,
+        attachment: &omnifs_core::ResourceName,
+        spec: &omnifs_core::AttachmentSpec,
+        instance_id: &str,
+    ) -> Result<Self, Error> {
         let listener = UnixListener::bind(path)
             .map_err(|error| Error::io("bind control socket", path, error))?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -280,7 +295,12 @@ impl Control {
         Ok(Self {
             path: path.to_path_buf(),
             listener,
-            record: HelperRecord::new(std::process::id(), spec.clone(), instance_id)?,
+            record: HelperRecord::new(
+                std::process::id(),
+                attachment.clone(),
+                spec.clone(),
+                instance_id,
+            )?,
         })
     }
 
@@ -330,27 +350,21 @@ impl Control {
                     }
                     let expected_ping = format!(
                         "ping {} {}\n",
-                        self.record.spec.id(),
-                        self.record.instance_id
+                        self.record.attachment, self.record.instance_id
                     );
                     let expected_shutdown = format!(
                         "shutdown {} {}\n",
-                        self.record.spec.id(),
-                        self.record.instance_id
+                        self.record.attachment, self.record.instance_id
                     );
                     let reply = if request == expected_ping {
                         format!(
                             "pong {} {} {}\n",
-                            self.record.pid,
-                            self.record.spec.id(),
-                            self.record.instance_id
+                            self.record.pid, self.record.attachment, self.record.instance_id
                         )
                     } else if request == expected_shutdown {
                         format!(
                             "ok {} {} {}\n",
-                            self.record.pid,
-                            self.record.spec.id(),
-                            self.record.instance_id
+                            self.record.pid, self.record.attachment, self.record.instance_id
                         )
                     } else {
                         eprintln!(
@@ -394,7 +408,8 @@ struct PublishedPid {
 impl PublishedPid {
     fn publish(
         pid_file: &Path,
-        spec: &omnifs_core::fs::Spec,
+        attachment: &omnifs_core::ResourceName,
+        spec: &omnifs_core::AttachmentSpec,
         instance_id: &str,
     ) -> Result<Self, Error> {
         let mut file = OpenOptions::new()
@@ -403,7 +418,12 @@ impl PublishedPid {
             .mode(0o600)
             .open(pid_file)
             .map_err(|error| Error::io("create helper record", pid_file, error))?;
-        let record = HelperRecord::new(std::process::id(), spec.clone(), instance_id)?;
+        let record = HelperRecord::new(
+            std::process::id(),
+            attachment.clone(),
+            spec.clone(),
+            instance_id,
+        )?;
         let mut bytes = serde_json::to_vec(&record)
             .map_err(|error| Error::Control(format!("serialize helper record: {error}")))?;
         bytes.push(b'\n');
@@ -588,16 +608,19 @@ mod tests {
 
     fn config() -> Config {
         let install = Installation::for_executable("/opt/omnifs/omnifs").unwrap();
-        let spec = omnifs_core::fs::Spec::new(
-            "demo".parse().unwrap(),
-            omnifs_core::fs::Protocol::Fuse,
-            omnifs_core::fs::Runtime::Libkrun,
-            omnifs_core::fs::GUEST_LOCATION.into(),
+        let attachment = omnifs_core::ResourceName::new("demo").unwrap();
+        let spec = omnifs_core::AttachmentSpec::new(
+            omnifs_core::AttachmentProtocol::Fuse,
+            omnifs_core::AttachmentRuntime::Libkrun,
+            omnifs_core::ATTACHMENT_GUEST_LOCATION.into(),
+            None,
+            Some("guest.raw".into()),
         )
         .unwrap();
         Config::omnifs(
             "/tmp/omnifs/libkrun",
             "/tmp/omnifs/attach.sock",
+            attachment,
             spec,
             "0123456789abcdef0123456789abcdef",
             &install,
@@ -727,14 +750,16 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(crate::CONTROL_SOCKET_NAME);
         let instance = "0123456789abcdef0123456789abcdef";
-        let spec = omnifs_core::fs::Spec::new(
-            "demo".parse().unwrap(),
-            omnifs_core::fs::Protocol::Fuse,
-            omnifs_core::fs::Runtime::Libkrun,
-            omnifs_core::fs::GUEST_LOCATION.into(),
+        let attachment = omnifs_core::ResourceName::new("demo").unwrap();
+        let spec = omnifs_core::AttachmentSpec::new(
+            omnifs_core::AttachmentProtocol::Fuse,
+            omnifs_core::AttachmentRuntime::Libkrun,
+            omnifs_core::ATTACHMENT_GUEST_LOCATION.into(),
+            None,
+            Some("guest.raw".into()),
         )
         .unwrap();
-        let control = Control::bind(&path, &spec, instance).unwrap();
+        let control = Control::bind(&path, &attachment, &spec, instance).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let (mut signal_reader, signal_writer) = UnixStream::pair().unwrap();
         let thread = control.spawn(
@@ -742,7 +767,7 @@ mod tests {
             Arc::clone(&stop),
         );
         let client = crate::ControlSocket::new(path).unwrap();
-        let record = client.ping(&spec, instance).unwrap();
+        let record = client.ping(&attachment, &spec, instance).unwrap();
         assert_eq!(record.pid, std::process::id());
         assert_eq!(record.spec, spec);
         assert_eq!(record.instance_id, instance);

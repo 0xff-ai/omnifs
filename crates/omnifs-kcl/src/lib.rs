@@ -180,8 +180,9 @@ mod tests {
         API_VERSION, AttachmentDefinition, CredentialDefinition, MountResourceDefinition,
         ProviderDefinition, ResourceDeclarations, ResourceDefinition, ResourceLimits,
     };
-    use omnifs_core::fs::{Protocol, Runtime};
-    use omnifs_core::{AttachmentSpec, ProviderId, ResourceName};
+    use omnifs_core::{
+        AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ProviderId, ResourceName,
+    };
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -217,8 +218,8 @@ mod tests {
                 ResourceDefinition::Attachment(AttachmentDefinition {
                     name: name("demo-fs"),
                     spec: AttachmentSpec::new(
-                        Protocol::Nfs,
-                        Runtime::Host,
+                        AttachmentProtocol::Nfs,
+                        AttachmentRuntime::Host,
                         PathBuf::from("/tmp/omnifs-demo"),
                         None,
                         None,

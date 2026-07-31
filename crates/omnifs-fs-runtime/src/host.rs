@@ -6,7 +6,7 @@ use crate::{
     RuntimeState, advise,
 };
 use anyhow::{Context as _, Result, ensure};
-use omnifs_core::fs;
+use omnifs_core::{AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceName};
 use omnifs_mtab::{RunnerClaim, RunnerRecord};
 use omnifs_thin::host_control::{
     RunnerControlClient, RunnerPhase, StopOutcome, control_socket_for,
@@ -19,8 +19,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
 const STOP_TIMEOUT: Duration = Duration::from_secs(6);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-pub(crate) fn probe(protocol: fs::Protocol) -> Result<()> {
-    if protocol == fs::Protocol::Fuse && !Path::new("/dev/fuse").exists() {
+pub(crate) fn probe(protocol: AttachmentProtocol) -> Result<()> {
+    if protocol == AttachmentProtocol::Fuse && !Path::new("/dev/fuse").exists() {
         anyhow::bail!("/dev/fuse is not available on this host");
     }
     Ok(())
@@ -75,7 +75,11 @@ impl HostDriver {
     /// Prove a live, identity-matched runner, returning its confirmed record
     /// and phase together so a caller that needs to act on the identity (for
     /// example, stop it) does not have to re-read the record from disk.
-    pub async fn confirmed(&self, spec: &fs::Spec) -> Result<Option<(RunnerRecord, RunnerPhase)>> {
+    pub async fn confirmed(
+        &self,
+        attachment: &ResourceName,
+        spec: &AttachmentSpec,
+    ) -> Result<Option<(RunnerRecord, RunnerPhase)>> {
         let mount_point = spec.location();
         let Some(record) = RunnerRecord::read(&self.state_dir)? else {
             if omnifs_nfs::mount_is_active_checked(mount_point)? {
@@ -89,7 +93,7 @@ impl HostDriver {
             }
             return Ok(None);
         };
-        ensure_record_matches(&record.spec, spec)?;
+        ensure_record_matches(&record.attachment, &record.spec, attachment, spec)?;
         let state = RunnerControlClient::new(&record)
             .ping()
             .await
@@ -108,8 +112,8 @@ impl HostDriver {
         probe(request.spec.protocol())?;
         self.events.emit(RuntimeEvent::Stage {
             stage: RuntimeStage::StartProcess,
-            runtime: fs::Runtime::Host,
-            id: request.spec.id().clone(),
+            runtime: AttachmentRuntime::Host,
+            attachment: request.attachment.clone(),
             state: RuntimeState::Active,
         });
         PendingHostFilesystem::spawn(PendingHostSpawn {
@@ -117,17 +121,16 @@ impl HostDriver {
             log_path: &self.log_path,
             executable: &self.executable,
             attachment: request.attachment,
-            attachment_spec: request.attachment_spec,
             runtime_instance: request.runtime_instance,
             spec: request.spec,
             attach_socket: request.endpoints.attach_unix()?,
             control_socket: self.control_socket.as_deref(),
         })?
-        .wait_until_mounted(request.spec)
+        .wait_until_mounted(request.attachment, request.spec)
         .await?;
         self.events.emit(RuntimeEvent::MountReady {
-            runtime: fs::Runtime::Host,
-            id: request.spec.id().clone(),
+            runtime: AttachmentRuntime::Host,
+            attachment: request.attachment.clone(),
             location: request.spec.location().to_path_buf(),
             container: None,
         });
@@ -196,10 +199,9 @@ struct PendingHostSpawn<'a> {
     state_dir: &'a Path,
     log_path: &'a Path,
     executable: &'a Path,
-    attachment: &'a omnifs_core::ResourceName,
-    attachment_spec: &'a omnifs_core::AttachmentSpec,
+    attachment: &'a ResourceName,
     runtime_instance: &'a str,
-    spec: &'a fs::Spec,
+    spec: &'a AttachmentSpec,
     attach_socket: &'a Path,
     control_socket: Option<&'a Path>,
 }
@@ -211,7 +213,6 @@ impl PendingHostFilesystem {
             log_path,
             executable,
             attachment,
-            attachment_spec,
             runtime_instance,
             spec,
             attach_socket,
@@ -251,15 +252,13 @@ impl PendingHostFilesystem {
             .arg("--location")
             .arg(spec.location())
             .args(
-                attachment_spec
-                    .docker_image()
+                spec.docker_image()
                     .map(|image| ["--docker-image", image])
                     .into_iter()
                     .flatten(),
             )
             .args(
-                attachment_spec
-                    .libkrun_guest_image()
+                spec.libkrun_guest_image()
                     .map(|image| ["--libkrun-guest-image", image])
                     .into_iter()
                     .flatten(),
@@ -294,7 +293,11 @@ impl PendingHostFilesystem {
         })
     }
 
-    async fn wait_until_mounted(self, spec: &fs::Spec) -> Result<()> {
+    async fn wait_until_mounted(
+        self,
+        attachment: &ResourceName,
+        spec: &AttachmentSpec,
+    ) -> Result<()> {
         // Bundled (including `spec`) so the check closure captures nothing
         // from the enclosing scope and takes everything by explicit `&mut`
         // argument instead: an `FnMut` closure cannot itself return a future
@@ -302,11 +305,13 @@ impl PendingHostFilesystem {
         // an argument can.
         struct Wait<'a> {
             pending: PendingHostFilesystem,
-            spec: &'a fs::Spec,
+            attachment: &'a ResourceName,
+            spec: &'a AttachmentSpec,
             last_phase: Option<RunnerPhase>,
         }
         let mut wait = Wait {
             pending: self,
+            attachment,
             spec,
             last_phase: None,
         };
@@ -322,14 +327,19 @@ impl PendingHostFilesystem {
                         return Err(advise(
                             anyhow::anyhow!(
                                 "host filesystem `{}` exited with {status}",
-                                wait.spec.id()
+                                wait.attachment
                             ),
                             RuntimeAdvice::HostLog(wait.pending.log_path.clone()),
                         ));
                     }
                     match RunnerRecord::read(&wait.pending.state_dir) {
                         Ok(Some(record)) if record.instance_id == wait.pending.instance_id => {
-                            ensure_record_matches(&record.spec, wait.spec)?;
+                            ensure_record_matches(
+                                &record.attachment,
+                                &record.spec,
+                                wait.attachment,
+                                wait.spec,
+                            )?;
                             if let Ok(state) = RunnerControlClient::new(&record).ping().await {
                                 wait.last_phase = Some(state.phase.clone());
                                 match state.phase {
@@ -338,7 +348,7 @@ impl PendingHostFilesystem {
                                         return Err(advise(
                                             anyhow::anyhow!(
                                                 "host filesystem `{}` failed: {message}",
-                                                wait.spec.id()
+                                                wait.attachment
                                             ),
                                             RuntimeAdvice::HostLog(wait.pending.log_path.clone()),
                                         ));
@@ -375,7 +385,7 @@ impl PendingHostFilesystem {
                     anyhow::anyhow!(
                         "host filesystem `{}` did not confirm mount startup within {}s; \
                          last proved phase was {phase}; runner {} was left alive for safe cleanup",
-                        spec.id(),
+                        attachment,
                         STARTUP_TIMEOUT.as_secs(),
                         wait.pending.instance_id
                     ),
@@ -484,11 +494,13 @@ mod tests {
             instance_id: "0123456789abcdef0123456789abcdef".to_owned(),
             pid: 42,
             process_group: 42,
-            spec: fs::Spec::new(
-                fs::Id::new("main").unwrap(),
-                fs::Protocol::Fuse,
-                fs::Runtime::Host,
+            attachment: ResourceName::new("main").unwrap(),
+            spec: AttachmentSpec::new(
+                AttachmentProtocol::Fuse,
+                AttachmentRuntime::Host,
                 mount_point.clone(),
+                None,
+                None,
             )
             .unwrap(),
             control_socket: state_dir.join("control.sock"),
@@ -519,8 +531,8 @@ mod tests {
     async fn corrupt_runner_leaf_does_not_hide_a_valid_sibling() {
         let temp = tempfile::tempdir().unwrap();
         let state_root = temp.path().join("state");
-        let valid_id = fs::Id::new("valid").unwrap();
-        let invalid_id = fs::Id::new("invalid").unwrap();
+        let valid_id = ResourceName::new("valid").unwrap();
+        let invalid_id = ResourceName::new("invalid").unwrap();
         let valid_dir = state_root.join(valid_id.as_str());
         let invalid_dir = state_root.join(invalid_id.as_str());
         std::fs::create_dir_all(&valid_dir).unwrap();
@@ -530,11 +542,13 @@ mod tests {
             instance_id: "0123456789abcdef0123456789abcdef".to_owned(),
             pid: 42,
             process_group: 42,
-            spec: fs::Spec::new(
-                valid_id,
-                fs::Protocol::Nfs,
-                fs::Runtime::Host,
+            attachment: valid_id,
+            spec: AttachmentSpec::new(
+                AttachmentProtocol::Nfs,
+                AttachmentRuntime::Host,
                 PathBuf::from("/mnt/valid"),
+                None,
+                None,
             )
             .unwrap(),
             control_socket: valid_dir.join("control.sock"),

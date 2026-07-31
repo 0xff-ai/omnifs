@@ -6,16 +6,14 @@ use hyper_util::rt::TokioIo;
 use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
     ActionReceipt, ApplyReceipt, ApplyResourcesRequest, AttachmentAccess, AttachmentStatus,
-    CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MUTATION_TIMEOUT_SECS, CONTROL_REQUEST_TIMEOUT_SECS,
-    CONTROL_SHUTDOWN_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES, CredentialKey,
-    CredentialReceipt, CredentialStatus, DaemonInventory, GetAttachmentAccessRequest, MountRecord,
-    MutationOp, MutationOpResult, ProgressEvent, ProgressTarget, ProviderImportReceipt,
-    ProviderMetadata, ResourceDeclarations, ResourcePlan, ResourceSnapshot,
-    RestartAttachmentRequest, RevokeCredentialRequest, ServingOutcome,
-    SetCredentialMaterialRequest,
+    CONTROL_LOG_TAIL_MAX_LINES, CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS,
+    CONTROL_STREAM_PAYLOAD_MAX_BYTES, CredentialKey, CredentialReceipt, CredentialStatus,
+    DaemonInventory, GetAttachmentAccessRequest, ProgressEvent, ProgressTarget,
+    ProviderImportReceipt, ProviderMetadata, ResourceDeclarations, ResourcePlan, ResourceSnapshot,
+    RestartAttachmentRequest, RevokeCredentialRequest, SetCredentialMaterialRequest,
 };
 use omnifs_bootstrap::Profile;
-use omnifs_core::{MountName, MutationId, ProviderId, ResourceName};
+use omnifs_core::{ProviderId, ResourceName};
 use prost::Message as _;
 use std::time::Duration;
 use tokio::net::UnixStream;
@@ -26,7 +24,6 @@ use tonic::{Code, Request};
 use crate::error::{ExitCode, WithExitCode, WithHint};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
-const MUTATION_TIMEOUT: Duration = Duration::from_secs(CONTROL_MUTATION_TIMEOUT_SECS);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(CONTROL_SHUTDOWN_TIMEOUT_SECS);
 const PROVIDER_IMPORT_TIMEOUT: Duration = Duration::from_mins(3);
 
@@ -110,23 +107,6 @@ impl RpcClient {
         })
     }
 
-    pub(crate) async fn get_mount(&self, name: MountName) -> anyhow::Result<Option<MountRecord>> {
-        let response = bounded_unary!(
-            self,
-            get_mount,
-            wire::GetMountRequest {
-                name: name.as_str().to_owned(),
-            }
-        )
-        .into_inner();
-        response
-            .mount
-            .as_ref()
-            .map(grpc::mount_record)
-            .transpose()
-            .map_err(Into::into)
-    }
-
     pub(crate) async fn inventory(&self) -> anyhow::Result<DaemonInventory> {
         let response = bounded_unary!(self, get_inventory, wire::Empty {}).into_inner();
         grpc::daemon_inventory(response.inventory.as_ref().context("missing inventory")?)
@@ -199,16 +179,6 @@ impl RpcClient {
         .await
         .context("timed out starting daemon log stream")
         .with_exit_code(ExitCode::DaemonUnavailable)?
-    }
-
-    pub(crate) async fn list_mounts(&self) -> anyhow::Result<Vec<MountRecord>> {
-        let response = bounded_unary!(self, list_mounts, wire::Empty {}).into_inner();
-        response
-            .mounts
-            .iter()
-            .map(grpc::mount_record)
-            .collect::<Result<_, _>>()
-            .map_err(Into::into)
     }
 
     pub(crate) async fn provider_metadata(
@@ -314,7 +284,7 @@ impl RpcClient {
             self,
             import_embedded_provider,
             wire::ImportEmbeddedProviderRequest { name },
-            MUTATION_TIMEOUT
+            REQUEST_TIMEOUT
         )
         .into_inner();
         grpc::provider_import_receipt(
@@ -346,17 +316,6 @@ impl RpcClient {
             .map_err(Into::into)
     }
 
-    pub(crate) async fn list_credentials(&self) -> anyhow::Result<Vec<CredentialStatus>> {
-        let response = bounded_unary!(self, list_credentials, wire::Empty {}).into_inner();
-        response
-            .credentials
-            .iter()
-            .map(grpc::credential_status)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    }
-
-    #[allow(dead_code, reason = "Plan 007 declarative commands consume this RPC")]
     pub(crate) async fn resources(&self) -> anyhow::Result<ResourceSnapshot> {
         let response = bounded_unary!(self, get_resources, wire::Empty {}).into_inner();
         grpc::get_resources_response(&response).map_err(Into::into)
@@ -495,70 +454,6 @@ impl RpcClient {
         .with_exit_code(ExitCode::DaemonUnavailable)?
     }
 
-    /// Acquire the daemon's single mutation lease for `id`. Rejects with a
-    /// `MutationInProgress`/`LeaseExpired`/`LeaseNotHeld`-coded error (message
-    /// already names the holder and deadline where relevant) if another
-    /// batch holds it.
-    pub(crate) async fn begin_mutation(&self, id: MutationId) -> anyhow::Result<u64> {
-        let response = bounded_unary!(
-            self,
-            begin_mutation,
-            wire::BeginMutationRequest {
-                mutation_id: id.as_bytes().to_vec().into(),
-            },
-            MUTATION_TIMEOUT
-        )
-        .into_inner();
-        Ok(response.lease_deadline_unix_ms)
-    }
-
-    /// Apply a batch of ops under the lease `id` holds. Returns only after the
-    /// daemon commits the batch and reports whether the serving generation
-    /// reflects it.
-    pub(crate) async fn apply_mutation(
-        &self,
-        id: MutationId,
-        ops: Vec<MutationOp>,
-    ) -> anyhow::Result<(Vec<MutationOpResult>, ServingOutcome)> {
-        let wire_ops = ops.iter().map(grpc::to_mutation_op).collect();
-        let response = bounded_unary!(
-            self,
-            apply_mutation,
-            wire::ApplyMutationRequest {
-                mutation_id: id.as_bytes().to_vec().into(),
-                ops: wire_ops,
-            },
-            MUTATION_TIMEOUT
-        )
-        .into_inner();
-        let results = response
-            .results
-            .iter()
-            .map(grpc::mutation_op_result)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(anyhow::Error::from)?;
-        let serving = response
-            .serving
-            .as_ref()
-            .map(grpc::serving_outcome)
-            .context("missing serving outcome")?;
-        Ok((results, serving))
-    }
-
-    /// Release the lease if `id` holds it. Idempotent: an id that does not
-    /// hold the lease (already applied, or never begun) is a no-op.
-    pub(crate) async fn drop_mutation(&self, id: MutationId) -> anyhow::Result<()> {
-        bounded_unary!(
-            self,
-            drop_mutation,
-            wire::DropMutationRequest {
-                mutation_id: id.as_bytes().to_vec().into(),
-            },
-            MUTATION_TIMEOUT
-        );
-        Ok(())
-    }
-
     async fn client(&self) -> anyhow::Result<ControlClient> {
         let socket = self.endpoint.clone();
         let socket_display = socket.display().to_string();
@@ -615,27 +510,6 @@ fn retained_provider_metadata(
         .map_err(Into::into)
 }
 
-/// The human top-level sentence for a lease-conflict error code, or `None`
-/// for every other code. The daemon's own message (holder id, raw deadline)
-/// is never parsed or thrown away; it stays one step down the chain via
-/// `.context`, and `omnifs status` is the command that actually renders it
-/// nicely (holder id, seconds remaining), which is why the caller attaches
-/// that as the `Try:` hint rather than repeating the detail here.
-fn lease_conflict_sentence(code: omnifs_api::ControlErrorCode) -> Option<&'static str> {
-    match code {
-        omnifs_api::ControlErrorCode::MutationInProgress => {
-            Some("another omnifs command is applying changes right now")
-        },
-        omnifs_api::ControlErrorCode::LeaseExpired => {
-            Some("this command's change timed out before it could finish")
-        },
-        omnifs_api::ControlErrorCode::LeaseNotHeld => {
-            Some("this command no longer holds the slot needed to apply changes")
-        },
-        _ => None,
-    }
-}
-
 #[allow(clippy::needless_pass_by_value)]
 fn status_error(status: tonic::Status) -> anyhow::Error {
     if let Ok(detail) = wire::ErrorDetail::decode(status.details())
@@ -644,18 +518,10 @@ fn status_error(status: tonic::Status) -> anyhow::Error {
         let code = match error.code {
             omnifs_api::ControlErrorCode::Busy
             | omnifs_api::ControlErrorCode::NotReady
-            | omnifs_api::ControlErrorCode::RecoveryRequired
-            | omnifs_api::ControlErrorCode::MutationInProgress
-            | omnifs_api::ControlErrorCode::LeaseExpired
-            | omnifs_api::ControlErrorCode::LeaseNotHeld => ExitCode::DaemonUnavailable,
+            | omnifs_api::ControlErrorCode::RecoveryRequired => ExitCode::DaemonUnavailable,
             _ => ExitCode::GenericFailure,
         };
-        let result: anyhow::Result<()> = match lease_conflict_sentence(error.code) {
-            Some(sentence) => {
-                Err(anyhow::anyhow!(error.message).context(sentence)).with_hint("omnifs status")
-            },
-            None => Err(anyhow::anyhow!(error.message)),
-        };
+        let result: anyhow::Result<()> = Err(anyhow::anyhow!(error.message));
         return WithExitCode::<()>::with_exit_code(result, code)
             .expect_err("status error starts from Err");
     }
@@ -674,70 +540,6 @@ fn status_error(status: tonic::Status) -> anyhow::Error {
 mod tests {
     use super::*;
     use crate::error::exit_code;
-
-    #[test]
-    fn mutation_in_progress_humanizes_the_top_level_message_and_keeps_the_daemon_detail() {
-        let daemon_message = "mutation deadbeef is already in progress; its lease expires at 123";
-        let detail = wire::ErrorDetail {
-            code: wire::ErrorCode::MutationInProgress as i32,
-            message: daemon_message.into(),
-        };
-        let status = tonic::Status::with_details(
-            Code::Internal,
-            "fallback message",
-            detail.encode_to_vec().into(),
-        );
-        let error = status_error(status);
-        // The top-level message is a human sentence, not the daemon's raw
-        // hex-id-and-unix-ms wire message.
-        assert_eq!(
-            error.to_string(),
-            "another omnifs command is applying changes right now"
-        );
-        // Nothing is lost: the daemon's own message (holder id, deadline)
-        // still rides in the chain for anyone who reads the full transcript.
-        assert!(
-            crate::error::message_chain(&error).contains(&daemon_message.to_owned()),
-            "{:?}",
-            crate::error::message_chain(&error)
-        );
-        assert_eq!(
-            crate::error::hints(&error),
-            vec!["omnifs status".to_owned()]
-        );
-        assert_eq!(exit_code(&error), ExitCode::DaemonUnavailable);
-    }
-
-    #[test]
-    fn lease_expired_and_lease_not_held_also_get_a_human_sentence_and_the_status_hint() {
-        for (code, expected) in [
-            (
-                wire::ErrorCode::LeaseExpired,
-                "this command's change timed out before it could finish",
-            ),
-            (
-                wire::ErrorCode::LeaseNotHeld,
-                "this command no longer holds the slot needed to apply changes",
-            ),
-        ] {
-            let detail = wire::ErrorDetail {
-                code: code as i32,
-                message: "daemon detail".into(),
-            };
-            let status = tonic::Status::with_details(
-                Code::Internal,
-                "fallback",
-                detail.encode_to_vec().into(),
-            );
-            let error = status_error(status);
-            assert_eq!(error.to_string(), expected);
-            assert_eq!(
-                crate::error::hints(&error),
-                vec!["omnifs status".to_owned()]
-            );
-            assert_eq!(exit_code(&error), ExitCode::DaemonUnavailable);
-        }
-    }
 
     #[test]
     fn structured_error_detail_wins_over_tonic_code_fallback() {

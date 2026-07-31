@@ -1,6 +1,5 @@
-//! The Docker client for the optional Docker-hosted FUSE filesystem
-//! (`omnifs fs attach|detach`). The daemon itself always runs
-//! host-native and has no Docker surface here.
+//! The Docker client for optional Docker-hosted FUSE Attachment reconciliation.
+//! The daemon itself always runs host-native and has no Docker surface here.
 
 mod container;
 
@@ -18,7 +17,7 @@ use bollard::query_parameters::{
     RemoveContainerOptions, StartContainerOptions, StopContainerOptions,
 };
 use futures_util::TryStreamExt;
-use omnifs_core::{AttachmentSpec, ResourceName, fs};
+use omnifs_core::{ATTACHMENT_GUEST_LOCATION, AttachmentRuntime, AttachmentSpec, ResourceName};
 
 pub use self::container::resolve_filesystem_image;
 use self::container::{
@@ -100,11 +99,11 @@ impl DockerTarget {
     pub fn for_filesystem(
         profile_root: &std::path::Path,
         is_default_profile: bool,
-        id: &fs::Id,
+        attachment: &ResourceName,
         configured_image: Option<&str>,
     ) -> Result<Self> {
         let image = resolve_filesystem_image(None, configured_image)?;
-        let name = Self::filesystem_container_name(profile_root, id, is_default_profile)?;
+        let name = Self::filesystem_container_name(profile_root, attachment, is_default_profile)?;
         Self::new(name.as_str().to_owned(), image.as_str().to_owned())
     }
 }
@@ -156,8 +155,8 @@ impl DockerClient {
     pub(crate) async fn launch(&self, request: &LaunchRequest<'_>) -> Result<()> {
         self.events.emit(RuntimeEvent::Stage {
             stage: RuntimeStage::StartContainer,
-            runtime: fs::Runtime::Docker,
-            id: request.spec.id().clone(),
+            runtime: AttachmentRuntime::Docker,
+            attachment: request.attachment.clone(),
             state: RuntimeState::Active,
         });
         self.ping()
@@ -183,7 +182,6 @@ impl DockerClient {
         self.launch_container(
             request.paths.profile_root(),
             request.attachment,
-            request.attachment_spec,
             request.runtime_instance,
             request.spec,
             addr.port(),
@@ -198,15 +196,14 @@ impl DockerClient {
         &self,
         home: &std::path::Path,
         attachment: &ResourceName,
-        attachment_spec: &AttachmentSpec,
         runtime_instance: &str,
-        spec: &fs::Spec,
+        spec: &AttachmentSpec,
         attach_port: u16,
     ) -> Result<()> {
         let body = self.target.build_filesystem_container_body(
             home,
             attachment,
-            attachment_spec,
+            spec,
             runtime_instance,
             attach_port,
             cfg!(target_os = "linux"),
@@ -220,26 +217,20 @@ impl DockerClient {
         }
 
         let identity = self
-            .confirmed(home, attachment, attachment_spec, runtime_instance)
+            .confirmed(home, attachment, spec, runtime_instance)
             .await?
             .map(|(identity, _running)| identity)
             .context("the launched filesystem container did not retain its exact identity")?;
 
         if let Err(mount_error) = self.wait_for_mount_ready().await {
             let cleanup = self
-                .stop_confirmed(
-                    &identity,
-                    home,
-                    attachment,
-                    attachment_spec,
-                    runtime_instance,
-                )
+                .stop_confirmed(&identity, home, attachment, spec, runtime_instance)
                 .await;
             return err_after_rollback(mount_error, cleanup, "the failed filesystem container");
         }
         self.events.emit(RuntimeEvent::MountReady {
-            runtime: fs::Runtime::Docker,
-            id: spec.id().clone(),
+            runtime: AttachmentRuntime::Docker,
+            attachment: attachment.clone(),
             location: spec.location().to_path_buf(),
             container: Some(self.container_name().to_string()),
         });
@@ -248,13 +239,16 @@ impl DockerClient {
 
     async fn wait_for_mount_ready(&self) -> Result<()> {
         crate::process::poll_until(MOUNT_READY_TIMEOUT, MOUNT_READY_POLL_INTERVAL, || async {
-            Ok(self.mount_ready(fs::GUEST_LOCATION).await?.then_some(()))
+            Ok(self
+                .mount_ready(ATTACHMENT_GUEST_LOCATION)
+                .await?
+                .then_some(()))
         })
         .await?
         .with_context(|| {
             format!(
                 "{} did not appear inside the filesystem container within {}s",
-                fs::GUEST_LOCATION,
+                ATTACHMENT_GUEST_LOCATION,
                 MOUNT_READY_TIMEOUT.as_secs()
             )
         })
@@ -474,7 +468,7 @@ impl DockerClient {
         }
         command
             .arg("-w")
-            .arg(fs::GUEST_LOCATION)
+            .arg(ATTACHMENT_GUEST_LOCATION)
             .arg(self.container_name().as_str());
         if trailing.is_empty() {
             command.arg(shell_override.unwrap_or("/bin/sh"));
@@ -501,12 +495,16 @@ impl DockerClient {
     pub(crate) fn for_filesystem(
         profile_root: &std::path::Path,
         is_default_profile: bool,
-        id: &fs::Id,
+        attachment: &ResourceName,
         configured_image: Option<&str>,
         events: RuntimeEventSink,
     ) -> Result<Self> {
-        let target =
-            DockerTarget::for_filesystem(profile_root, is_default_profile, id, configured_image)?;
+        let target = DockerTarget::for_filesystem(
+            profile_root,
+            is_default_profile,
+            attachment,
+            configured_image,
+        )?;
         Self::connect_for(&target, events)
     }
 

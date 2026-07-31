@@ -440,7 +440,7 @@ fn fresh_profile_degradation(inventory: &crate::inventory::Inventory) -> Option<
         } => inventory
             .filesystems
             .iter()
-            .find(|filesystem| filesystem.spec.id() == &id)
+            .find(|filesystem| filesystem.name == id)
             .map(|filesystem| {
                 (
                     format!(
@@ -470,12 +470,7 @@ mod tests {
     use super::{Cli, fresh_profile_block};
 
     fn caps(color: bool) -> crate::ui::render::Capabilities {
-        crate::ui::render::Capabilities {
-            width: 120,
-            is_tty: color,
-            color,
-            quiet: false,
-        }
+        crate::ui::render::Capabilities { width: 120, color }
     }
 
     /// The fresh-profile screen:
@@ -560,11 +555,13 @@ mod tests {
     #[test]
     fn fresh_profile_screen_names_a_failed_filesystem_while_daemon_is_up() {
         let filesystem = crate::inventory::FilesystemStatus {
-            spec: omnifs_core::fs::Spec::new(
-                "test".parse().unwrap(),
-                omnifs_core::fs::Protocol::Fuse,
-                omnifs_core::fs::Runtime::Docker,
-                omnifs_core::fs::GUEST_LOCATION.into(),
+            name: "test".parse().unwrap(),
+            spec: omnifs_core::AttachmentSpec::new(
+                omnifs_core::AttachmentProtocol::Fuse,
+                omnifs_core::AttachmentRuntime::Docker,
+                omnifs_core::ATTACHMENT_GUEST_LOCATION.into(),
+                None,
+                None,
             )
             .unwrap(),
             state: crate::inventory::FilesystemState::Failed,

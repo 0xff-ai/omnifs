@@ -5,8 +5,8 @@
 //! Doctor probes.
 
 use anyhow::Context as _;
-use omnifs_core::fs;
-use serde::Serialize;
+use omnifs_core::{AttachmentProtocol, AttachmentRuntime, ResourceName};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const FILESYSTEMS_DIR: &str = "filesystems";
@@ -19,8 +19,28 @@ pub(crate) struct LegacyFilesystems {
 
 #[derive(Debug, Clone)]
 pub(crate) struct LegacyScan {
-    pub(crate) specs: Vec<fs::Spec>,
+    pub(crate) specs: Vec<LegacyFilesystemSpec>,
     pub(crate) issues: Vec<LegacyIssue>,
+}
+
+/// Strict DTO for one pre-resource filesystem spec. This type only supports
+/// read-only migration and Doctor reporting. It never becomes desired state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LegacyFilesystemSpec {
+    id: String,
+    protocol: AttachmentProtocol,
+    runtime: AttachmentRuntime,
+    location: PathBuf,
+}
+
+impl LegacyFilesystemSpec {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+    pub(crate) const fn runtime(&self) -> AttachmentRuntime {
+        self.runtime
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,19 +128,21 @@ impl LegacyFilesystems {
         Ok(LegacyScan { specs, issues })
     }
 
-    fn read(path: &Path) -> anyhow::Result<fs::Spec> {
+    fn read(path: &Path) -> anyhow::Result<LegacyFilesystemSpec> {
         let stem = path
             .file_stem()
             .and_then(|value| value.to_str())
             .ok_or_else(|| anyhow::anyhow!("invalid legacy spec filename {}", path.display()))?;
-        let expected = fs::Id::new(stem)
+        ResourceName::new(stem)
             .with_context(|| format!("invalid legacy spec filename {}", path.display()))?;
         let bytes =
             std::fs::read(path).with_context(|| format!("read legacy spec {}", path.display()))?;
-        let spec: fs::Spec = serde_json::from_slice(&bytes)
+        let spec: LegacyFilesystemSpec = serde_json::from_slice(&bytes)
             .with_context(|| format!("parse legacy spec {}", path.display()))?;
+        ResourceName::new(spec.id())
+            .with_context(|| format!("invalid legacy spec {}", path.display()))?;
         anyhow::ensure!(
-            spec.id() == &expected,
+            spec.id() == stem,
             "legacy spec {} declares `{}`",
             path.display(),
             spec.id()
@@ -134,14 +156,13 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-    fn spec(id: &str, location: &Path) -> fs::Spec {
-        fs::Spec::new(
-            fs::Id::new(id).unwrap(),
-            fs::Protocol::Nfs,
-            fs::Runtime::Host,
-            location.to_path_buf(),
-        )
-        .unwrap()
+    fn spec(id: &str, location: &Path) -> LegacyFilesystemSpec {
+        LegacyFilesystemSpec {
+            id: id.to_owned(),
+            protocol: AttachmentProtocol::Nfs,
+            runtime: AttachmentRuntime::Host,
+            location: location.to_path_buf(),
+        }
     }
 
     fn write_spec(profile: &Path, file: &str, value: &serde_json::Value) -> PathBuf {
@@ -183,7 +204,7 @@ mod tests {
         assert_eq!(
             scan.specs
                 .iter()
-                .map(|spec| spec.id().as_str())
+                .map(LegacyFilesystemSpec::id)
                 .collect::<Vec<_>>(),
             ["alpha", "beta"]
         );
@@ -218,7 +239,7 @@ mod tests {
 
         let scan = LegacyFilesystems::under_profile(dir.path()).scan().unwrap();
         assert_eq!(scan.specs.len(), 1);
-        assert_eq!(scan.specs[0].id().as_str(), "valid");
+        assert_eq!(scan.specs[0].id(), "valid");
         assert_eq!(scan.issues.len(), 2);
         assert!(
             scan.issues

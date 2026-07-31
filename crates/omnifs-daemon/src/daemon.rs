@@ -9,7 +9,7 @@ use omnifs_api::{
     AttachmentPhase as ApiAttachmentPhase, AttachmentStatus, CONTROL_SHUTDOWN_DRAIN_SECS,
     ControlError, ControlErrorCode, CredentialHealth, DaemonHealth, DaemonInventory, DaemonPhase,
     DaemonRecovery, DaemonStatus, GetAttachmentAccessRequest, HealthReport, HealthState,
-    MountHealth, MountInfo, MountRecord,
+    MountHealth, MountInfo, MountRecord, ResourceDefinition,
 };
 use omnifs_engine::{Inspector, ServingCell};
 use omnifs_state::StateStore;
@@ -59,7 +59,6 @@ pub(crate) struct Daemon {
     pub(crate) state: Arc<StateStore>,
     pub(crate) inspector: Option<Arc<Inspector>>,
     pub(crate) serving: Arc<ServingCell>,
-    pub(crate) manager: Arc<crate::manager::MutationManager>,
     pub(crate) resources: Arc<crate::resource_control::ResourceControl>,
     pub(crate) reconciler: OnceLock<Arc<crate::serving_reconciler::ServingReconciler>>,
     pub(crate) attachments: OnceLock<Arc<crate::attachment_supervisor::AttachmentSupervisor>>,
@@ -73,7 +72,6 @@ pub(crate) struct DaemonParts {
     pub(crate) embedded: Arc<EmbeddedProviders>,
     pub(crate) state: Arc<StateStore>,
     pub(crate) serving: Arc<ServingCell>,
-    pub(crate) manager: Arc<crate::manager::MutationManager>,
     pub(crate) resources: Arc<crate::resource_control::ResourceControl>,
     pub(crate) inspector: Option<Arc<Inspector>>,
     pub(crate) shutdown_tx: tokio::sync::watch::Sender<bool>,
@@ -86,7 +84,6 @@ impl Daemon {
             embedded,
             state,
             serving,
-            manager,
             resources,
             inspector,
             shutdown_tx,
@@ -98,7 +95,6 @@ impl Daemon {
             embedded,
             state,
             inspector,
-            manager,
             resources,
             reconciler: OnceLock::new(),
             attachments: OnceLock::new(),
@@ -127,7 +123,7 @@ impl Daemon {
     }
 
     /// Run every shutdown step even after an earlier one fails, so a state
-    /// store that will not close cleanly cannot mask a manager or drain
+    /// store that will not close cleanly cannot mask a reconciler or drain
     /// failure (or vice versa). The first failure is the returned error;
     /// later ones are logged rather than discarded.
     ///
@@ -151,13 +147,7 @@ impl Daemon {
             Some(reconciler) => reconciler.shutdown().await,
             None => Ok(()),
         };
-        info!("serving reconciler stopped; stopping mutation manager");
-        let manager_result = self
-            .manager
-            .shutdown()
-            .await
-            .map_err(|error| anyhow::anyhow!("mutation manager shutdown: {error}"));
-        info!("mutation manager stopped; stopping namespace listeners");
+        info!("serving reconciler stopped; stopping namespace listeners");
         let retired = self.serving.retire_active();
         self.vfs.shutdown().await;
         info!("namespace listeners stopped; draining active generation");
@@ -174,7 +164,6 @@ impl Daemon {
         crate::first_error([
             attachment_result,
             reconciler_result,
-            manager_result,
             generation_result,
             state_result,
         ])
@@ -320,25 +309,24 @@ impl Daemon {
         mounts.sort_by(|a, b| a.mount.cmp(&b.mount));
         let attach_serving = self.vfs.ready();
         let attach_tcp = self.attach_tcp();
-        let filesystems = self.live_filesystems();
-        let health = self.daemon_health(attach_serving, &filesystems, &views);
+        let attachments = self.live_attachments();
+        let health = self.daemon_health(attach_serving, &attachments, &views);
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
             pid: self.context.process_identity().pid(),
             instance_id: self.context.instance_id().to_owned(),
             executable: self.context.process_identity().executable().to_path_buf(),
             attach_tcp,
-            filesystems,
+            attachments,
             mounts,
             health: Box::new(health),
-            active_mutation: self.manager.active_mutation(),
         }
     }
 
     fn daemon_health(
         &self,
         attach_serving: bool,
-        filesystems: &[omnifs_core::fs::Spec],
+        attachments: &[AttachmentDefinition],
         views: &[MountStatusView],
     ) -> DaemonHealth {
         DaemonHealth::new(
@@ -349,23 +337,23 @@ impl Daemon {
                     self.context.control_socket().display()
                 ),
             ),
-            Self::filesystem_health(attach_serving, filesystems),
+            Self::filesystem_health(attach_serving, attachments),
             Self::mount_health_report(views),
         )
     }
 
     fn filesystem_health(
         attach_serving: bool,
-        filesystems: &[omnifs_core::fs::Spec],
+        attachments: &[AttachmentDefinition],
     ) -> HealthReport {
         let mut listed = vec!["attach socket local".to_string()];
-        listed.extend(filesystems.iter().map(|filesystem| {
+        listed.extend(attachments.iter().map(|attachment| {
             format!(
                 "attached `{}` ({}) at {} via {}",
-                filesystem.id(),
-                filesystem.protocol(),
-                filesystem.location().display(),
-                filesystem.runtime()
+                attachment.name,
+                attachment.spec.protocol(),
+                attachment.spec.location().display(),
+                attachment.spec.runtime()
             )
         }));
         let listed = listed.join(", ");
@@ -438,7 +426,8 @@ impl Daemon {
 
     pub(crate) async fn recovery(&self) -> anyhow::Result<DaemonRecovery> {
         let state = self.state.serving_state().await?;
-        let durable_revision = self.state.mount_revision().await?;
+        let durable_revision =
+            omnifs_core::MountRevision::new(self.state.resource_snapshot().await?.revision.get());
         let serving = self.serving.provenance();
         let phase = match state.recovery {
             omnifs_state::RecoveryState::Ready => DaemonPhase::Ready,
@@ -448,7 +437,6 @@ impl Daemon {
             phase,
             durable_revision: Some(durable_revision),
             serving_revision: Some(serving.revision()),
-            failed_mutation: state.failed_mutation,
             store_health: HealthReport::new(HealthState::Healthy, "control store available"),
             repair: None,
         })
@@ -472,13 +460,87 @@ impl Daemon {
             health: *status.health,
             mounts: self.mount_records().await?,
             credentials,
-            attachments: self.live_filesystems(),
-            active_mutation: status.active_mutation,
+            attachments: self.live_attachments(),
         })
     }
 
     pub(crate) async fn mount_records(&self) -> anyhow::Result<Vec<MountRecord>> {
-        let mounts = self.state.list_mounts().await?;
+        let snapshot = self.state.resource_snapshot().await?;
+        let revision = omnifs_core::MountRevision::new(snapshot.revision.get());
+        let mut providers = std::collections::HashMap::new();
+        for resource in snapshot.resources.resources() {
+            let ResourceDefinition::Provider(provider) = resource else {
+                continue;
+            };
+            let metadata = self
+                .state
+                .load_provider_metadata(provider.artifact)
+                .await?
+                .with_context(|| {
+                    format!(
+                        "desired provider `{}` artifact {} is not retained",
+                        provider.name, provider.artifact
+                    )
+                })?;
+            providers.insert(provider.name.clone(), metadata);
+        }
+        let mut credentials = std::collections::HashMap::new();
+        for resource in snapshot.resources.resources() {
+            let ResourceDefinition::Credential(credential) = resource else {
+                continue;
+            };
+            let provider = providers.get(&credential.provider).with_context(|| {
+                format!(
+                    "desired credential `{}` provider `{}` is absent",
+                    credential.name, credential.provider
+                )
+            })?;
+            credentials.insert(
+                credential.name.clone(),
+                omnifs_auth::CredentialId::new(
+                    provider.reference.meta.name.to_string(),
+                    credential.scheme.clone(),
+                    credential.account.clone(),
+                )?,
+            );
+        }
+        let mut mounts = Vec::new();
+        for resource in snapshot.resources.resources().iter().cloned() {
+            let ResourceDefinition::Mount(mount) = resource else {
+                continue;
+            };
+            let provider = providers.get(&mount.provider).with_context(|| {
+                format!(
+                    "desired mount `{}` provider `{}` is absent",
+                    mount.name, mount.provider
+                )
+            })?;
+            let credential = mount
+                .credential
+                .as_ref()
+                .map(|name| {
+                    credentials.get(name).cloned().with_context(|| {
+                        format!(
+                            "desired mount `{}` credential `{name}` is absent",
+                            mount.name
+                        )
+                    })
+                })
+                .transpose()?;
+            mounts.push(omnifs_state::StoredMount::prepare(
+                omnifs_state::MountDocument {
+                    name: omnifs_core::MountName::new(mount.name.to_string())?,
+                    provider: provider.reference.clone(),
+                    credential,
+                    limits: mount.limits.map(|limits| omnifs_state::MountLimits {
+                        max_memory_mb: limits.max_memory_mb,
+                        max_fetch_blob_bytes: limits.max_fetch_blob_bytes,
+                    }),
+                    config: mount.config,
+                },
+                revision,
+            )?);
+        }
         let mut health = self.live_mount_healths();
         mounts
             .into_iter()
@@ -624,7 +686,7 @@ impl Daemon {
                 format!("attachment `{}` runtime is absent", request.attachment),
             ));
         }
-        if status.definition.spec.runtime() == omnifs_core::fs::Runtime::Host {
+        if status.definition.spec.runtime() == omnifs_core::AttachmentRuntime::Host {
             return Ok(AttachmentAccess::HostPath(
                 status.definition.spec.location().to_path_buf(),
             ));
@@ -658,31 +720,26 @@ impl Daemon {
         );
         omnifs_fs_runtime::RuntimeDriver::new(
             &runtime_paths,
-            definition.spec.to_fs_spec(&definition.name)?,
-            omnifs_fs_runtime::RuntimeAssets {
-                docker_image: definition.spec.docker_image().map(str::to_owned),
-                guest_image: definition.spec.libkrun_guest_image().map(str::to_owned),
-            },
+            definition.name.clone(),
+            definition.spec.clone(),
             omnifs_fs_runtime::RuntimeEventSink::discard(),
         )
     }
 
-    fn live_filesystems(&self) -> Vec<omnifs_core::fs::Spec> {
+    fn live_attachments(&self) -> Vec<AttachmentDefinition> {
         self.vfs
             .sessions()
             .into_iter()
-            .map(|session| {
-                session
-                    .spec
-                    .to_fs_spec(&session.attachment)
-                    .expect("a validated VFS session has a valid filesystem projection")
+            .map(|session| AttachmentDefinition {
+                name: session.attachment,
+                spec: session.spec,
             })
             .collect()
     }
 }
 /// One mount's live status, derived once from an atomic
 /// `ServingCell::mount_statuses_with_provenance` read. Feeds `MountInfo`
-/// (control status), `MountRecord` (inventory and `GetMount`), and the
+/// (control status), `MountRecord` (inventory), and the
 /// top-level health rollup, so all three agree on what a mount's health is.
 struct MountStatusView {
     name: String,

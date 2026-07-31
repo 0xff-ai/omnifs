@@ -20,7 +20,10 @@ use omnifs_api::{
     ResourcePhase, ResourceSnapshot,
 };
 use omnifs_bootstrap::Profile;
-use omnifs_core::{AttachmentSpec, MutationId, ProviderId, ResourceKind, ResourceName, fs};
+use omnifs_core::{
+    AttachmentProtocol, AttachmentRuntime, AttachmentSpec, MutationId, ProviderId, ResourceKind,
+    ResourceName,
+};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::Duration;
@@ -353,13 +356,19 @@ async fn wait_for_resource_ready(
 
 fn attachment_definition(name: &str, location: &Path) -> AttachmentDefinition {
     #[cfg(target_os = "macos")]
-    let protocol = fs::Protocol::Nfs;
+    let protocol = AttachmentProtocol::Nfs;
     #[cfg(not(target_os = "macos"))]
-    let protocol = fs::Protocol::Fuse;
+    let protocol = AttachmentProtocol::Fuse;
     AttachmentDefinition {
         name: ResourceName::new(name).expect("valid Attachment name"),
-        spec: AttachmentSpec::new(protocol, fs::Runtime::Host, location.to_owned(), None, None)
-            .expect("valid host Attachment spec"),
+        spec: AttachmentSpec::new(
+            protocol,
+            AttachmentRuntime::Host,
+            location.to_owned(),
+            None,
+            None,
+        )
+        .expect("valid host Attachment spec"),
     }
 }
 

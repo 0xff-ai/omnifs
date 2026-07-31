@@ -1,6 +1,4 @@
-//! Unix process probes shared by detached runtime owners, and the shared
-//! deadline-poll loop every one of them needs while waiting for a runner,
-//! helper, or daemon to reach some observable state.
+//! Unix process probes and the async deadline loop used by daemon lifecycle.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -67,28 +65,6 @@ pub(crate) async fn poll_until_mut<S, T>(
             return Ok(None);
         }
         tokio::time::sleep(interval).await;
-    }
-}
-
-/// The synchronous twin of [`poll_until`] for the one caller
-/// (`commands/mount/detect.rs`) that runs outside the async runtime. `check`
-/// returning `Some(value)` means ready (a caller folds any hard-abort
-/// condition into this rather than a separate error channel); `None` means
-/// keep polling.
-pub(crate) fn poll_until_sync<T>(
-    timeout: Duration,
-    interval: Duration,
-    mut check: impl FnMut() -> Option<T>,
-) -> Option<T> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if let Some(value) = check() {
-            return Some(value);
-        }
-        if std::time::Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(interval);
     }
 }
 

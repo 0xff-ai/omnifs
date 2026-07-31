@@ -12,7 +12,10 @@ use omnifs_api::{
     RestartAttachmentRequest,
 };
 use omnifs_bootstrap::Profile;
-use omnifs_core::{ActionId, AttachmentSpec, ResourceKind, ResourceName, ResourceRevision, fs};
+use omnifs_core::{
+    ATTACHMENT_GUEST_LOCATION, ActionId, AttachmentProtocol, AttachmentRuntime, AttachmentSpec,
+    ResourceKind, ResourceName, ResourceRevision,
+};
 use serde::Serialize;
 use std::fmt::{self, Write as _};
 use std::io::IsTerminal as _;
@@ -51,8 +54,8 @@ pub struct AddArgs {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AttachmentPair {
-    protocol: fs::Protocol,
-    runtime: fs::Runtime,
+    protocol: AttachmentProtocol,
+    runtime: AttachmentRuntime,
 }
 
 impl fmt::Display for AttachmentPair {
@@ -105,8 +108,8 @@ struct ListResult {
 #[serde(rename_all = "camelCase")]
 struct ListRow {
     name: ResourceName,
-    protocol: fs::Protocol,
-    runtime: fs::Runtime,
+    protocol: AttachmentProtocol,
+    runtime: AttachmentRuntime,
     location: PathBuf,
     phase: &'static str,
     desired_revision: ResourceRevision,
@@ -149,7 +152,7 @@ async fn add(_args: AddArgs, output: Output) -> Result<ExitCode> {
         .with_default(&default_name)
         .ask_with_output(&output)?;
     let name = ResourceName::new(name)?;
-    let location = if pair.runtime == fs::Runtime::Host {
+    let location = if pair.runtime == AttachmentRuntime::Host {
         let default = Profile::resolve()?
             .root()
             .join("attachments")
@@ -516,22 +519,22 @@ fn definition_for_pair(
     ensure!(supports(protocol, runtime), "{pair} is not supported");
     let profile_root = Profile::resolve()?.root().to_path_buf();
     let location = match runtime {
-        fs::Runtime::Host => {
+        AttachmentRuntime::Host => {
             location.unwrap_or_else(|| profile_root.join("attachments").join(name.as_str()))
         },
-        fs::Runtime::Docker | fs::Runtime::Libkrun => {
+        AttachmentRuntime::Docker | AttachmentRuntime::Libkrun => {
             ensure!(
                 location.is_none(),
                 "guest Attachment runtimes own their location"
             );
-            PathBuf::from(fs::GUEST_LOCATION)
+            PathBuf::from(ATTACHMENT_GUEST_LOCATION)
         },
     };
-    let docker_image = (runtime == fs::Runtime::Docker)
+    let docker_image = (runtime == AttachmentRuntime::Docker)
         .then(|| omnifs_fs_runtime::resolve_filesystem_image(None, None))
         .transpose()?
         .map(|value| value.to_string());
-    let libkrun_guest_image = (runtime == fs::Runtime::Libkrun)
+    let libkrun_guest_image = (runtime == AttachmentRuntime::Libkrun)
         .then(|| omnifs_fs_runtime::resolve_guest_image_reference(None));
     Ok(AttachmentDefinition {
         name,
@@ -545,16 +548,16 @@ fn definition_for_pair(
     })
 }
 
-pub(crate) fn platform_default() -> Option<(fs::Protocol, fs::Runtime)> {
+pub(crate) fn platform_default() -> Option<(AttachmentProtocol, AttachmentRuntime)> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", _) => Some((fs::Protocol::Fuse, fs::Runtime::Host)),
-        ("macos", "aarch64") => Some((fs::Protocol::Fuse, fs::Runtime::Libkrun)),
-        ("macos", _) => Some((fs::Protocol::Nfs, fs::Runtime::Host)),
+        ("linux", _) => Some((AttachmentProtocol::Fuse, AttachmentRuntime::Host)),
+        ("macos", "aarch64") => Some((AttachmentProtocol::Fuse, AttachmentRuntime::Libkrun)),
+        ("macos", _) => Some((AttachmentProtocol::Nfs, AttachmentRuntime::Host)),
         _ => None,
     }
 }
 
-pub(crate) fn supports(protocol: fs::Protocol, runtime: fs::Runtime) -> bool {
+pub(crate) fn supports(protocol: AttachmentProtocol, runtime: AttachmentRuntime) -> bool {
     matches!(
         (
             std::env::consts::OS,
@@ -565,23 +568,40 @@ pub(crate) fn supports(protocol: fs::Protocol, runtime: fs::Runtime) -> bool {
         (
             "linux",
             _,
-            fs::Protocol::Fuse,
-            fs::Runtime::Host | fs::Runtime::Docker
-        ) | ("linux" | "macos", _, fs::Protocol::Nfs, fs::Runtime::Host)
-            | ("macos", _, fs::Protocol::Fuse, fs::Runtime::Docker)
-            | ("macos", "aarch64", fs::Protocol::Fuse, fs::Runtime::Libkrun)
+            AttachmentProtocol::Fuse,
+            AttachmentRuntime::Host | AttachmentRuntime::Docker
+        ) | (
+            "linux" | "macos",
+            _,
+            AttachmentProtocol::Nfs,
+            AttachmentRuntime::Host
+        ) | (
+            "macos",
+            _,
+            AttachmentProtocol::Fuse,
+            AttachmentRuntime::Docker
+        ) | (
+            "macos",
+            "aarch64",
+            AttachmentProtocol::Fuse,
+            AttachmentRuntime::Libkrun
+        )
     )
 }
 
 fn available_pairs() -> Vec<AttachmentPair> {
     let recommended = platform_default();
-    let mut pairs = [fs::Protocol::Fuse, fs::Protocol::Nfs]
+    let mut pairs = [AttachmentProtocol::Fuse, AttachmentProtocol::Nfs]
         .into_iter()
         .flat_map(|protocol| {
-            [fs::Runtime::Host, fs::Runtime::Docker, fs::Runtime::Libkrun]
-                .into_iter()
-                .filter(move |runtime| supports(protocol, *runtime))
-                .map(move |runtime| AttachmentPair { protocol, runtime })
+            [
+                AttachmentRuntime::Host,
+                AttachmentRuntime::Docker,
+                AttachmentRuntime::Libkrun,
+            ]
+            .into_iter()
+            .filter(move |runtime| supports(protocol, *runtime))
+            .map(move |runtime| AttachmentPair { protocol, runtime })
         })
         .collect::<Vec<_>>();
     pairs.sort_by_key(|pair| {

@@ -44,14 +44,14 @@ fn test_attachment() -> omnifs_core::ResourceName {
 fn test_identity() -> omnifs_core::AttachmentSpec {
     let (protocol, runtime, location) = if cfg!(target_os = "linux") {
         (
-            omnifs_core::fs::Protocol::Fuse,
-            omnifs_core::fs::Runtime::Host,
+            omnifs_core::AttachmentProtocol::Fuse,
+            omnifs_core::AttachmentRuntime::Host,
             PathBuf::from("/mnt/test"),
         )
     } else {
         (
-            omnifs_core::fs::Protocol::Nfs,
-            omnifs_core::fs::Runtime::Host,
+            omnifs_core::AttachmentProtocol::Nfs,
+            omnifs_core::AttachmentRuntime::Host,
             PathBuf::from("/mnt/test"),
         )
     };
@@ -795,9 +795,9 @@ async fn one_name_allows_reconnect_overlap_but_rejects_conflicting_resolved_fiel
     assert_eq!(server.sessions().len(), 1);
 
     let conflicting = omnifs_core::AttachmentSpec::new(
-        omnifs_core::fs::Protocol::Fuse,
-        omnifs_core::fs::Runtime::Docker,
-        PathBuf::from(omnifs_core::fs::GUEST_LOCATION),
+        omnifs_core::AttachmentProtocol::Fuse,
+        omnifs_core::AttachmentRuntime::Docker,
+        PathBuf::from(omnifs_core::ATTACHMENT_GUEST_LOCATION),
         None,
         None,
     )

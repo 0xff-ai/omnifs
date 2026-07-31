@@ -359,7 +359,7 @@ pub fn control_socket_for(state_dir: &Path, _instance_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_core::fs;
+    use omnifs_core::{AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceName};
 
     #[tokio::test]
     async fn ping_and_stop_require_and_echo_the_exact_instance() {
@@ -385,11 +385,13 @@ mod tests {
             instance_id: instance.to_owned(),
             pid: 42,
             process_group: 42,
-            spec: fs::Spec::new(
-                fs::Id::new("main").unwrap(),
-                fs::Protocol::Nfs,
-                fs::Runtime::Host,
+            attachment: ResourceName::new("main").unwrap(),
+            spec: AttachmentSpec::new(
+                AttachmentProtocol::Nfs,
+                AttachmentRuntime::Host,
                 PathBuf::from("/mnt/omnifs"),
+                None,
+                None,
             )
             .unwrap(),
             control_socket: socket,

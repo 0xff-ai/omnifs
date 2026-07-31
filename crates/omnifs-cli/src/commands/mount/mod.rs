@@ -4,12 +4,8 @@
 //! that cannot be inferred, edit the complete typed desired set, and use the
 //! daemon's resource planner and revision progress stream.
 
-pub(crate) mod create;
-mod provider_selection;
 pub(crate) mod spec_creation;
 mod token_validation;
-
-pub(crate) use create::MountInitStatus;
 
 use std::fmt::{self, Write as _};
 

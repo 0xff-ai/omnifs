@@ -1,8 +1,8 @@
 //! The gRPC control surface: one method per control-plane operation.
 
 use super::mapping::{
-    api_credential_status, api_mount_record, api_provider_import_disposition,
-    api_provider_metadata, api_provider_reference, credential_id,
+    api_credential_status, api_provider_import_disposition, api_provider_metadata,
+    api_provider_reference, credential_id,
 };
 use super::*;
 use tokio_stream::StreamExt as _;
@@ -31,7 +31,6 @@ impl GrpcControlService {
                 phase: DaemonPhase::Starting,
                 durable_revision: None,
                 serving_revision: None,
-                failed_mutation: None,
                 store_health: HealthReport::new(HealthState::Degraded, "daemon is starting"),
                 repair: None,
             }),
@@ -56,7 +55,6 @@ impl GrpcControlService {
                 mounts: Vec::new(),
                 credentials: Vec::new(),
                 attachments: Vec::new(),
-                active_mutation: None,
             }),
             ControlPhase::Recovery(recovery) => Ok(DaemonInventory {
                 info: self.control.context.daemon_info(None, None),
@@ -71,7 +69,6 @@ impl GrpcControlService {
                 mounts: Vec::new(),
                 credentials: Vec::new(),
                 attachments: Vec::new(),
-                active_mutation: None,
             }),
             ControlPhase::Ready(daemon) => daemon.inventory().await.map_err(grpc_internal),
             ControlPhase::ShuttingDown => Err(grpc_status(ControlPhase::shutting_down())),
@@ -419,100 +416,6 @@ impl wire::control_server::Control for GrpcControlService {
             .map_err(grpc_internal)?;
         daemon.provider_imported(&outcome);
         Ok(Response::new(provider_import_response(outcome)))
-    }
-
-    async fn begin_mutation(
-        &self,
-        request: Request<wire::BeginMutationRequest>,
-    ) -> Result<Response<wire::BeginMutationResponse>, Status> {
-        let daemon = self.daemon()?;
-        let request = request.into_inner();
-        let id =
-            omnifs_core::MutationId::from_bytes(exact_bytes(&request.mutation_id, "mutation id")?);
-        let lease_deadline_unix_ms = daemon
-            .manager
-            .begin(id)
-            .await
-            .map_err(|error| manager_status(&error))?;
-        Ok(Response::new(wire::BeginMutationResponse {
-            lease_deadline_unix_ms,
-        }))
-    }
-
-    async fn apply_mutation(
-        &self,
-        request: Request<wire::ApplyMutationRequest>,
-    ) -> Result<Response<wire::ApplyMutationResponse>, Status> {
-        let daemon = self.daemon()?;
-        let request = request.into_inner();
-        let id =
-            omnifs_core::MutationId::from_bytes(exact_bytes(&request.mutation_id, "mutation id")?);
-        let ops = request
-            .ops
-            .iter()
-            .map(grpc::mutation_op)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(grpc_invalid)?;
-        let outcome = daemon
-            .manager
-            .apply(id, ops)
-            .await
-            .map_err(|error| manager_status(&error))?;
-        Ok(Response::new(wire::ApplyMutationResponse {
-            results: outcome
-                .results
-                .iter()
-                .map(grpc::to_mutation_op_result)
-                .collect(),
-            serving: Some(grpc::to_serving_outcome(&outcome.serving)),
-        }))
-    }
-
-    async fn drop_mutation(
-        &self,
-        request: Request<wire::DropMutationRequest>,
-    ) -> Result<Response<wire::DropMutationResponse>, Status> {
-        let daemon = self.daemon()?;
-        let request = request.into_inner();
-        let id =
-            omnifs_core::MutationId::from_bytes(exact_bytes(&request.mutation_id, "mutation id")?);
-        daemon
-            .manager
-            .drop_mutation(id)
-            .await
-            .map_err(|error| manager_status(&error))?;
-        Ok(Response::new(wire::DropMutationResponse {}))
-    }
-
-    async fn list_mounts(
-        &self,
-        _request: Request<wire::Empty>,
-    ) -> Result<Response<wire::ListMountsResponse>, Status> {
-        let daemon = self.daemon()?;
-        let mounts = daemon.mount_records().await.map_err(grpc_internal)?;
-        Ok(Response::new(wire::ListMountsResponse {
-            mounts: mounts.iter().map(grpc::to_mount_record).collect(),
-        }))
-    }
-
-    async fn get_mount(
-        &self,
-        request: Request<wire::GetMountRequest>,
-    ) -> Result<Response<wire::GetMountResponse>, Status> {
-        let daemon = self.daemon()?;
-        let name = omnifs_core::MountName::new(request.into_inner().name)
-            .map_err(|_| grpc_invalid("invalid mount name"))?;
-        let mount = daemon.state.get_mount(&name).await.map_err(grpc_internal)?;
-        let mount = mount
-            .map(|mount| {
-                let mut health = daemon.live_mount_healths();
-                let (mount_health, auth_health) = health.take(&mount);
-                api_mount_record(mount, mount_health, auth_health).map_err(grpc_internal)
-            })
-            .transpose()?;
-        Ok(Response::new(wire::GetMountResponse {
-            mount: mount.as_ref().map(grpc::to_mount_record),
-        }))
     }
 
     async fn list_credentials(

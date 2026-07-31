@@ -139,7 +139,7 @@ pub struct CredentialProgress {
 pub struct AttachmentProgress {
     pub key: ResourceKey,
     pub desired_revision: ResourceRevision,
-    pub runtime: omnifs_core::fs::Runtime,
+    pub runtime: omnifs_core::AttachmentRuntime,
     pub stage: AttachmentProgressStage,
     pub completed_bytes: u64,
     pub total_bytes: Option<u64>,

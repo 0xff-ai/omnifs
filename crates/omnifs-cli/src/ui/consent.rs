@@ -5,8 +5,6 @@
 //! same row identities.  Commands own the side effects; this module owns the
 //! invariant that the thing the user approved is the thing the receipt settles.
 
-use std::collections::BTreeMap;
-
 use serde::Serialize;
 
 use super::output::{Output, PromptMode};
@@ -90,31 +88,6 @@ impl Plan {
     pub(crate) fn render(&self, caps: render::Capabilities) -> String {
         let rows = self.rows.iter().map(Row::ledger_row).collect::<Vec<_>>();
         format!("{}\n", render::plan_block(&self.title, &rows, caps))
-    }
-
-    /// Settle outcomes in plan order. An operation that did not produce a
-    /// result is represented as a skipped row, rather than silently dropping a
-    /// row the user approved.
-    pub(crate) fn receipt(&self, outcomes: impl IntoIterator<Item = Outcome>) -> Receipt {
-        let outcomes: BTreeMap<String, Outcome> = outcomes
-            .into_iter()
-            .map(|outcome| (outcome.id.clone(), outcome))
-            .collect();
-        let rows = self
-            .rows
-            .iter()
-            .map(|planned| {
-                outcomes
-                    .get(&planned.id)
-                    .cloned()
-                    .unwrap_or_else(|| Outcome::skip(&planned.id, "not applied"))
-                    .with_key(planned.key.clone())
-            })
-            .collect();
-        Receipt {
-            title: self.title.clone(),
-            rows,
-        }
     }
 }
 
@@ -255,12 +228,6 @@ impl Outcome {
         }
     }
 
-    /// Set the human-facing key without changing the stable operation id.
-    pub(crate) fn with_key(mut self, key: impl Into<String>) -> Self {
-        self.key = key.into();
-        self
-    }
-
     pub(crate) fn glyph(&self) -> Glyph {
         self.state.glyph()
     }
@@ -288,52 +255,9 @@ impl Outcome {
     }
 }
 
-/// Settled rows for one plan.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Receipt {
-    pub(crate) title: String,
-    pub(crate) rows: Vec<Outcome>,
-}
-
-impl Receipt {
-    /// The consent receipt: settled rows at column 0 (never indented under
-    /// the plan's headline, since the operation already happened), then a
-    /// blank line before the caller's closing sentence.
-    pub(crate) fn render(&self, caps: render::Capabilities) -> String {
-        let rows = self
-            .rows
-            .iter()
-            .map(Outcome::ledger_row)
-            .collect::<Vec<_>>();
-        format!("{}\n\n", render::ledger_block(&rows, caps))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn receipt_keeps_stable_plan_ids() {
-        let mut plan = Plan::new("reset");
-        plan.push(Row::remove("daemon", "daemon", "stop"));
-        plan.push(Row::remove("mount:a", "mount a", "delete"));
-        plan.push(Row::keep("provider-store", "provider store", "keep"));
-
-        let receipt = plan.receipt([
-            Outcome::done("mount:a", "deleted"),
-            Outcome::done("daemon", "stopped"),
-        ]);
-        assert_eq!(
-            receipt
-                .rows
-                .iter()
-                .map(|row| row.id.as_str())
-                .collect::<Vec<_>>(),
-            ["daemon", "mount:a", "provider-store"]
-        );
-        assert_eq!(receipt.rows[2].state, OutcomeState::Skip);
-    }
 
     #[test]
     fn dry_run_decision_never_resolves_a_prompt() {
@@ -381,7 +305,7 @@ mod tests {
 
     #[test]
     fn receipt_ledger_row_folds_details_into_the_value_trailer() {
-        let mut outcome = Outcome::done("credential", "revoked").with_key("credential");
+        let mut outcome = Outcome::done("credential", "revoked");
         outcome
             .details
             .push(Outcome::done("upstream", "revoked upstream"));

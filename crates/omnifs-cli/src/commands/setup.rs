@@ -338,27 +338,29 @@ fn count(value: usize, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_core::{AttachmentSpec, fs};
+    use omnifs_core::{
+        ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec,
+    };
     use omnifs_provider::LimitDeclarations;
     use std::path::PathBuf;
 
     fn attachment(
         name: &str,
-        protocol: fs::Protocol,
-        runtime: fs::Runtime,
+        protocol: AttachmentProtocol,
+        runtime: AttachmentRuntime,
     ) -> AttachmentDefinition {
         AttachmentDefinition {
             name: ResourceName::new(name).unwrap(),
             spec: AttachmentSpec::new(
                 protocol,
                 runtime,
-                if runtime == fs::Runtime::Host {
+                if runtime == AttachmentRuntime::Host {
                     PathBuf::from("/tmp/omnifs")
                 } else {
-                    PathBuf::from(fs::GUEST_LOCATION)
+                    PathBuf::from(ATTACHMENT_GUEST_LOCATION)
                 },
-                (runtime == fs::Runtime::Docker).then(|| "image".to_owned()),
-                (runtime == fs::Runtime::Libkrun).then(|| "guest".to_owned()),
+                (runtime == AttachmentRuntime::Docker).then(|| "image".to_owned()),
+                (runtime == AttachmentRuntime::Libkrun).then(|| "guest".to_owned()),
             )
             .unwrap(),
         }
@@ -366,8 +368,8 @@ mod tests {
 
     #[test]
     fn attachment_offer_is_pair_based() {
-        let existing = attachment("one", fs::Protocol::Nfs, fs::Runtime::Host);
-        let candidate = attachment("two", fs::Protocol::Nfs, fs::Runtime::Host);
+        let existing = attachment("one", AttachmentProtocol::Nfs, AttachmentRuntime::Host);
+        let candidate = attachment("two", AttachmentProtocol::Nfs, AttachmentRuntime::Host);
         assert!(has_attachment_pair(
             &[ResourceDefinition::Attachment(existing)],
             &candidate

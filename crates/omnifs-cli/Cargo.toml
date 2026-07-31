@@ -41,8 +41,6 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-atomic-write-file = { workspace = true }
-fs2 = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

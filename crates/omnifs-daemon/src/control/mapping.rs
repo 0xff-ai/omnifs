@@ -8,7 +8,6 @@ pub(crate) fn api_mount_record(
     health: MountHealth,
     auth_health: Option<CredentialHealth>,
 ) -> anyhow::Result<MountRecord> {
-    let last_mutation_id = mount.last_mutation_id;
     let document = mount.document;
     let provider = api_provider_reference(document.provider.clone());
     let definition = ApiMountDefinition {
@@ -31,7 +30,6 @@ pub(crate) fn api_mount_record(
         revision: mount.revision,
         health,
         auth_health,
-        last_mutation_id,
     })
 }
 
@@ -72,7 +70,6 @@ pub(crate) fn api_credential_status_with_scopes(
         generation: summary.generation,
         action_generation: summary.action_generation,
         status: api_credential_status_kind(summary.state),
-        last_mutation_id: summary.last_mutation_id,
     }
 }
 
@@ -103,40 +100,6 @@ pub(crate) const fn api_provider_import_disposition(
     }
 }
 
-/// Project one batch op's durable outcome onto the wire result the client
-/// sees, in submitted order.
-pub(crate) fn api_mutation_op_result(outcome: &omnifs_state::OpOutcome) -> MutationOpResult {
-    match outcome {
-        omnifs_state::OpOutcome::Mount(outcome) => MutationOpResult::Mount(MountOpResult {
-            name: outcome.name.clone(),
-            version: outcome.version,
-            revision: outcome.revision,
-        }),
-        omnifs_state::OpOutcome::Credential(outcome) => {
-            MutationOpResult::Credential(api_credential_outcome(outcome.clone()))
-        },
-    }
-}
-
-fn api_credential_outcome(outcome: omnifs_state::CredentialMutationOutcome) -> CredentialStatus {
-    CredentialStatus {
-        key: CredentialKey {
-            provider_name: outcome.provider_name,
-            scheme: outcome.scheme,
-            account_label: outcome.account_label,
-        },
-        provider: outcome.provider,
-        kind: api_credential_kind(outcome.kind),
-        scopes: outcome.scopes,
-        auth_fingerprint: outcome.auth_fingerprint,
-        version: outcome.version,
-        generation: outcome.generation,
-        action_generation: 0,
-        status: api_credential_status_kind(outcome.state),
-        last_mutation_id: outcome.last_mutation_id,
-    }
-}
-
 const fn api_credential_kind(kind: omnifs_auth::AuthKind) -> CredentialKind {
     match kind {
         omnifs_auth::AuthKind::StaticToken => CredentialKind::StaticToken,
@@ -153,31 +116,6 @@ const fn api_credential_status_kind(state: omnifs_state::CredentialState) -> Cre
         omnifs_state::CredentialState::RevocationUnknown => CredentialStatusKind::RevocationUnknown,
         omnifs_state::CredentialState::Deleted => CredentialStatusKind::Deleted,
     }
-}
-
-pub(crate) fn manager_error(error: &ManagerError) -> ControlError {
-    let (code, message) = match error {
-        ManagerError::Busy => (ControlErrorCode::Busy, error.to_string()),
-        ManagerError::Stopped => (ControlErrorCode::NotReady, error.to_string()),
-        ManagerError::MutationInProgress { .. } => {
-            (ControlErrorCode::MutationInProgress, error.to_string())
-        },
-        ManagerError::LeaseExpired(_) => (ControlErrorCode::LeaseExpired, error.to_string()),
-        ManagerError::LeaseNotHeld(_) => (ControlErrorCode::LeaseNotHeld, error.to_string()),
-        ManagerError::RecoveryRequired(_) => {
-            (ControlErrorCode::RecoveryRequired, error.to_string())
-        },
-        ManagerError::Invalid(_) | ManagerError::CredentialId(_) => {
-            (ControlErrorCode::InvalidRequest, error.to_string())
-        },
-        ManagerError::Mount(inner) => (mount_write_error_code(inner), error.to_string()),
-        ManagerError::Credential(inner) => (credential_write_error_code(inner), error.to_string()),
-        ManagerError::Batch(inner) => return batch_error(inner),
-        ManagerError::Other(_) | ManagerError::Task(_) => {
-            (ControlErrorCode::Internal, error.to_string())
-        },
-    };
-    ControlError::new(code, message)
 }
 
 pub(crate) fn resource_control_error(
@@ -246,52 +184,6 @@ pub(crate) fn resource_control_error(
         | ResourceControlError::Other(_) => ControlErrorCode::Internal,
     };
     ControlError::new(code, error.to_string())
-}
-
-const fn mount_write_error_code(error: &omnifs_state::MountWriteError) -> ControlErrorCode {
-    match error {
-        omnifs_state::MountWriteError::AlreadyExists(_) => ControlErrorCode::AlreadyExists,
-        omnifs_state::MountWriteError::NotFound(_) => ControlErrorCode::NotFound,
-        omnifs_state::MountWriteError::Store(_) => ControlErrorCode::Internal,
-    }
-}
-
-const fn credential_write_error_code(
-    error: &omnifs_state::CredentialWriteError,
-) -> ControlErrorCode {
-    match error {
-        omnifs_state::CredentialWriteError::NotFound(_) => ControlErrorCode::NotFound,
-        omnifs_state::CredentialWriteError::Conflict { .. }
-        | omnifs_state::CredentialWriteError::GenerationConflict { .. } => {
-            ControlErrorCode::Conflict
-        },
-        omnifs_state::CredentialWriteError::FactsMismatch { .. }
-        | omnifs_state::CredentialWriteError::InvalidState { .. } => {
-            ControlErrorCode::InvalidRequest
-        },
-        omnifs_state::CredentialWriteError::Store(_) => ControlErrorCode::Internal,
-    }
-}
-
-/// Map a failed batch op onto the same error vocabulary a standalone mount or
-/// credential failure would use, with the failing op's index folded into the
-/// message since the wire error envelope carries no structured detail channel.
-fn batch_error(error: &omnifs_state::BatchError) -> ControlError {
-    match error {
-        omnifs_state::BatchError::Op {
-            index,
-            error: op_error,
-        } => {
-            let code = match op_error {
-                omnifs_state::StateOpError::Mount(inner) => mount_write_error_code(inner),
-                omnifs_state::StateOpError::Credential(inner) => credential_write_error_code(inner),
-            };
-            ControlError::new(code, format!("batch op {index} failed: {op_error}"))
-        },
-        omnifs_state::BatchError::Store(_) => {
-            ControlError::new(ControlErrorCode::Internal, error.to_string())
-        },
-    }
 }
 
 pub(crate) fn api_credential_health_kind(

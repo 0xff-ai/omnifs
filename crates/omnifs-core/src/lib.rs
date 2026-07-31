@@ -2,10 +2,8 @@
 
 pub mod attachment;
 mod auth_fingerprint;
-mod client_owner_id;
 mod content_type;
 mod file;
-pub mod fs;
 mod mount_name;
 mod mutation;
 mod operation;
@@ -16,11 +14,11 @@ pub mod resource;
 mod state_version;
 
 pub use attachment::{
-    AttachmentSpec, AttachmentSpecError, AttachmentVersion, RuntimeInstanceId,
-    RuntimeInstanceIdError,
+    ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec,
+    AttachmentSpecError, AttachmentVersion, ParseAttachmentProtocolError,
+    ParseAttachmentRuntimeError, RuntimeInstanceId, RuntimeInstanceIdError,
 };
 pub use auth_fingerprint::{AuthRuntimeFingerprint, AuthRuntimeFingerprintParseError};
-pub use client_owner_id::{ClientOwnerId, ClientOwnerIdError};
 pub use content_type::ContentType;
 pub use file::{FileSize, ReadMode, Stability};
 pub use mount_name::{MountName, MountNameError};

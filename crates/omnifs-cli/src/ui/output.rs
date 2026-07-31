@@ -22,14 +22,9 @@ pub(crate) const SCHEMA_VERSION: u8 = 1;
 /// the stable 120-column width, never the `crossterm::terminal::size` error
 /// fallback of 80, which would word-wrap content mid-path (a real path or
 /// command embedded in a sentence) the moment stderr is redirected.
-pub(crate) fn stderr_capabilities(quiet: bool) -> super::render::Capabilities {
-    let (is_tty, width, color) = super::style::probe(super::style::Stream::Stderr);
-    super::render::Capabilities {
-        width,
-        is_tty,
-        color,
-        quiet,
-    }
+pub(crate) fn stderr_capabilities(_quiet: bool) -> super::render::Capabilities {
+    let (_is_tty, width, color) = super::style::probe(super::style::Stream::Stderr);
+    super::render::Capabilities { width, color }
 }
 
 #[derive(Debug, Default)]
@@ -618,18 +613,6 @@ impl Output {
         }
     }
 
-    /// The key column width one contiguous ledger block needs. Every flow that emits rows one at a time as async
-    /// work settles (a spinner settling into its ledger row, a live region's
-    /// summary, `up`'s streamed `daemon`/`mounts`/`filesystems` rows) computes
-    /// this once from its full possible key set before the first row prints,
-    /// so the block still reads as one aligned unit. An associated function,
-    /// not a method: the width depends only on the declared key set, never on
-    /// invocation state, so callers reach it as `Output::ledger_block_width`
-    /// beside the other row primitives without an instance in scope.
-    pub(crate) fn ledger_block_width(keys: &[&str]) -> usize {
-        super::render::key_field_width(keys)
-    }
-
     /// Print one durable v2-register ledger row at an externally
     /// supplied key width, so a block whose rows are printed one at a time
     /// as async work settles still reads as one aligned unit rather than
@@ -654,17 +637,6 @@ impl Output {
         }
         let caps = stderr_capabilities(self.quiet);
         crate::ui::eprint_raw(&plan.render(caps));
-    }
-
-    /// Print the consent receipt. `Receipt` owns the row-mapping and block
-    /// shape (`super::consent::Receipt::render`); this method only owns the
-    /// mode/quiet gate every human-only print in this invocation shares.
-    pub(crate) fn receipt(&self, receipt: &super::consent::Receipt) {
-        if self.mode != OutputMode::Human {
-            return;
-        }
-        let caps = stderr_capabilities(self.quiet);
-        crate::ui::eprint_raw(&receipt.render(caps));
     }
 
     /// The v2 register never repeats the command the user just typed, so

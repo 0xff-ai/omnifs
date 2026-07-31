@@ -14,11 +14,6 @@ service Control {
   rpc GetProviderMetadata(GetProviderMetadataRequest) returns (GetProviderMetadataResponse);
   rpc ImportProvider(stream ImportProviderRequest) returns (ImportProviderResponse);
   rpc ImportEmbeddedProvider(ImportEmbeddedProviderRequest) returns (ImportProviderResponse);
-  rpc BeginMutation(BeginMutationRequest) returns (BeginMutationResponse);
-  rpc ApplyMutation(ApplyMutationRequest) returns (ApplyMutationResponse);
-  rpc DropMutation(DropMutationRequest) returns (DropMutationResponse);
-  rpc ListMounts(Empty) returns (ListMountsResponse);
-  rpc GetMount(GetMountRequest) returns (GetMountResponse);
   rpc ListCredentials(Empty) returns (ListCredentialsResponse);
   rpc GetCredentialStatus(GetCredentialStatusRequest) returns (GetCredentialStatusResponse);
   rpc GetResources(Empty) returns (GetResourcesResponse);
@@ -67,43 +62,6 @@ message ProviderUploadStart {
 }
 message ImportProviderResponse { ProviderImportReceipt receipt = 1; }
 message ImportEmbeddedProviderRequest { string name = 1; }
-
-message BeginMutationRequest { bytes mutation_id = 1; }
-message BeginMutationResponse { uint64 lease_deadline_unix_ms = 1; }
-message DropMutationRequest { bytes mutation_id = 1; }
-message DropMutationResponse {}
-
-message ApplyMutationRequest { bytes mutation_id = 1; repeated MutationOp ops = 2; }
-message MutationOp {
-  oneof op {
-    CreateMountOp create_mount = 1;
-    UpdateMountOp update_mount = 2;
-    RemoveMountOp remove_mount = 3;
-    SubmitCredentialOp submit_credential = 4;
-    DeleteCredentialOp delete_credential = 5;
-    RevokeCredentialOp revoke_credential = 6;
-  }
-}
-message CreateMountOp { MountDefinition definition = 1; }
-message UpdateMountOp { string name = 1; MountPatch patch = 2; }
-message RemoveMountOp { string name = 1; }
-message SubmitCredentialOp { CredentialSubmission submission = 1; }
-message DeleteCredentialOp { CredentialKey key = 1; }
-message RevokeCredentialOp { CredentialKey key = 1; }
-
-message ApplyMutationResponse { repeated MutationOpResult results = 1; ServingOutcome serving = 2; }
-message MutationOpResult {
-  oneof result {
-    MountOpResult mount = 1;
-    CredentialStatus credential = 2;
-  }
-}
-message MountOpResult { string name = 1; optional bytes version = 2; uint64 revision = 3; }
-message ServingOutcome { bool serving = 1; optional string recovery_detail = 2; }
-
-message ListMountsResponse { repeated MountRecord mounts = 1; }
-message GetMountRequest { string name = 1; }
-message GetMountResponse { MountRecord mount = 1; }
 
 message ListCredentialsResponse { repeated CredentialStatus credentials = 1; }
 message GetCredentialStatusRequest { CredentialKey key = 1; }
@@ -400,11 +358,7 @@ message ProviderImportReceipt { ProviderReference provider = 1; ProviderImportDi
 message MountDefinition { string name = 1; bytes provider = 2; MountCredential auth = 3; MountLimits limits = 4; bytes config = 5; }
 message MountCredential { string scheme = 1; string account_label = 2; }
 message MountLimits { optional uint32 max_memory_mb = 1; optional uint64 max_fetch_blob_bytes = 2; }
-message MountPatch { optional bytes provider = 1; MountCredentialPatch auth = 2; MountLimitsPatch limits = 3; BytesPatch config = 4; }
-message MountCredentialPatch { oneof value { Empty keep = 1; MountCredential set = 2; Empty clear = 3; } }
-message MountLimitsPatch { oneof value { Empty keep = 1; MountLimits set = 2; Empty clear = 3; } }
-message BytesPatch { oneof value { Empty keep = 1; bytes set = 2; Empty clear = 3; } }
-message MountRecord { MountDefinition definition = 1; ProviderReference provider = 2; bytes version = 3; uint64 revision = 4; MountHealth health = 5; optional CredentialHealth auth_health = 6; bytes last_mutation_id = 7; }
+message MountRecord { MountDefinition definition = 1; ProviderReference provider = 2; bytes version = 3; uint64 revision = 4; MountHealth health = 5; optional CredentialHealth auth_health = 6; }
 message MountHealth {
   oneof value { Empty active = 1; Empty auth_required = 2; string provider_unavailable = 3; string failed = 4; }
 }
@@ -425,20 +379,17 @@ message OAuthMaterial {
 }
 message CredentialClientOverrides { optional string client_id = 1; optional bytes client_secret = 2; optional string redirect_uri = 3; optional StringList scopes = 4; }
 message StringList { repeated string values = 1; }
-message CredentialStatus { CredentialKey key = 1; bytes provider = 2; CredentialKind kind = 3; repeated string scopes = 4; bytes auth_fingerprint = 5; uint64 version = 6; uint64 generation = 7; CredentialStatusKind status = 8; bytes last_mutation_id = 9; uint64 action_generation = 10; }
+message CredentialStatus { CredentialKey key = 1; bytes provider = 2; CredentialKind kind = 3; repeated string scopes = 4; bytes auth_fingerprint = 5; uint64 version = 6; uint64 generation = 7; CredentialStatusKind status = 8; uint64 action_generation = 10; }
 
 message DaemonInfo { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional bytes attach_unix = 5; optional string attach_tcp = 6; }
-message DaemonStatus { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional string attach_tcp = 5; repeated FilesystemSpec filesystems = 6; repeated MountInfo mounts = 7; DaemonHealth health = 8; optional ActiveMutation active_mutation = 9; }
-message ActiveMutation { bytes mutation_id = 1; uint64 lease_deadline_unix_ms = 2; }
-message DaemonInventory { DaemonInfo info = 1; DaemonPhase phase = 2; optional uint64 durable_revision = 3; optional uint64 serving_revision = 4; DaemonHealth health = 5; repeated MountRecord mounts = 6; repeated CredentialStatus credentials = 7; repeated FilesystemSpec attachments = 8; optional ActiveMutation active_mutation = 9; }
-message DaemonRecovery { DaemonPhase phase = 1; optional uint64 durable_revision = 2; optional uint64 serving_revision = 3; optional bytes failed_mutation = 4; HealthReport store_health = 5; RecoveryOffer repair = 6; }
+message DaemonStatus { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional string attach_tcp = 5; repeated AttachmentResource attachments = 6; repeated MountInfo mounts = 7; DaemonHealth health = 8; }
+message DaemonInventory { DaemonInfo info = 1; DaemonPhase phase = 2; optional uint64 durable_revision = 3; optional uint64 serving_revision = 4; DaemonHealth health = 5; repeated MountRecord mounts = 6; repeated CredentialStatus credentials = 7; repeated AttachmentResource attachments = 8; }
+message DaemonRecovery { DaemonPhase phase = 1; optional uint64 durable_revision = 2; optional uint64 serving_revision = 3; HealthReport store_health = 4; RecoveryOffer repair = 5; }
 message RecoveryOffer { bytes id = 1; repeated RepairAction actions = 2; }
 message RepairReceipt { string instance_id = 1; bytes recovery_id = 2; RepairAction action = 3; RepairDisposition disposition = 4; }
 message HealthReport { HealthState state = 1; string message = 2; }
 message DaemonHealth { HealthReport control = 1; HealthReport filesystems = 2; HealthReport mounts = 3; }
 message MountInfo { string mount = 1; string provider_name = 2; string provider_id = 3; optional CredentialHealth auth_health = 4; }
-message FilesystemSpec { string id = 1; FsProtocol protocol = 2; FsRuntime runtime = 3; bytes location = 4; }
-
 enum DaemonPhase { DAEMON_PHASE_UNSPECIFIED = 0; DAEMON_STARTING = 1; DAEMON_READY = 2; DAEMON_RECOVERY_REQUIRED = 3; }
 enum HealthState { HEALTH_STATE_UNSPECIFIED = 0; HEALTH_STARTING = 1; HEALTH_HEALTHY = 2; HEALTH_DEGRADED = 3; HEALTH_UNHEALTHY = 4; }
 enum CredentialHealth { CREDENTIAL_HEALTH_UNSPECIFIED = 0; CREDENTIAL_READY = 1; CREDENTIAL_EXPIRING_SOON = 2; CREDENTIAL_EXPIRED = 3; CREDENTIAL_REFRESH_FAILED = 4; CREDENTIAL_NEEDS_CONSENT = 5; CREDENTIAL_MISSING = 6; CREDENTIAL_STATIC_UNVALIDATED = 7; }
@@ -465,9 +416,6 @@ enum ErrorCode {
   NOT_READY = 5;
   ERROR_RECOVERY_REQUIRED = 6;
   INVALID_REQUEST = 7;
-  MUTATION_IN_PROGRESS = 8;
-  LEASE_EXPIRED = 9;
-  LEASE_NOT_HELD = 10;
   NOT_FOUND = 11;
   ALREADY_EXISTS = 12;
   CONFLICT = 13;

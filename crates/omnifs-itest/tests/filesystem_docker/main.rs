@@ -1,12 +1,12 @@
 //! Docker-hosted FUSE filesystem acceptance.
 //!
-//! `omnifs fs attach --name itest-docker` attaches a separate, credential-free container to a
-//! host-native daemon's shared namespace over TCP and renders kernel FUSE
+//! A desired Docker Attachment starts a separate, credential-free container
+//! against a host-native daemon's shared namespace over TCP and renders kernel FUSE
 //! inside it. This suite proves the container behaves like a real mount for
 //! the standard toolbox (the `fuse-docker` conformance column, reusing the
 //! shared matrix machinery from `omnifs_itest::matrix` rather than forking
 //! it), plus the surrounding lifecycle, timing, and security guarantees:
-//! `omnifs fs {create,restart,detach,ls}`, explicit desired teardown before
+//! `omnifs attachment {restart,rm,ls}`, explicit desired teardown before
 //! `omnifs down`, a cold-start budget, cross-mount byte identity,
 //! kill/reattach behavior, and
 //! the no-credentials contract.
@@ -24,7 +24,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use omnifs_api::DaemonInfo;
+use omnifs_api::{AttachmentDefinition, DaemonInfo};
+use omnifs_core::{
+    ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceName,
+};
 use omnifs_itest::matrix::{self, Exec};
 use omnifs_itest::{live, provider_artifact_dir};
 use tempfile::TempDir;
@@ -139,7 +142,7 @@ fn docker_logs(name: &str) -> String {
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
 /// as a contributor would: daemon start, desired Attachment apply and
-/// progress watch, `fs restart/detach/ls`, `down`. No test
+/// progress watch, `attachment restart/rm/ls`, `down`. No test
 /// touches the user's real `~/.omnifs` or default ports.
 struct Fixture {
     home: TempDir,
@@ -239,76 +242,24 @@ impl Fixture {
     fn up_native(&mut self) {
         self.start_daemon();
 
-        let filesystem = if cfg!(target_os = "linux") {
-            "fuse"
+        let protocol = if cfg!(target_os = "linux") {
+            AttachmentProtocol::Fuse
         } else {
-            "nfs"
+            AttachmentProtocol::Nfs
         };
-        let location = self.mount_point.to_str().expect("mount point utf8");
-        let out = self.run(&[
-            "fs",
-            "create",
-            "--name",
-            "itest-host",
-            "--protocol",
-            filesystem,
-            "--runtime",
-            "host",
-            "--location",
-            location,
-        ]);
-        assert!(
-            out.status.success(),
-            "host filesystem create failed (exit {})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-        let out = self.run(&["fs", "attach", "--name", "itest-host"]);
-        let host_log = std::fs::read_to_string(
-            self.home_path()
-                .join("daemon-state/logs/attachments/itest-host.log"),
-        )
-        .unwrap_or_else(|error| format!("<host filesystem log unavailable: {error}>"));
-        assert!(
-            out.status.success(),
-            "host filesystem attach failed (exit {})\nstdout: {}\nstderr: {}\nhost log:\n{}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-            host_log,
-        );
-        let out = self.run(&[
-            "fs",
-            "create",
-            "--name",
-            "itest-docker",
-            "--protocol",
-            "fuse",
-            "--runtime",
-            "docker",
-        ]);
-        let daemon_log =
-            std::fs::read_to_string(self.home_path().join("daemon-state/logs/daemon.log"))
-                .unwrap_or_else(|error| format!("<daemon log unavailable: {error}>"));
-        let container_logs = self
-            .containers()
-            .into_iter()
-            .map(|name| {
-                let log = docker_logs(&name);
-                format!("--- docker logs {name} (tail) ---\n{log}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            out.status.success(),
-            "Docker filesystem create failed (exit {})\nstdout: {}\nstderr: {}\n\
-             daemon log:\n{}\n{}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-            daemon_log,
-            container_logs,
+        live::ensure_attachment(
+            &self.control_socket(),
+            AttachmentDefinition {
+                name: ResourceName::new("itest-host").unwrap(),
+                spec: AttachmentSpec::new(
+                    protocol,
+                    AttachmentRuntime::Host,
+                    self.mount_point.clone(),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            },
         );
 
         let message = self.mount_point.join("test/hello/message");
@@ -324,24 +275,31 @@ impl Fixture {
     }
 
     fn filesystem_attach(&self) -> Output {
-        self.run(&["fs", "attach", "--name", "itest-docker", "--output", "json"])
+        live::ensure_attachment(
+            &self.control_socket(),
+            AttachmentDefinition {
+                name: ResourceName::new("itest-docker").unwrap(),
+                spec: AttachmentSpec::new(
+                    AttachmentProtocol::Fuse,
+                    AttachmentRuntime::Docker,
+                    ATTACHMENT_GUEST_LOCATION.into(),
+                    Some(self.filesystem_image.clone()),
+                    None,
+                )
+                .unwrap(),
+            },
+        );
+        self.run(&["attachment", "show", "itest-docker", "--output", "json"])
     }
 
     fn filesystem_restart(&self) -> Output {
-        self.run(&[
-            "fs",
-            "restart",
-            "--name",
-            "itest-docker",
-            "--output",
-            "json",
-        ])
+        self.run(&["attachment", "restart", "itest-docker", "--output", "json"])
     }
 
     fn wait_for_filesystem_attachment(&self, id: &str, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
-            let output = self.run(&["fs", "ls", "--output", "json"]);
+            let output = self.run(&["attachment", "ls", "--output", "json"]);
             if serde_json::from_slice::<serde_json::Value>(&output.stdout)
                 .ok()
                 .is_some_and(|value| {
@@ -399,7 +357,9 @@ impl Fixture {
                         .cloned()
                 })
                 .is_some_and(|attachments| {
-                    attachments.iter().any(|attachment| attachment["id"] == id)
+                    attachments
+                        .iter()
+                        .any(|attachment| attachment["name"] == id)
                 })
             {
                 return;
@@ -441,7 +401,7 @@ impl Fixture {
     }
 
     fn filesystem_status(&self) -> Output {
-        self.run(&["fs", "ls"])
+        self.run(&["attachment", "ls"])
     }
 
     fn down(&self) -> Output {
@@ -811,11 +771,11 @@ fn fuse_docker_lifecycle_and_matrix() {
     fixture.assert_filesystem_action_ok(&up_out, "cold start");
     record_cold_start(elapsed);
 
-    // (a) `fs ls` is truthful.
+    // (a) `attachment ls` is truthful.
     let status_out = fixture.filesystem_status();
     assert!(
         status_out.status.success(),
-        "fs ls failed (exit {})\nstdout: {}\nstderr: {}",
+        "attachment ls failed (exit {})\nstdout: {}\nstderr: {}",
         status_out.status,
         String::from_utf8_lossy(&status_out.stdout),
         String::from_utf8_lossy(&status_out.stderr),
@@ -823,7 +783,7 @@ fn fuse_docker_lifecycle_and_matrix() {
     let status_text = String::from_utf8_lossy(&status_out.stdout);
     assert!(
         status_text.contains("ready"),
-        "fs ls must report a ready Docker attachment: {status_text}"
+        "attachment ls must report a ready Docker attachment: {status_text}"
     );
 
     let container = fixture.container_name();
@@ -909,7 +869,7 @@ fn fuse_docker_lifecycle_and_matrix() {
 
     // Remove both desired Attachments explicitly, then stop the daemon with
     // `omnifs down`. The daemon owns runtime teardown before rows vanish.
-    let detached = fixture.run(&["fs", "detach", "--name", "itest-docker"]);
+    let detached = fixture.run(&["attachment", "rm", "itest-docker", "--yes"]);
     assert!(
         detached.status.success(),
         "removing Docker attachment before down failed (exit {})\nstdout: {}\nstderr: {}",
@@ -917,7 +877,7 @@ fn fuse_docker_lifecycle_and_matrix() {
         String::from_utf8_lossy(&detached.stdout),
         String::from_utf8_lossy(&detached.stderr),
     );
-    let detached = fixture.run(&["fs", "detach", "--name", "itest-host"]);
+    let detached = fixture.run(&["attachment", "rm", "itest-host", "--yes"]);
     assert!(
         detached.status.success(),
         "removing host attachment before down failed (exit {})\nstdout: {}\nstderr: {}",

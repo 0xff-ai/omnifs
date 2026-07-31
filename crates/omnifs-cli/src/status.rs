@@ -53,7 +53,7 @@ impl InventoryReport {
             let (severity, label) = daemon_health.descriptor();
             TableState::new(severity.into(), label)
         };
-        let mut metadata = match self.inventory.daemon.pid() {
+        let metadata = match self.inventory.daemon.pid() {
             Some(pid) => vec![
                 TableMeta::new("daemon", format!("pid {pid}")),
                 TableMeta::new("serving", count(self.inventory.mounts.len(), "mount")),
@@ -67,9 +67,6 @@ impl InventoryReport {
                 format!("{} configured", count(self.inventory.mounts.len(), "mount")),
             )],
         };
-        if let Some(active) = &self.inventory.active_mutation {
-            metadata.push(active_mutation_meta(active));
-        }
         let mut context = TableContext::new(
             "omnifs",
             self.inventory.home.display().to_string(),
@@ -142,7 +139,7 @@ pub(crate) fn filesystem_table(
     for filesystem in filesystems {
         let mut row = TableRow::new(
             [
-                TableCell::new(filesystem.spec.id().as_str()),
+                TableCell::new(filesystem.name.as_str()),
                 TableCell::new(filesystem.spec.protocol().as_str()),
                 TableCell::new(filesystem.spec.runtime().as_str()),
                 TableCell::new(filesystem.spec.location().display().to_string()),
@@ -158,7 +155,7 @@ pub(crate) fn filesystem_table(
             next_action,
             Some(NextAction::Doctor {
                 target: ActionTarget::Filesystem(id)
-            }) if id == filesystem.spec.id()
+            }) if id == &filesystem.name
         ) {
             row = row.with_action(TableAction::fix("omnifs doctor"));
         }
@@ -215,20 +212,6 @@ pub(crate) fn mount_table(
         table.push(row);
     }
     table
-}
-
-/// The context strip's `mutation` row: a short-hex id plus the seconds left
-/// on its lease, so a busy daemon's status output names what is holding it
-/// without dumping the full 32-hex-character id.
-fn active_mutation_meta(active: &omnifs_api::ActiveMutation) -> TableMeta {
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-        });
-    let remaining_secs = active.lease_deadline_unix_ms.saturating_sub(now_ms) / 1000;
-    let short_id: String = active.mutation_id.to_string().chars().take(8).collect();
-    TableMeta::new("mutation", format!("{short_id} ({remaining_secs}s left)"))
 }
 
 fn filesystem_summary(filesystems: &[FilesystemStatus]) -> String {
@@ -320,26 +303,6 @@ mod tests {
     }
 
     #[test]
-    fn status_shows_the_active_mutation_lease_when_held() {
-        let inventory = Inventory {
-            active_mutation: Some(omnifs_api::ActiveMutation {
-                mutation_id: omnifs_core::MutationId::from_bytes([0xab; 16]),
-                lease_deadline_unix_ms: u64::MAX,
-            }),
-            ..Inventory::test(DaemonHealth::Running, Vec::new(), Vec::new())
-        };
-        let rendered =
-            InventoryReport { inventory }
-                .render()
-                .render_with(crate::ui::table::RenderOptions {
-                    width: 120,
-                    color: false,
-                });
-        assert!(rendered.contains("mutation"), "{rendered}");
-        assert!(rendered.contains("abababab"), "{rendered}");
-    }
-
-    #[test]
     fn status_exit_code_reserves_daemon_unreachable_for_code_three() {
         assert_eq!(
             report(DaemonHealth::Unreachable).exit_code(),
@@ -366,11 +329,13 @@ mod tests {
         let inventory = Inventory::test(
             DaemonHealth::Running,
             vec![crate::inventory::FilesystemStatus {
-                spec: omnifs_core::fs::Spec::new(
-                    "host".parse().unwrap(),
-                    omnifs_core::fs::Protocol::Nfs,
-                    omnifs_core::fs::Runtime::Host,
+                name: "host".parse().unwrap(),
+                spec: omnifs_core::AttachmentSpec::new(
+                    omnifs_core::AttachmentProtocol::Nfs,
+                    omnifs_core::AttachmentRuntime::Host,
                     "/Users/raul/omnifs".into(),
+                    None,
+                    None,
                 )
                 .unwrap(),
                 state: crate::inventory::FilesystemState::Attached,
@@ -403,11 +368,13 @@ mod tests {
         let inventory = Inventory::test(
             DaemonHealth::Running,
             vec![crate::inventory::FilesystemStatus {
-                spec: omnifs_core::fs::Spec::new(
-                    "host".parse().unwrap(),
-                    omnifs_core::fs::Protocol::Nfs,
-                    omnifs_core::fs::Runtime::Host,
+                name: "host".parse().unwrap(),
+                spec: omnifs_core::AttachmentSpec::new(
+                    omnifs_core::AttachmentProtocol::Nfs,
+                    omnifs_core::AttachmentRuntime::Host,
                     "/Users/raul/omnifs".into(),
+                    None,
+                    None,
                 )
                 .unwrap(),
                 state: crate::inventory::FilesystemState::Attached,
@@ -512,11 +479,13 @@ mod tests {
         let inventory = Inventory::test(
             DaemonHealth::Stopped,
             vec![crate::inventory::FilesystemStatus {
-                spec: omnifs_core::fs::Spec::new(
-                    "host".parse().unwrap(),
-                    omnifs_core::fs::Protocol::Nfs,
-                    omnifs_core::fs::Runtime::Host,
+                name: "host".parse().unwrap(),
+                spec: omnifs_core::AttachmentSpec::new(
+                    omnifs_core::AttachmentProtocol::Nfs,
+                    omnifs_core::AttachmentRuntime::Host,
                     "/Users/raul/omnifs".into(),
+                    None,
+                    None,
                 )
                 .unwrap(),
                 state: crate::inventory::FilesystemState::Detached,

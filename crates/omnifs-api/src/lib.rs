@@ -1,6 +1,6 @@
 //! Shared control-plane domain and wire types for the `omnifs` CLI and daemon.
 
-use omnifs_core::{MountRevision, MutationId};
+use omnifs_core::MountRevision;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -21,20 +21,17 @@ pub use attachment::{
 };
 pub use control::{
     ActionKind, ActionPhase, ActionReceipt, CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MESSAGE_MAX_BYTES,
-    CONTROL_MUTATION_TIMEOUT_SECS, CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_RESOURCE_MAX_COUNT,
-    CONTROL_SHUTDOWN_DRAIN_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS, CONTROL_STREAM_ITEM_MAX_BYTES,
-    CONTROL_STREAM_PAYLOAD_MAX_BYTES, ControlError, ControlErrorCode, CredentialReceipt,
-    MutationOp, MutationOpResult, ProviderImportDisposition, ProviderImportReceipt,
-    ProviderReference, RevokeCredentialRequest, ServingOutcome, SetCredentialMaterialRequest,
+    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_RESOURCE_MAX_COUNT, CONTROL_SHUTDOWN_DRAIN_SECS,
+    CONTROL_SHUTDOWN_TIMEOUT_SECS, CONTROL_STREAM_ITEM_MAX_BYTES, CONTROL_STREAM_PAYLOAD_MAX_BYTES,
+    ControlError, ControlErrorCode, CredentialReceipt, ProviderImportDisposition,
+    ProviderImportReceipt, ProviderReference, RevokeCredentialRequest,
+    SetCredentialMaterialRequest,
 };
 pub use credential::{
     CredentialClientOverrides, CredentialKey, CredentialKind, CredentialMaterial, CredentialStatus,
     CredentialStatusKind, CredentialSubmission, SecretBytes,
 };
-pub use mount::{
-    MountCredential, MountDefinition, MountField, MountHealth, MountLimits, MountOpResult,
-    MountPatch, MountRecord,
-};
+pub use mount::{MountCredential, MountDefinition, MountHealth, MountLimits, MountRecord};
 pub use progress::{
     AttachmentProgress, AttachmentProgressStage, CredentialProgress, CredentialProgressStage,
     ProgressEvent, ProgressEventKind, ProgressSnapshot, ProgressTarget,
@@ -146,15 +143,14 @@ pub struct RepairReceipt {
 }
 
 /// Durable and serving state exposed while the daemon recovers its store or
-/// namespace. The revisions are independent because activation may fail after
-/// the durable mount transaction commits.
+/// namespace. The revisions are independent because reconciliation may fail
+/// after the desired resource transaction commits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonRecovery {
     pub phase: DaemonPhase,
     pub durable_revision: Option<MountRevision>,
     pub serving_revision: Option<MountRevision>,
-    pub failed_mutation: Option<MutationId>,
     pub store_health: HealthReport,
     pub repair: Option<RecoveryOffer>,
 }
@@ -170,11 +166,7 @@ pub struct DaemonInventory {
     pub health: DaemonHealth,
     pub mounts: Vec<MountRecord>,
     pub credentials: Vec<CredentialStatus>,
-    pub attachments: Vec<omnifs_core::fs::Spec>,
-    /// The daemon's single mutation lease, when one is currently held. Same
-    /// source `DaemonStatus::active_mutation` reads, so a client reading
-    /// `GetInventory` for both facts needs only the one round trip.
-    pub active_mutation: Option<ActiveMutation>,
+    pub attachments: Vec<AttachmentDefinition>,
 }
 
 /// Current daemon lifecycle phase.
@@ -199,15 +191,13 @@ pub struct DaemonStatus {
     pub executable: PathBuf,
     /// TCP namespace endpoint this daemon bound for guest filesystems.
     pub attach_tcp: Option<SocketAddr>,
-    /// Every filesystem currently attached to the shared namespace.
-    pub filesystems: Vec<omnifs_core::fs::Spec>,
+    /// Every configured Attachment currently attached to the shared namespace.
+    pub attachments: Vec<AttachmentDefinition>,
     /// Provider mounts loaded in the registry.
     pub mounts: Vec<MountInfo>,
     /// Daemon-owned health for runtime subsystems. CLI status renders these
     /// entries instead of reconstructing daemon health from raw fields.
     pub health: Box<DaemonHealth>,
-    /// The daemon's single mutation lease, when one is currently held.
-    pub active_mutation: Option<ActiveMutation>,
 }
 
 impl DaemonStatus {
@@ -215,14 +205,6 @@ impl DaemonStatus {
     pub fn ready(&self) -> bool {
         self.health.filesystems.state == HealthState::Healthy
     }
-}
-
-/// The daemon's single mutation lease: who holds it and when it expires.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ActiveMutation {
-    pub mutation_id: MutationId,
-    pub lease_deadline_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,7 +320,7 @@ mod tests {
         CredentialHealth, DaemonInfo, DaemonPhase, DaemonRecovery, HealthReport, HealthState,
         RecoveryId, RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt,
     };
-    use omnifs_core::{MountRevision, MutationId};
+    use omnifs_core::MountRevision;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
 
@@ -372,7 +354,6 @@ mod tests {
             phase: DaemonPhase::RecoveryRequired,
             durable_revision: Some(MountRevision::new(7)),
             serving_revision: None,
-            failed_mutation: Some(MutationId::from_bytes([0x11; 16])),
             store_health: HealthReport::new(HealthState::Degraded, "store unavailable"),
             repair: Some(RecoveryOffer {
                 id: RecoveryId::from_bytes([0x22; 16]),

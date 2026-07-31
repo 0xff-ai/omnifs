@@ -1,6 +1,4 @@
-use omnifs_core::{
-    AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MutationId, ProviderId,
-};
+use omnifs_core::{AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, ProviderId};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -160,8 +158,6 @@ pub struct CredentialStatus {
     /// Monotonic precondition for durable credential actions.
     pub action_generation: u64,
     pub status: CredentialStatusKind,
-    /// Id of the batch that last wrote this row, for provenance recovery.
-    pub last_mutation_id: MutationId,
 }
 
 #[cfg(test)]

@@ -305,13 +305,13 @@ fn digest_resources(resources: &[ResourceDefinition]) -> ResourceDigest {
 
 fn write_attachment(hasher: &mut blake3::Hasher, spec: &AttachmentSpec) {
     hasher.update(&[match spec.protocol() {
-        omnifs_core::fs::Protocol::Fuse => 1,
-        omnifs_core::fs::Protocol::Nfs => 2,
+        omnifs_core::AttachmentProtocol::Fuse => 1,
+        omnifs_core::AttachmentProtocol::Nfs => 2,
     }]);
     hasher.update(&[match spec.runtime() {
-        omnifs_core::fs::Runtime::Host => 1,
-        omnifs_core::fs::Runtime::Docker => 2,
-        omnifs_core::fs::Runtime::Libkrun => 3,
+        omnifs_core::AttachmentRuntime::Host => 1,
+        omnifs_core::AttachmentRuntime::Docker => 2,
+        omnifs_core::AttachmentRuntime::Libkrun => 3,
     }]);
     write_bytes(hasher, spec.location().as_os_str().as_encoded_bytes());
     write_optional_string(hasher, spec.docker_image());
@@ -565,7 +565,7 @@ pub enum ResourceDefinitionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_core::fs::{Protocol, Runtime};
+    use omnifs_core::{AttachmentProtocol as Protocol, AttachmentRuntime as Runtime};
     use std::path::PathBuf;
 
     fn name(value: &str) -> ResourceName {

@@ -7,10 +7,12 @@ use omnifs_api::{
     ActionKind, ActionPhase, ActionReceipt, AttachmentProgress, AttachmentProgressStage,
     ProgressEventKind, ProgressTarget, ResourcePhase,
 };
-use omnifs_core::{AttachmentSpec, ResourceKey, ResourceKind, ResourceName, ResourceRevision, fs};
+use omnifs_core::{
+    AttachmentRuntime, AttachmentSpec, ResourceKey, ResourceKind, ResourceName, ResourceRevision,
+};
 use omnifs_fs_runtime::{
-    AttachEndpoints, ConfirmedRuntime, RuntimeAssets, RuntimeDriver, RuntimeEvent,
-    RuntimeEventReceiver, RuntimeEventSink, RuntimePaths, RuntimeStage, RuntimeState,
+    AttachEndpoints, ConfirmedRuntime, RuntimeDriver, RuntimeEvent, RuntimeEventReceiver,
+    RuntimeEventSink, RuntimePaths, RuntimeStage, RuntimeState,
 };
 use omnifs_state::{
     AttachmentInstance, AttachmentObservation, AttachmentPhase, DesiredAttachment, StateStore,
@@ -1218,7 +1220,7 @@ fn publish_deletion(context: &ReconcileContext, revision: ResourceRevision, work
         .observed_spec
         .as_ref()
         .or(work.instance.desired_spec.as_ref())
-        .map_or(fs::Runtime::Host, AttachmentSpec::runtime);
+        .map_or(AttachmentRuntime::Host, AttachmentSpec::runtime);
     context.resources.progress().record_attachment(
         ProgressTarget::DesiredRevision(revision),
         AttachmentProgress {
@@ -1374,15 +1376,7 @@ fn runtime_driver_with_events(
     spec: &AttachmentSpec,
     events: RuntimeEventSink,
 ) -> anyhow::Result<RuntimeDriver> {
-    RuntimeDriver::new(
-        &context.paths,
-        spec.to_fs_spec(name)?,
-        RuntimeAssets {
-            docker_image: spec.docker_image().map(str::to_owned),
-            guest_image: spec.libkrun_guest_image().map(str::to_owned),
-        },
-        events,
-    )
+    RuntimeDriver::new(&context.paths, name.clone(), spec.clone(), events)
 }
 
 async fn stop_exact(
@@ -1772,11 +1766,12 @@ mod tests {
 
     fn attachment_set(name: ResourceName, location: PathBuf) -> NormalizedResourceSet {
         let protocol = if cfg!(target_os = "linux") {
-            fs::Protocol::Fuse
+            omnifs_core::AttachmentProtocol::Fuse
         } else {
-            fs::Protocol::Nfs
+            omnifs_core::AttachmentProtocol::Nfs
         };
-        let spec = AttachmentSpec::new(protocol, fs::Runtime::Host, location, None, None).unwrap();
+        let spec =
+            AttachmentSpec::new(protocol, AttachmentRuntime::Host, location, None, None).unwrap();
         NormalizedResourceSet::new(vec![ResourceDefinition::Attachment(AttachmentDefinition {
             name,
             spec,

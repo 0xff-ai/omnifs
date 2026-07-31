@@ -14,7 +14,6 @@ mod daemon;
 mod generation_builder;
 mod log_stream;
 mod logging;
-mod manager;
 mod progress;
 mod provider_bundle;
 mod provider_preparer;

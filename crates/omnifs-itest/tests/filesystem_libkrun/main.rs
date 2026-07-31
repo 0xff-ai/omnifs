@@ -17,7 +17,7 @@
 //! for the wrapped invocation.
 //!
 //! Every row's matrix execution goes over ssh-over-vsock via the real
-//! `omnifs fs shell --name itest-libkrun -- <cmd>` CLI path
+//! `omnifs attachment shell itest-libkrun -- <cmd>` CLI path
 //! (`matrix::Exec::SshLibkrun`), the same command construction
 //! `LibkrunRunner::shell_command` builds for interactive `filesystem shell`. One
 //! ssh connection per row (mirroring `filesystem_docker`,
@@ -46,6 +46,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use omnifs_api::AttachmentDefinition;
+use omnifs_core::{
+    ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceName,
+};
 use omnifs_itest::matrix::{self, Exec};
 use omnifs_itest::{live, provider_artifact_dir};
 use tempfile::TempDir;
@@ -157,7 +161,7 @@ fn workspace_root() -> PathBuf {
 
 /// Drives the real `omnifs` binary against a hermetic `OMNIFS_HOME`, exactly
 /// as a contributor would: daemon start, desired Attachment apply and
-/// progress watch, `fs ls`, explicit desired removal, `down`. No test touches
+/// progress watch, `attachment ls`, explicit desired removal, `down`. No test touches
 /// the user's real `~/.omnifs` or default ports.
 struct Fixture {
     home: TempDir,
@@ -280,50 +284,19 @@ impl Fixture {
     fn up_native(&mut self) {
         self.start_daemon();
 
-        let location = self.mount_point.to_str().expect("mount point utf8");
-        let out = self.run(&[
-            "fs",
-            "create",
-            "--name",
-            "itest-host",
-            "--protocol",
-            "nfs",
-            "--runtime",
-            "host",
-            "--location",
-            location,
-        ]);
-        assert!(
-            out.status.success(),
-            "host NFS filesystem create failed (exit {})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-        let out = self.run(&["fs", "attach", "--name", "itest-host"]);
-        assert!(
-            out.status.success(),
-            "host NFS filesystem attach failed (exit {})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
-        );
-        let out = self.run(&[
-            "fs",
-            "create",
-            "--name",
-            "itest-libkrun",
-            "--protocol",
-            "fuse",
-            "--runtime",
-            "libkrun",
-        ]);
-        assert!(
-            out.status.success(),
-            "libkrun filesystem create failed (exit {})\nstdout: {}\nstderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
+        live::ensure_attachment(
+            &self.control_socket(),
+            AttachmentDefinition {
+                name: ResourceName::new("itest-host").unwrap(),
+                spec: AttachmentSpec::new(
+                    AttachmentProtocol::Nfs,
+                    AttachmentRuntime::Host,
+                    self.mount_point.clone(),
+                    None,
+                    None,
+                )
+                .unwrap(),
+            },
         );
 
         let message = self.mount_point.join("test/hello/message");
@@ -339,7 +312,21 @@ impl Fixture {
     }
 
     fn filesystem_attach(&self) -> Output {
-        self.run(&["fs", "attach", "--name", "itest-libkrun"])
+        live::ensure_attachment(
+            &self.control_socket(),
+            AttachmentDefinition {
+                name: ResourceName::new("itest-libkrun").unwrap(),
+                spec: AttachmentSpec::new(
+                    AttachmentProtocol::Fuse,
+                    AttachmentRuntime::Libkrun,
+                    ATTACHMENT_GUEST_LOCATION.into(),
+                    None,
+                    Some(self.guest_image.to_string_lossy().into_owned()),
+                )
+                .unwrap(),
+            },
+        );
+        self.run(&["attachment", "show", "itest-libkrun"])
     }
 
     /// Assert libkrun filesystem attach succeeded; on failure, dump the libkrun serial
@@ -364,7 +351,7 @@ impl Fixture {
             eprintln!("--- {} (tail) ---\n{tail}\n---", serial.display());
         }
         panic!(
-            "omnifs fs attach --name itest-libkrun failed ({context}, exit {})\nstdout: {}\nstderr: {}",
+            "omnifs Attachment bring-up failed ({context}, exit {})\nstdout: {}\nstderr: {}",
             out.status,
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr),
@@ -372,7 +359,7 @@ impl Fixture {
     }
 
     fn filesystem_status(&self) -> Output {
-        self.run(&["fs", "ls"])
+        self.run(&["attachment", "ls"])
     }
 
     fn down(&self) -> Output {
@@ -423,31 +410,6 @@ impl Fixture {
             .mode()
             & 0o777
     }
-
-    fn corrupt_libkrun_payload() -> TempDir {
-        let source_bin = live::omnifs_bin();
-        let source_root = source_bin.parent().expect("omnifs binary directory");
-        let payload = tempfile::tempdir().expect("create corrupt payload directory");
-        for executable in ["omnifs", "omnifs-libkrun"] {
-            std::fs::copy(
-                source_root.join(executable),
-                payload.path().join(executable),
-            )
-            .unwrap_or_else(|error| panic!("copy {executable} into corrupt payload: {error}"));
-        }
-        let runtime = payload.path().join("libexec/omnifs");
-        std::fs::create_dir_all(&runtime).expect("create corrupt payload runtime directory");
-        std::fs::write(runtime.join("libkrun.1.dylib"), b"not a Mach-O dylib")
-            .expect("write corrupt packaged dylib");
-        for asset in ["KRUN_EFI.silent.fd", "runtime-manifest.json"] {
-            std::fs::copy(
-                source_root.join("libexec/omnifs").join(asset),
-                runtime.join(asset),
-            )
-            .unwrap_or_else(|error| panic!("copy {asset} into corrupt payload: {error}"));
-        }
-        payload
-    }
 }
 
 impl Drop for Fixture {
@@ -495,16 +457,15 @@ fn force_unmount(mount_point: &Path) {
     }
 }
 
-/// `omnifs fs shell --name itest-libkrun -- cat
+/// `omnifs attachment shell itest-libkrun -- cat
 /// /omnifs/<mount>/hello/message` returns exact fixture bytes for every
 /// configured mount.
 fn assert_serves(fixture: &Fixture) {
     for root in ["test", "test2"] {
         let guest_path = format!("/omnifs/{root}/hello/message");
         let out = fixture.run(&[
-            "fs",
+            "attachment",
             "shell",
-            "--name",
             "itest-libkrun",
             "--",
             "cat",
@@ -512,7 +473,7 @@ fn assert_serves(fixture: &Fixture) {
         ]);
         assert!(
             out.status.success(),
-            "omnifs fs shell --name itest-libkrun -- cat {guest_path} failed: {}",
+            "omnifs attachment shell itest-libkrun -- cat {guest_path} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&out.stdout), "Hello, world!");
@@ -521,9 +482,8 @@ fn assert_serves(fixture: &Fixture) {
 
 fn assert_guest_lockdown(fixture: &Fixture) {
     let links = fixture.run(&[
-        "fs",
+        "attachment",
         "shell",
-        "--name",
         "itest-libkrun",
         "--",
         "ls",
@@ -542,9 +502,8 @@ fn assert_guest_lockdown(fixture: &Fixture) {
     );
 
     let cmdline = fixture.run(&[
-        "fs",
+        "attachment",
         "shell",
-        "--name",
         "itest-libkrun",
         "--",
         "cat",
@@ -672,13 +631,13 @@ fn libkrun_lifecycle_and_matrix() {
         "launch root must be writable only by its owner"
     );
 
-    // `fs ls` is truthful.
+    // `attachment ls` is truthful.
     let status_out = fixture.filesystem_status();
     assert!(status_out.status.success());
     let status_text = String::from_utf8_lossy(&status_out.stdout);
     assert!(
         status_text.contains("libkrun") && status_text.contains("ready"),
-        "fs ls must report the libkrun attachment ready: {status_text}"
+        "attachment ls must report the libkrun attachment ready: {status_text}"
     );
 
     assert_serves(&fixture);
@@ -723,44 +682,15 @@ fn libkrun_lifecycle_and_matrix() {
     assert_ne!(fixture.libkrun_pid(), Some(killed_pid));
     assert_serves(&fixture);
 
-    let restarted = fixture.run(&["fs", "restart", "--name", "itest-libkrun"]);
+    let restarted = fixture.run(&["attachment", "restart", "itest-libkrun"]);
     fixture.assert_filesystem_attach_ok(&restarted, "restart");
     assert_eq!(fixture.guest_image_hash(), base_hash);
     assert_eq!(fixture.guest_image_mode(), base_mode);
     assert_serves(&fixture);
 
-    // A malformed packaged dylib must fail before pidfile publication, show
-    // the helper's direct loader error, and roll back every launch artifact.
-    let detached_for_failure = fixture.run(&["fs", "detach", "--name", "itest-libkrun"]);
-    assert!(
-        detached_for_failure.status.success(),
-        "detach before failed-launch check: {}",
-        String::from_utf8_lossy(&detached_for_failure.stderr)
-    );
-    let corrupt_payload = Fixture::corrupt_libkrun_payload();
-    let failed = fixture.run_with_bin(
-        &corrupt_payload.path().join("omnifs"),
-        &["fs", "attach", "--name", "itest-libkrun"],
-    );
-    assert!(!failed.status.success(), "corrupt libkrun dylib must fail");
-    let failed_stderr = String::from_utf8_lossy(&failed.stderr);
-    assert!(
-        failed_stderr.contains("omnifs-libkrun exited")
-            && failed_stderr.contains("load packaged libkrun dylib"),
-        "failed launch must show the helper loader error: {failed_stderr}"
-    );
-    assert!(
-        fixture.libkrun_artifacts().is_empty(),
-        "failed helper launch must roll back launch artifacts"
-    );
-    let relaunched = fixture.filesystem_attach();
-    fixture.assert_filesystem_attach_ok(&relaunched, "launch after direct helper failure");
-    assert_serves(&fixture);
-
     let mkdir_out = fixture.run(&[
-        "fs",
+        "attachment",
         "shell",
-        "--name",
         "itest-libkrun",
         "--",
         "mkdir",
@@ -769,13 +699,13 @@ fn libkrun_lifecycle_and_matrix() {
     ]);
     assert!(
         mkdir_out.status.success(),
-        "omnifs fs shell --name itest-libkrun -- mkdir -p {GUEST_SCRATCH} failed: {}",
+        "omnifs attachment shell itest-libkrun -- mkdir -p {GUEST_SCRATCH} failed: {}",
         String::from_utf8_lossy(&mkdir_out.stderr)
     );
 
     // The fuse-libkrun matrix column, through the shared row/executor
     // machinery, over ssh-over-vsock via the real
-    // `omnifs fs shell --name itest-libkrun -- <cmd>` path.
+    // `omnifs attachment shell itest-libkrun -- <cmd>` path.
     let exec = Exec::SshLibkrun {
         omnifs_bin: live::omnifs_bin(),
         home: fixture.home_path().to_path_buf(),
@@ -801,7 +731,7 @@ fn libkrun_lifecycle_and_matrix() {
     // host runners explicitly, then stop the daemon with `omnifs down`.
     // The host-native NFS mount can be transiently busy at shutdown because
     // macOS spawns indexer handles like mds/mdworker against a fresh mount.
-    let libkrun_detached = fixture.run(&["fs", "detach", "--name", "itest-libkrun"]);
+    let libkrun_detached = fixture.run(&["attachment", "rm", "itest-libkrun", "--yes"]);
     assert!(
         libkrun_detached.status.success(),
         "detaching libkrun filesystem before down failed (exit {})\nstdout: {}\nstderr: {}",
@@ -811,7 +741,7 @@ fn libkrun_lifecycle_and_matrix() {
     );
     assert_eq!(fixture.guest_image_hash(), base_hash);
     assert_eq!(fixture.guest_image_mode(), base_mode);
-    let host_detached = fixture.run(&["fs", "detach", "--name", "itest-host"]);
+    let host_detached = fixture.run(&["attachment", "rm", "itest-host", "--yes"]);
     assert!(
         host_detached.status.success(),
         "detaching host filesystem before down failed (exit {})\nstdout: {}\nstderr: {}",

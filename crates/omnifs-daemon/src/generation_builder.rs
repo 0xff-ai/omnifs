@@ -1,16 +1,14 @@
 //! Assembles one durable serving generation from durable state.
 //!
-//! [`GenerationDraft::load`] reads the durable serving snapshot;
+//! [`GenerationDraft::load_resources`] reads the durable desired resources;
 //! [`GenerationDraft::prepare`] resolves every mounted provider and
 //! credential, binds auth, and returns a [`GenerationBuild`] ready to
-//! publish. The single mutation lease means every batch is followed by
-//! exactly one load/prepare/activate pass, so the draft carries no staging
-//! API of its own.
+//! publish. Resource reconciliation owns the load/prepare/activate pass.
 
 mod refresh_sink;
 mod revocation;
 
-pub(crate) use revocation::{PreparedCredentialRevocation, prepare_credential_revocation};
+pub(crate) use revocation::prepare_credential_revocation;
 
 use crate::auth_fingerprint::auth_fingerprint;
 use crate::credential_codec::decode_payload;
@@ -23,7 +21,7 @@ use omnifs_auth::{
 };
 use omnifs_core::{
     ActionId, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MountName,
-    MountRevision, MutationId, ProviderId, ResourceName,
+    MountRevision, ProviderId, ResourceName,
 };
 use omnifs_engine::{
     CredentialProvenance, GenerationProvenance, HostOnline, MountBuildInput, MountBuildState,
@@ -41,9 +39,9 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 
 /// The durable serving snapshot as of `load`: every active mount and
-/// credential a fresh generation should be built from. A mutation batch
-/// commits durably first; `load` then re-reads the result, so the draft
-/// always reflects the batch's outcome rather than staging it separately.
+/// credential a fresh generation should be built from. Resource apply
+/// commits desired state first; `load` then re-reads the result, so the draft
+/// always reflects the durable outcome rather than staging it separately.
 pub(crate) struct GenerationDraft {
     revision: MountRevision,
     mounts: Vec<StoredMount>,
@@ -62,35 +60,6 @@ pub(crate) fn empty_generation(host: &HostOnline) -> anyhow::Result<PublishReady
 }
 
 impl GenerationDraft {
-    pub(crate) async fn load(state: &StateStore) -> anyhow::Result<Self> {
-        let durable = state.serving_snapshot().await?;
-        let mut credentials = Vec::new();
-        let mut pending_refreshes = Vec::new();
-        for credential in durable.credentials {
-            match credential.summary.state {
-                CredentialState::Active => {},
-                CredentialState::PendingRepublish => {
-                    pending_refreshes.push(PendingRefresh {
-                        id: credential.summary.id.clone(),
-                        version: credential.summary.version,
-                        generation: credential.summary.generation,
-                    });
-                },
-                CredentialState::Blocked
-                | CredentialState::RevocationPending
-                | CredentialState::RevocationUnknown
-                | CredentialState::Deleted => continue,
-            }
-            credentials.push(CredentialRuntime::from_stored(credential)?);
-        }
-        Ok(Self {
-            revision: durable.revision,
-            mounts: durable.mounts,
-            credentials,
-            pending_refreshes,
-        })
-    }
-
     /// Resolve the authoritative declarative resources into one immutable
     /// serving draft. Provider resource names are aliases only; mounted
     /// generations pin the exact retained artifact digest.
@@ -174,7 +143,6 @@ impl GenerationDraft {
                     config: mount.config.clone(),
                 },
                 revision,
-                MutationId::from_bytes([0; 16]),
             )?);
         }
 
@@ -184,16 +152,6 @@ impl GenerationDraft {
             credentials,
             pending_refreshes,
         })
-    }
-
-    pub(crate) fn has_pending_refreshes(&self) -> bool {
-        !self.pending_refreshes.is_empty()
-    }
-
-    /// The mounts this draft was loaded with, so a caller can check whether
-    /// any of them pins a given provider before deciding to rebuild.
-    pub(crate) fn mounts(&self) -> &[StoredMount] {
-        &self.mounts
     }
 
     pub(crate) fn provenance(&self) -> GenerationProvenance {
@@ -495,12 +453,7 @@ pub(crate) async fn finish_resource_credential_revocation(
         },
     };
     state
-        .finish_credential_revocation(
-            id,
-            MutationId::from_bytes(*action_id.as_bytes()),
-            finish,
-            scopes,
-        )
+        .finish_credential_revocation(id, action_id, finish, scopes)
         .await?;
     Ok(match finish {
         CredentialRevocationFinish::Deleted => RevocationActionOutcome::Deleted,

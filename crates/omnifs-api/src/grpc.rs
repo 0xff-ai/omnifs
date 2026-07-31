@@ -11,23 +11,22 @@ pub mod wire {
 }
 
 use crate::{
-    ActionKind, ActionPhase, ActionReceipt, ActiveMutation, ApplyReceipt, ApplyResourcesRequest,
-    AttachmentAccess, AttachmentCommand, AttachmentDefinition, AttachmentPhase, AttachmentProgress,
+    ActionKind, ActionPhase, ActionReceipt, ApplyReceipt, ApplyResourcesRequest, AttachmentAccess,
+    AttachmentCommand, AttachmentDefinition, AttachmentPhase, AttachmentProgress,
     AttachmentProgressStage, AttachmentStatus, CONTROL_RESOURCE_MAX_COUNT, ControlError,
     ControlErrorCode, CredentialClientOverrides, CredentialDefinition, CredentialHealth,
     CredentialKey, CredentialKind, CredentialMaterial, CredentialMaterialSidecar,
     CredentialProgress, CredentialProgressStage, CredentialReceipt, CredentialStatus,
     CredentialStatusKind, CredentialSubmission, DaemonHealth, DaemonInfo, DaemonInventory,
     DaemonPhase, DaemonRecovery, DaemonStatus, GetAttachmentAccessRequest, HealthReport,
-    HealthState, MountCredential, MountDefinition, MountField, MountHealth, MountLimits,
-    MountOpResult, MountPatch, MountRecord, MountResourceDefinition, MutationOp, MutationOpResult,
-    NormalizedResourceSet, ProgressEvent, ProgressEventKind, ProgressSnapshot, ProgressTarget,
-    ProviderDefinition, ProviderImportDisposition, ProviderImportReceipt, ProviderMetadata,
-    ProviderPreparationProgress, ProviderPreparationStage, ProviderReference, RecoveryId,
-    RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt, ResourceChange,
-    ResourceChangeAction, ResourceDeclarations, ResourceDefinition, ResourceLimits, ResourcePhase,
-    ResourcePlan, ResourceSnapshot, ResourceStatus, RestartAttachmentRequest,
-    RevokeCredentialRequest, SecretBytes, ServingOutcome, ServingProgress, ServingProgressStage,
+    HealthState, MountCredential, MountDefinition, MountHealth, MountLimits, MountRecord,
+    MountResourceDefinition, NormalizedResourceSet, ProgressEvent, ProgressEventKind,
+    ProgressSnapshot, ProgressTarget, ProviderDefinition, ProviderImportDisposition,
+    ProviderImportReceipt, ProviderMetadata, ProviderPreparationProgress, ProviderPreparationStage,
+    ProviderReference, RecoveryId, RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt,
+    ResourceChange, ResourceChangeAction, ResourceDeclarations, ResourceDefinition, ResourceLimits,
+    ResourcePhase, ResourcePlan, ResourceSnapshot, ResourceStatus, RestartAttachmentRequest,
+    RevokeCredentialRequest, SecretBytes, ServingProgress, ServingProgressStage,
     SetCredentialMaterialRequest,
 };
 use omnifs_core::{
@@ -296,11 +295,6 @@ pub fn daemon_recovery(v: &wire::DaemonRecovery) -> Result<DaemonRecovery, FromG
         )?,
         durable_revision: v.durable_revision.map(MountRevision::new),
         serving_revision: v.serving_revision.map(MountRevision::new),
-        failed_mutation: v
-            .failed_mutation
-            .as_ref()
-            .map(|x| mutation_id(x))
-            .transpose()?,
         store_health: health_report(&req(v.store_health.clone(), "store health")?)?,
         repair: v.repair.as_ref().map(recovery_offer).transpose()?,
     })
@@ -310,7 +304,6 @@ pub fn to_daemon_recovery(v: &DaemonRecovery) -> wire::DaemonRecovery {
         phase: to_daemon_phase(v.phase),
         durable_revision: v.durable_revision.map(MountRevision::get),
         serving_revision: v.serving_revision.map(MountRevision::get),
-        failed_mutation: v.failed_mutation.map(|x| x.as_bytes().to_vec().into()),
         store_health: Some(to_health_report(&v.store_health)),
         repair: v.repair.as_ref().map(to_recovery_offer),
     }
@@ -354,7 +347,6 @@ pub fn mount_record(v: &wire::MountRecord) -> Result<MountRecord, FromGrpcError>
                 )
             })
             .transpose()?,
-        last_mutation_id: mutation_id(&v.last_mutation_id)?,
     })
 }
 fn credential_health(v: wire::CredentialHealth) -> Result<CredentialHealth, FromGrpcError> {
@@ -392,22 +384,7 @@ pub fn to_mount_record(v: &MountRecord) -> wire::MountRecord {
         revision: v.revision.get(),
         health: Some(to_mount_health(&v.health)),
         auth_health: v.auth_health.map(to_credential_health),
-        last_mutation_id: v.last_mutation_id.as_bytes().to_vec().into(),
     }
-}
-pub fn to_mount_op_result(v: &MountOpResult) -> wire::MountOpResult {
-    wire::MountOpResult {
-        name: v.name.to_string(),
-        version: v.version.map(|x| x.as_bytes().to_vec().into()),
-        revision: v.revision.get(),
-    }
-}
-pub fn mount_op_result(v: &wire::MountOpResult) -> Result<MountOpResult, FromGrpcError> {
-    Ok(MountOpResult {
-        name: MountName::new(v.name.clone()).map_err(|_| FromGrpcError::Invalid("mount name"))?,
-        version: v.version.as_ref().map(|x| mount_version(x)).transpose()?,
-        revision: MountRevision::new(v.revision),
-    })
 }
 
 fn mount_info(v: &wire::MountInfo) -> Result<crate::MountInfo, FromGrpcError> {
@@ -427,19 +404,6 @@ fn mount_info(v: &wire::MountInfo) -> Result<crate::MountInfo, FromGrpcError> {
     })
 }
 
-fn active_mutation(v: &wire::ActiveMutation) -> Result<ActiveMutation, FromGrpcError> {
-    Ok(ActiveMutation {
-        mutation_id: mutation_id(&v.mutation_id)?,
-        lease_deadline_unix_ms: v.lease_deadline_unix_ms,
-    })
-}
-fn to_active_mutation(v: &ActiveMutation) -> wire::ActiveMutation {
-    wire::ActiveMutation {
-        mutation_id: v.mutation_id.as_bytes().to_vec().into(),
-        lease_deadline_unix_ms: v.lease_deadline_unix_ms,
-    }
-}
-
 pub fn daemon_status(v: &wire::DaemonStatus) -> Result<DaemonStatus, FromGrpcError> {
     Ok(DaemonStatus {
         version: v.version.clone(),
@@ -451,18 +415,13 @@ pub fn daemon_status(v: &wire::DaemonStatus) -> Result<DaemonStatus, FromGrpcErr
             .as_deref()
             .map(|x| x.parse().map_err(|_| FromGrpcError::Invalid("attach tcp")))
             .transpose()?,
-        filesystems: v
-            .filesystems
+        attachments: v
+            .attachments
             .iter()
-            .map(filesystem_spec)
+            .map(attachment_definition)
             .collect::<Result<_, _>>()?,
         mounts: v.mounts.iter().map(mount_info).collect::<Result<_, _>>()?,
         health: Box::new(daemon_health(&req(v.health.clone(), "daemon health")?)?),
-        active_mutation: v
-            .active_mutation
-            .as_ref()
-            .map(active_mutation)
-            .transpose()?,
     })
 }
 
@@ -489,13 +448,8 @@ pub fn daemon_inventory(v: &wire::DaemonInventory) -> Result<DaemonInventory, Fr
         attachments: v
             .attachments
             .iter()
-            .map(filesystem_spec)
+            .map(attachment_definition)
             .collect::<Result<_, _>>()?,
-        active_mutation: v
-            .active_mutation
-            .as_ref()
-            .map(active_mutation)
-            .transpose()?,
     })
 }
 
@@ -506,7 +460,7 @@ pub fn to_daemon_status(v: &DaemonStatus) -> wire::DaemonStatus {
         instance_id: v.instance_id.clone(),
         executable: path_bytes(&v.executable).into(),
         attach_tcp: v.attach_tcp.map(|x| x.to_string()),
-        filesystems: v.filesystems.iter().map(to_filesystem_spec).collect(),
+        attachments: v.attachments.iter().map(to_attachment_definition).collect(),
         mounts: v
             .mounts
             .iter()
@@ -518,7 +472,6 @@ pub fn to_daemon_status(v: &DaemonStatus) -> wire::DaemonStatus {
             })
             .collect(),
         health: Some(to_daemon_health(&v.health)),
-        active_mutation: v.active_mutation.as_ref().map(to_active_mutation),
     }
 }
 pub fn to_daemon_inventory(v: &DaemonInventory) -> wire::DaemonInventory {
@@ -530,8 +483,7 @@ pub fn to_daemon_inventory(v: &DaemonInventory) -> wire::DaemonInventory {
         health: Some(to_daemon_health(&v.health)),
         mounts: v.mounts.iter().map(to_mount_record).collect(),
         credentials: v.credentials.iter().map(to_credential_status).collect(),
-        attachments: v.attachments.iter().map(to_filesystem_spec).collect(),
-        active_mutation: v.active_mutation.as_ref().map(to_active_mutation),
+        attachments: v.attachments.iter().map(to_attachment_definition).collect(),
     }
 }
 
@@ -543,9 +495,6 @@ pub fn error_detail(v: &wire::ErrorDetail) -> Result<ControlError, FromGrpcError
         wire::ErrorCode::NotReady => ControlErrorCode::NotReady,
         wire::ErrorCode::ErrorRecoveryRequired => ControlErrorCode::RecoveryRequired,
         wire::ErrorCode::InvalidRequest => ControlErrorCode::InvalidRequest,
-        wire::ErrorCode::MutationInProgress => ControlErrorCode::MutationInProgress,
-        wire::ErrorCode::LeaseExpired => ControlErrorCode::LeaseExpired,
-        wire::ErrorCode::LeaseNotHeld => ControlErrorCode::LeaseNotHeld,
         wire::ErrorCode::NotFound => ControlErrorCode::NotFound,
         wire::ErrorCode::AlreadyExists => ControlErrorCode::AlreadyExists,
         wire::ErrorCode::Conflict => ControlErrorCode::Conflict,
@@ -570,9 +519,6 @@ pub fn to_error_detail(v: &ControlError) -> wire::ErrorDetail {
             ControlErrorCode::NotReady => wire::ErrorCode::NotReady as i32,
             ControlErrorCode::RecoveryRequired => wire::ErrorCode::ErrorRecoveryRequired as i32,
             ControlErrorCode::InvalidRequest => wire::ErrorCode::InvalidRequest as i32,
-            ControlErrorCode::MutationInProgress => wire::ErrorCode::MutationInProgress as i32,
-            ControlErrorCode::LeaseExpired => wire::ErrorCode::LeaseExpired as i32,
-            ControlErrorCode::LeaseNotHeld => wire::ErrorCode::LeaseNotHeld as i32,
             ControlErrorCode::NotFound => wire::ErrorCode::NotFound as i32,
             ControlErrorCode::AlreadyExists => wire::ErrorCode::AlreadyExists as i32,
             ControlErrorCode::Conflict => wire::ErrorCode::Conflict as i32,
@@ -598,104 +544,6 @@ pub fn to_error_detail(v: &ControlError) -> wire::ErrorDetail {
             ControlErrorCode::Internal => wire::ErrorCode::Internal as i32,
         },
         message: v.message.clone(),
-    }
-}
-
-pub fn to_mutation_op(v: &MutationOp) -> wire::MutationOp {
-    let op = match v {
-        MutationOp::CreateMount(definition) => {
-            wire::mutation_op::Op::CreateMount(wire::CreateMountOp {
-                definition: Some(to_mount_definition(definition)),
-            })
-        },
-        MutationOp::UpdateMount { name, patch } => {
-            wire::mutation_op::Op::UpdateMount(wire::UpdateMountOp {
-                name: name.to_string(),
-                patch: Some(to_mount_patch(patch)),
-            })
-        },
-        MutationOp::RemoveMount { name } => {
-            wire::mutation_op::Op::RemoveMount(wire::RemoveMountOp {
-                name: name.to_string(),
-            })
-        },
-        MutationOp::SubmitCredential(submission) => {
-            wire::mutation_op::Op::SubmitCredential(wire::SubmitCredentialOp {
-                submission: Some(to_credential_submission(submission)),
-            })
-        },
-        MutationOp::DeleteCredential(key) => {
-            wire::mutation_op::Op::DeleteCredential(wire::DeleteCredentialOp {
-                key: Some(to_credential_key(key)),
-            })
-        },
-        MutationOp::RevokeCredential(key) => {
-            wire::mutation_op::Op::RevokeCredential(wire::RevokeCredentialOp {
-                key: Some(to_credential_key(key)),
-            })
-        },
-    };
-    wire::MutationOp { op: Some(op) }
-}
-
-pub fn mutation_op(v: &wire::MutationOp) -> Result<MutationOp, FromGrpcError> {
-    match req(v.op.clone(), "mutation op")? {
-        wire::mutation_op::Op::CreateMount(x) => Ok(MutationOp::CreateMount(mount_definition(
-            &req(x.definition, "mount definition")?,
-        )?)),
-        wire::mutation_op::Op::UpdateMount(x) => Ok(MutationOp::UpdateMount {
-            name: MountName::new(x.name).map_err(|_| FromGrpcError::Invalid("mount name"))?,
-            patch: mount_patch(&req(x.patch, "mount patch")?)?,
-        }),
-        wire::mutation_op::Op::RemoveMount(x) => Ok(MutationOp::RemoveMount {
-            name: MountName::new(x.name).map_err(|_| FromGrpcError::Invalid("mount name"))?,
-        }),
-        wire::mutation_op::Op::SubmitCredential(x) => Ok(MutationOp::SubmitCredential(
-            credential_submission(&req(x.submission, "credential submission")?)?,
-        )),
-        wire::mutation_op::Op::DeleteCredential(x) => Ok(MutationOp::DeleteCredential(
-            credential_key(&req(x.key, "credential key")?),
-        )),
-        wire::mutation_op::Op::RevokeCredential(x) => Ok(MutationOp::RevokeCredential(
-            credential_key(&req(x.key, "credential key")?),
-        )),
-    }
-}
-
-pub fn to_mutation_op_result(v: &MutationOpResult) -> wire::MutationOpResult {
-    let result = match v {
-        MutationOpResult::Mount(x) => {
-            wire::mutation_op_result::Result::Mount(to_mount_op_result(x))
-        },
-        MutationOpResult::Credential(x) => {
-            wire::mutation_op_result::Result::Credential(to_credential_status(x))
-        },
-    };
-    wire::MutationOpResult {
-        result: Some(result),
-    }
-}
-pub fn mutation_op_result(v: &wire::MutationOpResult) -> Result<MutationOpResult, FromGrpcError> {
-    match req(v.result.clone(), "mutation op result")? {
-        wire::mutation_op_result::Result::Mount(x) => {
-            Ok(MutationOpResult::Mount(mount_op_result(&x)?))
-        },
-        wire::mutation_op_result::Result::Credential(x) => {
-            Ok(MutationOpResult::Credential(credential_status(&x)?))
-        },
-    }
-}
-
-pub fn to_serving_outcome(v: &ServingOutcome) -> wire::ServingOutcome {
-    wire::ServingOutcome {
-        serving: v.serving,
-        recovery_detail: v.recovery_detail.clone(),
-    }
-}
-pub fn serving_outcome(v: &wire::ServingOutcome) -> ServingOutcome {
-    ServingOutcome {
-        serving: v.serving,
-        recovery_detail: v.recovery_detail.clone(),
     }
 }
 
@@ -828,109 +676,6 @@ pub fn to_mount_definition(v: &MountDefinition) -> wire::MountDefinition {
     }
 }
 
-fn auth_patch(
-    v: Option<&wire::MountCredentialPatch>,
-) -> Result<MountField<MountCredential>, FromGrpcError> {
-    let Some(v) = v else {
-        return Ok(MountField::Keep);
-    };
-    match req(v.value.clone(), "auth patch")? {
-        wire::mount_credential_patch::Value::Keep(_) => Ok(MountField::Keep),
-        wire::mount_credential_patch::Value::Set(x) => Ok(MountField::Set(MountCredential {
-            scheme: x.scheme,
-            account_label: x.account_label,
-        })),
-        wire::mount_credential_patch::Value::Clear(_) => Ok(MountField::Clear),
-    }
-}
-fn limits_patch(
-    v: Option<&wire::MountLimitsPatch>,
-) -> Result<MountField<MountLimits>, FromGrpcError> {
-    let Some(v) = v else {
-        return Ok(MountField::Keep);
-    };
-    match req(v.value, "limits patch")? {
-        wire::mount_limits_patch::Value::Keep(_) => Ok(MountField::Keep),
-        wire::mount_limits_patch::Value::Set(x) => Ok(MountField::Set(MountLimits {
-            max_memory_mb: x.max_memory_mb,
-            max_fetch_blob_bytes: x.max_fetch_blob_bytes,
-        })),
-        wire::mount_limits_patch::Value::Clear(_) => Ok(MountField::Clear),
-    }
-}
-fn bytes_patch(v: Option<&wire::BytesPatch>) -> Result<MountField<Vec<u8>>, FromGrpcError> {
-    let Some(v) = v else {
-        return Ok(MountField::Keep);
-    };
-    match req(v.value.clone(), "config patch")? {
-        wire::bytes_patch::Value::Keep(_) => Ok(MountField::Keep),
-        wire::bytes_patch::Value::Set(x) => {
-            serde_json::from_slice::<serde_json::Value>(&x)
-                .map_err(|e| FromGrpcError::Json(e.to_string()))?;
-            Ok(MountField::Set(x.to_vec()))
-        },
-        wire::bytes_patch::Value::Clear(_) => Ok(MountField::Clear),
-    }
-}
-pub fn mount_patch(v: &wire::MountPatch) -> Result<MountPatch, FromGrpcError> {
-    Ok(MountPatch {
-        provider: v.provider.as_ref().map(|x| provider_id(x)).transpose()?,
-        auth: auth_patch(v.auth.as_ref())?,
-        limits: limits_patch(v.limits.as_ref())?,
-        config: bytes_patch(v.config.as_ref())?,
-    })
-}
-
-fn to_mount_credential(v: &MountCredential) -> wire::MountCredential {
-    wire::MountCredential {
-        scheme: v.scheme.clone(),
-        account_label: v.account_label.clone(),
-    }
-}
-
-fn to_mount_limits(v: &MountLimits) -> wire::MountLimits {
-    wire::MountLimits {
-        max_memory_mb: v.max_memory_mb,
-        max_fetch_blob_bytes: v.max_fetch_blob_bytes,
-    }
-}
-
-fn to_auth_patch(v: &MountField<MountCredential>) -> wire::MountCredentialPatch {
-    let value = match v {
-        MountField::Keep => wire::mount_credential_patch::Value::Keep(wire::Empty {}),
-        MountField::Set(x) => wire::mount_credential_patch::Value::Set(to_mount_credential(x)),
-        MountField::Clear => wire::mount_credential_patch::Value::Clear(wire::Empty {}),
-    };
-    wire::MountCredentialPatch { value: Some(value) }
-}
-
-fn to_limits_patch(v: &MountField<MountLimits>) -> wire::MountLimitsPatch {
-    let value = match v {
-        MountField::Keep => wire::mount_limits_patch::Value::Keep(wire::Empty {}),
-        MountField::Set(x) => wire::mount_limits_patch::Value::Set(to_mount_limits(x)),
-        MountField::Clear => wire::mount_limits_patch::Value::Clear(wire::Empty {}),
-    };
-    wire::MountLimitsPatch { value: Some(value) }
-}
-
-fn to_bytes_patch(v: &MountField<Vec<u8>>) -> wire::BytesPatch {
-    let value = match v {
-        MountField::Keep => wire::bytes_patch::Value::Keep(wire::Empty {}),
-        MountField::Set(x) => wire::bytes_patch::Value::Set(x.clone().into()),
-        MountField::Clear => wire::bytes_patch::Value::Clear(wire::Empty {}),
-    };
-    wire::BytesPatch { value: Some(value) }
-}
-
-pub fn to_mount_patch(v: &MountPatch) -> wire::MountPatch {
-    wire::MountPatch {
-        provider: v.provider.map(|x| x.as_bytes().to_vec().into()),
-        auth: Some(to_auth_patch(&v.auth)),
-        limits: Some(to_limits_patch(&v.limits)),
-        config: Some(to_bytes_patch(&v.config)),
-    }
-}
-
 pub fn credential_key(v: &wire::CredentialKey) -> CredentialKey {
     CredentialKey {
         provider_name: v.provider_name.clone(),
@@ -1057,7 +802,6 @@ pub fn to_credential_status(v: &CredentialStatus) -> wire::CredentialStatus {
             },
             CredentialStatusKind::Deleted => wire::CredentialStatusKind::CredentialDeleted as i32,
         },
-        last_mutation_id: v.last_mutation_id.as_bytes().to_vec().into(),
     }
 }
 pub fn credential_status(v: &wire::CredentialStatus) -> Result<CredentialStatus, FromGrpcError> {
@@ -1099,54 +843,7 @@ pub fn credential_status(v: &wire::CredentialStatus) -> Result<CredentialStatus,
         generation: CredentialGeneration::new(nz(v.generation, "credential generation")?),
         action_generation: v.action_generation,
         status,
-        last_mutation_id: mutation_id(&v.last_mutation_id)?,
     })
-}
-
-fn to_filesystem_spec(v: &omnifs_core::fs::Spec) -> wire::FilesystemSpec {
-    wire::FilesystemSpec {
-        id: v.id().to_string(),
-        protocol: match v.protocol() {
-            omnifs_core::fs::Protocol::Fuse => wire::FsProtocol::FsFuse as i32,
-            omnifs_core::fs::Protocol::Nfs => wire::FsProtocol::FsNfs as i32,
-        },
-        runtime: match v.runtime() {
-            omnifs_core::fs::Runtime::Host => wire::FsRuntime::FsHost as i32,
-            omnifs_core::fs::Runtime::Docker => wire::FsRuntime::FsDocker as i32,
-            omnifs_core::fs::Runtime::Libkrun => wire::FsRuntime::FsLibkrun as i32,
-        },
-        location: path_bytes(v.location()).into(),
-    }
-}
-fn filesystem_spec(v: &wire::FilesystemSpec) -> Result<omnifs_core::fs::Spec, FromGrpcError> {
-    let id = omnifs_core::fs::Id::new(v.id.clone())
-        .map_err(|_| FromGrpcError::Invalid("filesystem id"))?;
-    let protocol = match wire::FsProtocol::try_from(v.protocol)
-        .map_err(|_| FromGrpcError::Invalid("filesystem protocol"))?
-    {
-        wire::FsProtocol::FsFuse => omnifs_core::fs::Protocol::Fuse,
-        wire::FsProtocol::FsNfs => omnifs_core::fs::Protocol::Nfs,
-        wire::FsProtocol::Unspecified => {
-            return Err(FromGrpcError::Unspecified("filesystem protocol"));
-        },
-    };
-    let runtime = match wire::FsRuntime::try_from(v.runtime)
-        .map_err(|_| FromGrpcError::Invalid("filesystem runtime"))?
-    {
-        wire::FsRuntime::FsHost => omnifs_core::fs::Runtime::Host,
-        wire::FsRuntime::FsDocker => omnifs_core::fs::Runtime::Docker,
-        wire::FsRuntime::FsLibkrun => omnifs_core::fs::Runtime::Libkrun,
-        wire::FsRuntime::Unspecified => {
-            return Err(FromGrpcError::Unspecified("filesystem runtime"));
-        },
-    };
-    omnifs_core::fs::Spec::new(
-        id,
-        protocol,
-        runtime,
-        path_from_bytes(&v.location, "filesystem location")?,
-    )
-    .map_err(|_| FromGrpcError::Path("filesystem location"))
 }
 
 fn action_id(v: &[u8]) -> Result<ActionId, FromGrpcError> {
@@ -1249,8 +946,8 @@ fn attachment_spec(v: &wire::AttachmentSpec) -> Result<AttachmentSpec, FromGrpcE
     let protocol = match wire::FsProtocol::try_from(v.protocol)
         .map_err(|_| FromGrpcError::Invalid("attachment protocol"))?
     {
-        wire::FsProtocol::FsFuse => omnifs_core::fs::Protocol::Fuse,
-        wire::FsProtocol::FsNfs => omnifs_core::fs::Protocol::Nfs,
+        wire::FsProtocol::FsFuse => omnifs_core::AttachmentProtocol::Fuse,
+        wire::FsProtocol::FsNfs => omnifs_core::AttachmentProtocol::Nfs,
         wire::FsProtocol::Unspecified => {
             return Err(FromGrpcError::Unspecified("attachment protocol"));
         },
@@ -1258,9 +955,9 @@ fn attachment_spec(v: &wire::AttachmentSpec) -> Result<AttachmentSpec, FromGrpcE
     let runtime = match wire::FsRuntime::try_from(v.runtime)
         .map_err(|_| FromGrpcError::Invalid("attachment runtime"))?
     {
-        wire::FsRuntime::FsHost => omnifs_core::fs::Runtime::Host,
-        wire::FsRuntime::FsDocker => omnifs_core::fs::Runtime::Docker,
-        wire::FsRuntime::FsLibkrun => omnifs_core::fs::Runtime::Libkrun,
+        wire::FsRuntime::FsHost => omnifs_core::AttachmentRuntime::Host,
+        wire::FsRuntime::FsDocker => omnifs_core::AttachmentRuntime::Docker,
+        wire::FsRuntime::FsLibkrun => omnifs_core::AttachmentRuntime::Libkrun,
         wire::FsRuntime::Unspecified => {
             return Err(FromGrpcError::Unspecified("attachment runtime"));
         },
@@ -1278,13 +975,13 @@ fn attachment_spec(v: &wire::AttachmentSpec) -> Result<AttachmentSpec, FromGrpcE
 fn to_attachment_spec(v: &AttachmentSpec) -> wire::AttachmentSpec {
     wire::AttachmentSpec {
         protocol: match v.protocol() {
-            omnifs_core::fs::Protocol::Fuse => wire::FsProtocol::FsFuse as i32,
-            omnifs_core::fs::Protocol::Nfs => wire::FsProtocol::FsNfs as i32,
+            omnifs_core::AttachmentProtocol::Fuse => wire::FsProtocol::FsFuse as i32,
+            omnifs_core::AttachmentProtocol::Nfs => wire::FsProtocol::FsNfs as i32,
         },
         runtime: match v.runtime() {
-            omnifs_core::fs::Runtime::Host => wire::FsRuntime::FsHost as i32,
-            omnifs_core::fs::Runtime::Docker => wire::FsRuntime::FsDocker as i32,
-            omnifs_core::fs::Runtime::Libkrun => wire::FsRuntime::FsLibkrun as i32,
+            omnifs_core::AttachmentRuntime::Host => wire::FsRuntime::FsHost as i32,
+            omnifs_core::AttachmentRuntime::Docker => wire::FsRuntime::FsDocker as i32,
+            omnifs_core::AttachmentRuntime::Libkrun => wire::FsRuntime::FsLibkrun as i32,
         },
         location: path_bytes(v.location()).into(),
         docker_image: v.docker_image().map(str::to_owned),
@@ -2411,20 +2108,20 @@ fn to_attachment_progress_stage(v: AttachmentProgressStage) -> i32 {
 fn filesystem_runtime(
     v: i32,
     field: &'static str,
-) -> Result<omnifs_core::fs::Runtime, FromGrpcError> {
+) -> Result<omnifs_core::AttachmentRuntime, FromGrpcError> {
     match wire::FsRuntime::try_from(v).map_err(|_| FromGrpcError::Invalid(field))? {
-        wire::FsRuntime::FsHost => Ok(omnifs_core::fs::Runtime::Host),
-        wire::FsRuntime::FsDocker => Ok(omnifs_core::fs::Runtime::Docker),
-        wire::FsRuntime::FsLibkrun => Ok(omnifs_core::fs::Runtime::Libkrun),
+        wire::FsRuntime::FsHost => Ok(omnifs_core::AttachmentRuntime::Host),
+        wire::FsRuntime::FsDocker => Ok(omnifs_core::AttachmentRuntime::Docker),
+        wire::FsRuntime::FsLibkrun => Ok(omnifs_core::AttachmentRuntime::Libkrun),
         wire::FsRuntime::Unspecified => Err(FromGrpcError::Unspecified(field)),
     }
 }
 
-fn to_filesystem_runtime(v: omnifs_core::fs::Runtime) -> i32 {
+fn to_filesystem_runtime(v: omnifs_core::AttachmentRuntime) -> i32 {
     match v {
-        omnifs_core::fs::Runtime::Host => wire::FsRuntime::FsHost as i32,
-        omnifs_core::fs::Runtime::Docker => wire::FsRuntime::FsDocker as i32,
-        omnifs_core::fs::Runtime::Libkrun => wire::FsRuntime::FsLibkrun as i32,
+        omnifs_core::AttachmentRuntime::Host => wire::FsRuntime::FsHost as i32,
+        omnifs_core::AttachmentRuntime::Docker => wire::FsRuntime::FsDocker as i32,
+        omnifs_core::AttachmentRuntime::Libkrun => wire::FsRuntime::FsLibkrun as i32,
     }
 }
 
@@ -2768,182 +2465,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn active_mutation_round_trips_and_rejects_short_id() {
-        let value = ActiveMutation {
-            mutation_id: MutationId::from_bytes([2; 16]),
-            lease_deadline_unix_ms: 1_700_000_000_000,
-        };
-        assert_eq!(active_mutation(&to_active_mutation(&value)).unwrap(), value);
-
-        let mut short = to_active_mutation(&value);
-        short.mutation_id = vec![1].into();
-        assert!(matches!(
-            active_mutation(&short),
-            Err(FromGrpcError::Length { .. })
-        ));
-    }
-    #[test]
-    fn mutation_op_round_trips_mount_and_credential_variants() {
-        let create = MutationOp::CreateMount(MountDefinition {
-            name: MountName::new("demo").unwrap(),
-            provider: ProviderId::from_wasm_bytes(b"demo"),
-            auth: None,
-            limits: None,
-            config: br"{}".to_vec(),
-        });
-        match mutation_op(&to_mutation_op(&create)).unwrap() {
-            MutationOp::CreateMount(definition) => assert_eq!(definition.name.as_str(), "demo"),
-            other => panic!("wrong op: {other:?}"),
-        }
-
-        let update = MutationOp::UpdateMount {
-            name: MountName::new("demo").unwrap(),
-            patch: MountPatch::default(),
-        };
-        match mutation_op(&to_mutation_op(&update)).unwrap() {
-            MutationOp::UpdateMount { name, .. } => assert_eq!(name.as_str(), "demo"),
-            other => panic!("wrong op: {other:?}"),
-        }
-
-        let remove = MutationOp::RemoveMount {
-            name: MountName::new("demo").unwrap(),
-        };
-        match mutation_op(&to_mutation_op(&remove)).unwrap() {
-            MutationOp::RemoveMount { name } => assert_eq!(name.as_str(), "demo"),
-            other => panic!("wrong op: {other:?}"),
-        }
-
-        let submit = MutationOp::SubmitCredential(CredentialSubmission {
-            provider: ProviderId::from_wasm_bytes(b"provider"),
-            scheme: "oauth".into(),
-            account_label: "default".into(),
-            material: CredentialMaterial::StaticToken {
-                token: SecretBytes::new(b"secret".to_vec()),
-            },
-            overrides: CredentialClientOverrides {
-                client_id: None,
-                client_secret: None,
-                redirect_uri: None,
-                scopes: None,
-            },
-        });
-        match mutation_op(&to_mutation_op(&submit)).unwrap() {
-            MutationOp::SubmitCredential(submission) => {
-                assert_eq!(submission.account_label, "default");
-            },
-            other => panic!("wrong op: {other:?}"),
-        }
-
-        let key = CredentialKey {
-            provider_name: "provider".into(),
-            scheme: "oauth".into(),
-            account_label: "default".into(),
-        };
-        let delete = MutationOp::DeleteCredential(key.clone());
-        assert!(matches!(
-            mutation_op(&to_mutation_op(&delete)).unwrap(),
-            MutationOp::DeleteCredential(k) if k == key
-        ));
-        let revoke = MutationOp::RevokeCredential(key.clone());
-        assert!(matches!(
-            mutation_op(&to_mutation_op(&revoke)).unwrap(),
-            MutationOp::RevokeCredential(k) if k == key
-        ));
-    }
-    #[test]
-    fn mutation_op_result_round_trips_mount_and_credential() {
-        let mount = MutationOpResult::Mount(MountOpResult {
-            name: MountName::new("demo").unwrap(),
-            version: Some(MountVersion::from_digest([3; 32])),
-            revision: MountRevision::new(4),
-        });
-        assert_eq!(
-            mutation_op_result(&to_mutation_op_result(&mount)).unwrap(),
-            mount
-        );
-
-        let credential = MutationOpResult::Credential(CredentialStatus {
-            key: CredentialKey {
-                provider_name: "provider".into(),
-                scheme: "oauth".into(),
-                account_label: "default".into(),
-            },
-            provider: ProviderId::from_wasm_bytes(b"provider"),
-            kind: CredentialKind::OAuth,
-            scopes: vec!["read".into()],
-            auth_fingerprint: AuthRuntimeFingerprint::from_digest([5; 32]),
-            version: CredentialVersion::new(std::num::NonZeroU64::new(1).unwrap()),
-            generation: CredentialGeneration::new(std::num::NonZeroU64::new(2).unwrap()),
-            action_generation: 3,
-            status: CredentialStatusKind::Active,
-            last_mutation_id: MutationId::from_bytes([6; 16]),
-        });
-        assert_eq!(
-            mutation_op_result(&to_mutation_op_result(&credential)).unwrap(),
-            credential
-        );
-    }
-    #[test]
-    fn serving_outcome_round_trips_with_and_without_detail() {
-        let serving = ServingOutcome {
-            serving: true,
-            recovery_detail: None,
-        };
-        assert_eq!(serving_outcome(&to_serving_outcome(&serving)), serving);
-
-        let recovering = ServingOutcome {
-            serving: false,
-            recovery_detail: Some("store unavailable".into()),
-        };
-        assert_eq!(
-            serving_outcome(&to_serving_outcome(&recovering)),
-            recovering
-        );
-    }
-    #[test]
-    fn mount_patch_preserves_keep_set_clear() {
-        let keep = wire::MountPatch {
-            provider: None,
-            auth: Some(wire::MountCredentialPatch {
-                value: Some(wire::mount_credential_patch::Value::Keep(wire::Empty {})),
-            }),
-            limits: Some(wire::MountLimitsPatch {
-                value: Some(wire::mount_limits_patch::Value::Clear(wire::Empty {})),
-            }),
-            config: Some(wire::BytesPatch {
-                value: Some(wire::bytes_patch::Value::Set(
-                    br#"{"enabled":true}"#.to_vec().into(),
-                )),
-            }),
-        };
-        let patch = mount_patch(&keep).unwrap();
-        assert!(matches!(patch.auth, MountField::Keep));
-        assert!(matches!(patch.limits, MountField::Clear));
-        assert!(
-            matches!(patch.config, MountField::Set(ref bytes) if bytes == br#"{"enabled":true}"#)
-        );
-    }
-    #[test]
-    fn mount_patch_encoder_round_trips_and_validates_json() {
-        let value = MountPatch {
-            provider: Some(ProviderId::from_wasm_bytes(b"provider")),
-            auth: MountField::Set(MountCredential {
-                scheme: "oauth".into(),
-                account_label: "default".into(),
-            }),
-            limits: MountField::Clear,
-            config: MountField::Set(br#"{"enabled":true}"#.to_vec()),
-        };
-        assert_eq!(mount_patch(&to_mount_patch(&value)).unwrap(), value);
-        let invalid = wire::MountPatch {
-            config: Some(wire::BytesPatch {
-                value: Some(wire::bytes_patch::Value::Set(b"not-json".to_vec().into())),
-            }),
-            ..Default::default()
-        };
-        assert!(matches!(mount_patch(&invalid), Err(FromGrpcError::Json(_))));
-    }
-    #[test]
     fn secret_domain_debug_is_redacted() {
         let value = CredentialSubmission {
             provider: ProviderId::from_wasm_bytes(b"x"),
@@ -3032,7 +2553,6 @@ mod tests {
             generation: CredentialGeneration::new(std::num::NonZeroU64::new(2).unwrap()),
             action_generation: 3,
             status: CredentialStatusKind::Active,
-            last_mutation_id: MutationId::from_bytes([6; 16]),
         };
         assert_eq!(
             credential_status(&to_credential_status(&status)).unwrap(),
@@ -3081,114 +2601,11 @@ mod tests {
         ));
     }
     #[test]
-    fn daemon_status_and_inventory_round_trip_nested_state() {
-        let report = |state| HealthReport::new(state, "ok");
-        let health = DaemonHealth::new(
-            report(HealthState::Healthy),
-            report(HealthState::Healthy),
-            report(HealthState::Degraded),
-        );
-        let info = DaemonInfo {
-            version: "0.2.1".into(),
-            pid: 42,
-            instance_id: "instance".into(),
-            executable: PathBuf::from("/bin/omnifs"),
-            attach_unix: Some(PathBuf::from("/tmp/omnifs.sock")),
-            attach_tcp: Some("127.0.0.1:1234".parse().unwrap()),
-        };
-        let active_mutation = ActiveMutation {
-            mutation_id: MutationId::from_bytes([7; 16]),
-            lease_deadline_unix_ms: 1_700_000_000_000,
-        };
-        let status = DaemonStatus {
-            version: info.version.clone(),
-            pid: info.pid,
-            instance_id: info.instance_id.clone(),
-            executable: info.executable.clone(),
-            attach_tcp: info.attach_tcp,
-            filesystems: vec![],
-            mounts: vec![crate::MountInfo {
-                mount: "demo".into(),
-                provider_name: "provider".into(),
-                provider_id: "hash".into(),
-                auth_health: Some(CredentialHealth::Ready),
-            }],
-            health: Box::new(health.clone()),
-            active_mutation: Some(active_mutation),
-        };
-        let decoded_status = daemon_status(&to_daemon_status(&status)).unwrap();
-        assert_eq!(decoded_status.mounts.len(), 1);
-        assert_eq!(decoded_status.mounts[0].mount, "demo");
-        assert_eq!(
-            decoded_status.mounts[0].auth_health,
-            Some(CredentialHealth::Ready)
-        );
-        assert_eq!(decoded_status.active_mutation, Some(active_mutation));
-
-        let mount_record = MountRecord {
-            definition: MountDefinition {
-                name: MountName::new("demo").unwrap(),
-                provider: ProviderId::from_wasm_bytes(b"demo"),
-                auth: None,
-                limits: None,
-                config: br"{}".to_vec(),
-            },
-            provider: ProviderReference {
-                id: ProviderId::from_wasm_bytes(b"demo"),
-                name: "demo".into(),
-                version: None,
-            },
-            version: MountVersion::from_digest([1; 32]),
-            revision: MountRevision::new(1),
-            health: MountHealth::Active,
-            auth_health: None,
-            last_mutation_id: MutationId::from_bytes([9; 16]),
-        };
-        let inventory = DaemonInventory {
-            info,
-            phase: DaemonPhase::Ready,
-            durable_revision: Some(MountRevision::new(3)),
-            serving_revision: Some(MountRevision::new(2)),
-            health,
-            mounts: vec![mount_record.clone()],
-            credentials: vec![],
-            attachments: vec![],
-            active_mutation: Some(active_mutation),
-        };
-        let decoded = daemon_inventory(&to_daemon_inventory(&inventory)).unwrap();
-        assert_eq!(decoded.phase, inventory.phase);
-        assert_eq!(decoded.durable_revision, inventory.durable_revision);
-        assert_eq!(decoded.info.attach_tcp, inventory.info.attach_tcp);
-        assert_eq!(decoded.mounts, vec![mount_record]);
-        assert_eq!(decoded.active_mutation, Some(active_mutation));
-    }
-    #[test]
     fn lookup_replies_use_message_presence_as_the_only_absence_signal() {
         let provider = wire::GetProviderMetadataResponse { metadata: None };
-        let mount = wire::GetMountResponse { mount: None };
         let credential = wire::GetCredentialStatusResponse { status: None };
         assert!(provider.metadata.is_none());
-        assert!(mount.mount.is_none());
         assert!(credential.status.is_none());
-    }
-    #[cfg(unix)]
-    #[test]
-    fn unix_paths_round_trip_non_utf8_bytes() {
-        use std::os::unix::ffi::OsStringExt;
-        let location = PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', b't', 0x80]));
-        let spec = omnifs_core::fs::Spec::new(
-            omnifs_core::fs::Id::new("x").unwrap(),
-            omnifs_core::fs::Protocol::Fuse,
-            omnifs_core::fs::Runtime::Host,
-            location,
-        )
-        .unwrap();
-        assert_eq!(
-            filesystem_spec(&to_filesystem_spec(&spec))
-                .unwrap()
-                .location(),
-            spec.location()
-        );
     }
 
     fn new_resource_name(value: &str) -> ResourceName {
@@ -3198,24 +2615,24 @@ mod tests {
     fn supported_attachment() -> AttachmentDefinition {
         let (protocol, runtime) = if cfg!(target_os = "linux") {
             (
-                omnifs_core::fs::Protocol::Fuse,
-                omnifs_core::fs::Runtime::Host,
+                omnifs_core::AttachmentProtocol::Fuse,
+                omnifs_core::AttachmentRuntime::Host,
             )
         } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             (
-                omnifs_core::fs::Protocol::Fuse,
-                omnifs_core::fs::Runtime::Libkrun,
+                omnifs_core::AttachmentProtocol::Fuse,
+                omnifs_core::AttachmentRuntime::Libkrun,
             )
         } else {
             (
-                omnifs_core::fs::Protocol::Nfs,
-                omnifs_core::fs::Runtime::Host,
+                omnifs_core::AttachmentProtocol::Nfs,
+                omnifs_core::AttachmentRuntime::Host,
             )
         };
-        let location = if runtime == omnifs_core::fs::Runtime::Host {
+        let location = if runtime == omnifs_core::AttachmentRuntime::Host {
             PathBuf::from("/tmp/omnifs")
         } else {
-            PathBuf::from(omnifs_core::fs::GUEST_LOCATION)
+            PathBuf::from(omnifs_core::ATTACHMENT_GUEST_LOCATION)
         };
         AttachmentDefinition {
             name: new_resource_name("local"),
@@ -3656,7 +3073,7 @@ mod tests {
             ProgressEventKind::AttachmentProgress(AttachmentProgress {
                 key: attachment_key,
                 desired_revision: ResourceRevision::new(4),
-                runtime: omnifs_core::fs::Runtime::Docker,
+                runtime: omnifs_core::AttachmentRuntime::Docker,
                 stage: AttachmentProgressStage::Starting,
                 completed_bytes: 5,
                 total_bytes: Some(9),

@@ -2,7 +2,6 @@
 
 mod action;
 mod attachment;
-mod batch;
 mod blob;
 mod credential;
 mod db;
@@ -15,8 +14,8 @@ mod writer;
 
 use anyhow::Context as _;
 use omnifs_core::{
-    AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MountName, MountRevision,
-    MountVersion, MutationId, ProviderId,
+    ActionId, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MountRevision,
+    ProviderId,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnection, SqlitePoolOptions};
@@ -28,9 +27,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
-use credential::{credential_summaries_query, pending_revocations_query, stored_credentials_query};
+use credential::{credential_summaries_query, stored_credentials_query};
 use db::{Db, RecoveryTransition};
-use mount::mounts_query;
 use paths::{DAEMON_LOG_FILE, ensure_private_dir};
 use provider::{
     MAX_PROVIDER_BYTES, PROVIDER_CHUNK_BYTES, provider_metadata_query, providers_query,
@@ -41,11 +39,10 @@ pub use action::{
     ActionWriteError, AttachmentActionRequest, CredentialActionOperation, CredentialActionRequest,
 };
 pub use attachment::{AttachmentInstance, AttachmentObservation, AttachmentPhase};
-pub use batch::{BatchError, OpOutcome, StateOp, StateOpError};
 pub use credential::{
     CredentialDocument, CredentialRefreshKind, CredentialRefreshOutcome,
-    CredentialRevocationFinish, CredentialState, CredentialSummary, PendingCredentialRevocation,
-    SecretMaterial, StoredCredential, next_submitted,
+    CredentialRevocationFinish, CredentialState, CredentialSummary, SecretMaterial,
+    StoredCredential, next_submitted,
 };
 pub use mount::{MountDocument, MountLimits, StoredMount};
 pub use paths::DaemonStatePaths;
@@ -188,17 +185,6 @@ impl StateStore {
     #[must_use]
     pub fn engine_paths(&self) -> EngineStatePaths {
         self.paths.engine_paths()
-    }
-
-    pub async fn mount_revision(&self) -> anyhow::Result<MountRevision> {
-        let revision: i64 =
-            sqlx::query_scalar("SELECT revision FROM mount_state WHERE singleton = 1")
-                .fetch_one(&self.reads)
-                .await
-                .context("read mount revision")?;
-        Ok(MountRevision::new(
-            u64::try_from(revision).context("mount revision is negative")?,
-        ))
     }
 
     /// Read one exact, non-secret desired-resource head.
@@ -359,60 +345,19 @@ impl StateStore {
             .await?
     }
 
-    /// Read one exact durable head for serving-generation preparation.
-    pub async fn serving_snapshot(&self) -> anyhow::Result<DurableServingSnapshot> {
-        let mut transaction = self
-            .reads
-            .begin()
-            .await
-            .context("begin durable serving snapshot")?;
-        let revision: i64 =
-            sqlx::query_scalar("SELECT revision FROM mount_state WHERE singleton = 1")
-                .fetch_one(&mut *transaction)
-                .await
-                .context("read snapshot mount revision")?;
-        let mounts = sqlx::query_as::<_, StoredMount>(mounts_query!("ORDER BY name"))
-            .fetch_all(&mut *transaction)
-            .await
-            .context("read snapshot mounts")?;
-        let credentials = sqlx::query_as::<_, StoredCredential>(stored_credentials_query!(
-            "WHERE status <> 'deleted' ORDER BY provider_name, scheme, account"
-        ))
-        .fetch_all(&mut *transaction)
-        .await
-        .context("read snapshot credentials")?;
-        transaction
-            .commit()
-            .await
-            .context("release durable serving snapshot")?;
-
-        Ok(DurableServingSnapshot {
-            revision: MountRevision::new(
-                u64::try_from(revision).context("mount revision is negative")?,
-            ),
-            mounts,
-            credentials,
-        })
-    }
-
     pub async fn serving_state(&self) -> anyhow::Result<ServingState> {
-        let (state, detail, revision, failed_mutation) =
-            sqlx::query_as::<_, (String, Option<String>, i64, Option<Vec<u8>>)>(
-                "SELECT state, detail, serving_mount_revision, failed_mutation_id \
-                 FROM recovery_state WHERE singleton = 1",
-            )
-            .fetch_one(&self.reads)
-            .await
-            .context("read recovery state")?;
+        let (state, detail, revision) = sqlx::query_as::<_, (String, Option<String>, i64)>(
+            "SELECT state, detail, serving_mount_revision \
+             FROM recovery_state WHERE singleton = 1",
+        )
+        .fetch_one(&self.reads)
+        .await
+        .context("read recovery state")?;
         Ok(ServingState {
             recovery: RecoveryState::from_row(&state, detail)?,
             revision: MountRevision::new(
                 u64::try_from(revision).context("serving revision is negative")?,
             ),
-            failed_mutation: failed_mutation
-                .as_deref()
-                .map(row::decode_mutation_id)
-                .transpose()?,
         })
     }
 
@@ -434,12 +379,8 @@ impl StateStore {
             .await
     }
 
-    pub async fn mark_recovery_required(
-        &self,
-        mutation: Option<MutationId>,
-        detail: String,
-    ) -> anyhow::Result<()> {
-        self.transition(RecoveryTransition::RecoveryRequired { mutation, detail })
+    pub async fn mark_recovery_required(&self, detail: String) -> anyhow::Result<()> {
+        self.transition(RecoveryTransition::RecoveryRequired { detail })
             .await
     }
 
@@ -543,43 +484,6 @@ impl StateStore {
         .context("list providers")
     }
 
-    pub async fn get_mount(&self, name: &MountName) -> anyhow::Result<Option<StoredMount>> {
-        sqlx::query_as::<_, StoredMount>(mounts_query!("WHERE name = ?1"))
-            .bind(name.as_str())
-            .fetch_optional(&self.reads)
-            .await
-            .context("load mount")
-    }
-
-    pub async fn list_mounts(&self) -> anyhow::Result<Vec<StoredMount>> {
-        sqlx::query_as::<_, StoredMount>(mounts_query!("ORDER BY name"))
-            .fetch_all(&self.reads)
-            .await
-            .context("list mounts")
-    }
-
-    /// Apply every op in `ops`, in order, inside one transaction. The first
-    /// failure rolls back the whole batch. Every mounts/credentials row this
-    /// batch creates or updates is stamped with `mutation_id`, and the global
-    /// mount revision advances at most once, only if `ops` touches a mount.
-    ///
-    /// This is the sole entry point for the six wire mutation ops (mount
-    /// create/update/remove, credential submit/delete/revoke); there is no
-    /// standalone method for any of them.
-    pub async fn apply_batch(
-        &self,
-        mutation_id: MutationId,
-        ops: Vec<StateOp>,
-    ) -> Result<Vec<OpOutcome>, BatchError> {
-        self.writer
-            .call(move |mut connection| async move {
-                let result = Db::new(&mut connection).apply_batch(mutation_id, ops).await;
-                (connection, result)
-            })
-            .await
-            .map_err(BatchError::Store)?
-    }
-
     pub async fn get_credential(
         &self,
         id: &omnifs_auth::CredentialId,
@@ -604,30 +508,19 @@ impl StateStore {
         .context("list credentials")
     }
 
-    pub async fn pending_credential_revocations(
-        &self,
-    ) -> anyhow::Result<Vec<PendingCredentialRevocation>> {
-        sqlx::query_as::<_, PendingCredentialRevocation>(pending_revocations_query!(
-            "WHERE status = 'revocation-pending' ORDER BY provider_name, scheme, account"
-        ))
-        .fetch_all(&self.reads)
-        .await
-        .context("list pending credential revocations")
-    }
-
     /// Complete a revocation an out-of-band provider call finished, matching
-    /// it against the batch id recorded when the revocation began.
+    /// it against the durable action id recorded when revocation began.
     pub async fn finish_credential_revocation(
         &self,
         id: omnifs_auth::CredentialId,
-        mutation_id: MutationId,
+        action_id: ActionId,
         finish: CredentialRevocationFinish,
         scopes: Vec<String>,
     ) -> Result<CredentialMutationOutcome, CredentialWriteError> {
         self.writer
             .call(move |mut connection| async move {
                 let result = Db::new(&mut connection)
-                    .write_credential_revocation_finish(id, mutation_id, finish, scopes)
+                    .write_credential_revocation_finish(id, action_id, finish, scopes)
                     .await;
                 (connection, result)
             })
@@ -729,26 +622,6 @@ pub fn open_daemon_log(paths: &DaemonStatePaths) -> anyhow::Result<std::fs::File
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MountMutationOutcome {
-    pub name: MountName,
-    pub version: Option<MountVersion>,
-    pub revision: MountRevision,
-}
-
-/// The lease serializes every write, so the CAS conflicts a client-supplied
-/// `if_version` used to catch are unreachable except through a bug; only
-/// plain existence integrity errors and internal storage failures remain.
-#[derive(Debug, thiserror::Error)]
-pub enum MountWriteError {
-    #[error("mount `{0}` already exists")]
-    AlreadyExists(MountName),
-    #[error("mount `{0}` was not found")]
-    NotFound(MountName),
-    #[error(transparent)]
-    Store(#[from] anyhow::Error),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialMutationOutcome {
     pub provider_name: String,
     pub scheme: String,
@@ -760,10 +633,6 @@ pub struct CredentialMutationOutcome {
     pub version: CredentialVersion,
     pub generation: CredentialGeneration,
     pub state: CredentialState,
-    /// Provenance: the batch that produced this outcome, echoed back so the
-    /// daemon can populate `CredentialStatus.last_mutation_id` without a
-    /// second read.
-    pub last_mutation_id: MutationId,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -771,8 +640,7 @@ pub enum CredentialWriteError {
     #[error("credential `{0}` was not found")]
     NotFound(omnifs_auth::CredentialId),
     /// Real compare-and-swap, reachable only from the background refresh and
-    /// activation paths: they race the lease-serialized batch writers rather
-    /// than being serialized by them.
+    /// activation paths: they can race daemon action and reconcile writers.
     #[error("credential `{id}` changed; expected {expected:?}, found {actual:?}")]
     Conflict {
         id: omnifs_auth::CredentialId,
@@ -797,14 +665,6 @@ pub enum CredentialWriteError {
     Store(#[from] anyhow::Error),
 }
 
-/// One transactionally consistent durable input for serving preparation.
-#[derive(Debug)]
-pub struct DurableServingSnapshot {
-    pub revision: MountRevision,
-    pub mounts: Vec<StoredMount>,
-    pub credentials: Vec<StoredCredential>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryState {
     Ready,
@@ -827,7 +687,6 @@ impl RecoveryState {
 pub struct ServingState {
     pub recovery: RecoveryState,
     pub revision: MountRevision,
-    pub failed_mutation: Option<MutationId>,
 }
 
 #[cfg(test)]

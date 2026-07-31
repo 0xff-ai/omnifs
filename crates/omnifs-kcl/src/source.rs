@@ -2,8 +2,9 @@ use omnifs_api::{
     AttachmentDefinition, CredentialDefinition, MountResourceDefinition, ProviderDefinition,
     ResourceDeclarations, ResourceDefinition,
 };
-use omnifs_core::fs::{Protocol, Runtime};
-use omnifs_core::{AttachmentSpec, ProviderId, ResourceName};
+use omnifs_core::{
+    AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ProviderId, ResourceName,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 use thiserror::Error;
@@ -42,8 +43,8 @@ pub struct ProviderAuthoring {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AttachmentAuthoring {
     pub name: ResourceName,
-    pub protocol: Protocol,
-    pub runtime: Runtime,
+    pub protocol: AttachmentProtocol,
+    pub runtime: AttachmentRuntime,
     pub location: PathBuf,
     pub docker_image: Option<String>,
     pub libkrun_guest_image: Option<String>,

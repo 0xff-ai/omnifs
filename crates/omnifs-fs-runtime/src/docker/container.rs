@@ -14,7 +14,9 @@ use std::path::Path;
 
 use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, MountPoint};
 use omnifs_api::OMNIFS_ATTACH_ADDR_ENV;
-use omnifs_core::{AttachmentSpec, ResourceName, fs};
+#[cfg(test)]
+use omnifs_core::{ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime};
+use omnifs_core::{AttachmentSpec, ResourceName};
 
 use super::{ContainerName, DockerTarget};
 use crate::{BUILD_CHANNEL, BuildChannel, ImageRef};
@@ -66,22 +68,25 @@ impl DockerTarget {
     /// collide.
     pub(crate) fn filesystem_container_name(
         config_dir: &Path,
-        id: &fs::Id,
+        attachment: &ResourceName,
         is_default_home: bool,
     ) -> anyhow::Result<ContainerName> {
-        container_name_for(config_dir, id, is_default_home)
+        container_name_for(config_dir, attachment, is_default_home)
     }
 }
 
 fn container_name_for(
     config_dir: &Path,
-    id: &fs::Id,
+    attachment: &ResourceName,
     is_default_home: bool,
 ) -> anyhow::Result<ContainerName> {
     let name = if is_default_home {
-        format!("{FILESYSTEM_CONTAINER_BASE}-{id}")
+        format!("{FILESYSTEM_CONTAINER_BASE}-{attachment}")
     } else {
-        format!("{FILESYSTEM_CONTAINER_BASE}-{}-{id}", hash8(config_dir))
+        format!(
+            "{FILESYSTEM_CONTAINER_BASE}-{}-{attachment}",
+            hash8(config_dir)
+        )
     };
     ContainerName::new(name)
 }
@@ -240,12 +245,13 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn spec() -> fs::Spec {
-        fs::Spec::new(
-            "work".parse().unwrap(),
-            fs::Protocol::Fuse,
-            fs::Runtime::Docker,
-            fs::GUEST_LOCATION.into(),
+    fn spec() -> AttachmentSpec {
+        AttachmentSpec::new(
+            AttachmentProtocol::Fuse,
+            AttachmentRuntime::Docker,
+            ATTACHMENT_GUEST_LOCATION.into(),
+            Some("omnifs-filesystem:dev".into()),
+            None,
         )
         .unwrap()
     }
@@ -351,7 +357,7 @@ mod tests {
         let body = target("omnifs-filesystem:dev").build_filesystem_container_body(
             Path::new("/home/u/.omnifs"),
             &attachment(),
-            &AttachmentSpec::from_fs_spec(&spec()).unwrap(),
+            &spec(),
             "runtime",
             54321,
             true,
@@ -394,20 +400,16 @@ mod tests {
         );
         assert_eq!(
             body.cmd,
-            Some(filesystem_command(
-                &attachment(),
-                &AttachmentSpec::from_fs_spec(&spec()).unwrap(),
-                "runtime"
-            ))
+            Some(filesystem_command(&attachment(), &spec(), "runtime"))
         );
     }
 
     #[test]
     fn container_command_preserves_exact_docker_image() {
         let spec = AttachmentSpec::new(
-            fs::Protocol::Fuse,
-            fs::Runtime::Docker,
-            fs::GUEST_LOCATION.into(),
+            AttachmentProtocol::Fuse,
+            AttachmentRuntime::Docker,
+            ATTACHMENT_GUEST_LOCATION.into(),
             Some("omnifs-filesystem:exact".to_owned()),
             None,
         )
@@ -437,7 +439,7 @@ mod tests {
         let body = target("omnifs-filesystem:dev").build_filesystem_container_body(
             Path::new("/home/u/.omnifs"),
             &attachment(),
-            &AttachmentSpec::from_fs_spec(&spec()).unwrap(),
+            &spec(),
             "runtime",
             1,
             false,

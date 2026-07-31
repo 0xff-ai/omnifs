@@ -103,7 +103,7 @@ const DB_IMAGE = "omnifs-dev-db:local";
 const DB_CONTAINER = "omnifs-dev-db";
 const K8S_COMPOSE_PROJECT = "omnifs-devcluster";
 const FILESYSTEM_DEV_IMAGE = "omnifs-filesystem:dev";
-// The fixed guest location in `omnifs_core::fs`; guest filesystems always mount here.
+// The fixed guest location in `omnifs_core::attachment`; guest filesystems always mount here.
 const GUEST_MOUNT = "/omnifs";
 // The filesystem image ships a minimal Debian base (fuse3, coreutils, findutils,
 // jq, rsync, tar, xxd) with no bash/zsh (`Dockerfile`'s `filesystem-base`), so

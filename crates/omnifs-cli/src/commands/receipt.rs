@@ -8,8 +8,7 @@
 
 use serde::Serialize;
 
-use crate::commands::mount::MountInitStatus;
-use crate::ui::consent::{Outcome, OutcomeState, Plan};
+use crate::ui::consent::{Outcome, OutcomeState};
 use crate::ui::output::ResultVerdict;
 
 /// Derive a receipt verdict from its settled rows: `degraded` if any row
@@ -36,49 +35,6 @@ pub(crate) struct TeardownReceipt {
     pub(crate) still_attached: Vec<String>,
 }
 
-/// `omnifs mount rm`: the approved removal plan and the rows settled by the
-/// operation. Dry runs retain the plan while leaving `rows` empty because no
-/// operation was applied.
-#[derive(Debug, Serialize)]
-pub(crate) struct MountRemoveReceipt {
-    pub(crate) verdict: ResultVerdict,
-    pub(crate) mount: String,
-    pub(crate) rows: Vec<Outcome>,
-    pub(crate) dry_run: bool,
-    pub(crate) plan: Plan,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) revision: Option<u64>,
-}
-
-impl MountRemoveReceipt {
-    pub(crate) fn dry_run(mount: String, plan: Plan) -> Self {
-        Self {
-            verdict: ResultVerdict::Ok,
-            mount,
-            rows: Vec::new(),
-            dry_run: true,
-            plan,
-            revision: None,
-        }
-    }
-
-    pub(crate) fn applied(
-        mount: String,
-        plan: Plan,
-        rows: Vec<Outcome>,
-        revision: Option<u64>,
-    ) -> Self {
-        Self {
-            verdict: verdict_from_rows(&rows),
-            mount,
-            rows,
-            dry_run: false,
-            plan,
-            revision,
-        }
-    }
-}
-
 impl TeardownReceipt {
     pub(crate) fn new(rows: Vec<Outcome>, detached: usize, still_attached: Vec<String>) -> Self {
         Self {
@@ -95,26 +51,6 @@ impl TeardownReceipt {
             ResultVerdict::Degraded => crate::error::ExitCode::GenericFailure,
         }
     }
-}
-
-/// `omnifs mount add`: the mount that was written and whether its
-/// credential is live yet.
-#[derive(Debug, Serialize)]
-pub(crate) struct MountAddReceipt {
-    pub(crate) verdict: ResultVerdict,
-    pub(crate) mount: String,
-    pub(crate) status: MountInitStatus,
-    pub(crate) revision: String,
-}
-
-/// `omnifs mount reauth`: the mount whose credential was refreshed. Reaching
-/// this constructor already proves success: any failure to reauthenticate
-/// propagates as an error before a receipt is ever built, so there is no
-/// outcome here for a verdict to be derived from.
-#[derive(Debug, Serialize)]
-pub(crate) struct MountReauthReceipt {
-    pub(crate) verdict: ResultVerdict,
-    pub(crate) mount: String,
 }
 
 #[cfg(test)]

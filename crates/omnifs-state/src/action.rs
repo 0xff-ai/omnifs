@@ -7,9 +7,7 @@ use crate::row::{RowExt as _, sql_int};
 use anyhow::Context as _;
 use omnifs_api::{ActionKind, ActionPhase, ActionReceipt};
 use omnifs_auth::CredentialId;
-use omnifs_core::{
-    ActionId, MutationId, ProviderId, ResourceDigest, ResourceKey, ResourceKind, ResourceName,
-};
+use omnifs_core::{ActionId, ProviderId, ResourceDigest, ResourceKey, ResourceKind, ResourceName};
 use sqlx::Row as _;
 use sqlx::sqlite::{SqliteConnection, SqliteRow};
 
@@ -167,17 +165,20 @@ impl Db<'_> {
         let accepted_generation = actual_generation
             .checked_add(1)
             .context("credential action generation exhausted")?;
-        let mutation = MutationId::from_bytes(*request.action_id.as_bytes());
         let kind = request.operation.kind();
         match request.operation {
             CredentialActionOperation::SetMaterial(document) => {
-                self.submit_credential_row(document, mutation)
+                self.submit_credential_row(document)
                     .await
                     .map_err(|error| anyhow::anyhow!(error))?;
             },
             CredentialActionOperation::Revoke => {
                 if let Err(error) = self
-                    .begin_credential_revocation_row(target.id.clone(), mutation, Vec::new())
+                    .begin_credential_revocation_row(
+                        target.id.clone(),
+                        request.action_id,
+                        Vec::new(),
+                    )
                     .await
                 {
                     return match error {

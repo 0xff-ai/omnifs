@@ -16,13 +16,8 @@ use super::style::{self, Glyph};
 /// equivalent (`stderr_capabilities`) for human-mode command output that
 /// prints its record to stdout rather than narrating to stderr.
 pub(crate) fn stdout_capabilities() -> Capabilities {
-    let (is_tty, width, color) = style::probe(style::Stream::Stdout);
-    Capabilities {
-        width,
-        is_tty,
-        color,
-        quiet: false,
-    }
+    let (_is_tty, width, color) = style::probe(style::Stream::Stdout);
+    Capabilities { width, color }
 }
 
 /// Injected terminal capabilities for one render call. Real detection (an
@@ -32,9 +27,7 @@ pub(crate) fn stdout_capabilities() -> Capabilities {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Capabilities {
     pub(crate) width: usize,
-    pub(crate) is_tty: bool,
     pub(crate) color: bool,
-    pub(crate) quiet: bool,
 }
 
 /// Measure a string's terminal column width, ignoring SGR escapes and
@@ -388,12 +381,7 @@ mod tests {
     use super::*;
 
     fn caps(width: usize, color: bool) -> Capabilities {
-        Capabilities {
-            width,
-            is_tty: color,
-            color,
-            quiet: false,
-        }
+        Capabilities { width, color }
     }
 
     #[test]
@@ -687,9 +675,7 @@ mod tests {
         // capability here, not something this module probes for itself.
         let piped = Capabilities {
             width: 120,
-            is_tty: false,
             color: false,
-            quiet: false,
         };
         let rows = [LedgerRow::new(Glyph::Done, "mounts", "3 attached")];
         let rendered = ledger_block(&rows, piped);

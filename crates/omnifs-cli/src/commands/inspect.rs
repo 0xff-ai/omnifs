@@ -241,9 +241,7 @@ mod tests {
         };
         let caps = crate::ui::render::Capabilities {
             width: 120,
-            is_tty: false,
             color: false,
-            quiet: false,
         };
         let rendered = render_receipt(&receipt, caps);
 
@@ -275,9 +273,7 @@ mod tests {
         };
         let caps = crate::ui::render::Capabilities {
             width: 120,
-            is_tty: false,
             color: false,
-            quiet: false,
         };
         let rendered = render_receipt(&receipt, caps);
 

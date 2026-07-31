@@ -21,7 +21,6 @@ use crate::auth::{Auth, LoginInteractivity};
 use crate::commands::{daemon_start, resource_flow};
 use crate::error::{ErrorVerdict, ExitCode, WithHint as _};
 use crate::rpc::RpcClient;
-use crate::token_source::TokenSource;
 use crate::ui::consent::{Decision, Plan, Row};
 use crate::ui::output::{Output, ResultVerdict};
 
@@ -212,7 +211,7 @@ async fn authenticate_named_with_rpc(
         )
         .await?
     } else {
-        let token = TokenSource::Interactive.read(&output)?;
+        let token = read_interactive_secret(&output)?;
         omnifs_api::CredentialSubmission {
             provider: context.provider_artifact,
             scheme: context.definition.scheme.clone(),
@@ -232,6 +231,17 @@ async fn authenticate_named_with_rpc(
         submission.overrides,
     )
     .await
+}
+
+fn read_interactive_secret(output: &Output) -> anyhow::Result<SecretString> {
+    ensure!(
+        crate::ui::prompt::is_terminal(),
+        "no token source and stdin is not a terminal; use `credential set NAME --from-env VARIABLE`"
+    );
+    let value = crate::ui::prompt::Password::new("Token").ask_with_output(output)?;
+    let value = value.trim();
+    ensure!(!value.is_empty(), "token cannot be empty");
+    Ok(SecretString::from(value.to_owned()))
 }
 
 async fn set(args: SetArgs, output: Output) -> anyhow::Result<ExitCode> {

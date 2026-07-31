@@ -3,12 +3,12 @@
 //! container, attached to the host-native daemon's namespace over vsock
 //! instead of TCP.
 //!
-//! State lives under `client/filesystems/runtime/<id>/libkrun/`: a persistent
-//! per-filesystem ed25519 keypair (survives across launches and authenticates guest ssh access
+//! State lives under the daemon-owned runtime directory for one Attachment: a persistent
+//! ed25519 keypair (survives across launches and authenticates guest ssh access
 //! independent of any one VM instance) plus per-launch artifacts (a writable
 //! root disk, strict helper record, seed ISO, the helper-owned attach bridge, the readiness,
 //! SSH, and control sockets, and the serial log). Every path lives under the CLI client dir,
-//! never a system temp dir, so `omnifs down`/`fs detach` can find and
+//! never a system temp dir, so daemon reconciliation can find and
 //! remove exactly what this runner owns. The resolved guest image is an
 //! immutable base artifact and is only the source for that launch-local root.
 //!
@@ -26,7 +26,7 @@
 //!   host-to-guest mode; omitting both keywords means guest-initiated):
 //!   libkrun itself creates and listens on the unix socket, relaying each
 //!   accepted connection into the guest's vsock-listening dropbear
-//!   (`ListenStream=vsock::22` in the guest image). `omnifs fs shell` dials it
+//!   (`ListenStream=vsock::22` in the guest image). `omnifs attachment shell` dials it
 //!   through `ssh -o ProxyCommand='socat - UNIX-CONNECT:<path>'`.
 //!
 //! No network or GPU configuration exists in the helper's typed launch shape.
@@ -43,7 +43,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use omnifs_api::OMNIFS_ATTACH_ADDR_ENV;
-use omnifs_core::fs;
+use omnifs_core::{ATTACHMENT_GUEST_LOCATION, AttachmentRuntime, AttachmentSpec, ResourceName};
 use omnifs_libkrun::{
     ATTACH_BRIDGE_SOCKET_NAME, CONTROL_SOCKET_NAME, ControlSocket, DIAGNOSTIC_LOG_NAME,
     HelperRecord, Installation, PID_FILE_NAME, READY_SOCKET_NAME, ROOT_DISK_NAME, SEED_DISK_NAME,
@@ -89,14 +89,14 @@ const READY_VSOCK_PORT: u32 = 1025;
 
 fn emit_stage(
     events: &RuntimeEventSink,
-    spec: &fs::Spec,
+    attachment: &ResourceName,
     stage: RuntimeStage,
     lifecycle_state: RuntimeState,
 ) {
     events.emit(RuntimeEvent::Stage {
         stage,
-        runtime: fs::Runtime::Libkrun,
-        id: spec.id().clone(),
+        runtime: AttachmentRuntime::Libkrun,
+        attachment: attachment.clone(),
         state: lifecycle_state,
     });
 }
@@ -162,7 +162,7 @@ pub const fn default_guest_image_for(channel: BuildChannel) -> &'static str {
     }
 }
 
-/// `omnifs fs shell`'s libkrun dispatch calls this before building the ssh
+/// `omnifs attachment shell`'s libkrun dispatch calls this before building the ssh
 /// command: `shell_command` itself stays pure construction (no I/O), so the
 /// probe belongs at the one call site that is about to actually run it.
 pub fn ensure_socat_available() -> Result<()> {
@@ -487,10 +487,9 @@ struct LibkrunLaunchLease<'a> {
     child: Option<std::process::Child>,
     ready_listener: Option<tokio::net::UnixListener>,
     instance_id: Option<String>,
-    attachment: Option<omnifs_core::ResourceName>,
-    attachment_spec: Option<omnifs_core::AttachmentSpec>,
+    attachment: Option<ResourceName>,
     runtime_instance: Option<String>,
-    spec: Option<fs::Spec>,
+    spec: Option<AttachmentSpec>,
     expected_record: Option<HelperRecord>,
     replaced: bool,
 }
@@ -522,7 +521,6 @@ impl<'a> LibkrunLaunchLease<'a> {
             ready_listener: None,
             instance_id: None,
             attachment: None,
-            attachment_spec: None,
             runtime_instance: None,
             spec: None,
             expected_record: None,
@@ -539,7 +537,6 @@ impl<'a> LibkrunLaunchLease<'a> {
             ready_listener: None,
             instance_id: None,
             attachment: None,
-            attachment_spec: None,
             runtime_instance: None,
             spec: None,
             expected_record: Some(expected_record),
@@ -549,14 +546,13 @@ impl<'a> LibkrunLaunchLease<'a> {
 
     async fn prepare(runner: &'a LibkrunRunner, request: &LaunchRequest<'_>) -> Result<Self> {
         let guest_image = resolve_guest_image(
-            request.assets.guest_image.as_deref(),
+            request.spec.libkrun_guest_image(),
             request.paths.guest_image_cache(),
             request.events.clone(),
         )
         .await?;
         let mut lease = Self::new(runner, request.endpoints.attach_unix()?, guest_image);
         lease.attachment = Some(request.attachment.clone());
-        lease.attachment_spec = Some(request.attachment_spec.clone());
         lease.runtime_instance = Some(request.runtime_instance.to_owned());
         lease.spec = Some(request.spec.clone());
         Ok(lease)
@@ -569,10 +565,10 @@ impl<'a> LibkrunLaunchLease<'a> {
     ) -> Result<()> {
         match self.run_to_publish(attached, events).await {
             Ok(()) => {
-                if let Some(spec) = &self.spec {
+                if let (Some(attachment), Some(spec)) = (&self.attachment, &self.spec) {
                     events.emit(RuntimeEvent::MountReady {
-                        runtime: fs::Runtime::Libkrun,
-                        id: spec.id().clone(),
+                        runtime: AttachmentRuntime::Libkrun,
+                        attachment: attachment.clone(),
                         location: spec.location().to_path_buf(),
                         container: None,
                     });
@@ -580,8 +576,13 @@ impl<'a> LibkrunLaunchLease<'a> {
                 Ok(())
             },
             Err(error) => {
-                if let Some(spec) = &self.spec {
-                    emit_stage(events, spec, RuntimeStage::Stop, RuntimeState::Stopping);
+                if let Some(attachment) = &self.attachment {
+                    emit_stage(
+                        events,
+                        attachment,
+                        RuntimeStage::Stop,
+                        RuntimeState::Stopping,
+                    );
                 }
                 let cleanup = if self.replaced {
                     self.stop_and_remove().await
@@ -606,13 +607,14 @@ impl<'a> LibkrunLaunchLease<'a> {
         self.prepare_runtime_dir()?;
         let dir = self.runner.dir();
 
-        let launch_spec = self
-            .spec
+        let attachment = self
+            .attachment
             .as_ref()
-            .context("libkrun launch has no filesystem identity")?;
+            .context("libkrun launch has no Attachment identity")?
+            .clone();
         emit_stage(
             events,
-            launch_spec,
+            &attachment,
             RuntimeStage::MaterializeImage,
             RuntimeState::Active,
         );
@@ -623,43 +625,31 @@ impl<'a> LibkrunLaunchLease<'a> {
             .as_ref()
             .context("libkrun launch has no filesystem identity")?
             .clone();
-        let attachment = self
-            .attachment
-            .as_ref()
-            .context("libkrun launch has no attachment identity")?;
-        let attachment_spec = self
-            .attachment_spec
-            .as_ref()
-            .context("libkrun launch has no exact attachment spec")?;
         let runtime_instance = self
             .runtime_instance
             .as_deref()
             .context("libkrun launch has no runtime instance")?
             .to_owned();
         self.runner
-            .write_seed_iso(attachment, attachment_spec, &runtime_instance, &ssh_pubkey)?;
+            .write_seed_iso(&attachment, &spec, &runtime_instance, &ssh_pubkey)?;
         self.ready_listener = Some(self.bind_ready_listener()?);
         let _ = std::fs::remove_file(self.runner.ssh_socket());
         let _ = std::fs::remove_file(self.runner.control_socket());
 
-        self.spawn_and_confirm_helper(&installation, dir, &spec, &runtime_instance)
+        self.spawn_and_confirm_helper(&installation, dir, &attachment, &spec, &runtime_instance)
             .await?;
 
         self.wait_for_ready(events).await?;
-        let spec = self
-            .spec
-            .as_ref()
-            .context("libkrun launch has no filesystem identity")?;
         emit_stage(
             events,
-            spec,
+            &attachment,
             RuntimeStage::WaitForVfsSession,
             RuntimeState::Active,
         );
         attached.await?;
         emit_stage(
             events,
-            spec,
+            &attachment,
             RuntimeStage::WaitForVfsSession,
             RuntimeState::Ready,
         );
@@ -670,12 +660,14 @@ impl<'a> LibkrunLaunchLease<'a> {
         &mut self,
         installation: &Installation,
         dir: &Path,
-        spec: &fs::Spec,
+        attachment: &ResourceName,
+        spec: &AttachmentSpec,
         runtime_instance: &str,
     ) -> Result<()> {
         let helper_config = omnifs_libkrun::Config::omnifs(
             dir,
             &self.daemon_attach_socket,
+            attachment.clone(),
             spec.clone(),
             runtime_instance,
             installation,
@@ -821,13 +813,14 @@ impl<'a> LibkrunLaunchLease<'a> {
     }
 
     async fn wait_for_ready(&mut self, events: &RuntimeEventSink) -> Result<()> {
-        let spec = self
-            .spec
+        let attachment = self
+            .attachment
             .as_ref()
-            .context("libkrun launch has no filesystem identity")?;
+            .context("libkrun launch has no Attachment identity")?
+            .clone();
         emit_stage(
             events,
-            spec,
+            &attachment,
             RuntimeStage::WaitForOsMount,
             RuntimeState::Active,
         );
@@ -867,7 +860,7 @@ impl<'a> LibkrunLaunchLease<'a> {
             result.context("read the libkrun readiness beacon")?;
             emit_stage(
                 events,
-                spec,
+                &attachment,
                 RuntimeStage::WaitForOsMount,
                 RuntimeState::Ready,
             );
@@ -875,7 +868,7 @@ impl<'a> LibkrunLaunchLease<'a> {
         } else {
             anyhow::bail!(
                 "{} did not appear inside the filesystem within {}s",
-                fs::GUEST_LOCATION,
+                ATTACHMENT_GUEST_LOCATION,
                 LAUNCH_READY_TIMEOUT.as_secs()
             )
         }
@@ -1003,7 +996,7 @@ impl LibkrunRunner {
         let lease = LibkrunLaunchLease::prepare(self, request).await?;
         emit_stage(
             request.events,
-            request.spec,
+            request.attachment,
             RuntimeStage::StartVm,
             RuntimeState::Active,
         );
@@ -1014,7 +1007,7 @@ impl LibkrunRunner {
 impl LibkrunRunner {
     fn confirm_record(&self, expected: &HelperRecord) -> Result<()> {
         let actual = ControlSocket::new(self.control_socket())?
-            .ping(&expected.spec, &expected.instance_id)
+            .ping(&expected.attachment, &expected.spec, &expected.instance_id)
             .context("prove libkrun helper identity")?;
         anyhow::ensure!(
             actual == *expected,
@@ -1025,7 +1018,11 @@ impl LibkrunRunner {
 
     /// Prove a live, identity-matched helper, matching the host and Docker
     /// drivers' `confirmed`.
-    pub fn confirmed(&self) -> Result<Option<HelperRecord>> {
+    pub fn confirmed(
+        &self,
+        attachment: &ResourceName,
+        spec: &AttachmentSpec,
+    ) -> Result<Option<HelperRecord>> {
         let Some(record) = self.read_helper_record()? else {
             anyhow::ensure!(
                 !self.has_operational_state(),
@@ -1034,6 +1031,10 @@ impl LibkrunRunner {
             );
             return Ok(None);
         };
+        anyhow::ensure!(
+            record.attachment == *attachment && record.spec == *spec,
+            "libkrun helper record does not match configured Attachment `{attachment}`"
+        );
         self.confirm_record(&record)?;
         Ok(Some(record))
     }
@@ -1082,8 +1083,8 @@ impl LibkrunRunner {
                 continue;
             }
             let raw_id = entry.file_name().to_string_lossy().into_owned();
-            let id = match fs::Id::new(raw_id.clone()) {
-                Ok(id) => id,
+            let attachment = match ResourceName::new(raw_id.clone()) {
+                Ok(attachment) => attachment,
                 Err(error) => {
                     owned.push(Candidate::Invalid {
                         backend: "libkrun",
@@ -1093,11 +1094,25 @@ impl LibkrunRunner {
                     continue;
                 },
             };
-            let confirmed = Self::new(state_dir.clone())
-                .confirmed()
+            let runner = Self::new(state_dir.clone());
+            let confirmed = runner
+                .read_helper_record()
+                .and_then(|record| {
+                    record
+                        .map(|record| {
+                            anyhow::ensure!(
+                                record.attachment == attachment,
+                                "libkrun record belongs to Attachment `{}`",
+                                record.attachment
+                            );
+                            runner.confirm_record(&record)?;
+                            Ok(record)
+                        })
+                        .transpose()
+                })
                 .map_err(|error| format!("{error:#}"));
             owned.push(Candidate::Libkrun {
-                id,
+                attachment,
                 state_dir,
                 confirmed,
             });
@@ -1135,7 +1150,7 @@ impl LibkrunRunner {
         };
         let remote = format!(
             "cd {} && exec {}",
-            shell_word(fs::GUEST_LOCATION),
+            shell_word(ATTACHMENT_GUEST_LOCATION),
             program
                 .iter()
                 .map(|word| shell_word(word))

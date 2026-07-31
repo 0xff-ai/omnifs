@@ -6,7 +6,6 @@ pub mod credential;
 pub(crate) mod daemon_start;
 pub mod doctor;
 pub mod down;
-pub mod fs;
 pub mod inspect;
 pub mod logs;
 pub mod mount;

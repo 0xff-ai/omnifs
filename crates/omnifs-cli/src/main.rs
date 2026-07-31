@@ -12,22 +12,18 @@
 mod auth;
 mod capability;
 mod cli;
-mod client_dir;
-mod client_state;
 mod commands;
 mod daemon_teardown;
 mod error;
 mod inventory;
 mod legacy_filesystems;
 mod metrics;
-mod mutation;
 mod process;
 mod profile_config;
 mod provider_catalog;
 mod provider_resolver;
 mod rpc;
 mod status;
-mod token_source;
 mod ui;
 
 use clap::Parser;

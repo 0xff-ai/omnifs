@@ -6,7 +6,7 @@ use omnifs_api::{
     ProgressSnapshot, ProviderPreparationProgress, ProviderPreparationStage, RecoveryId,
     RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt, ResourceDefinition,
 };
-use omnifs_core::{MountRevision, MutationId, ResourceRevision};
+use omnifs_core::{MountRevision, ResourceRevision};
 use omnifs_engine::{
     ComponentEngine, HostOnline, HostRuntimeOpen, Inspector, ServingCell, init_global_from_env,
 };
@@ -24,7 +24,6 @@ use crate::{
     daemon::{Daemon, DaemonParts},
     generation_builder::empty_generation,
     logging,
-    manager::MutationManager,
     progress::ProgressHub,
     provider_bundle::EmbeddedProviders,
     provider_preparer::{
@@ -462,14 +461,11 @@ async fn build_daemon(
         Ok(resources) => resources,
         Err(error) => return Err(close_failed_state(state, error).await),
     };
-    let manager =
-        MutationManager::spawn(Arc::clone(&state), Arc::clone(&host), Arc::clone(&serving));
     let daemon = Arc::new(Daemon::new(DaemonParts {
         context,
         embedded,
         state: Arc::clone(&state),
         serving,
-        manager,
         resources,
         inspector,
         shutdown_tx,
@@ -571,13 +567,16 @@ async fn close_failed_state(state: Arc<StateStore>, error: anyhow::Error) -> Sta
 }
 
 async fn runtime_failure(state: &StateStore, error: anyhow::Error) -> StartupFailure {
-    let durable_revision = state.mount_revision().await.ok();
+    let durable_revision = state
+        .resource_snapshot()
+        .await
+        .ok()
+        .map(|snapshot| MountRevision::new(snapshot.revision.get()));
     let serving = state.serving_state().await.ok();
     StartupFailure::Runtime {
         error,
         durable_revision,
         serving_revision: serving.as_ref().map(|state| state.revision),
-        failed_mutation: serving.and_then(|state| state.failed_mutation),
     }
 }
 
@@ -591,7 +590,6 @@ enum StartupFailure {
         error: anyhow::Error,
         durable_revision: Option<MountRevision>,
         serving_revision: Option<MountRevision>,
-        failed_mutation: Option<MutationId>,
     },
 }
 
@@ -612,7 +610,6 @@ impl StartupFailure {
                 phase: DaemonPhase::RecoveryRequired,
                 durable_revision: None,
                 serving_revision: None,
-                failed_mutation: None,
                 store_health: HealthReport::new(
                     HealthState::Unhealthy,
                     "control store could not be opened",
@@ -625,13 +622,11 @@ impl StartupFailure {
             Self::Runtime {
                 durable_revision,
                 serving_revision,
-                failed_mutation,
                 ..
             } => DaemonRecovery {
                 phase: DaemonPhase::RecoveryRequired,
                 durable_revision: *durable_revision,
                 serving_revision: *serving_revision,
-                failed_mutation: *failed_mutation,
                 store_health: HealthReport::new(
                     HealthState::Unhealthy,
                     "daemon runtime could not start",

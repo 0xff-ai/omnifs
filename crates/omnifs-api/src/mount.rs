@@ -1,4 +1,4 @@
-use omnifs_core::{MountName, MountRevision, MountVersion, MutationId, ProviderId};
+use omnifs_core::{MountName, MountRevision, MountVersion, ProviderId};
 use serde::{Deserialize, Serialize};
 
 /// Client-authored fields of one daemon-owned mount.
@@ -27,25 +27,6 @@ pub struct MountLimits {
     pub max_fetch_blob_bytes: Option<u64>,
 }
 
-/// One field in a partial mount update.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MountField<T> {
-    #[default]
-    Keep,
-    Set(T),
-    Clear,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MountPatch {
-    /// `None` keeps the current provider pin.
-    pub provider: Option<ProviderId>,
-    pub auth: MountField<MountCredential>,
-    pub limits: MountField<MountLimits>,
-    pub config: MountField<Vec<u8>>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MountRecord {
@@ -57,8 +38,6 @@ pub struct MountRecord {
     /// Non-secret credential readiness for this mount, when it has a
     /// credential binding. This is separate from serving/provider health.
     pub auth_health: Option<crate::CredentialHealth>,
-    /// Id of the batch that last wrote this row, for provenance recovery.
-    pub last_mutation_id: MutationId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,15 +46,6 @@ pub enum MountHealth {
     AuthRequired,
     ProviderUnavailable { reason: String },
     Failed { reason: String },
-}
-
-/// Result of one mount op applied inside a mutation batch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MountOpResult {
-    pub name: MountName,
-    pub version: Option<MountVersion>,
-    pub revision: MountRevision,
 }
 
 #[cfg(test)]

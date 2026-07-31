@@ -7,7 +7,9 @@ mod lifecycle;
 pub mod nfs;
 
 use clap::Args;
-use omnifs_core::{AttachmentSpec, ResourceName, RuntimeInstanceId, fs};
+use omnifs_core::{
+    AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceName, RuntimeInstanceId,
+};
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]
@@ -40,10 +42,10 @@ pub struct RunFsArgs {
     name: ResourceName,
     /// OS filesystem protocol to serve.
     #[arg(long)]
-    protocol: fs::Protocol,
+    protocol: AttachmentProtocol,
     /// Runtime identity supplied by the launcher.
     #[arg(long)]
-    runtime: fs::Runtime,
+    runtime: AttachmentRuntime,
     /// Mount location resolved in the persisted filesystem spec.
     #[arg(long)]
     location: PathBuf,
@@ -88,10 +90,10 @@ pub fn run(args: RunFsArgs) -> anyhow::Result<()> {
     };
     match args.spec.protocol() {
         #[cfg(target_os = "linux")]
-        fs::Protocol::Fuse => fuse::run(args),
+        AttachmentProtocol::Fuse => fuse::run(args),
         #[cfg(not(target_os = "linux"))]
-        fs::Protocol::Fuse => anyhow::bail!("FUSE is not supported on this platform"),
-        fs::Protocol::Nfs => nfs::run(args),
+        AttachmentProtocol::Fuse => anyhow::bail!("FUSE is not supported on this platform"),
+        AttachmentProtocol::Nfs => nfs::run(args),
     }
 }
 

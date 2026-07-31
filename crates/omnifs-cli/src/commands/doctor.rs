@@ -5,7 +5,7 @@
 
 use anyhow::Context as _;
 use omnifs_bootstrap::Profile;
-use omnifs_core::fs;
+use omnifs_core::{AttachmentRuntime, ResourceName};
 use omnifs_fs_runtime::{
     Candidate, DockerClient, DockerTarget, HostDriver, ImageInspection, ImageRef, LibkrunRunner,
     OwnedFilesystemContainer, RuntimeEventSink, RuntimePaths, owned_filesystems,
@@ -58,10 +58,10 @@ fn resolve_filesystem_target(
         .scan()?
         .specs
         .into_iter()
-        .find(|spec| spec.runtime() == fs::Runtime::Docker)
+        .find(|spec| spec.runtime() == AttachmentRuntime::Docker)
         .map_or_else(
-            || fs::Id::new("doctor").expect("static filesystem id"),
-            |spec| spec.id().clone(),
+            || ResourceName::new("doctor").expect("static attachment name"),
+            |spec| ResourceName::new(spec.id()).expect("validated legacy attachment name"),
         );
     let paths = legacy_filesystems.runtime_paths()?;
     DockerTarget::for_filesystem(paths.profile_root(), paths.is_default_profile(), &id, None)
@@ -192,7 +192,7 @@ impl Remediation {
                 "omnifs doctor (clean stale daemon identity)".to_owned()
             },
             Self::StopHostFilesystem { record, .. } => {
-                format!("omnifs fs detach --name {}", record.spec.id())
+                format!("omnifs attachment rm {}", record.attachment)
             },
             Self::CleanStaleHostRecord { record, .. } => {
                 format!(
@@ -201,7 +201,7 @@ impl Remediation {
                 )
             },
             Self::StopLibkrunFilesystem { record, .. } => {
-                format!("omnifs fs detach --name {}", record.spec.id())
+                format!("omnifs attachment rm {}", record.attachment)
             },
         }
     }
@@ -249,7 +249,7 @@ impl Remediation {
                 record,
             } => {
                 let _guard = acquire_stopped_daemon_guard(profile).await?;
-                let paths = paths.attachment(record.spec.id());
+                let paths = paths.attachment(&record.attachment);
                 HostDriver::new(
                     state_dir.clone(),
                     paths.host_log().to_path_buf(),
@@ -265,7 +265,7 @@ impl Remediation {
                 record,
             } => {
                 let _guard = acquire_stopped_daemon_guard(profile).await?;
-                let paths = paths.attachment(record.spec.id());
+                let paths = paths.attachment(&record.attachment);
                 HostDriver::new(
                     state_dir.clone(),
                     paths.host_log().to_path_buf(),
@@ -920,11 +920,11 @@ impl Doctor {
         (runtime, findings)
     }
 
-    fn attached(&self, spec: &fs::Spec) -> bool {
+    fn attached(&self, name: &ResourceName, spec: &omnifs_core::AttachmentSpec) -> bool {
         self.inventory
             .filesystems
             .iter()
-            .any(|filesystem| filesystem.spec == *spec)
+            .any(|filesystem| filesystem.name == *name && filesystem.spec == *spec)
     }
 
     /// One generic pass over every backend's owned-instance scan: a
@@ -1015,12 +1015,12 @@ impl Doctor {
                     findings.extend(Self::docker_candidate_finding(owned, daemon_health));
                 },
                 Candidate::Libkrun {
-                    id,
+                    attachment,
                     state_dir,
                     confirmed,
                 } => {
                     findings.extend(self.libkrun_candidate_finding(
-                        &id,
+                        &attachment,
                         state_dir,
                         confirmed,
                         daemon_health,
@@ -1047,10 +1047,10 @@ impl Doctor {
     ) -> anyhow::Result<Option<Finding>> {
         let spec = record.spec.clone();
         let mount_point = spec.location().to_path_buf();
-        let is_attached = self.attached(&spec);
+        let is_attached = self.attached(&record.attachment, &spec);
         let target = Some(format!(
             "`{}` {}/host at {}",
-            spec.id(),
+            record.attachment,
             spec.protocol(),
             mount_point.display()
         ));
@@ -1138,25 +1138,25 @@ impl Doctor {
     /// `Candidate::Invalid` arm before this is ever called.
     fn libkrun_candidate_finding(
         &self,
-        id: &fs::Id,
+        id: &ResourceName,
         state_dir: PathBuf,
         confirmed: Result<Option<omnifs_libkrun::HelperRecord>, String>,
         daemon_health: DaemonHealth,
     ) -> Vec<Finding> {
         match confirmed {
-            Ok(Some(record)) if record.spec.id() != id => {
+            Ok(Some(record)) if record.attachment != *id => {
                 vec![Finding::from_probe(
                     Section::Filesystems,
                     Check::LibkrunFilesystemOwnership,
                     Some(id.to_string()),
                     ProbeResult::Err(format!(
                         "helper claims filesystem `{}` instead of matching its state path",
-                        record.spec.id()
+                        record.attachment
                     )),
                 )]
             },
             Ok(Some(record)) => {
-                if self.attached(&record.spec) {
+                if self.attached(&record.attachment, &record.spec) {
                     return Vec::new();
                 }
                 let remediation = (daemon_health == DaemonHealth::Stopped)
@@ -1229,10 +1229,10 @@ impl Doctor {
         match runtime.inspect_image(image.as_str()).await {
             Ok(ImageInspection::Present) => ProbeResult::Ok(format!("{image} cached")),
             Ok(ImageInspection::Missing) if image.has_registry() => ProbeResult::Warn(format!(
-                "{image} not cached (will pull on the next Docker `omnifs fs attach`)"
+                "{image} not cached (will pull on the next Docker attachment start)"
             )),
             Ok(ImageInspection::Missing) => ProbeResult::Err(format!(
-                "{image} not present locally; a dev image is never pulled, so `omnifs fs attach` \
+                "{image} not present locally; a dev image is never pulled, so attachment start \
                  cannot start (build it with `just filesystem-image`)"
             )),
             Err(error) => ProbeResult::Err(format!("inspect: {error}")),
@@ -1301,12 +1301,7 @@ impl Doctor {
             severity: Severity::Attention,
             message:
                 "legacy detached spec is not desired state and will not be launched".to_owned(),
-            fix: Some(format!(
-                "omnifs fs create --name {} --protocol {} --runtime {}",
-                spec.id(),
-                spec.protocol(),
-                spec.runtime()
-            )),
+            fix: Some("omnifs attachment add".to_owned()),
             remediation: None,
         }));
         findings
@@ -1382,12 +1377,7 @@ mod golden {
     }
 
     fn caps(color: bool) -> Capabilities {
-        Capabilities {
-            width: 120,
-            is_tty: color,
-            color,
-            quiet: false,
-        }
+        Capabilities { width: 120, color }
     }
 
     fn running_inventory() -> Inventory {
@@ -1551,7 +1541,7 @@ mod golden {
             ),
             findings: Vec::new(),
             repairs: vec![
-                Repair::applied("omnifs fs detach --name docker".to_owned()),
+                Repair::applied("omnifs attachment rm docker".to_owned()),
                 Repair::failed(
                     "omnifs doctor (clean stale daemon identity)".to_owned(),
                     "boom".to_owned(),
@@ -1682,18 +1672,20 @@ mod golden {
         let root = TempDir::new().unwrap();
         let profile = Profile::under_root(root.path());
         let paths = daemon_runtime_paths(&profile).unwrap();
-        let id = fs::Id::new("legacy").unwrap();
-        let spec = fs::Spec::new(
-            id.clone(),
-            fs::Protocol::Nfs,
-            fs::Runtime::Host,
+        let id: ResourceName = "legacy".parse().unwrap();
+        let spec = omnifs_core::AttachmentSpec::new(
+            omnifs_core::AttachmentProtocol::Nfs,
+            AttachmentRuntime::Host,
             root.path().join("mount"),
+            None,
+            None,
         )
         .unwrap();
         let state_dir = paths.attachment(&id).state_dir().to_path_buf();
         std::fs::create_dir_all(&state_dir).unwrap();
         let record = |instance_id: &str| omnifs_mtab::RunnerRecord {
             version: omnifs_mtab::RunnerRecord::VERSION,
+            attachment: id.clone(),
             instance_id: instance_id.to_owned(),
             pid: 1,
             process_group: 1,

@@ -3,8 +3,8 @@
 //! This crate owns exact host-process, Docker-container, and libkrun-helper
 //! identity, launch, probe, stop, and stale-cleanup operations. Callers own
 //! desired state, retry policy, daemon RPC, profile resolution, and terminal
-//! output. Every path and configured image enters through [`RuntimePaths`] or
-//! [`RuntimeAssets`].
+//! output. Every path enters through [`RuntimePaths`], while exact runtime
+//! configuration enters through `omnifs_core::AttachmentSpec`.
 
 mod docker;
 mod driver;
@@ -23,7 +23,7 @@ pub use docker::{
 };
 pub use driver::{
     AttachEndpoints, AttachmentRuntimePaths, Candidate, ConfirmedRuntime, LaunchRequest,
-    RuntimeAssets, RuntimeDriver, RuntimePaths, err_after_rollback, owned_filesystems,
+    RuntimeDriver, RuntimePaths, err_after_rollback, owned_filesystems,
 };
 pub use events::{
     Artifact, ContainerState, ImageState, RuntimeEvent, RuntimeEventReceiver, RuntimeEventSink,

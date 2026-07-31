@@ -2,7 +2,7 @@
 
 use anyhow::Context as _;
 use omnifs_api::{AttachmentDefinition, MountResourceDefinition, ResourceLimits};
-use omnifs_core::fs::{Protocol, Runtime};
+use omnifs_core::{AttachmentProtocol as Protocol, AttachmentRuntime as Runtime};
 use omnifs_core::{AttachmentSpec, AttachmentVersion, ResourceName};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;

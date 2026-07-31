@@ -16,10 +16,15 @@ use bytes::Bytes;
 use hyper_util::rt::TokioIo;
 use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
-    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInfo, DaemonStatus,
-    MountDefinition, MountOpResult, ProviderImportReceipt,
+    ApplyResourcesRequest, AttachmentDefinition, CONTROL_REQUEST_TIMEOUT_SECS,
+    CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInfo, DaemonStatus, MountResourceDefinition,
+    ProgressEventKind, ProgressTarget, ProviderDefinition, ProviderImportReceipt,
+    ResourceDeclarations, ResourceDefinition,
 };
-use omnifs_core::{MountName, ProviderId};
+use omnifs_core::{
+    AttachmentProtocol, AttachmentRuntime, AttachmentSpec, MutationId, ProviderId, ResourceKind,
+    ResourceName,
+};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::runtime::{Builder, Runtime};
@@ -29,20 +34,16 @@ use tower::service_fn;
 
 type ControlClient = wire::control_client::ControlClient<Channel>;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
-const MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
 const PROVIDER_CHUNK_BYTES: usize = CONTROL_STREAM_PAYLOAD_MAX_BYTES;
 
-/// A unique-enough mutation id for a test fixture: a live daemon only needs
-/// ids that never collide within one hermetic home's lifetime, not
-/// cryptographic randomness, so an incrementing counter avoids pulling in a
-/// random-bytes dependency for test-only code.
-fn next_mutation_id() -> Vec<u8> {
+/// A unique-enough resource-apply id for a test fixture.
+fn next_mutation_id() -> MutationId {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut bytes = [0_u8; 16];
     bytes[8..].copy_from_slice(&counter.to_be_bytes());
-    bytes.to_vec()
+    MutationId::from_bytes(bytes)
 }
 
 /// Fixed, non-ephemeral port used purely as a cross-process lock for live NFS
@@ -254,10 +255,7 @@ pub struct NativeDaemon {
 impl Drop for NativeDaemon {
     fn drop(&mut self) {
         if matches!(self.daemon.try_wait(), Ok(None)) {
-            let _ = Command::new(omnifs_bin())
-                .args(["fs", "detach", "--name", "native"])
-                .env("OMNIFS_HOME", self.home.path())
-                .output();
+            best_effort_remove_attachment(self.home.path(), "native");
         }
         self.detach_mount();
         sigterm(&self.daemon);
@@ -312,10 +310,7 @@ impl Drop for MultiFilesystemDaemon {
     fn drop(&mut self) {
         if matches!(self.daemon.try_wait(), Ok(None)) {
             for name in &self.attachment_names {
-                let _ = Command::new(omnifs_bin())
-                    .args(["fs", "detach", "--name", name])
-                    .env("OMNIFS_HOME", self.home.path())
-                    .output();
+                best_effort_remove_attachment(self.home.path(), name);
             }
         }
         for mount_point in &self.mount_points {
@@ -740,8 +735,8 @@ fn wire_filesystem(
     }
 }
 
-/// Import the test provider and create the two mounts used by live conformance
-/// fixtures through the same daemon RPCs as the CLI.
+/// Import the test provider and declare the two mounts used by live
+/// conformance fixtures through the resource apply path.
 pub fn seed_test_namespace(socket: &Path) -> ProviderId {
     let bytes = std::fs::read(crate::provider_wasm_path("test_provider.wasm"))
         .expect("read test provider wasm");
@@ -749,17 +744,7 @@ pub fn seed_test_namespace(socket: &Path) -> ProviderId {
     let receipt = import_provider(socket, bytes);
     assert_eq!(receipt.provider.id, provider);
 
-    for name in ["test", "test2"] {
-        let definition = MountDefinition {
-            name: MountName::new(name).expect("valid test mount name"),
-            provider,
-            auth: None,
-            limits: None,
-            config: br"{}".to_vec(),
-        };
-        let result = create_mount(socket, &definition);
-        assert_eq!(result.name.as_str(), name);
-    }
+    apply_test_namespace(socket, provider);
     provider
 }
 
@@ -783,33 +768,118 @@ fn control_socket_ready(socket: &Path) -> bool {
 /// the ready phase. Live acceptance fixtures use this path instead of taking
 /// ownership of a runner process themselves.
 fn ensure_host_attachment(home: &Path, name: &str, protocol: &str, location: &Path) {
-    let location = location
-        .to_str()
-        .unwrap_or_else(|| panic!("attachment location is not UTF-8: {}", location.display()));
-    let output = Command::new(omnifs_bin())
-        .args([
-            "fs",
-            "create",
-            "--name",
-            name,
-            "--protocol",
-            protocol,
-            "--runtime",
-            "host",
-            "--location",
-            location,
-        ])
-        .env("OMNIFS_HOME", home)
-        .env("RUST_LOG", "warn")
-        .output()
-        .unwrap_or_else(|error| panic!("spawn daemon-owned attachment {name}: {error}"));
-    assert!(
-        output.status.success(),
-        "daemon-owned attachment {name} failed (exit {})\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
+    let protocol = protocol
+        .parse::<AttachmentProtocol>()
+        .unwrap_or_else(|error| panic!("invalid test Attachment protocol: {error}"));
+    ensure_attachment(
+        &home.join("control.sock"),
+        AttachmentDefinition {
+            name: ResourceName::new(name).expect("valid test Attachment name"),
+            spec: AttachmentSpec::new(
+                protocol,
+                AttachmentRuntime::Host,
+                location.to_path_buf(),
+                None,
+                None,
+            )
+            .expect("valid host Attachment spec"),
+        },
     );
+}
+
+/// Add or replace one desired Attachment through the same typed apply and
+/// progress protocol used by the CLI, preserving every other desired resource.
+pub fn ensure_attachment(socket: &Path, definition: AttachmentDefinition) {
+    update_attachment(socket, Some(definition));
+}
+
+fn best_effort_remove_attachment(home: &Path, name: &str) {
+    let _ = Command::new(omnifs_bin())
+        .args(["attachment", "rm", name, "--yes"])
+        .env("OMNIFS_HOME", home)
+        .output();
+}
+
+fn update_attachment(socket: &Path, definition: Option<AttachmentDefinition>) {
+    block_on(async {
+        let mut client = connect(socket.to_path_buf())
+            .await
+            .expect("connect to update test Attachment");
+        let snapshot = client
+            .get_resources(Request::new(wire::Empty {}))
+            .await
+            .expect("get resources before updating test Attachment")
+            .into_inner();
+        let snapshot = grpc::get_resources_response(&snapshot).expect("decode resource snapshot");
+        let mut resources = snapshot.resources;
+        if let Some(definition) = definition {
+            resources.retain(|resource| {
+                resource.kind() != ResourceKind::Attachment || resource.name() != &definition.name
+            });
+            resources.push(ResourceDefinition::Attachment(definition));
+        }
+        let declarations = ResourceDeclarations {
+            api_version: omnifs_api::API_VERSION.to_owned(),
+            resources,
+        };
+        apply_and_wait(&mut client, snapshot.revision, declarations).await;
+    });
+}
+
+async fn apply_and_wait(
+    client: &mut ControlClient,
+    base_revision: omnifs_core::ResourceRevision,
+    declarations: ResourceDeclarations,
+) {
+    let desired = declarations
+        .clone()
+        .normalize()
+        .expect("normalize test resources");
+    let response = client
+        .apply_resources(grpc::to_apply_resources_request(&ApplyResourcesRequest {
+            mutation_id: next_mutation_id(),
+            base_revision,
+            expected_desired_digest: desired.digest(),
+            declarations,
+            credential_material: Vec::new(),
+        }))
+        .await
+        .expect("apply test Attachment resources")
+        .into_inner();
+    let receipt = grpc::apply_resources_response(&response).expect("decode apply receipt");
+    let mut stream = client
+        .watch_progress(grpc::to_progress_target(ProgressTarget::DesiredRevision(
+            receipt.revision,
+        )))
+        .await
+        .expect("watch test Attachment revision")
+        .into_inner();
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(3);
+    loop {
+        let message = tokio::time::timeout_at(deadline, stream.message())
+            .await
+            .expect("test Attachment revision reaches a terminal state")
+            .expect("read test Attachment progress")
+            .expect("test Attachment progress stream remains open");
+        match grpc::progress_event(&message)
+            .expect("decode test Attachment progress")
+            .event
+        {
+            ProgressEventKind::Snapshot(snapshot) | ProgressEventKind::Resync(snapshot)
+                if snapshot.observed_revision == Some(receipt.revision) =>
+            {
+                return;
+            },
+            ProgressEventKind::RevisionReady(revision) if revision == receipt.revision => return,
+            ProgressEventKind::RevisionFailed { detail, .. } => {
+                panic!("test Attachment revision failed: {detail}")
+            },
+            ProgressEventKind::RevisionSuperseded { replaced_by, .. } => {
+                panic!("test Attachment revision was superseded by {replaced_by}")
+            },
+            _ => {},
+        }
+    }
 }
 
 pub fn control_status(socket: &Path) -> DaemonStatus {
@@ -925,51 +995,70 @@ fn import_provider(socket: &Path, bytes: Vec<u8>) -> ProviderImportReceipt {
     })
 }
 
-/// Create one mount through a fresh single-op `BeginMutation`/`ApplyMutation`
-/// batch, the same lease-scoped path the CLI's mutation runner uses.
-fn create_mount(socket: &Path, definition: &MountDefinition) -> MountOpResult {
+fn apply_test_namespace(socket: &Path, provider: ProviderId) {
     block_on(async {
         let mut client = connect(socket.to_path_buf())
             .await
             .expect("connect to daemon control socket");
-        let mutation_id: Bytes = next_mutation_id().into();
-
-        let mut begin_request = Request::new(wire::BeginMutationRequest {
-            mutation_id: mutation_id.clone(),
-        });
-        begin_request.set_timeout(MUTATION_TIMEOUT);
-        client
-            .begin_mutation(begin_request)
+        let provider_name = ResourceName::new("test-provider").expect("valid provider name");
+        let declarations = ResourceDeclarations {
+            api_version: omnifs_api::API_VERSION.to_owned(),
+            resources: vec![
+                ResourceDefinition::Provider(ProviderDefinition {
+                    name: provider_name.clone(),
+                    artifact: provider,
+                }),
+                ResourceDefinition::Mount(MountResourceDefinition {
+                    name: ResourceName::new("test").expect("valid mount name"),
+                    provider: provider_name.clone(),
+                    credential: None,
+                    config: serde_json::json!({}),
+                    limits: None,
+                }),
+                ResourceDefinition::Mount(MountResourceDefinition {
+                    name: ResourceName::new("test2").expect("valid mount name"),
+                    provider: provider_name,
+                    credential: None,
+                    config: serde_json::json!({}),
+                    limits: None,
+                }),
+            ],
+        };
+        let desired = declarations
+            .clone()
+            .normalize()
+            .expect("normalize test namespace resources");
+        let snapshot = client
+            .get_resources(Request::new(wire::Empty {}))
             .await
-            .expect("begin test mutation");
-
-        let mut apply_request = Request::new(wire::ApplyMutationRequest {
-            mutation_id,
-            ops: vec![wire::MutationOp {
-                op: Some(wire::mutation_op::Op::CreateMount(wire::CreateMountOp {
-                    definition: Some(grpc::to_mount_definition(definition)),
-                })),
-            }],
+            .expect("get resource snapshot")
+            .into_inner()
+            .snapshot
+            .as_ref()
+            .map(grpc::resource_snapshot)
+            .transpose()
+            .expect("decode resource snapshot")
+            .expect("resource snapshot missing");
+        let request = grpc::to_apply_resources_request(&ApplyResourcesRequest {
+            mutation_id: next_mutation_id(),
+            base_revision: snapshot.revision,
+            expected_desired_digest: desired.digest(),
+            declarations,
+            credential_material: Vec::new(),
         });
-        apply_request.set_timeout(MUTATION_TIMEOUT);
         let response = client
-            .apply_mutation(apply_request)
+            .apply_resources(Request::new(request))
             .await
-            .expect("apply test mount creation")
+            .expect("apply test namespace resources")
             .into_inner();
-        let result = response
-            .results
-            .into_iter()
-            .next()
-            .expect("mutation batch reply missing its one op result");
-        match result.result.expect("mutation op result missing its op") {
-            wire::mutation_op_result::Result::Mount(mount) => {
-                grpc::mount_op_result(&mount).expect("decode mount op result")
-            },
-            wire::mutation_op_result::Result::Credential(_) => {
-                panic!("expected a mount op result from a mount-create batch")
-            },
-        }
+        let receipt = response
+            .receipt
+            .as_ref()
+            .map(grpc::apply_receipt)
+            .transpose()
+            .expect("decode apply receipt")
+            .expect("apply reply missing receipt");
+        assert_eq!(receipt.desired_digest, desired.digest());
     })
 }
 

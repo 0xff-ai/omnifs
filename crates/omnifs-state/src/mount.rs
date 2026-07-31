@@ -3,16 +3,14 @@
 use anyhow::Context as _;
 use omnifs_auth::CredentialId;
 use omnifs_core::{
-    MountName, MountRevision, MountVersion, MutationId, ProviderId, ProviderMeta, ProviderName,
-    ProviderRef, ProviderVersion,
+    MountName, MountRevision, MountVersion, ProviderId, ProviderMeta, ProviderName, ProviderRef,
+    ProviderVersion,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use sqlx::sqlite::SqliteRow;
 
-use crate::db::Db;
-use crate::row::{RowExt as _, decode_error, sql_int};
-use crate::{MountMutationOutcome, MountWriteError};
+use crate::row::{RowExt as _, decode_error};
 
 const CANONICAL_MOUNT_V1_PREFIX: &[u8] = b"omnifs.mount.v1\0";
 const MOUNT_VERSION_DOMAIN: &str = "omnifs mount version v1";
@@ -38,36 +36,25 @@ pub struct StoredMount {
     pub canonical: Vec<u8>,
     pub version: MountVersion,
     pub revision: MountRevision,
-    /// Provenance: the batch that last created or updated this row. Row
-    /// metadata only; it never feeds the canonical bytes or version hash.
-    pub last_mutation_id: MutationId,
 }
 
 /// One mount SELECT with its column list stated once. `concat!` keeps the
 /// result a `&'static str`, which is what `sqlx::query_as` accepts.
 macro_rules! mounts_query {
     ($tail:literal) => {
-        concat!(
-            "SELECT canonical, version, revision, last_mutation_id FROM mounts ",
-            $tail
-        )
+        concat!("SELECT canonical, version, revision FROM mounts ", $tail)
     };
 }
 pub(crate) use mounts_query;
 
 impl StoredMount {
-    pub fn prepare(
-        document: MountDocument,
-        revision: MountRevision,
-        last_mutation_id: MutationId,
-    ) -> anyhow::Result<Self> {
+    pub fn prepare(document: MountDocument, revision: MountRevision) -> anyhow::Result<Self> {
         let (canonical, version) = encode(&document)?;
         Ok(Self {
             document,
             canonical,
             version,
             revision,
-            last_mutation_id,
         })
     }
 
@@ -76,7 +63,6 @@ impl StoredMount {
             row.bytes("canonical")?,
             MountVersion::from_digest(row.digest("version")?),
             MountRevision::new(row.unsigned("revision")?),
-            row.mutation_id("last_mutation_id")?,
         )
     }
 }
@@ -132,7 +118,6 @@ pub(crate) fn decode(
     canonical: Vec<u8>,
     stored_version: MountVersion,
     revision: MountRevision,
-    last_mutation_id: MutationId,
 ) -> anyhow::Result<StoredMount> {
     let payload = canonical
         .strip_prefix(CANONICAL_MOUNT_V1_PREFIX)
@@ -149,7 +134,6 @@ pub(crate) fn decode(
         canonical,
         version: stored_version,
         revision,
-        last_mutation_id,
     })
 }
 
@@ -215,188 +199,6 @@ impl CanonicalMountV1 {
     }
 }
 
-impl Db<'_> {
-    /// Read the mount revision a batch would commit if it wrote a mount row,
-    /// without advancing it. The caller writes it back only once, after every
-    /// op in the batch has succeeded.
-    pub(crate) async fn next_mount_revision(&mut self) -> anyhow::Result<MountRevision> {
-        let current: i64 =
-            sqlx::query_scalar("SELECT revision FROM mount_state WHERE singleton = 1")
-                .fetch_one(self.raw())
-                .await
-                .context("read mount revision")?;
-        let current = MountRevision::new(
-            u64::try_from(current).context("stored mount revision is negative")?,
-        );
-        current.next().context("mount revision exhausted")
-    }
-
-    /// Persist a batch's computed mount revision. Called at most once per
-    /// batch, after every op has applied.
-    pub(crate) async fn advance_mount_revision(
-        &mut self,
-        revision: MountRevision,
-    ) -> anyhow::Result<()> {
-        sqlx::query("UPDATE mount_state SET revision = ?1 WHERE singleton = 1")
-            .bind(sql_int(revision.get(), "mount revision")?)
-            .execute(self.raw())
-            .await
-            .context("advance mount revision")?;
-        Ok(())
-    }
-
-    pub(crate) async fn create_mount_row(
-        &mut self,
-        document: MountDocument,
-        revision: MountRevision,
-        mutation_id: MutationId,
-    ) -> Result<MountMutationOutcome, MountWriteError> {
-        if self.mount_version(&document.name).await?.is_some() {
-            return Err(MountWriteError::AlreadyExists(document.name));
-        }
-        self.insert_or_replace_mount(&document, revision, mutation_id, false)
-            .await
-    }
-
-    pub(crate) async fn update_mount_row(
-        &mut self,
-        document: MountDocument,
-        revision: MountRevision,
-        mutation_id: MutationId,
-    ) -> Result<MountMutationOutcome, MountWriteError> {
-        self.require_mount_exists(&document.name).await?;
-        self.insert_or_replace_mount(&document, revision, mutation_id, true)
-            .await
-    }
-
-    pub(crate) async fn remove_mount_row(
-        &mut self,
-        name: MountName,
-        revision: MountRevision,
-    ) -> Result<MountMutationOutcome, MountWriteError> {
-        self.require_mount_exists(&name).await?;
-        sqlx::query("DELETE FROM mounts WHERE name = ?1")
-            .bind(name.as_str())
-            .execute(self.raw())
-            .await
-            .context("remove mount")?;
-        Ok(MountMutationOutcome {
-            name,
-            version: None,
-            revision,
-        })
-    }
-
-    async fn mount_version(
-        &mut self,
-        name: &MountName,
-    ) -> Result<Option<MountVersion>, MountWriteError> {
-        let version: Option<Vec<u8>> =
-            sqlx::query_scalar("SELECT version FROM mounts WHERE name = ?1")
-                .bind(name.as_str())
-                .fetch_optional(self.raw())
-                .await
-                .context("read mount version")?;
-        let Some(version) = version else {
-            return Ok(None);
-        };
-        let length = version.len();
-        let version: [u8; 32] = version
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("stored mount version has {length} bytes"))?;
-        Ok(Some(MountVersion::from_digest(version)))
-    }
-
-    /// The lease serializes every batch, so a mount vanishing between a
-    /// caller's read and this write is a bug, not a race; the single-writer
-    /// invariant makes this an existence probe rather than a CAS check.
-    async fn require_mount_exists(&mut self, name: &MountName) -> Result<(), MountWriteError> {
-        if self.mount_version(name).await?.is_none() {
-            return Err(MountWriteError::NotFound(name.clone()));
-        }
-        Ok(())
-    }
-
-    async fn insert_or_replace_mount(
-        &mut self,
-        document: &MountDocument,
-        revision: MountRevision,
-        mutation_id: MutationId,
-        replace: bool,
-    ) -> Result<MountMutationOutcome, MountWriteError> {
-        self.verify_mount_provider(&document.provider).await?;
-        if let Some(credential) = document.credential.as_ref()
-            && credential.provider_name() != document.provider.meta.name.as_str()
-        {
-            return Err(anyhow::anyhow!(
-                "mount credential provider does not match pinned provider"
-            )
-            .into());
-        }
-        let (canonical, version) = encode(document)?;
-        let credential_provider = document
-            .credential
-            .as_ref()
-            .map(CredentialId::provider_name);
-        let credential_scheme = document.credential.as_ref().map(CredentialId::scheme);
-        let credential_account = document.credential.as_ref().map(CredentialId::account);
-        let statement = if replace {
-            "UPDATE mounts SET \
-                 canonical = ?2, version = ?3, revision = ?4, provider_digest = ?5, \
-                 credential_provider_name = ?6, credential_scheme = ?7, \
-                 credential_account = ?8, last_mutation_id = ?9, updated_at = unixepoch() \
-             WHERE name = ?1"
-        } else {
-            "INSERT INTO mounts(\
-                 name, canonical, version, revision, provider_digest, \
-                 credential_provider_name, credential_scheme, credential_account, \
-                 last_mutation_id, updated_at\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, unixepoch())"
-        };
-        sqlx::query(statement)
-            .bind(document.name.as_str())
-            .bind(canonical)
-            .bind(version.as_bytes().as_slice())
-            .bind(sql_int(revision.get(), "mount revision")?)
-            .bind(document.provider.id.as_bytes().as_slice())
-            .bind(credential_provider)
-            .bind(credential_scheme)
-            .bind(credential_account)
-            .bind(mutation_id.as_bytes().as_slice())
-            .execute(self.raw())
-            .await
-            .context("write mount")?;
-        Ok(MountMutationOutcome {
-            name: document.name.clone(),
-            version: Some(version),
-            revision,
-        })
-    }
-
-    async fn verify_mount_provider(
-        &mut self,
-        reference: &ProviderRef,
-    ) -> Result<(), MountWriteError> {
-        let (name, version) = sqlx::query_as::<_, (String, Option<String>)>(
-            "SELECT name, version FROM providers WHERE digest = ?1",
-        )
-        .bind(reference.id.as_bytes().as_slice())
-        .fetch_optional(self.raw())
-        .await
-        .context("load mount provider")?
-        .with_context(|| format!("provider {} is not retained", reference.id))?;
-        if name != reference.meta.name.as_str()
-            || version.as_deref() != reference.meta.version.as_ref().map(ProviderVersion::as_str)
-        {
-            return Err(anyhow::anyhow!(
-                "retained provider metadata does not match mount reference"
-            )
-            .into());
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,18 +256,10 @@ mod tests {
     fn canonical_mount_round_trips() {
         let document = document(serde_json::json!({"nested": [true, null, -2, 3.5]}));
         let (canonical, version) = encode(&document).unwrap();
-        let mutation_id = MutationId::from_bytes([0x99; 16]);
-        let stored = decode(
-            canonical.clone(),
-            version,
-            MountRevision::new(4),
-            mutation_id,
-        )
-        .unwrap();
+        let stored = decode(canonical.clone(), version, MountRevision::new(4)).unwrap();
         assert_eq!(stored.document, document);
         assert_eq!(stored.canonical, canonical);
         assert_eq!(stored.version, version);
         assert_eq!(stored.revision, MountRevision::new(4));
-        assert_eq!(stored.last_mutation_id, mutation_id);
     }
 }
