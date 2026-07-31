@@ -67,13 +67,13 @@ Unknown and non-zero sizes use truthful sentinel behavior until exact size is le
 
 ## Filesystems
 
-FUSE and NFS are protocol adapters over the same projected tree. Each attached filesystem has a stable `fs::Id`, a fully resolved persisted spec, and a separate process, container, or VM. Host filesystems use hidden `omnifs run-fs`; Docker and libkrun guests use the slim `omnifs-thin` binary. Both attach over the Omnifs VFS wire protocol.
+FUSE and NFS are protocol adapters over the same projected tree. Each desired Attachment has a `ResourceName` and fully resolved `AttachmentSpec`; a separate process, container, or VM realizes it. Host filesystems use hidden `omnifs run-fs`; Docker and libkrun guests use the slim `omnifs-thin` binary. Both attach over the Omnifs VFS wire protocol.
 
-FUSE owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply construction. NFSv4.0 loopback owns filehandles, stateids, leases, NFS protocol errors, mount readiness, and teardown. Runner and NFS filehandle state live under the filesystem ID's leaf in `cache/filesystems/<id>`.
+FUSE owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply construction. NFSv4.0 loopback owns filehandles, stateids, leases, NFS protocol errors, mount readiness, and teardown. Runner and NFS filehandle state live under the Attachment's daemon-owned runtime leaf.
 
 Neither filesystem owns projection semantics, provider WIT calls, cache schema, root enumeration, learned-size rules, preload policy, inline-byte policy, or negative lookup policy.
 
-A filesystem consumes the same `omnifs_vfs::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the projection owner; `omnifs-vfs` owns the facade and postcard serialization, framing, the strict handshake, attach target resolution and reconnect, server-pushed stop, direct validated `Path` requests, terminal `OfflineMiss`, and ordered invalidation events. The fixed Unix and TCP endpoints serve this one internal protocol. The launcher supplies the exact resolved spec in every handshake; the daemon rejects a reused ID with conflicting fields.
+A filesystem consumes the same `omnifs_vfs::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the projection owner; `omnifs-vfs` owns the facade and postcard serialization, framing, the strict handshake, attach target resolution and reconnect, server-pushed stop, direct validated `Path` requests, terminal `OfflineMiss`, and ordered invalidation events. The fixed Unix and TCP endpoints serve this one internal protocol. The launcher supplies the Attachment name, exact spec, and runtime instance in every handshake; the daemon rejects conflicting session identity.
 
 ## Control plane
 

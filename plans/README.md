@@ -33,7 +33,7 @@ a terminal result.
 | [006](006-retire-client-filesystem-state-and-narrow-bootstrap.md) | Retire client filesystem state and narrow bootstrap | P1 | L | 005 | DONE |
 | [007](007-add-kcl-plan-and-apply-client.md) | Add KCL plan and apply | P1 | L | 005 | DONE |
 | [008](008-switch-to-interactive-resource-porcelain.md) | Switch to interactive resource porcelain | P1 | L | 005, 006, 007 | DONE |
-| [009](009-remove-legacy-control-plane-and-finish-migration.md) | Remove the legacy control plane and finish migration | P1 | L | 003, 006, 007, 008 | TODO |
+| [009](009-remove-legacy-control-plane-and-finish-migration.md) | Remove the legacy control plane and finish migration | P1 | L | 003, 006, 007, 008 | DONE |
 
 ## Dependency graph
 
@@ -120,110 +120,110 @@ that plan.
 
 ### Desired state
 
-- [ ] One strict `ResourceName` grammar
-- [ ] Typed Provider, Credential, Mount, and Attachment resources
-- [ ] One sorted, versioned resource-set digest
-- [ ] One SQLite desired revision
-- [ ] One atomic compare-and-swap apply
-- [ ] Durable mutation-ID receipts
-- [ ] Durable typed action receipts with one non-terminal action per target
-- [ ] Action-generation preconditions prevent lost-reply duplicates
-- [ ] No secret fields in resources, plans, receipts, or status
+- [x] One strict `ResourceName` grammar
+- [x] Typed Provider, Credential, Mount, and Attachment resources
+- [x] One sorted, versioned resource-set digest
+- [x] One SQLite desired revision
+- [x] One atomic compare-and-swap apply
+- [x] Durable mutation-ID receipts
+- [x] Durable typed action receipts with one non-terminal action per target
+- [x] Action-generation preconditions prevent lost-reply duplicates
+- [x] No secret fields in resources, plans, receipts, or status
 
 ### Control
 
-- [ ] `GetResources`
-- [ ] `PlanResources`
-- [ ] `ApplyResources`
-- [ ] `WatchProgress` with desired revision, durable action, and current targets
-- [ ] Credential actions and Attachment restart return correlated action IDs
-- [ ] Request-only credential secret sidecars
-- [ ] Apply returns after commit and non-blocking wakeup
-- [ ] Progress subscription starts with a complete snapshot
-- [ ] Slow subscribers resync without blocking reconcile workers
-- [ ] No compile, generation, network, or runtime work in plan/apply
-- [ ] Old lease and operation batch removed after cutover
+- [x] `GetResources`
+- [x] `PlanResources`
+- [x] `ApplyResources`
+- [x] `WatchProgress` with desired revision, durable action, and current targets
+- [x] Credential actions and Attachment restart return correlated action IDs
+- [x] Request-only credential secret sidecars
+- [x] Apply returns after commit and non-blocking wakeup
+- [x] Progress subscription starts with a complete snapshot
+- [x] Slow subscribers resync without blocking reconcile workers
+- [x] No compile, generation, network, or runtime work in plan/apply
+- [x] Old lease and operation batch removed after cutover
 
 ### Providers and serving
 
-- [ ] Required Wasmtime cache only
-- [ ] One required-cache `ComponentEngine` is constructed per daemon
-- [ ] Embedded preparation starts before SQLite opens
-- [ ] Desired and retained providers join when SQLite becomes available
-- [ ] `HostOnline` and preparation share the same engine
-- [ ] Every embedded and retained digest queued
-- [ ] Desired providers get priority
-- [ ] Bounded workers and digest dedupe
-- [ ] Prepared temporary components dropped
-- [ ] Only active generation providers stay in memory
-- [ ] Latest desired revision is the only one allowed to publish
-- [ ] Last good generation remains active on failure
-- [ ] Provider and generation phase changes feed the progress stream
+- [x] Required Wasmtime cache only
+- [x] One required-cache `ComponentEngine` is constructed per daemon
+- [x] Embedded preparation starts before SQLite opens
+- [x] Desired and retained providers join when SQLite becomes available
+- [x] `HostOnline` and preparation share the same engine
+- [x] Every embedded and retained digest queued
+- [x] Desired providers get priority
+- [x] Bounded workers and digest dedupe
+- [x] Prepared temporary components dropped
+- [x] Only active generation providers stay in memory
+- [x] Latest desired revision is the only one allowed to publish
+- [x] Last good generation remains active on failure
+- [x] Provider and generation phase changes feed the progress stream
 
 ### Attachments
 
-- [ ] Daemon owns desired specs and lifecycle
-- [ ] Filesystems stay out of process
-- [ ] Low-level runtime drivers live outside CLI policy
-- [ ] Internal live connections renamed `VfsSession`
-- [ ] VFS v11 removes `ClientOwnerId`
-- [ ] Per-attachment work serialized and globally bounded
-- [ ] Deletion tombstone lasts until exact teardown
-- [ ] `down` stops runtimes but preserves desired rows
-- [ ] Restart restores desired attachments
-- [ ] Image, runtime, mount, and VFS session changes feed the progress stream
+- [x] Daemon owns desired specs and lifecycle
+- [x] Filesystems stay out of process
+- [x] Low-level runtime drivers live outside CLI policy
+- [x] Internal live connections renamed `VfsSession`
+- [x] VFS v11 removes `ClientOwnerId`
+- [x] Per-attachment work serialized and globally bounded
+- [x] Deletion tombstone lasts until exact teardown
+- [x] `down` stops runtimes but preserves desired rows
+- [x] Restart restores desired attachments
+- [x] Image, runtime, mount, and VFS session changes feed the progress stream
 
 ### Bootstrap and client state
 
-- [ ] `omnifs-bootstrap` owns only profile resolution, fixed control paths,
+- [x] `omnifs-bootstrap` owns only profile resolution, fixed control paths,
   spawn locking, and exact daemon identity
-- [ ] `Bootstrap<R>`, `Client`, `Daemon`, and role-specific duplicate methods
+- [x] `Bootstrap<R>`, `Client`, `Daemon`, and role-specific duplicate methods
   removed
-- [ ] Daemon resolves one `Profile` for logging, state, and control
-- [ ] One `DaemonStatePaths` comes from an explicit daemon-state root
-- [ ] Early engine setup and later state open share that paths value
-- [ ] `omnifs-state` has no bootstrap dependency
-- [ ] `client_fs_state.rs`, active JSON registry, and per-ID claims removed
-- [ ] Normal lifecycle creates no `client/filesystems` paths
-- [ ] Metrics reads narrow profile config without constructing filesystem state
-- [ ] Legacy client specs have one named read-only scanner
-- [ ] Doctor holds the profile spawn lock and exact identity across legacy
+- [x] Daemon resolves one `Profile` for logging, state, and control
+- [x] One `DaemonStatePaths` comes from an explicit daemon-state root
+- [x] Early engine setup and later state open share that paths value
+- [x] `omnifs-state` has no bootstrap dependency
+- [x] `client_fs_state.rs`, active JSON registry, and per-ID claims removed
+- [x] Normal lifecycle creates no `client/filesystems` paths
+- [x] Metrics reads narrow profile config without constructing filesystem state
+- [x] Legacy client specs have one named read-only scanner
+- [x] Doctor holds the profile spawn lock and exact identity across legacy
   runtime repair
-- [ ] Final cutover removes `client_state.rs`, `client_dir.rs`, owner ID, and
+- [x] Final cutover removes `client_state.rs`, `client_dir.rs`, owner ID, and
   mutation journal
 
 ### KCL and CLI
 
-- [ ] KCL evaluator embedded through pinned Rust API
-- [ ] No `kcl` subprocess
-- [ ] No implicit remote package fetch
-- [ ] Strict Rust types remain authoritative
-- [ ] Local provider paths resolve only on the client
-- [ ] `config init`, `config export`, `plan`, and `apply`
-- [ ] Interactive provider, mount, credential, and attachment commands
-- [ ] One shared plan, consent, and receipt path
-- [ ] Human and JSONL mutations stream progress and wait by default
-- [ ] JSON emits exactly one terminal envelope after waiting
-- [ ] Non-TTY progress uses stable lines with no cursor control
-- [ ] Ctrl-C detaches the viewer, restores the terminal, and reports that
+- [x] KCL evaluator embedded through pinned Rust API
+- [x] No `kcl` subprocess
+- [x] No implicit remote package fetch
+- [x] Strict Rust types remain authoritative
+- [x] Local provider paths resolve only on the client
+- [x] `config init`, `config export`, `plan`, and `apply`
+- [x] Interactive provider, mount, credential, and attachment commands
+- [x] One shared plan, consent, and receipt path
+- [x] Human and JSONL mutations stream progress and wait by default
+- [x] JSON emits exactly one terminal envelope after waiting
+- [x] Non-TTY progress uses stable lines with no cursor control
+- [x] Ctrl-C detaches the viewer, restores the terminal, and reports that
   daemon work continues
-- [ ] Status can resume current, revision, or durable action streams
-- [ ] No fake Wasmtime percentage or cache-hit claim
-- [ ] `attachment` replaces public `fs`
-- [ ] Setup names active provider and attachment phases while it waits
-- [ ] Read commands keep structured output
-- [ ] Secret automation uses one narrow environment-input command
+- [x] Status can resume current, revision, or durable action streams
+- [x] No fake Wasmtime percentage or cache-hit claim
+- [x] `attachment` replaces public `fs`
+- [x] Setup names active provider and attachment phases while it waits
+- [x] Read commands keep structured output
+- [x] Secret automation uses one narrow environment-input command
 
 ### Cutover
 
-- [ ] Existing daemon mounts and credentials migrate deterministically
-- [ ] Legacy detached client specs never auto-launch
-- [ ] Legacy client specs are never edited or deleted by migration
-- [ ] Client mutation journal removed
-- [ ] Mutation lease and six imperative ops removed
-- [ ] Current docs and `AGENTS.md` updated only after code lands
-- [ ] `just check` passes
-- [ ] Cold-cache, host, Docker, multi-filesystem, and supported libkrun lanes
+- [x] Existing daemon mounts and credentials migrate deterministically
+- [x] Legacy detached client specs never auto-launch
+- [x] Legacy client specs are never edited or deleted by migration
+- [x] Client mutation journal removed
+- [x] Mutation lease and six imperative ops removed
+- [x] Current docs and `AGENTS.md` updated only after code lands
+- [x] `just check` passes
+- [x] Cold-cache, host, Docker, multi-filesystem, and supported libkrun lanes
   pass
 
 ## Core acceptance test

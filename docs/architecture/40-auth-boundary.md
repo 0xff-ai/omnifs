@@ -15,7 +15,9 @@ Vendor knowledge lives in provider metadata and provider docs. A new service sho
 
 ## Credential ownership
 
-Providers never hold stored tokens. The daemon stores credentials in its SQLite state under the active profile, prepares auth material for host-run callouts, and injects headers only after the callout crosses the WASM boundary. The CLI owns OAuth and static-token UX, collected before any mutation lease is acquired, then submits the credential as one op inside a lease-scoped mutation batch over local RPC (often alongside the mount op that needs it).
+Providers never hold stored tokens. A desired Credential resource contains only its name, provider, scheme, and account. The daemon stores secret material separately in SQLite, prepares it for host-run callouts, and injects headers only after the callout crosses the WASM boundary. The CLI owns OAuth and static-token UX, applies the non-secret desired resource, then submits material through a typed durable action on the local control socket.
+
+Credential actions use a client-generated action ID and action-generation precondition. The first accepted action ID owns any secret bytes associated with that request; retries never hash or persist those bytes for dedupe, and new material requires a new action ID. Delete drains serving generations before removing local material. Revoke is an explicit upstream action that also drains before it leaves the declared Credential slot empty.
 
 The provider receives responses or callout-denied errors, not raw credential store access.
 
@@ -45,7 +47,7 @@ Refresh and retry are host protocol behavior. Providers should model permission 
 
 ## Runtime trust boundary
 
-The CLI and host-native daemon are trusted local control-plane code. Provider WASM is untrusted. A filesystem runner is deliberately credential-free, whatever its driver: it receives only the authority to attach through the daemon's Omnifs VFS wire protocol. The CLI cannot read daemon SQLite tables; the daemon cannot read client filesystem config.
+The CLI and host-native daemon are trusted local control-plane code. Provider WASM is untrusted. A filesystem runner is deliberately credential-free, whatever its driver: it receives only the authority to attach through the daemon's Omnifs VFS wire protocol. The CLI cannot read daemon SQLite tables; the daemon does not consume legacy client filesystem config.
 
 Do not design credential boundaries around hiding `OMNIFS_HOME` from the trusted daemon, which owns that state. Do prevent provider WASM and optional filesystem guests from reading secrets or escalating host resources.
 

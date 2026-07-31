@@ -40,14 +40,13 @@ Dynamic domain needs resolve from a provider config field named `domains`, whose
 
 ### Auth and credentials
 
-Credentials live host-side in daemon-owned SQLite state. Startup resolves each
-mount auth declaration into one mount-owned binding before namespace publication;
-that binding loads the store entry, refreshes OAuth credentials during use, and
-injects them after a callout crosses the WASM boundary.
+Credential resources are non-secret desired state in daemon-owned SQLite. Secret material is stored separately and may change only through a typed durable action. Startup resolves each mount auth declaration into one mount-owned binding before namespace publication; that binding loads the material, refreshes OAuth credentials during use, and injects them after a callout crosses the WASM boundary.
 
 Credential material stays out of WIT payloads. It may cross the daemon control boundary only in request-side protobuf messages on the local Unix socket; it never crosses filesystem attach/TCP or appears in responses, status, inventory, logs, Debug, or Inspector output. Route provider auth declarations through provider metadata and mount auth/config resolution. Keep human auth UX in `omnifs-cli`.
 
-OAuth client ids in provider declarations are public application identifiers, not secrets. User access tokens, refresh tokens, and client secrets remain sensitive host-side values. `omnifs mount add` owns first-run OAuth mount generation; `omnifs mount reauth <mount>` owns repair and re-authentication; both submit the collected credential as one op in a lease-scoped mutation batch to the daemon. Credentials live only in the daemon credential store: a mount's auth declares identity (scheme, account) and never a sourcing mechanism, so there is no read-from-env or read-from-file path at serve time.
+OAuth client ids in provider declarations are public application identifiers, not secrets. User access tokens, refresh tokens, and client secrets remain sensitive host-side values. Login, set, refresh, and revoke use client-generated action IDs and action-generation preconditions. The daemon accepts at most one non-terminal action per Credential target, retains it across restart, and never persists or hashes submitted secret bytes for dedupe. The first accepted action ID wins; new material requires a new action ID.
+
+A mount's auth declares identity (Credential resource, scheme, and account), never a sourcing mechanism, so there is no read-from-env or read-from-file path at serve time. Credential deletion and explicit upstream revoke drain every serving generation that can use the material before terminal completion. Revoke leaves the desired Credential slot present and empty.
 
 Credential values must never appear in CLI output, errors, tracing, metrics, or structured envelopes. Source identifiers such as environment-variable names may appear when they make an error actionable.
 
