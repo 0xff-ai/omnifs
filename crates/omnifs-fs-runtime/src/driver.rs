@@ -33,8 +33,8 @@ fn short_attachment_hash(name: &ResourceName) -> String {
 
 impl RuntimePaths {
     /// Construct daemon-owned attachment paths. The caller supplies daemon
-    /// state roots, so this crate never resolves a profile or creates a
-    /// fallback client layout.
+    /// state roots, so this crate never resolves a profile or creates
+    /// client-owned state.
     #[must_use]
     pub fn daemon_owned(
         profile_root: PathBuf,
@@ -47,7 +47,7 @@ impl RuntimePaths {
         Self {
             profile_root,
             is_default_profile,
-            state_root: attachments_root.clone(),
+            state_root: attachments_root,
             host_log_root: attachment_logs_root,
             guest_image_cache,
             executable,
