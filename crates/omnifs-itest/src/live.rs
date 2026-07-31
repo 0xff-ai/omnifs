@@ -1059,7 +1059,7 @@ fn apply_test_namespace(socket: &Path, provider: ProviderId) {
             .expect("decode apply receipt")
             .expect("apply reply missing receipt");
         assert_eq!(receipt.desired_digest, desired.digest());
-    })
+    });
 }
 
 /// Bring up `omnifs daemon` with an explicit local filesystem runner and only the

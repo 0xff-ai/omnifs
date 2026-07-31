@@ -175,7 +175,7 @@ async fn prepare_setup(rpc: &RpcClient, output: &Output) -> Result<PreparedSetup
     let mut mount_names = Vec::new();
     if add_providers {
         for selector in &offered {
-            let resolved = ProviderResolver::new(&rpc)
+            let resolved = ProviderResolver::new(rpc)
                 .resolve(selector, &embedded)
                 .await
                 .with_context(|| format!("prepare quick-start provider `{selector}`"))?;

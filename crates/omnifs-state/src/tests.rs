@@ -480,7 +480,7 @@ async fn imports_verifies_and_repairs_provider_rows() {
 
 /// Shared fixture for resource-apply tests: an open store with one imported
 /// provider, ready for a mount declaration.
-async fn store_with_imported_provider() -> (StateStore, ProviderRef) {
+async fn store_with_imported_provider() -> (tempfile::TempDir, StateStore, ProviderRef) {
     let temp = tempfile::tempdir().unwrap();
     let paths = StorePaths::under_root(&temp.path().join("state"));
     let store = StateStore::open_paths(paths, StateStoreOptions::default())
@@ -491,7 +491,7 @@ async fn store_with_imported_provider() -> (StateStore, ProviderRef) {
     let provider = upload_and_import(&store, provider_id, &bytes)
         .await
         .reference;
-    (store, provider)
+    (temp, store, provider)
 }
 
 #[tokio::test]
@@ -833,7 +833,7 @@ async fn attachment_desired_updates_and_deletion_preserve_observed_runtime_state
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)] // one transaction contract with shared setup and row proof
 async fn resource_apply_is_atomic_idempotent_and_stamps_changed_rows() {
-    let (store, provider) = store_with_imported_provider().await;
+    let (_temp, store, provider) = store_with_imported_provider().await;
     let desired = resource_set(provider.id, serde_json::json!({"a": 1}));
     let initial = store.resource_snapshot().await.unwrap();
     let first_id = mutation_id(81);
@@ -993,7 +993,7 @@ async fn resource_apply_is_atomic_idempotent_and_stamps_changed_rows() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn corrupt_stored_resource_reports_table_and_name() {
-    let (store, provider) = store_with_imported_provider().await;
+    let (_temp, store, provider) = store_with_imported_provider().await;
     let desired = resource_set(provider.id, serde_json::json!({}));
     let initial = store.resource_snapshot().await.unwrap();
     store
@@ -1312,7 +1312,7 @@ async fn attachment_restart_actions_are_durable_and_generation_guarded() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stale_attachment_observation_cannot_overwrite_new_desired_state() {
-    let (store, provider) = store_with_imported_provider().await;
+    let (_temp, store, provider) = store_with_imported_provider().await;
     let desired_v1 = resource_set(provider.id, serde_json::json!({}));
     let initial = store.resource_snapshot().await.unwrap();
     store
@@ -1387,7 +1387,7 @@ async fn stale_attachment_observation_cannot_overwrite_new_desired_state() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stale_attachment_observation_cannot_lower_restart_generation_or_mark_ready() {
-    let (store, provider) = store_with_imported_provider().await;
+    let (_temp, store, provider) = store_with_imported_provider().await;
     let desired = resource_set(provider.id, serde_json::json!({}));
     let initial = store.resource_snapshot().await.unwrap();
     store

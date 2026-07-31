@@ -425,8 +425,7 @@ impl Config {
             || self.spec.location() != Path::new(ATTACHMENT_GUEST_LOCATION)
         {
             return Err(Error::Config(format!(
-                "libkrun requires a fuse/libkrun filesystem at {}",
-                ATTACHMENT_GUEST_LOCATION
+                "libkrun requires a fuse/libkrun filesystem at {ATTACHMENT_GUEST_LOCATION}"
             )));
         }
         if (self.vcpus, self.memory_mib) != (VCPUS, MEMORY_MIB) {
@@ -469,15 +468,14 @@ impl ControlSocket {
     ) -> Result<HelperRecord, Error> {
         validate_instance_id(expected_instance_id)?;
         let reply = self.request(&format!(
-            "ping {} {expected_instance_id}\n",
-            expected_attachment
+            "ping {expected_attachment} {expected_instance_id}\n"
         ))?;
         let mut fields = reply.trim_end().split(' ');
         let record = match (fields.next(), fields.next(), fields.next(), fields.next()) {
-            (Some("pong"), Some(pid), Some(filesystem_id), Some(instance_id))
+            (Some("pong"), Some(pid), Some(attachment_name), Some(instance_id))
                 if fields.next().is_none() =>
             {
-                let attachment: ResourceName = filesystem_id.parse().map_err(|error| {
+                let attachment: ResourceName = attachment_name.parse().map_err(|error| {
                     Error::Control(format!(
                         "control Ping returned an invalid filesystem id: {error}"
                     ))

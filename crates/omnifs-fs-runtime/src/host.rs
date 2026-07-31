@@ -496,7 +496,11 @@ mod tests {
             process_group: 42,
             attachment: ResourceName::new("main").unwrap(),
             spec: AttachmentSpec::new(
-                AttachmentProtocol::Fuse,
+                if cfg!(target_os = "linux") {
+                    AttachmentProtocol::Fuse
+                } else {
+                    AttachmentProtocol::Nfs
+                },
                 AttachmentRuntime::Host,
                 mount_point.clone(),
                 None,

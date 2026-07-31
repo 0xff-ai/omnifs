@@ -294,8 +294,7 @@ impl RuntimeDriver {
                 );
                 ensure!(
                     spec.location() == Path::new(ATTACHMENT_GUEST_LOCATION),
-                    "Docker runtime requires location {}",
-                    ATTACHMENT_GUEST_LOCATION
+                    "Docker runtime requires location {ATTACHMENT_GUEST_LOCATION}"
                 );
                 Backend::Docker(DockerClient::for_filesystem(
                     paths.profile_root(),
@@ -312,8 +311,7 @@ impl RuntimeDriver {
                 );
                 ensure!(
                     spec.location() == Path::new(ATTACHMENT_GUEST_LOCATION),
-                    "libkrun runtime requires location {}",
-                    ATTACHMENT_GUEST_LOCATION
+                    "libkrun runtime requires location {ATTACHMENT_GUEST_LOCATION}"
                 );
                 Backend::Libkrun(LibkrunRunner::new(
                     runtime_paths.libkrun_root().to_path_buf(),
@@ -339,7 +337,6 @@ impl RuntimeDriver {
         &self.attachment
     }
 
-    #[must_use]
     pub async fn confirmed(
         &self,
         runtime_instance: &str,
