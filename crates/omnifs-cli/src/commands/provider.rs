@@ -146,9 +146,7 @@ async fn add(output: Output) -> anyhow::Result<ExitCode> {
         &output,
     )? {
         return crate::commands::mount::MountArgs {
-            command: crate::commands::mount::MountCommand::Add(
-                crate::commands::mount::AddArgs::default(),
-            ),
+            command: crate::commands::mount::MountCommand::Add,
         }
         .run(output)
         .await;

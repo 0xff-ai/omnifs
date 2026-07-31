@@ -36,7 +36,7 @@ pub struct AttachmentArgs {
 #[derive(Subcommand, Debug)]
 pub enum AttachmentCommand {
     /// Add a platform-supported Attachment.
-    Add(AddArgs),
+    Add,
     /// List desired Attachments and their observed state.
     Ls,
     /// Show one desired Attachment and its observed state.
@@ -48,9 +48,6 @@ pub enum AttachmentCommand {
     /// Enter the Attachment or run a command in its runtime.
     Shell(ShellArgs),
 }
-
-#[derive(Args, Debug, Clone, Default)]
-pub struct AddArgs {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AttachmentPair {
@@ -123,7 +120,7 @@ struct ShowResult {
 impl AttachmentArgs {
     pub async fn run(self, output: Output) -> Result<ExitCode> {
         match self.command {
-            AttachmentCommand::Add(args) => add(args, output).await,
+            AttachmentCommand::Add => add(output).await,
             AttachmentCommand::Ls => list(output).await,
             AttachmentCommand::Show(args) => show(args, output).await,
             AttachmentCommand::Rm(args) => remove(args, output).await,
@@ -133,7 +130,7 @@ impl AttachmentArgs {
     }
 }
 
-async fn add(_args: AddArgs, output: Output) -> Result<ExitCode> {
+async fn add(output: Output) -> Result<ExitCode> {
     crate::commands::resource_flow::ensure_interactive_mutation(&output)?;
     daemon_start::start(&output).await?;
     let pairs = available_pairs();

@@ -183,7 +183,7 @@ impl Commands {
             Self::Mount(args) => (
                 Some("mount"),
                 match &args.command {
-                    commands::mount::MountCommand::Add(_) => "mount.add",
+                    commands::mount::MountCommand::Add => "mount.add",
                     commands::mount::MountCommand::Ls => "mount.ls",
                     commands::mount::MountCommand::Show(_) => "mount.show",
                     commands::mount::MountCommand::Update(_) => "mount.update",
@@ -206,7 +206,7 @@ impl Commands {
             Self::Attachment(args) => (
                 Some("attachment"),
                 match &args.command {
-                    commands::attachment::AttachmentCommand::Add(_) => "attachment.add",
+                    commands::attachment::AttachmentCommand::Add => "attachment.add",
                     commands::attachment::AttachmentCommand::Ls => "attachment.ls",
                     commands::attachment::AttachmentCommand::Show(_) => "attachment.show",
                     commands::attachment::AttachmentCommand::Rm(_) => "attachment.rm",

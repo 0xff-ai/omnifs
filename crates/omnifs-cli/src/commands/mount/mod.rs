@@ -40,7 +40,7 @@ pub struct MountArgs {
 #[derive(Subcommand, Debug, Clone)]
 pub enum MountCommand {
     /// Add a Mount resource through an interactive wizard.
-    Add(AddArgs),
+    Add,
     /// List desired Mount resources and their observed phases.
     Ls,
     /// Show one desired Mount resource.
@@ -54,9 +54,6 @@ pub enum MountCommand {
     /// Remove one Mount resource.
     Rm { name: ResourceName },
 }
-
-#[derive(Args, Debug, Clone, Default)]
-pub struct AddArgs {}
 
 #[derive(Args, Debug, Clone)]
 pub struct ShowArgs {
@@ -134,7 +131,7 @@ struct MountsResult {
 impl MountArgs {
     pub async fn run(self, output: Output) -> anyhow::Result<ExitCode> {
         match self.command {
-            MountCommand::Add(_) => add(output).await,
+            MountCommand::Add => add(output).await,
             MountCommand::Ls => list(output).await,
             MountCommand::Show(args) => show(args.name, output).await,
             MountCommand::Update(args) => update(args.name, output).await,
