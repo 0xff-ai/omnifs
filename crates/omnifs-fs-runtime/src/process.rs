@@ -92,6 +92,9 @@ pub(crate) fn configure_detached_child(
 }
 
 pub(crate) fn is_alive(pid: u32) -> bool {
+    if pid == 0 || pid == u32::MAX {
+        return false;
+    }
     Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
