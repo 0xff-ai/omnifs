@@ -22,11 +22,11 @@
     "postinstall": "node scripts/postinstall.js",
     "smoke": "node scripts/smoke.js"
   },
-  "version": "0.2.1",
+  "version": "0.3.0",
   "optionalDependencies": {
-    "@0xff-ai/omnifs-cli-darwin-arm64": "0.2.1",
-    "@0xff-ai/omnifs-cli-darwin-x64": "0.2.1",
-    "@0xff-ai/omnifs-cli-linux-arm64": "0.2.1",
-    "@0xff-ai/omnifs-cli-linux-x64": "0.2.1"
+    "@0xff-ai/omnifs-cli-darwin-arm64": "0.3.0",
+    "@0xff-ai/omnifs-cli-darwin-x64": "0.3.0",
+    "@0xff-ai/omnifs-cli-linux-arm64": "0.3.0",
+    "@0xff-ai/omnifs-cli-linux-x64": "0.3.0"
   }
 }
