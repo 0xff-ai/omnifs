@@ -81,14 +81,8 @@ mod tests {
         };
         FilesystemStatus {
             name: ResourceName::new(format!("attachment-{runtime}")).unwrap(),
-            spec: AttachmentSpec::new(
-                protocol,
-                runtime,
-                PathBuf::from(location),
-                None,
-                None,
-            )
-            .unwrap(),
+            spec: AttachmentSpec::new(protocol, runtime, PathBuf::from(location), None, None)
+                .unwrap(),
             state,
             mount_count: 1,
             fix: None,

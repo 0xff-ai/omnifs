@@ -995,14 +995,8 @@ mod tests {
         };
         unmanaged.filesystems.push(FilesystemStatus {
             name: "test".parse().unwrap(),
-            spec: AttachmentSpec::new(
-                protocol,
-                AttachmentRuntime::Host,
-                "/mnt".into(),
-                None,
-                None,
-            )
-            .unwrap(),
+            spec: AttachmentSpec::new(protocol, AttachmentRuntime::Host, "/mnt".into(), None, None)
+                .unwrap(),
             state: FilesystemState::Failed,
             mount_count: 1,
             fix: Some("omnifs attachment rm test".into()),

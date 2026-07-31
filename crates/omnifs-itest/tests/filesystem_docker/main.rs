@@ -292,8 +292,8 @@ impl Fixture {
         self.run(&["attachment", "show", "itest-docker", "--output", "json"])
     }
 
-    fn filesystem_restart(&self) -> Output {
-        self.run(&["attachment", "restart", "itest-docker", "--output", "json"])
+    fn filesystem_restart(&self) {
+        live::restart_attachment(&self.control_socket(), "itest-docker");
     }
 
     fn wait_for_filesystem_attachment(&self, id: &str, timeout: Duration) {
@@ -307,7 +307,7 @@ impl Fixture {
                         .as_array()
                         .is_some_and(|filesystems| {
                             filesystems.iter().any(|filesystem| {
-                                filesystem["name"] == id && filesystem["state"] == "ready"
+                                filesystem["name"] == id && filesystem["phase"] == "ready"
                             })
                         })
                 })
@@ -352,14 +352,14 @@ impl Fixture {
             if serde_json::from_slice::<serde_json::Value>(&output.stdout)
                 .ok()
                 .and_then(|value| {
-                    value["result"]["daemon"]["status"]["attachments"]
+                    value["result"]["inventory"]["filesystems"]
                         .as_array()
                         .cloned()
                 })
                 .is_some_and(|attachments| {
-                    attachments
-                        .iter()
-                        .any(|attachment| attachment["name"] == id)
+                    attachments.iter().any(|attachment| {
+                        attachment["name"] == id && attachment["state"] == "attached"
+                    })
                 })
             {
                 return;
@@ -845,14 +845,7 @@ fn fuse_docker_lifecycle_and_matrix() {
 
     // Restarting Docker leaves the host filesystem serving every mount and
     // restores the same whole-namespace view.
-    let detached = fixture.filesystem_restart();
-    assert!(
-        detached.status.success(),
-        "restarting Docker filesystem failed (exit {})\nstdout: {}\nstderr: {}",
-        detached.status,
-        String::from_utf8_lossy(&detached.stdout),
-        String::from_utf8_lossy(&detached.stderr),
-    );
+    fixture.filesystem_restart();
     for root in ["test", "test2"] {
         assert!(
             fixture
@@ -869,22 +862,8 @@ fn fuse_docker_lifecycle_and_matrix() {
 
     // Remove both desired Attachments explicitly, then stop the daemon with
     // `omnifs down`. The daemon owns runtime teardown before rows vanish.
-    let detached = fixture.run(&["attachment", "rm", "itest-docker", "--yes"]);
-    assert!(
-        detached.status.success(),
-        "removing Docker attachment before down failed (exit {})\nstdout: {}\nstderr: {}",
-        detached.status,
-        String::from_utf8_lossy(&detached.stdout),
-        String::from_utf8_lossy(&detached.stderr),
-    );
-    let detached = fixture.run(&["attachment", "rm", "itest-host", "--yes"]);
-    assert!(
-        detached.status.success(),
-        "removing host attachment before down failed (exit {})\nstdout: {}\nstderr: {}",
-        detached.status,
-        String::from_utf8_lossy(&detached.stdout),
-        String::from_utf8_lossy(&detached.stderr),
-    );
+    live::remove_attachment(&fixture.control_socket(), "itest-docker");
+    live::remove_attachment(&fixture.control_socket(), "itest-host");
     let down_out = fixture.down();
     assert!(
         down_out.status.success(),

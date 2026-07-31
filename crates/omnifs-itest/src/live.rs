@@ -16,14 +16,14 @@ use bytes::Bytes;
 use hyper_util::rt::TokioIo;
 use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
-    ApplyResourcesRequest, AttachmentDefinition, CONTROL_REQUEST_TIMEOUT_SECS,
+    ActionPhase, ApplyResourcesRequest, AttachmentDefinition, CONTROL_REQUEST_TIMEOUT_SECS,
     CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInfo, DaemonStatus, MountResourceDefinition,
     ProgressEventKind, ProgressTarget, ProviderDefinition, ProviderImportReceipt,
-    ResourceDeclarations, ResourceDefinition,
+    ResourceDeclarations, ResourceDefinition, RestartAttachmentRequest,
 };
 use omnifs_core::{
-    AttachmentProtocol, AttachmentRuntime, AttachmentSpec, MutationId, ProviderId, ResourceKind,
-    ResourceName,
+    ActionId, AttachmentProtocol, AttachmentRuntime, AttachmentSpec, MutationId, ProviderId,
+    ResourceKind, ResourceName,
 };
 use tempfile::TempDir;
 use tokio::net::UnixStream;
@@ -44,6 +44,17 @@ fn next_mutation_id() -> MutationId {
     let mut bytes = [0_u8; 16];
     bytes[8..].copy_from_slice(&counter.to_be_bytes());
     MutationId::from_bytes(bytes)
+}
+
+/// A unique-enough durable action id for a test fixture.
+fn next_action_id() -> ActionId {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut bytes = [0_u8; 16];
+    bytes[..8].copy_from_slice(b"itestact");
+    bytes[8..].copy_from_slice(&counter.to_be_bytes());
+    ActionId::from_bytes(bytes)
 }
 
 /// Fixed, non-ephemeral port used purely as a cross-process lock for live NFS
@@ -790,17 +801,24 @@ fn ensure_host_attachment(home: &Path, name: &str, protocol: &str, location: &Pa
 /// Add or replace one desired Attachment through the same typed apply and
 /// progress protocol used by the CLI, preserving every other desired resource.
 pub fn ensure_attachment(socket: &Path, definition: AttachmentDefinition) {
-    update_attachment(socket, Some(definition));
+    update_attachment(socket, Some(definition), None);
 }
 
 fn best_effort_remove_attachment(home: &Path, name: &str) {
-    let _ = Command::new(omnifs_bin())
-        .args(["attachment", "rm", name, "--yes"])
-        .env("OMNIFS_HOME", home)
-        .output();
+    let socket = home.join("control.sock");
+    let _ = std::panic::catch_unwind(|| remove_attachment(&socket, name));
 }
 
-fn update_attachment(socket: &Path, definition: Option<AttachmentDefinition>) {
+/// Remove one desired Attachment through the typed resource apply protocol.
+pub fn remove_attachment(socket: &Path, name: &str) {
+    update_attachment(socket, None, Some(name));
+}
+
+fn update_attachment(
+    socket: &Path,
+    definition: Option<AttachmentDefinition>,
+    remove_name: Option<&str>,
+) {
     block_on(async {
         let mut client = connect(socket.to_path_buf())
             .await
@@ -812,6 +830,12 @@ fn update_attachment(socket: &Path, definition: Option<AttachmentDefinition>) {
             .into_inner();
         let snapshot = grpc::get_resources_response(&snapshot).expect("decode resource snapshot");
         let mut resources = snapshot.resources;
+        if let Some(remove_name) = remove_name {
+            resources.retain(|resource| {
+                resource.kind() != ResourceKind::Attachment
+                    || resource.name().as_str() != remove_name
+            });
+        }
         if let Some(definition) = definition {
             resources.retain(|resource| {
                 resource.kind() != ResourceKind::Attachment || resource.name() != &definition.name
@@ -823,6 +847,88 @@ fn update_attachment(socket: &Path, definition: Option<AttachmentDefinition>) {
             resources,
         };
         apply_and_wait(&mut client, snapshot.revision, declarations).await;
+    });
+}
+
+/// Restart one desired Attachment through the durable typed action protocol
+/// and wait for its terminal receipt.
+pub fn restart_attachment(socket: &Path, name: &str) {
+    block_on(async {
+        let mut client = connect(socket.to_path_buf())
+            .await
+            .expect("connect to restart test Attachment");
+        let status = client
+            .get_attachment_status(Request::new(wire::GetAttachmentStatusRequest {
+                attachment_name: name.to_owned(),
+            }))
+            .await
+            .expect("get test Attachment status before restart")
+            .into_inner();
+        let status = grpc::get_attachment_status_response(&status)
+            .expect("decode test Attachment status")
+            .expect("test Attachment is desired");
+        let action_id = next_action_id();
+        let response = client
+            .restart_attachment(Request::new(grpc::to_restart_attachment_request(
+                &RestartAttachmentRequest {
+                    action_id,
+                    base_action_generation: status.action_generation,
+                    attachment: status.definition.name,
+                },
+            )))
+            .await
+            .expect("accept test Attachment restart")
+            .into_inner();
+        let receipt =
+            grpc::restart_attachment_response(&response).expect("decode Attachment action receipt");
+        assert_eq!(receipt.action_id, action_id);
+
+        let mut stream = client
+            .watch_progress(grpc::to_progress_target(ProgressTarget::Action(action_id)))
+            .await
+            .expect("watch test Attachment restart")
+            .into_inner();
+        let deadline = tokio::time::Instant::now() + Duration::from_mins(3);
+        loop {
+            let message = tokio::time::timeout_at(deadline, stream.message())
+                .await
+                .expect("test Attachment restart reaches a terminal state")
+                .expect("read test Attachment action progress")
+                .expect("test Attachment action stream remains open");
+            match grpc::progress_event(&message)
+                .expect("decode test Attachment action progress")
+                .event
+            {
+                ProgressEventKind::Snapshot(snapshot) | ProgressEventKind::Resync(snapshot) => {
+                    if let Some(receipt) = snapshot
+                        .actions
+                        .into_iter()
+                        .find(|receipt| receipt.action_id == action_id)
+                    {
+                        match receipt.phase {
+                            ActionPhase::Ready => return,
+                            ActionPhase::Failed => {
+                                panic!("test Attachment restart failed: {:?}", receipt.detail)
+                            },
+                            ActionPhase::Accepted
+                            | ActionPhase::Running
+                            | ActionPhase::Retrying => {},
+                        }
+                    }
+                },
+                ProgressEventKind::ActionCompleted(receipt) if receipt.action_id == action_id => {
+                    return;
+                },
+                ProgressEventKind::ActionFailed {
+                    receipt,
+                    error_code,
+                    detail,
+                } if receipt.action_id == action_id => {
+                    panic!("test Attachment restart failed ({error_code}): {detail}");
+                },
+                _ => {},
+            }
+        }
     });
 }
 

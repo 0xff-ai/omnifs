@@ -485,9 +485,11 @@ fn two_daemons_two_homes_resolve_through_their_own_sockets() {
         String::from_utf8_lossy(&out_a.stderr)
     );
     let json_a = status_json(&out_a);
-    let result_a = json_a["result"].as_object().expect("status result");
-    assert_eq!(result_a["daemon"]["probe"]["state"], "responding");
-    let pid_a = result_a["daemon"]["status"]["info"]["pid"]
+    let inventory_a = json_a["result"]["inventory"]
+        .as_object()
+        .expect("status inventory");
+    assert_eq!(inventory_a["daemon"]["probe"]["state"], "responding");
+    let pid_a = inventory_a["daemon"]["status"]["info"]["pid"]
         .as_u64()
         .expect("A pid");
     assert_eq!(
@@ -496,16 +498,16 @@ fn two_daemons_two_homes_resolve_through_their_own_sockets() {
         "status A must report A's pid"
     );
     assert!(
-        result_a["filesystems"]
+        inventory_a["filesystems"]
             .as_array()
             .is_some_and(Vec::is_empty)
     );
-    assert!(result_a["mounts"].as_array().is_some_and(Vec::is_empty));
+    assert!(inventory_a["mounts"].as_array().is_some_and(Vec::is_empty));
 
     let out_b = run_status(daemon_b.home.path());
     assert_eq!(exit_code(&out_b), 0, "status for home B must exit 0");
     let json_b = status_json(&out_b);
-    let pid_b = json_b["result"]["daemon"]["status"]["info"]["pid"]
+    let pid_b = json_b["result"]["inventory"]["daemon"]["status"]["info"]["pid"]
         .as_u64()
         .expect("B pid");
     assert_eq!(
@@ -514,7 +516,7 @@ fn two_daemons_two_homes_resolve_through_their_own_sockets() {
         "status B must report B's pid"
     );
     assert!(
-        json_b["result"]["filesystems"]
+        json_b["result"]["inventory"]["filesystems"]
             .as_array()
             .is_some_and(Vec::is_empty)
     );
@@ -535,7 +537,7 @@ fn two_daemons_two_homes_resolve_through_their_own_sockets() {
         String::from_utf8_lossy(&out_fresh.stderr)
     );
     assert_eq!(
-        status_json(&out_fresh)["result"]["daemon"]["probe"]["state"],
+        status_json(&out_fresh)["result"]["inventory"]["daemon"]["probe"]["state"],
         "stopped",
         "a home with no socket must report stopped, never a foreign daemon"
     );
@@ -564,7 +566,7 @@ fn two_daemons_two_homes_resolve_through_their_own_sockets() {
         String::from_utf8_lossy(&out_dead.stderr)
     );
     assert_eq!(
-        status_json(&out_dead)["result"]["daemon"]["probe"]["state"],
+        status_json(&out_dead)["result"]["inventory"]["daemon"]["probe"]["state"],
         "stopped",
         "the killed home A must report not_running"
     );
@@ -577,7 +579,7 @@ fn two_daemons_two_homes_resolve_through_their_own_sockets() {
         "home B must still answer after A is gone"
     );
     assert_eq!(
-        status_json(&out_b2)["result"]["daemon"]["status"]["info"]["pid"].as_u64(),
+        status_json(&out_b2)["result"]["inventory"]["daemon"]["status"]["info"]["pid"].as_u64(),
         Some(u64::from(daemon_b.pid())),
     );
 

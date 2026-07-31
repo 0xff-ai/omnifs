@@ -682,8 +682,7 @@ fn libkrun_lifecycle_and_matrix() {
     assert_ne!(fixture.libkrun_pid(), Some(killed_pid));
     assert_serves(&fixture);
 
-    let restarted = fixture.run(&["attachment", "restart", "itest-libkrun"]);
-    fixture.assert_filesystem_attach_ok(&restarted, "restart");
+    live::restart_attachment(&fixture.control_socket(), "itest-libkrun");
     assert_eq!(fixture.guest_image_hash(), base_hash);
     assert_eq!(fixture.guest_image_mode(), base_mode);
     assert_serves(&fixture);
@@ -731,24 +730,10 @@ fn libkrun_lifecycle_and_matrix() {
     // host runners explicitly, then stop the daemon with `omnifs down`.
     // The host-native NFS mount can be transiently busy at shutdown because
     // macOS spawns indexer handles like mds/mdworker against a fresh mount.
-    let libkrun_detached = fixture.run(&["attachment", "rm", "itest-libkrun", "--yes"]);
-    assert!(
-        libkrun_detached.status.success(),
-        "detaching libkrun filesystem before down failed (exit {})\nstdout: {}\nstderr: {}",
-        libkrun_detached.status,
-        String::from_utf8_lossy(&libkrun_detached.stdout),
-        String::from_utf8_lossy(&libkrun_detached.stderr),
-    );
+    live::remove_attachment(&fixture.control_socket(), "itest-libkrun");
     assert_eq!(fixture.guest_image_hash(), base_hash);
     assert_eq!(fixture.guest_image_mode(), base_mode);
-    let host_detached = fixture.run(&["attachment", "rm", "itest-host", "--yes"]);
-    assert!(
-        host_detached.status.success(),
-        "detaching host filesystem before down failed (exit {})\nstdout: {}\nstderr: {}",
-        host_detached.status,
-        String::from_utf8_lossy(&host_detached.stdout),
-        String::from_utf8_lossy(&host_detached.stderr),
-    );
+    live::remove_attachment(&fixture.control_socket(), "itest-host");
 
     let mut down_out = fixture.down();
     for _ in 0..3 {
