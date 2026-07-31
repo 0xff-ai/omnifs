@@ -1,7 +1,6 @@
 pub mod apply;
 pub mod attachment;
 pub mod completions;
-pub mod config;
 pub mod credential;
 pub(crate) mod daemon_start;
 pub mod doctor;

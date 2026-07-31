@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 pub async fn run(path: Option<PathBuf>, output: Output) -> anyhow::Result<ExitCode> {
-    let path = super::config::default_path(path)?;
+    let path = default_path(path)?;
     daemon_start::start(&output).await?;
     let evaluated = evaluate(path).await?;
     let rpc = RpcClient::resolve()?;
@@ -26,6 +26,18 @@ pub async fn run(path: Option<PathBuf>, output: Output) -> anyhow::Result<ExitCo
         output.report(render_plan(&plan));
     }
     Ok(ExitCode::Success)
+}
+
+pub(crate) fn default_path(path: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    if let Some(path) = path {
+        return Ok(path);
+    }
+    let path = PathBuf::from("omnifs.k");
+    anyhow::ensure!(
+        path.is_file(),
+        "no omnifs.k in the current directory; pass a path"
+    );
+    Ok(path)
 }
 
 fn render_plan(plan: &ResourcePlan) -> String {
@@ -70,9 +82,16 @@ fn render_plan(plan: &ResourcePlan) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_plan;
+    use super::{default_path, render_plan};
     use omnifs_api::{ResourceChange, ResourceChangeAction, ResourcePlan};
     use omnifs_core::{ResourceDigest, ResourceKey, ResourceKind, ResourceName, ResourceRevision};
+    use std::path::PathBuf;
+
+    #[test]
+    fn explicit_path_is_preserved() {
+        let path = PathBuf::from("some/omnifs.k");
+        assert_eq!(default_path(Some(path.clone())).unwrap(), path);
+    }
 
     #[test]
     fn empty_plan_is_explicitly_no_changes() {
@@ -90,7 +109,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_counts_every_change_class_and_warns_on_destructive_rows() {
+    fn plan_renders_every_change_class_and_warns_on_destructive_rows() {
         let key = |kind, name| ResourceKey::new(kind, ResourceName::new(name).unwrap());
         let plan = ResourcePlan {
             base_revision: ResourceRevision::new(1),

@@ -1,7 +1,7 @@
 //! Declarative apply handler.
 
 use crate::{
-    commands::{config, daemon_start, resource_flow},
+    commands::{daemon_start, plan, resource_flow},
     error::{ErrorVerdict, ExitCode, WithHint as _},
     provider_resolver::resolve_kcl_sources,
     rpc::RpcClient,
@@ -24,7 +24,7 @@ struct ApplyResult {
 }
 
 pub async fn run(path: Option<PathBuf>, output: Output) -> anyhow::Result<ExitCode> {
-    let path = config::default_path(path)?;
+    let path = plan::default_path(path)?;
     daemon_start::start(&output).await?;
     // The source is evaluated once. Provider imports are content-addressed and
     // inert, so they do not change desired state before this pure plan call.

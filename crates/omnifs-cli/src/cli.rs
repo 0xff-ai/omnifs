@@ -510,10 +510,9 @@ mod tests {
         );
     }
 
-    /// Leftover failed attachment state (e.g. a stale entry under
-    /// legacy runtime state can flip the verdict to `Degraded` while the daemon
+    /// A failed Attachment can flip the verdict to `Degraded` while the daemon
     /// is otherwise running and there are still zero mounts; the screen must
-    /// name that attachment and reuse its own `fix` field verbatim.
+    /// name that Attachment and reuse its own `fix` field verbatim.
     #[test]
     fn fresh_profile_screen_names_a_failed_attachment_while_daemon_is_up() {
         let attachment = crate::inventory::AttachmentAccessStatus {
@@ -594,15 +593,12 @@ mod tests {
     }
 
     #[test]
-    fn declarative_resource_commands_are_in_the_user_grammar() {
+    fn plan_and_apply_are_in_the_user_grammar() {
         for argv in [
             &["omnifs", "plan"][..],
             &["omnifs", "plan", "resources.k"][..],
             &["omnifs", "apply", "--yes"][..],
             &["omnifs", "apply", "resources.k", "--yes"][..],
-            &["omnifs", "config", "init"][..],
-            &["omnifs", "config", "export"][..],
-            &["omnifs", "config", "export", "--format", "kcl"][..],
         ] {
             assert!(
                 Cli::try_parse_from(argv).is_ok(),
