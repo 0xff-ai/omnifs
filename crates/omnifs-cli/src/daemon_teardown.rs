@@ -8,7 +8,7 @@ use crate::inventory::{DaemonHealth, Inventory};
 use crate::ui::consent::Outcome;
 use crate::ui::output::Output;
 use crate::ui::render::{self, LedgerRow};
-use omnifs_bootstrap::{Bootstrap, Client, Instance};
+use omnifs_bootstrap::{DaemonIdentity, Profile};
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -100,15 +100,15 @@ impl TeardownOutcome {
 
 pub(crate) struct DaemonTeardown {
     rpc: crate::rpc::RpcClient,
-    endpoint: Bootstrap<Client>,
-    initial_identity: Option<Instance>,
+    endpoint: Profile,
+    initial_identity: Option<DaemonIdentity>,
     initial: Option<Inventory>,
 }
 
 impl DaemonTeardown {
-    pub(crate) fn with_inventory(endpoint: Bootstrap<Client>, inventory: Inventory) -> Self {
+    pub(crate) fn with_inventory(endpoint: Profile, inventory: Inventory) -> Self {
         Self {
-            rpc: crate::rpc::RpcClient::from_endpoint(endpoint.clone()),
+            rpc: crate::rpc::RpcClient::from_endpoint(endpoint.control_socket()),
             initial_identity: endpoint.read_process_identity().ok().flatten(),
             endpoint,
             initial: Some(inventory),
@@ -262,7 +262,7 @@ impl DaemonTeardown {
             .filter(|identity| identity.pid() == pid)
             .map_or_else(
                 || crate::process::is_alive(pid),
-                Instance::still_identifies_running_process,
+                DaemonIdentity::still_identifies_running_process,
             )
     }
 
@@ -466,9 +466,9 @@ mod tests {
     #[test]
     fn successful_rpc_shutdown_needs_no_missing_identity_cleanup() {
         let root = tempfile::tempdir().unwrap();
-        let endpoint = Bootstrap::<Client>::under_root(root.path());
+        let endpoint = Profile::under_root(root.path());
         let teardown = DaemonTeardown {
-            rpc: crate::rpc::RpcClient::from_endpoint(endpoint.clone()),
+            rpc: crate::rpc::RpcClient::from_endpoint(endpoint.control_socket()),
             endpoint,
             initial_identity: None,
             initial: None,

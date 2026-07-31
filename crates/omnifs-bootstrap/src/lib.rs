@@ -6,7 +6,6 @@ use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
-use std::marker::PhantomData;
 use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -22,20 +21,11 @@ pub const OMNIFS_HOME_ENV: &str = "OMNIFS_HOME";
 
 /// The sole resolver for paths shared before the control socket is usable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bootstrap<R> {
-    bootstrap_dir: PathBuf,
-    role: PhantomData<R>,
+pub struct Profile {
+    root: PathBuf,
 }
 
-/// Client-side bootstrap capabilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Client;
-
-/// Daemon-side bootstrap capabilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Daemon;
-
-impl<R> Bootstrap<R> {
+impl Profile {
     fn resolve_root() -> Result<PathBuf, ResolveError> {
         std::env::var_os(OMNIFS_HOME_ENV)
             .map(PathBuf::from)
@@ -46,7 +36,7 @@ impl<R> Bootstrap<R> {
     }
 
     fn with_root(root: &Path) -> Self {
-        let bootstrap_dir = if root.is_absolute() {
+        let resolved_root = if root.is_absolute() {
             root.to_path_buf()
         } else {
             std::env::current_dir()
@@ -54,32 +44,31 @@ impl<R> Bootstrap<R> {
                 .join(root)
         };
         Self {
-            bootstrap_dir,
-            role: PhantomData,
+            root: resolved_root,
         }
     }
 
     /// Return the resolved active profile directory.
     #[must_use]
-    pub fn bootstrap_dir(&self) -> &Path {
-        &self.bootstrap_dir
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     #[must_use]
     pub fn control_socket(&self) -> PathBuf {
-        self.bootstrap_dir.join(CONTROL_SOCKET_FILE)
+        self.root.join(CONTROL_SOCKET_FILE)
     }
 
     #[must_use]
     pub fn process_identity_path(&self) -> PathBuf {
-        self.bootstrap_dir.join(PROCESS_IDENTITY_FILE)
+        self.root.join(PROCESS_IDENTITY_FILE)
     }
 
     fn spawn_lock_path(&self) -> PathBuf {
-        self.bootstrap_dir.join(SPAWN_LOCK_FILE)
+        self.root.join(SPAWN_LOCK_FILE)
     }
 
-    fn read_process_identity_inner(&self) -> io::Result<Option<Instance>> {
+    fn read_process_identity_inner(&self) -> io::Result<Option<DaemonIdentity>> {
         let path = self.process_identity_path();
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
@@ -95,8 +84,8 @@ impl<R> Bootstrap<R> {
     }
 
     fn prepare_dir(&self) -> io::Result<()> {
-        std::fs::create_dir_all(&self.bootstrap_dir)?;
-        std::fs::set_permissions(&self.bootstrap_dir, std::fs::Permissions::from_mode(0o700))
+        std::fs::create_dir_all(&self.root)?;
+        std::fs::set_permissions(&self.root, std::fs::Permissions::from_mode(0o700))
     }
 
     fn remove_process_identity(&self) -> io::Result<()> {
@@ -121,22 +110,20 @@ impl<R> Bootstrap<R> {
         file.lock_exclusive()?;
         Ok(SpawnLock { _file: file })
     }
-}
 
-impl Bootstrap<Client> {
-    /// Resolve the active client profile from `OMNIFS_HOME`, then `$HOME/.omnifs`.
-    pub fn for_client() -> Result<Self, ResolveError> {
+    /// Resolve the active profile from `OMNIFS_HOME`, then `$HOME/.omnifs`.
+    pub fn resolve() -> Result<Self, ResolveError> {
         Ok(Self::with_root(&Self::resolve_root()?))
     }
 
-    /// Build client bootstrap state under an explicit profile root.
+    /// Build a profile under an explicit root.
     #[must_use]
     pub fn under_root(root: &Path) -> Self {
         Self::with_root(root)
     }
 
     /// Read the persisted daemon identity for client-side diagnostics.
-    pub fn read_process_identity(&self) -> io::Result<Option<Instance>> {
+    pub fn read_process_identity(&self) -> io::Result<Option<DaemonIdentity>> {
         self.read_process_identity_inner()
     }
 
@@ -148,7 +135,7 @@ impl Bootstrap<Client> {
     /// Remove one exact daemon's identity and control-socket path while
     /// excluding concurrent startup. Replacement bootstrap state is never
     /// removed.
-    pub fn remove_daemon_bootstrap_if(&self, expected: &Instance) -> io::Result<bool> {
+    pub fn remove_daemon_bootstrap_if(&self, expected: &DaemonIdentity) -> io::Result<bool> {
         let _spawn_lock = self.acquire_spawn_lock()?;
         let Some(current) = self.read_process_identity_inner()? else {
             return Ok(false);
@@ -164,19 +151,6 @@ impl Bootstrap<Client> {
         self.remove_process_identity()?;
         Ok(true)
     }
-}
-
-impl Bootstrap<Daemon> {
-    /// Resolve the active daemon profile from `OMNIFS_HOME`, then `$HOME/.omnifs`.
-    pub fn for_daemon() -> Result<Self, ResolveError> {
-        Ok(Self::with_root(&Self::resolve_root()?))
-    }
-
-    /// Build daemon bootstrap state under an explicit profile root.
-    #[must_use]
-    pub fn under_root(root: &Path) -> Self {
-        Self::with_root(root)
-    }
 
     /// Bind the fixed local control socket with fail-closed stale-path rules.
     pub fn bind_control_socket(&self) -> io::Result<UnixListener> {
@@ -188,7 +162,7 @@ impl Bootstrap<Daemon> {
         Ok(listener)
     }
 
-    pub fn write_process_identity(&self, identity: &Instance) -> io::Result<()> {
+    pub fn write_process_identity(&self, identity: &DaemonIdentity) -> io::Result<()> {
         self.prepare_dir()?;
         let bytes = serde_json::to_vec(identity)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -202,7 +176,7 @@ impl Bootstrap<Daemon> {
     /// Remove the identity and socket published by this daemon on shutdown.
     /// The full identity is checked while holding the spawn lock so a
     /// replacement daemon's files are never removed.
-    pub fn remove_published_bootstrap_if(&self, expected: &Instance) -> io::Result<bool> {
+    pub fn remove_published_bootstrap_if(&self, expected: &DaemonIdentity) -> io::Result<bool> {
         let _spawn_lock = self.acquire_spawn_lock_inner()?;
         let Some(current) = self.read_process_identity_inner()? else {
             return Ok(false);
@@ -227,7 +201,7 @@ pub struct SpawnLock {
 /// Narrow daemon process identity used only when RPC cannot answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Instance {
+pub struct DaemonIdentity {
     version: u32,
     pid: u32,
     #[serde(rename = "instance_token")]
@@ -236,7 +210,7 @@ pub struct Instance {
     start_identity: Option<String>,
 }
 
-impl Instance {
+impl DaemonIdentity {
     pub fn current() -> io::Result<Self> {
         let pid = std::process::id();
         let mut token = [0_u8; 16];
@@ -394,7 +368,7 @@ mod tests {
     #[test]
     fn endpoint_owns_only_fixed_bootstrap_paths() {
         let dir = tempfile::tempdir().unwrap();
-        let endpoint = Bootstrap::<Client>::under_root(dir.path());
+        let endpoint = Profile::under_root(dir.path());
         assert_eq!(endpoint.control_socket(), dir.path().join("control.sock"));
         assert_eq!(
             endpoint.process_identity_path(),
@@ -404,11 +378,44 @@ mod tests {
     }
 
     #[test]
+    fn explicit_relative_root_is_anchored_to_the_current_directory() {
+        let relative = Path::new("target").join("profile-relative-test");
+        let profile = Profile::under_root(&relative);
+        assert_eq!(
+            profile.root(),
+            std::env::current_dir().unwrap().join(relative)
+        );
+    }
+
+    #[test]
+    fn bootstrap_files_are_owner_only_and_a_live_socket_is_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = Profile::under_root(dir.path());
+        let _lock = profile.acquire_spawn_lock().unwrap();
+        let identity = DaemonIdentity::current().unwrap();
+        profile.write_process_identity(&identity).unwrap();
+        let listener = profile.bind_control_socket().unwrap();
+
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(profile.root()), 0o700);
+        assert_eq!(mode(&profile.spawn_lock_path()), 0o600);
+        assert_eq!(mode(&profile.process_identity_path()), 0o600);
+        assert_eq!(mode(&profile.control_socket()), 0o600);
+
+        let replacement = Profile::under_root(dir.path())
+            .bind_control_socket()
+            .unwrap_err();
+        assert_eq!(replacement.kind(), io::ErrorKind::AddrInUse);
+        assert!(profile.control_socket().exists());
+        drop(listener);
+    }
+
+    #[test]
     fn process_identity_round_trips_and_matches_current_process() {
         let dir = tempfile::tempdir().unwrap();
-        let endpoint = Bootstrap::<Client>::under_root(dir.path());
-        let identity = Instance::current().unwrap();
-        let daemon = Bootstrap::<Daemon>::under_root(dir.path());
+        let endpoint = Profile::under_root(dir.path());
+        let identity = DaemonIdentity::current().unwrap();
+        let daemon = Profile::under_root(dir.path());
         daemon.write_process_identity(&identity).unwrap();
         assert_eq!(
             endpoint.read_process_identity().unwrap().as_ref(),
@@ -430,10 +437,10 @@ mod tests {
     #[test]
     fn exact_identity_removal_never_deletes_a_replacement() {
         let dir = tempfile::tempdir().unwrap();
-        let endpoint = Bootstrap::<Client>::under_root(dir.path());
-        let daemon = Bootstrap::<Daemon>::under_root(dir.path());
-        let old = Instance::current().unwrap();
-        let replacement = Instance::current().unwrap();
+        let endpoint = Profile::under_root(dir.path());
+        let daemon = Profile::under_root(dir.path());
+        let old = DaemonIdentity::current().unwrap();
+        let replacement = DaemonIdentity::current().unwrap();
         assert_ne!(old, replacement);
         daemon.write_process_identity(&replacement).unwrap();
         std::fs::write(endpoint.control_socket(), b"replacement").unwrap();
@@ -454,7 +461,7 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let dir = tempfile::tempdir().unwrap();
-        let endpoint = Bootstrap::<Daemon>::under_root(dir.path());
+        let endpoint = Profile::under_root(dir.path());
         let target = dir.path().join("target");
         std::fs::write(&target, b"keep").unwrap();
         symlink(&target, endpoint.control_socket()).unwrap();

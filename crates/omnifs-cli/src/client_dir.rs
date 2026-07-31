@@ -1,6 +1,6 @@
 //! Shared client-state scaffolding.
 //!
-//! `client_state.rs` and `client_fs_state.rs` both hang their durable state
+//! `client_state.rs` hangs its transitional journal state
 //! off the same CLI-private root, both need owner-only (0o700) directories
 //! and owner-only (0o600) files, and both need a locked sidecar file and an
 //! atomic write. This module owns those mechanical filesystem steps; each
@@ -14,15 +14,13 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 
-use omnifs_bootstrap::{Bootstrap, Client};
+use omnifs_bootstrap::Profile;
 
 const CLIENT_DIR: &str = "client";
 
 /// The CLI-private root every client-owned state tree hangs off.
 pub(crate) fn client_root() -> anyhow::Result<PathBuf> {
-    Ok(Bootstrap::<Client>::for_client()?
-        .bootstrap_dir()
-        .join(CLIENT_DIR))
+    Ok(Profile::resolve()?.root().join(CLIENT_DIR))
 }
 
 /// Create `path` if absent and restrict it to owner-only (0o700). The

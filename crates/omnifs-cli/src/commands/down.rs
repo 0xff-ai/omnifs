@@ -10,10 +10,10 @@ use crate::daemon_teardown::DaemonTeardown;
 use crate::error::ExitCode;
 use crate::inventory::Inventory;
 use crate::ui::output::Output;
-use omnifs_bootstrap::{Bootstrap, Client};
+use omnifs_bootstrap::Profile;
 
 pub async fn run(output: Output) -> anyhow::Result<ExitCode> {
-    let endpoint = Bootstrap::<Client>::for_client()?;
+    let endpoint = Profile::resolve()?;
     let inventory = Inventory::collect_rpc().await?;
 
     let teardown = DaemonTeardown::with_inventory(endpoint, inventory);

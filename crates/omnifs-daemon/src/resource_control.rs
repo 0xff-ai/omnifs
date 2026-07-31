@@ -858,10 +858,9 @@ mod tests {
         ProviderId,
     ) {
         let temp = tempfile::tempdir().unwrap();
-        let endpoint =
-            omnifs_bootstrap::Bootstrap::<omnifs_bootstrap::Daemon>::under_root(temp.path());
+        let paths = omnifs_state::DaemonStatePaths::new(temp.path().join("daemon-state"));
         let state = Arc::new(
-            StateStore::open(&endpoint, omnifs_state::StateStoreOptions::default())
+            StateStore::open(paths, omnifs_state::StateStoreOptions::default())
                 .await
                 .unwrap(),
         );

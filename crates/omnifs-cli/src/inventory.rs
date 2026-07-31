@@ -14,9 +14,8 @@ use serde::Serialize;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
-use crate::client_fs_state::ClientFilesystemState;
 use crate::ui::output::ResultVerdict;
-use omnifs_bootstrap::{Bootstrap, Client};
+use omnifs_bootstrap::Profile;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Inventory {
@@ -542,11 +541,7 @@ pub(crate) enum NextAction {
 
 impl Inventory {
     pub(crate) async fn collect_rpc() -> Result<Self> {
-        let endpoint = Bootstrap::<Client>::for_client()?;
-        let client_root = crate::client_dir::client_root()?;
-        let configured_filesystems = ClientFilesystemState::under_root(&client_root)
-            .registry()
-            .list()?;
+        let endpoint = Profile::resolve()?;
         let rpc = crate::rpc::RpcClient::resolve()?;
         let (daemon, mounts, daemon_status, daemon_known, active_mutation) =
             match rpc.inventory().await {
@@ -585,14 +580,10 @@ impl Inventory {
                 },
             };
         let mount_count = mounts.len();
-        let filesystems = filesystem_statuses(
-            &configured_filesystems,
-            daemon_status.as_ref(),
-            daemon_known,
-            mount_count,
-        );
+        let filesystems =
+            filesystem_statuses(&[], daemon_status.as_ref(), daemon_known, mount_count);
         let mut inventory = Self {
-            home: endpoint.bootstrap_dir().to_path_buf(),
+            home: endpoint.root().to_path_buf(),
             durable_revision: daemon_status
                 .as_ref()
                 .and_then(|status| status.durable_revision),
@@ -801,9 +792,13 @@ pub(crate) fn filesystem_statuses(
                 .filter(|observed| !configured.iter().any(|spec| spec.id() == observed.id()))
                 .map(|observed| FilesystemStatus {
                     spec: observed.clone(),
-                    state: FilesystemState::Failed,
+                    state: if daemon.health.overall_state() == HealthState::Unhealthy {
+                        FilesystemState::Failed
+                    } else {
+                        FilesystemState::Attached
+                    },
                     mount_count,
-                    fix: Some("omnifs doctor".to_owned()),
+                    fix: None,
                 }),
         );
     }

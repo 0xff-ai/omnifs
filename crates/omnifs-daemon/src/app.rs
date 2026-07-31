@@ -58,13 +58,12 @@ fn next_recovery_id() -> RecoveryId {
 
 /// Bind control first, then keep it available through startup and recovery.
 pub async fn run() -> anyhow::Result<()> {
-    let context = Arc::new(DaemonContext::resolve()?);
-    logging::verify_resolved_profile(&context)?;
+    let (context, inspector) = resolve_startup_context()?;
     let embedded = Arc::new(EmbeddedProviders::load()?);
     context.prepare_startup_dirs()?;
     let control_listener = context.bind_control_socket()?;
     if let Err(error) = context
-        .endpoint()
+        .profile()
         .write_process_identity(context.process_identity())
     {
         remove_control_socket(&context);
@@ -79,8 +78,8 @@ pub async fn run() -> anyhow::Result<()> {
     );
     let control_task = tokio::spawn(Arc::clone(&control).run(control_listener));
     let signal_task = spawn_signal_task(shutdown_tx.clone());
-    let inspector = start_inspector();
-    let state_paths = DaemonStatePaths::new(context.daemon_state_root());
+    let inspector = inspector.or_else(start_inspector);
+    let state_paths = context.state_paths().clone();
     let progress = ProgressHub::new(
         context.instance_id(),
         ProgressSnapshot {
@@ -164,6 +163,17 @@ pub async fn run() -> anyhow::Result<()> {
     unpublish_process_identity(&context);
 
     crate::first_error([result, control_result, daemon_result, preparer_result])
+}
+
+fn resolve_startup_context() -> anyhow::Result<(Arc<DaemonContext>, Option<Arc<Inspector>>)> {
+    let profile = omnifs_bootstrap::Profile::resolve()?;
+    let state_paths = DaemonStatePaths::new(profile.root().join("daemon-state"));
+    let inspector = init_global_from_env();
+    logging::init(&state_paths, inspector.as_ref())?;
+    Ok((
+        Arc::new(DaemonContext::new(profile, state_paths)?),
+        inspector,
+    ))
 }
 
 /// Open the store, build the runtime, and serve until stopped, re-entering
@@ -342,17 +352,17 @@ fn start_inspector() -> Option<Arc<Inspector>> {
 /// Remove this process's published identity, but only if it is still ours.
 fn unpublish_process_identity(context: &DaemonContext) {
     match context
-        .endpoint()
+        .profile()
         .remove_published_bootstrap_if(context.process_identity())
     {
         Ok(true) => {},
         Ok(false) => warn!(
-            path = %context.endpoint().process_identity_path().display(),
+            path = %context.profile().process_identity_path().display(),
             "daemon process identity changed before cleanup; leaving it intact"
         ),
         Err(error) => warn!(
             %error,
-            path = %context.endpoint().process_identity_path().display(),
+            path = %context.profile().process_identity_path().display(),
             "failed to remove daemon process identity"
         ),
     }
@@ -477,7 +487,7 @@ async fn build_daemon(
                 return Err(close_failed_state(state, error).await);
             }
             let attachment_paths = omnifs_fs_runtime::RuntimePaths::daemon_owned(
-                daemon.context.endpoint().bootstrap_dir().to_path_buf(),
+                daemon.context.profile().root().to_path_buf(),
                 std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
                 runtime.state_paths.attachments_runtime(),
                 runtime.state_paths.attachment_logs(),
@@ -519,30 +529,32 @@ async fn repair_store(
         action,
         reply,
     } = command;
-    let error =
-        match StateStore::recreate_control_store(context.endpoint(), StateStoreOptions::default())
-            .await
-        {
-            Ok((store, disposition)) => {
-                let disposition = match disposition {
-                    ControlStoreRepairDisposition::FreshStoreCreated => {
-                        RepairDisposition::FreshStoreCreated
-                    },
-                    ControlStoreRepairDisposition::CorruptStoreArchived => {
-                        RepairDisposition::CorruptStoreArchived
-                    },
-                };
-                let receipt = RepairReceipt {
-                    instance_id: context.instance_id().to_owned(),
-                    recovery_id,
-                    action,
-                    disposition,
-                };
-                let _ = reply.send(Ok(receipt));
-                return Ok(store);
-            },
-            Err(error) => error,
-        };
+    let error = match StateStore::recreate_control_store(
+        context.state_paths().clone(),
+        StateStoreOptions::default(),
+    )
+    .await
+    {
+        Ok((store, disposition)) => {
+            let disposition = match disposition {
+                ControlStoreRepairDisposition::FreshStoreCreated => {
+                    RepairDisposition::FreshStoreCreated
+                },
+                ControlStoreRepairDisposition::CorruptStoreArchived => {
+                    RepairDisposition::CorruptStoreArchived
+                },
+            };
+            let receipt = RepairReceipt {
+                instance_id: context.instance_id().to_owned(),
+                recovery_id,
+                action,
+                disposition,
+            };
+            let _ = reply.send(Ok(receipt));
+            return Ok(store);
+        },
+        Err(error) => error,
+    };
     let _ = reply.send(Err(ControlError::new(
         ControlErrorCode::Internal,
         "control store repair failed",

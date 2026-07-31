@@ -210,7 +210,7 @@ async function main() {
   try {
     // Host-resource mounts activate as soon as `mount add` reaches the daemon,
     // so their files and sockets must exist before the mount RPC.
-    await writeDevHome(devHome, filesystemImage, omnifsCli, render);
+    await writeDevHome(devHome, omnifsCli, render);
 
     const hostProtocol = process.platform === "linux" ? "fuse" : "nfs";
     const hostLocation = join(devHome, "mnt");
@@ -542,20 +542,11 @@ function cliEnv(devHome: string, extra: Record<string, string | undefined> = {})
 
 async function writeDevHome(
   devHome: string,
-  filesystemImage: string,
   omnifsCli: string,
   render: DevHomeRender,
 ): Promise<void> {
   mkdirSync(devHome, { recursive: true });
   chmodPrivateDir(devHome);
-
-  // The daemon always runs host-native. Keep the Docker filesystem image in the
-  // client config so `fs attach` resolves the local build without a
-  // registry lookup. Filesystem lifecycle itself is imperative and explicit.
-  writeFileSync(
-    join(devHome, "config.toml"),
-    [`[filesystem]`, `docker_image = ${JSON.stringify(filesystemImage)}`, ``].join("\n"),
-  );
 
   for (const mount of render.mounts) {
     await runInitMount(devHome, omnifsCli, mount, render.credentialEnv);

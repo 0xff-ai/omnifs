@@ -14,7 +14,6 @@ mod row;
 mod writer;
 
 use anyhow::Context as _;
-use omnifs_bootstrap::{Bootstrap, Daemon};
 use omnifs_core::{
     AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MountName, MountRevision,
     MountVersion, MutationId, ProviderId,
@@ -32,7 +31,7 @@ use tokio::sync::watch;
 use credential::{credential_summaries_query, pending_revocations_query, stored_credentials_query};
 use db::{Db, RecoveryTransition};
 use mount::mounts_query;
-use paths::{DAEMON_LOG_FILE, StorePaths, ensure_private_dir};
+use paths::{DAEMON_LOG_FILE, ensure_private_dir};
 use provider::{
     MAX_PROVIDER_BYTES, PROVIDER_CHUNK_BYTES, provider_metadata_query, providers_query,
 };
@@ -119,20 +118,16 @@ pub enum ControlStoreRepairDisposition {
 }
 
 impl StateStore {
-    pub async fn open(
-        endpoint: &Bootstrap<Daemon>,
-        options: StateStoreOptions,
-    ) -> anyhow::Result<Self> {
-        Self::open_paths(DaemonStatePaths::for_endpoint(endpoint), options).await
+    pub async fn open(paths: DaemonStatePaths, options: StateStoreOptions) -> anyhow::Result<Self> {
+        Self::open_paths(paths, options).await
     }
 
     /// Archive the authoritative control store as one directory entry and open
     /// a fresh store. Cache, logs, staging, and bootstrap state stay untouched.
     pub async fn recreate_control_store(
-        endpoint: &Bootstrap<Daemon>,
+        paths: DaemonStatePaths,
         options: StateStoreOptions,
     ) -> anyhow::Result<(Self, ControlStoreRepairDisposition)> {
-        let paths = DaemonStatePaths::for_endpoint(endpoint);
         ensure_private_dir(paths.root())?;
         let archive = paths.archive_control_store()?;
         let disposition = if archive.is_some() {
@@ -715,10 +710,9 @@ fn validate_provider_file_name(file_name: String) -> anyhow::Result<String> {
 }
 
 /// Open the daemon-owned log for append before the `StateStore` runtime starts.
-pub fn open_daemon_log(endpoint: &Bootstrap<Daemon>) -> anyhow::Result<std::fs::File> {
+pub fn open_daemon_log(paths: &DaemonStatePaths) -> anyhow::Result<std::fs::File> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
-    let paths = StorePaths::for_endpoint(endpoint);
     ensure_private_dir(paths.root())?;
     let logs = paths.logs();
     ensure_private_dir(&logs)?;

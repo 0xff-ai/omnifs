@@ -43,7 +43,7 @@ Run `just check` before a push or PR handoff; it composes formatting, justfile a
 
 ### Cross-language facts on the container boundary
 
-The daemon always runs host-native, so `OMNIFS_HOME` resolves from the host environment on every platform. `omnifs-bootstrap::Bootstrap<Client>` owns client-side profile resolution and spawn or stale-record cleanup; `Bootstrap<Daemon>` owns daemon-side control-socket binding and process-identity publication. Client filesystem state lives under `<profile>/client`; daemon SQLx state, cache, and logs live under `<profile>/daemon-state`. Guest runtimes use the fixed location `/omnifs`; `fs::Spec` stores it, launchers pass it through `--location`, and `scripts/dev.ts` uses the same value. The image entrypoint contains only `/usr/local/bin/omnifs-thin`; the launcher supplies the flat ID, protocol, runtime, and location arguments.
+The daemon always runs host-native, so `OMNIFS_HOME` resolves from the host environment on every platform. One `omnifs-bootstrap::Profile` feeds daemon logging, control binding, identity publication, and explicit `DaemonStatePaths`; `SpawnLock` and `DaemonIdentity` cover only pre-RPC process safety. Daemon SQLx state, cache, logs, and runtime paths live under `<profile>/daemon-state`; `client/filesystems` is read-only legacy migration input. Guest runtimes use the fixed location `/omnifs`; `fs::Spec` stores it, launchers pass it through `--location`, and `scripts/dev.ts` uses the same value. The image entrypoint contains only `/usr/local/bin/omnifs-thin`; the launcher supplies the flat ID, protocol, runtime, and location arguments.
 
 ### Filesystem image artifact
 
@@ -69,7 +69,7 @@ The libkrun BOOT smoke (`just guest-image-smoke`) and the libkrun conformance la
 
 CI builds the guest image on a native arm64 runner (`guest-image-arm64` in `ci.yml`, gated by `scripts/guest-image/**`, `crates/omnifs-thin/**`, both protocol crates, `crates/omnifs-vfs/**`, or a push to `main`): it consumes the `thin-linux-arm64` job's binary artifact, builds the `release` profile, runs `check-guest-image.sh release` against it, compresses the result with `zstd -19`, and pushes it as an OCI artifact (`oras push`, artifact type `application/vnd.omnifs.guest-image.v1+zstd`, one blob) to `ghcr.io/0xff-ai/omnifs-guest:sha-<commit>`. `oras` is a CI-only tool; it is never a CLI or product dependency. A fork PR builds and asserts the image but skips the push with a loud warning (no registry write access from a fork's `GITHUB_TOKEN`). On ship, `release.yml`'s `promote` job retags the sha-keyed artifact to the version (`scripts/ci/promote-guest-image.sh`, mirroring `promote-image.sh`'s wait-for-artifact retry loop but using `oras tag` instead of `docker buildx imagetools create`, since the guest image is a single-arch non-container artifact) and attests its provenance, exactly like the filesystem image.
 
-The CLI's libkrun runtime mirrors the filesystem image's channel split (`resolve_guest_image` in `crates/omnifs-cli/src/libkrun_runner.rs`): a release build defaults to `ghcr.io/0xff-ai/omnifs-guest:<version>` and pulls it on first use via `crate::guest_image_pull` (plain `reqwest`, not `oras`: anonymous ghcr token, manifest fetch accepting both the OCI image manifest and legacy artifact manifest media types, blob fetch, sha256 verification against the manifest before the file is trusted, cached under `<cache_dir>/guest-images/`); a dev build never downloads and defaults to the local `target/guest-image/omnifs-guest.raw`, naming `just guest-image` in its not-found error.
+The daemon-owned libkrun runtime mirrors the filesystem image's channel split (`resolve_guest_image` in `crates/omnifs-fs-runtime/src/libkrun.rs`): a release build defaults to `ghcr.io/0xff-ai/omnifs-guest:<version>` and pulls it on first use through `crates/omnifs-fs-runtime/src/guest_image.rs` (plain `reqwest`, not `oras`: anonymous ghcr token, manifest fetch accepting both the OCI image manifest and legacy artifact manifest media types, blob fetch, sha256 verification against the manifest before the file is trusted, cached under the daemon's guest-image cache); a dev build never downloads and defaults to the local `target/guest-image/omnifs-guest.raw`, naming `just guest-image` in its not-found error.
 
 ### Libkrun conformance lane (local-only, never CI)
 
@@ -133,9 +133,9 @@ This lane can **never** run in GitHub-hosted CI: libkrun boots a libkrun microVM
 - `scripts/guest-image/build.sh`
 - `scripts/guest-image/mkosi/mkosi.profiles/dev/mkosi.conf`
 - `scripts/guest-image/mkosi/mkosi.profiles/release/mkosi.conf`
-- `crates/omnifs-cli/src/libkrun_runner.rs`
+- `crates/omnifs-fs-runtime/src/libkrun.rs`
 - `crates/omnifs-libkrun/src`
-- `crates/omnifs-cli/src/guest_image_pull.rs`
+- `crates/omnifs-fs-runtime/src/guest_image.rs`
 - `CONTRIBUTING.md`
 
 ## Validation

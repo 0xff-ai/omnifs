@@ -11,7 +11,7 @@ Read this before touching `omnifs-cli`, `omnifs-api`, `omnifs-bootstrap`, `omnif
 
 ## Ownership boundary
 
-There is no shared workspace store. `omnifs-bootstrap` resolves one profile root from `OMNIFS_HOME` or `$HOME/.omnifs`, creates the fixed `control.sock`, writes the narrow `process.json` identity, and serializes daemon spawn with `spawn.lock`.
+There is no shared workspace store. `omnifs-bootstrap::Profile` resolves one profile root from `OMNIFS_HOME` or `$HOME/.omnifs`, owns only fixed pre-RPC paths, and exposes `SpawnLock` and exact `DaemonIdentity` operations.
 
 The CLI owns user-facing commands, OAuth and static-auth UX, client config, the legacy single-record mutation journal, metrics, daemon spawn, and resource authoring. It persists remaining client data under `<profile>/client/` and sends all daemon mutations through typed local RPC. Legacy filesystem specs are read-only migration input and never start a runtime.
 
@@ -83,7 +83,7 @@ CLI dogfood metrics are local client files under `<profile>/metrics/`, controlle
 - `crates/omnifs-cli/src/rpc.rs`
 - `crates/omnifs-cli/src/mutation.rs`
 - `crates/omnifs-cli/src/client_state.rs`
-- `crates/omnifs-cli/src/client_fs_state.rs`
+- `crates/omnifs-cli/src/legacy_filesystems.rs`
 - `crates/omnifs-inspector/src/lib.rs`
 - `crates/omnifs-daemon/src/app.rs`
 - `crates/omnifs-daemon/src/control.rs` and `crates/omnifs-daemon/src/control/`

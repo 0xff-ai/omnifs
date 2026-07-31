@@ -43,7 +43,6 @@ pub(crate) fn first_error(
     }
     first
 }
-pub use logging::init as init_tracing;
 
 #[cfg(test)]
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

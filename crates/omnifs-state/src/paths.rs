@@ -1,7 +1,6 @@
 //! On-disk layout, permissions, and control-store repair.
 
 use anyhow::Context as _;
-use omnifs_bootstrap::{Bootstrap, Daemon};
 use omnifs_core::ResourceName;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -37,17 +36,13 @@ pub struct DaemonStatePaths {
     root: PathBuf,
 }
 
+#[cfg(test)]
 pub(crate) type StorePaths = DaemonStatePaths;
 
 impl DaemonStatePaths {
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
-    }
-
-    #[must_use]
-    pub(crate) fn for_endpoint(endpoint: &Bootstrap<Daemon>) -> Self {
-        Self::new(endpoint.bootstrap_dir().join("daemon-state"))
     }
 
     #[cfg(test)]

@@ -30,7 +30,7 @@ a terminal result.
 | [003](003-move-provider-work-to-daemon-reconciliation.md) | Move provider work to daemon-owned reconciliation | P1 | L | 002 | DONE |
 | [004](004-extract-filesystem-runtime-drivers.md) | Extract filesystem runtime drivers | P1 | L | 001 | DONE |
 | [005](005-make-daemon-own-attachments.md) | Make the daemon own attachments | P1 | L | 003, 004 | DONE |
-| [006](006-retire-client-filesystem-state-and-narrow-bootstrap.md) | Retire client filesystem state and narrow bootstrap | P1 | L | 005 | TODO |
+| [006](006-retire-client-filesystem-state-and-narrow-bootstrap.md) | Retire client filesystem state and narrow bootstrap | P1 | L | 005 | DONE |
 | [007](007-add-kcl-plan-and-apply-client.md) | Add KCL plan and apply | P1 | L | 005 | TODO |
 | [008](008-switch-to-interactive-resource-porcelain.md) | Switch to interactive resource porcelain | P1 | L | 005, 006, 007 | TODO |
 | [009](009-remove-legacy-control-plane-and-finish-migration.md) | Remove the legacy control plane and finish migration | P1 | L | 003, 006, 007, 008 | TODO |
@@ -92,7 +92,7 @@ control and CLI files and should run after its prerequisites are integrated.
    runtime instance, remove client owner identity from runtime surfaces, and
    make current `fs` commands thin daemon RPC and progress-stream adapters.
 
-6. **Plan 006, delete the former client owner and narrow bootstrap.** Replace
+6. **Plan 006, delete the former client owner and narrow bootstrap.** **DONE.** Replace
    `Bootstrap<R>` with `Profile`, pass an explicit root into state, resolve one
    daemon profile, add a read-only legacy scanner, and delete
    `client_fs_state.rs`, its registry, claims, paths, config, and tests.

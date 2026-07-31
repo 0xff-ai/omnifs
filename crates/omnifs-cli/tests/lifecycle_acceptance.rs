@@ -17,7 +17,7 @@ use omnifs_api::{
     CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInventory,
     MountDefinition,
 };
-use omnifs_bootstrap::{Bootstrap, Client};
+use omnifs_bootstrap::Profile;
 use omnifs_core::{MountName, ProviderId};
 use prost::Message as _;
 use std::path::Path;
@@ -71,8 +71,8 @@ impl Fixture {
         self.home.path()
     }
 
-    fn endpoint(&self) -> Bootstrap<Client> {
-        Bootstrap::<Client>::under_root(self.home_path())
+    fn endpoint(&self) -> Profile {
+        Profile::under_root(self.home_path())
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -118,7 +118,7 @@ impl Fixture {
 
 struct DaemonGuard {
     child: Option<Child>,
-    endpoint: Bootstrap<Client>,
+    endpoint: Profile,
 }
 
 impl DaemonGuard {
@@ -169,7 +169,7 @@ impl Drop for DaemonGuard {
     }
 }
 
-async fn wait_until_ready(endpoint: &Bootstrap<Client>) -> DaemonInventory {
+async fn wait_until_ready(endpoint: &Profile) -> DaemonInventory {
     let socket = endpoint.control_socket();
     let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
     loop {

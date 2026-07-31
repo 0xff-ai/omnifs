@@ -647,9 +647,9 @@ impl Daemon {
         &self,
         definition: &AttachmentDefinition,
     ) -> anyhow::Result<omnifs_fs_runtime::RuntimeDriver> {
-        let paths = omnifs_state::DaemonStatePaths::new(self.context.daemon_state_root());
+        let paths = self.context.state_paths();
         let runtime_paths = omnifs_fs_runtime::RuntimePaths::daemon_owned(
-            self.context.endpoint().bootstrap_dir().to_path_buf(),
+            self.context.profile().root().to_path_buf(),
             std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
             paths.attachments_runtime(),
             paths.attachment_logs(),

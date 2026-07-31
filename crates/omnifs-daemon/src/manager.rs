@@ -810,15 +810,14 @@ pub(crate) enum ManagerError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_bootstrap::{Bootstrap, Daemon};
-    use omnifs_state::StateStoreOptions;
+    use omnifs_state::{DaemonStatePaths, StateStoreOptions};
     use std::time::Duration;
 
     async fn test_manager(lease: Duration) -> (Arc<MutationManager>, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
-        let endpoint = Bootstrap::<Daemon>::under_root(temp.path());
+        let paths = DaemonStatePaths::new(temp.path().join("daemon-state"));
         let state = Arc::new(
-            StateStore::open(&endpoint, StateStoreOptions::default())
+            StateStore::open(paths, StateStoreOptions::default())
                 .await
                 .unwrap(),
         );
@@ -853,9 +852,9 @@ mod tests {
         tempfile::TempDir,
     ) {
         let temp = tempfile::tempdir().unwrap();
-        let endpoint = Bootstrap::<Daemon>::under_root(temp.path());
+        let paths = DaemonStatePaths::new(temp.path().join("daemon-state"));
         let state = Arc::new(
-            StateStore::open(&endpoint, StateStoreOptions::default())
+            StateStore::open(paths, StateStoreOptions::default())
                 .await
                 .unwrap(),
         );

@@ -4,18 +4,18 @@
 //! call into `commands::mount`'s internal API.
 
 use anyhow::Context as _;
-use omnifs_bootstrap::Client;
+use omnifs_bootstrap::Profile;
 use omnifs_core::fs;
 use omnifs_fs_runtime::{
     Candidate, DockerClient, DockerTarget, HostDriver, ImageInspection, ImageRef, LibkrunRunner,
-    OwnedFilesystemContainer, RuntimeEventSink, owned_filesystems,
+    OwnedFilesystemContainer, RuntimeEventSink, RuntimePaths, owned_filesystems,
 };
+use omnifs_state::DaemonStatePaths;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-use crate::client_fs_state::{Claim, ClientFilesystemState, Registry};
-use crate::filesystem_driver::runtime_paths;
 use crate::inventory::{AuthState, DaemonHealth, DaemonProbe, Inventory, MountStatus, Severity};
+use crate::legacy_filesystems::LegacyFilesystems;
 use crate::ui::output::{Output, ResultVerdict};
 use crate::ui::prompt::Confirm;
 use crate::ui::render::{self, Capabilities, LedgerRow};
@@ -30,13 +30,16 @@ pub(crate) enum DoctorVerdict {
 }
 
 pub async fn run(output: Output) -> anyhow::Result<DoctorVerdict> {
-    let client_root = crate::client_dir::client_root()?;
-    let client_filesystems = ClientFilesystemState::under_root(&client_root);
+    let profile = Profile::resolve()?;
+    let legacy_filesystems = LegacyFilesystems::under_profile(profile.root());
+    let daemon_runtime_paths = daemon_runtime_paths(&profile)?;
     let inventory = Inventory::collect_rpc().await?;
-    let docker_target = resolve_filesystem_target(&client_filesystems)
+    let docker_target = resolve_filesystem_target(&legacy_filesystems)
         .map_err(|error: anyhow::Error| format!("resolve target: {error:#}"));
     Doctor {
-        client_filesystems,
+        profile,
+        legacy_filesystems,
+        daemon_runtime_paths,
         inventory,
         docker_target,
         output,
@@ -49,29 +52,37 @@ pub async fn run(output: Output) -> anyhow::Result<DoctorVerdict> {
 /// `docker reachable`/`image cached` diagnostics. The daemon itself always
 /// runs host-native, so there is no daemon Docker target to resolve here.
 fn resolve_filesystem_target(
-    client_filesystems: &ClientFilesystemState,
+    legacy_filesystems: &LegacyFilesystems,
 ) -> anyhow::Result<DockerTarget> {
-    let id = client_filesystems
-        .registry()
-        .list()?
+    let id = legacy_filesystems
+        .scan()?
+        .specs
         .into_iter()
         .find(|spec| spec.runtime() == fs::Runtime::Docker)
         .map_or_else(
             || fs::Id::new("doctor").expect("static filesystem id"),
             |spec| spec.id().clone(),
         );
-    let config = client_filesystems.config()?;
-    let paths = runtime_paths(client_filesystems)?;
-    DockerTarget::for_filesystem(
-        paths.profile_root(),
-        paths.is_default_profile(),
-        &id,
-        config.filesystem.docker_image.as_deref(),
-    )
+    let paths = legacy_filesystems.runtime_paths()?;
+    DockerTarget::for_filesystem(paths.profile_root(), paths.is_default_profile(), &id, None)
+}
+
+fn daemon_runtime_paths(profile: &Profile) -> anyhow::Result<RuntimePaths> {
+    let state = DaemonStatePaths::new(profile.root().join("daemon-state"));
+    Ok(RuntimePaths::daemon_owned(
+        profile.root().to_path_buf(),
+        std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
+        state.attachments_runtime(),
+        state.attachment_logs(),
+        state.guest_images_cache(),
+        std::env::current_exe().context("resolve the omnifs executable")?,
+    ))
 }
 
 struct Doctor {
-    client_filesystems: ClientFilesystemState,
+    profile: Profile,
+    legacy_filesystems: LegacyFilesystems,
+    daemon_runtime_paths: RuntimePaths,
     inventory: Inventory,
     /// The filesystem's Docker target, or the error resolving it.
     docker_target: Result<DockerTarget, String>,
@@ -108,6 +119,8 @@ enum Check {
     SshAgent,
     #[serde(rename = "config")]
     Config,
+    #[serde(rename = "legacy filesystem spec")]
+    LegacyFilesystemSpec,
     #[serde(rename = "network")]
     Network,
     #[serde(rename = "daemon identity")]
@@ -135,6 +148,7 @@ impl Check {
             Self::CredentialStore => "credential store",
             Self::SshAgent => "ssh-agent",
             Self::Config => "config",
+            Self::LegacyFilesystemSpec => "legacy filesystem spec",
             Self::Network => "network",
             Self::DaemonIdentity => "daemon identity",
             Self::Credentials => "credentials",
@@ -152,13 +166,15 @@ impl Check {
 enum Remediation {
     MountReauth(String),
     CleanStaleInstance {
-        identity: omnifs_bootstrap::Instance,
+        identity: omnifs_bootstrap::DaemonIdentity,
     },
     StopHostFilesystem {
+        paths: RuntimePaths,
         state_dir: PathBuf,
         record: omnifs_mtab::RunnerRecord,
     },
     CleanStaleHostRecord {
+        paths: RuntimePaths,
         state_dir: PathBuf,
         record: omnifs_mtab::RunnerRecord,
     },
@@ -194,7 +210,7 @@ impl Remediation {
     /// arguments only, never a shell string: the mount name came from the
     /// already-collected inventory, not from re-parsing the advisory `fix`
     /// text.
-    async fn apply(&self, client_filesystems: &ClientFilesystemState) -> anyhow::Result<()> {
+    async fn apply(&self, profile: &Profile) -> anyhow::Result<()> {
         match self {
             // Only this variant needs the CLI's own path, so it resolves it
             // itself instead of every variant paying for a lookup it never uses.
@@ -214,11 +230,10 @@ impl Remediation {
                     })
             },
             Self::CleanStaleInstance { identity } => {
-                let endpoint = omnifs_bootstrap::Bootstrap::<Client>::for_client()?;
-                if endpoint.remove_daemon_bootstrap_if(identity)? {
+                if profile.remove_daemon_bootstrap_if(identity)? {
                     return Ok(());
                 }
-                match endpoint.read_process_identity()? {
+                match profile.read_process_identity()? {
                     None => Ok(()),
                     Some(current) if current == *identity => {
                         anyhow::bail!("stale daemon identity still exists after cleanup")
@@ -229,11 +244,12 @@ impl Remediation {
                 }
             },
             Self::StopHostFilesystem {
-                state_dir, record, ..
+                paths,
+                state_dir,
+                record,
             } => {
-                let registry = client_filesystems.registry();
-                let _guard = claim_for_teardown(&registry, record.spec.id()).await?;
-                let paths = runtime_paths(client_filesystems)?.attachment(record.spec.id());
+                let _guard = acquire_stopped_daemon_guard(profile).await?;
+                let paths = paths.attachment(record.spec.id());
                 HostDriver::new(
                     state_dir.clone(),
                     paths.host_log().to_path_buf(),
@@ -244,11 +260,12 @@ impl Remediation {
                 .await
             },
             Self::CleanStaleHostRecord {
-                state_dir, record, ..
+                paths,
+                state_dir,
+                record,
             } => {
-                let registry = client_filesystems.registry();
-                let _guard = claim_for_teardown(&registry, record.spec.id()).await?;
-                let paths = runtime_paths(client_filesystems)?.attachment(record.spec.id());
+                let _guard = acquire_stopped_daemon_guard(profile).await?;
+                let paths = paths.attachment(record.spec.id());
                 HostDriver::new(
                     state_dir.clone(),
                     paths.host_log().to_path_buf(),
@@ -259,8 +276,7 @@ impl Remediation {
                 .await
             },
             Self::StopLibkrunFilesystem { state_dir, record } => {
-                let registry = client_filesystems.registry();
-                let _guard = claim_for_teardown(&registry, record.spec.id()).await?;
+                let _guard = acquire_stopped_daemon_guard(profile).await?;
                 LibkrunRunner::new(state_dir.clone())
                     .stop_confirmed(record.clone())
                     .await
@@ -269,30 +285,17 @@ impl Remediation {
     }
 }
 
-/// Claim the registry lock for `id` and prove the daemon is stopped, in one
-/// call: every filesystem-teardown remediation needs exactly this pair
-/// before it touches a runner, container, or helper. Returning both guards
-/// keeps them alive for the caller's teardown call; dropping either early
-/// would let a race the guards exist to prevent slip back in.
-async fn claim_for_teardown<'a>(
-    registry: &'a Registry,
-    id: &fs::Id,
-) -> anyhow::Result<(Claim<'a>, omnifs_bootstrap::SpawnLock)> {
-    let claim = registry.claim(id)?;
-    let spawn_lock = acquire_stopped_daemon_guard().await?;
-    Ok((claim, spawn_lock))
-}
-
-async fn acquire_stopped_daemon_guard() -> anyhow::Result<omnifs_bootstrap::SpawnLock> {
-    let endpoint = omnifs_bootstrap::Bootstrap::<Client>::for_client()?;
-    let guard = endpoint
+async fn acquire_stopped_daemon_guard(
+    profile: &Profile,
+) -> anyhow::Result<omnifs_bootstrap::SpawnLock> {
+    let guard = profile
         .acquire_spawn_lock()
         .context("acquire daemon spawn lock")?;
     anyhow::ensure!(
-        endpoint.read_process_identity()?.is_none(),
+        profile.read_process_identity()?.is_none(),
         "daemon has a process identity; refusing filesystem teardown"
     );
-    match tokio::net::UnixStream::connect(endpoint.control_socket()).await {
+    match tokio::net::UnixStream::connect(profile.control_socket()).await {
         Ok(_) => anyhow::bail!("daemon is running; refusing filesystem teardown"),
         Err(error)
             if matches!(
@@ -302,7 +305,7 @@ async fn acquire_stopped_daemon_guard() -> anyhow::Result<omnifs_bootstrap::Spaw
         Err(error) => return Err(error).context("probe daemon control socket before teardown"),
     }
     anyhow::ensure!(
-        endpoint.read_process_identity()?.is_none(),
+        profile.read_process_identity()?.is_none(),
         "daemon started during the safety check; refusing filesystem teardown"
     );
     Ok(guard)
@@ -456,10 +459,7 @@ fn ownership_check_for(backend: &str) -> Check {
     }
 }
 
-fn stale_process_identity_finding(
-    probe: &DaemonProbe,
-    endpoint: &omnifs_bootstrap::Bootstrap<Client>,
-) -> Option<Finding> {
+fn stale_process_identity_finding(probe: &DaemonProbe, endpoint: &Profile) -> Option<Finding> {
     if !matches!(probe, DaemonProbe::Unreachable { .. }) {
         return None;
     }
@@ -723,7 +723,7 @@ struct RepairSummary {
 /// mode always leaves it for the caller to run itself rather than spawning
 /// it with inherited stdio nobody can answer.
 async fn offer_fix(
-    client_filesystems: &ClientFilesystemState,
+    profile: &Profile,
     output: &Output,
     findings: &[Finding],
 ) -> anyhow::Result<(RepairSummary, Vec<Repair>)> {
@@ -768,7 +768,7 @@ async fn offer_fix(
             continue;
         }
         summary.attempted += 1;
-        let outcome = remediation.apply(client_filesystems).await;
+        let outcome = remediation.apply(profile).await;
         match &outcome {
             Ok(()) => repairs.push(Repair::applied(command_line)),
             Err(error) => {
@@ -810,8 +810,7 @@ impl Doctor {
             ));
         }
 
-        let (summary, repairs) =
-            offer_fix(&self.client_filesystems, &self.output, &result.findings).await?;
+        let (summary, repairs) = offer_fix(&self.profile, &self.output, &result.findings).await?;
         if summary.attempted > 0 {
             result = self.rediagnose_after_repairs().await?;
             verdict = result.verdict();
@@ -839,9 +838,11 @@ impl Doctor {
     /// after a repair pass may have changed what the checklist would find.
     async fn rediagnose_after_repairs(&self) -> anyhow::Result<DoctorResult> {
         let fresh = Doctor {
-            client_filesystems: self.client_filesystems.clone(),
+            profile: self.profile.clone(),
+            legacy_filesystems: self.legacy_filesystems.clone(),
+            daemon_runtime_paths: self.daemon_runtime_paths.clone(),
             inventory: Inventory::collect_rpc().await?,
-            docker_target: resolve_filesystem_target(&self.client_filesystems)
+            docker_target: resolve_filesystem_target(&self.legacy_filesystems)
                 .map_err(|error: anyhow::Error| format!("resolve target: {error:#}")),
             output: self.output.clone(),
         };
@@ -866,7 +867,7 @@ impl Doctor {
 
     async fn base_findings(&self) -> (Option<DockerClient>, Vec<Finding>) {
         let mut findings = Vec::new();
-        if let Ok(endpoint) = omnifs_bootstrap::Bootstrap::<Client>::for_client()
+        if let Ok(endpoint) = Profile::resolve()
             && let Some(finding) =
                 stale_process_identity_finding(&self.inventory.daemon.probe, &endpoint)
         {
@@ -909,6 +910,7 @@ impl Doctor {
         ] {
             findings.push(Finding::from_probe(Section::Profile, check, None, result));
         }
+        findings.extend(self.legacy_spec_findings());
         findings.push(Finding::from_probe(
             Section::Environment,
             Check::Network,
@@ -938,18 +940,35 @@ impl Doctor {
         docker: Option<&DockerClient>,
         daemon_health: DaemonHealth,
     ) -> Vec<Finding> {
-        let paths = match runtime_paths(&self.client_filesystems) {
+        let mut findings = self
+            .filesystem_findings_at(&self.daemon_runtime_paths, docker, daemon_health)
+            .await;
+        let legacy_paths = match self.legacy_filesystems.runtime_paths() {
             Ok(paths) => paths,
             Err(error) => {
-                return vec![Finding::from_probe(
+                findings.push(Finding::from_probe(
                     Section::Filesystems,
                     Check::FilesystemState,
                     None,
                     ProbeResult::Err(format!("{error:#}")),
-                )];
+                ));
+                return findings;
             },
         };
-        let candidates = owned_filesystems(&paths, docker).await;
+        findings.extend(
+            self.filesystem_findings_at(&legacy_paths, None, daemon_health)
+                .await,
+        );
+        findings
+    }
+
+    async fn filesystem_findings_at(
+        &self,
+        paths: &RuntimePaths,
+        docker: Option<&DockerClient>,
+        daemon_health: DaemonHealth,
+    ) -> Vec<Finding> {
+        let candidates = owned_filesystems(paths, docker).await;
         let mut findings = Vec::new();
         for candidate in candidates {
             match candidate {
@@ -977,8 +996,13 @@ impl Doctor {
                     state_dir,
                     record,
                     confirmed,
-                } => match self.host_candidate_finding(state_dir, record, confirmed, daemon_health)
-                {
+                } => match self.host_candidate_finding(
+                    paths,
+                    state_dir,
+                    record,
+                    confirmed,
+                    daemon_health,
+                ) {
                     Ok(finding) => findings.extend(finding),
                     Err(error) => findings.push(Finding::from_probe(
                         Section::Filesystems,
@@ -1015,6 +1039,7 @@ impl Doctor {
     /// called, so this only ever sees a runner that was actually read.
     fn host_candidate_finding(
         &self,
+        paths: &RuntimePaths,
         state_dir: PathBuf,
         record: omnifs_mtab::RunnerRecord,
         confirmed: Result<omnifs_thin::host_control::RunnerPhase, String>,
@@ -1032,8 +1057,13 @@ impl Doctor {
         match confirmed {
             Ok(_) if is_attached => Ok(None),
             Ok(phase) => {
-                let remediation = (daemon_health == DaemonHealth::Stopped)
-                    .then_some(Remediation::StopHostFilesystem { state_dir, record });
+                let remediation = (daemon_health == DaemonHealth::Stopped).then_some(
+                    Remediation::StopHostFilesystem {
+                        paths: paths.clone(),
+                        state_dir,
+                        record,
+                    },
+                );
                 Ok(Some(Finding {
                     section: Section::Filesystems,
                     check: Check::StrayFilesystem,
@@ -1048,8 +1078,12 @@ impl Doctor {
             },
             Err(error) => {
                 let mount_active = omnifs_nfs::mount_is_active_checked(&mount_point)?;
-                let remediation = (!mount_active && !is_attached)
-                    .then_some(Remediation::CleanStaleHostRecord { state_dir, record });
+                let remediation =
+                    (!mount_active && !is_attached).then_some(Remediation::CleanStaleHostRecord {
+                        paths: paths.clone(),
+                        state_dir,
+                        record,
+                    });
                 Ok(Some(Finding {
                     section: Section::Filesystems,
                     check: Check::StaleFilesystemState,
@@ -1227,12 +1261,55 @@ impl Doctor {
     }
 
     fn probe_config_file(&self) -> ProbeResult {
-        let path = self.client_filesystems.profile_root().join("config.toml");
-        if path.exists() {
-            ProbeResult::Ok(path.display().to_string())
-        } else {
-            ProbeResult::Ok(format!("defaults ({} absent)", path.display()))
+        let path = self.legacy_filesystems.profile_root().join("config.toml");
+        match crate::profile_config::read(self.legacy_filesystems.profile_root()) {
+            Ok(_) if path.exists() => ProbeResult::Ok(path.display().to_string()),
+            Ok(_) => ProbeResult::Ok(format!("defaults ({} absent)", path.display())),
+            Err(error) => ProbeResult::Err(format!("{error:#}")),
         }
+    }
+
+    fn legacy_spec_findings(&self) -> Vec<Finding> {
+        let scan = match self.legacy_filesystems.scan() {
+            Ok(scan) => scan,
+            Err(error) => {
+                return vec![Finding::from_probe(
+                    Section::Profile,
+                    Check::LegacyFilesystemSpec,
+                    None,
+                    ProbeResult::Err(format!("{error:#}")),
+                )];
+            },
+        };
+        let mut findings = scan
+            .issues
+            .into_iter()
+            .map(|issue| Finding {
+                section: Section::Profile,
+                check: Check::LegacyFilesystemSpec,
+                target: Some(issue.path.display().to_string()),
+                severity: Severity::Attention,
+                message: issue.message,
+                fix: None,
+                remediation: None,
+            })
+            .collect::<Vec<_>>();
+        findings.extend(scan.specs.into_iter().map(|spec| Finding {
+            section: Section::Profile,
+            check: Check::LegacyFilesystemSpec,
+            target: Some(spec.id().to_string()),
+            severity: Severity::Attention,
+            message:
+                "legacy detached spec is not desired state and will not be launched".to_owned(),
+            fix: Some(format!(
+                "omnifs fs create --name {} --protocol {} --runtime {}",
+                spec.id(),
+                spec.protocol(),
+                spec.runtime()
+            )),
+            remediation: None,
+        }));
+        findings
     }
 
     async fn probe_network(&self) -> ProbeResult {
@@ -1515,9 +1592,13 @@ mod golden {
 
     fn probe_credential_result(state: crate::inventory::DaemonHealth) -> ProbeResult {
         let root = TempDir::new().unwrap();
-        let client_filesystems = ClientFilesystemState::under_root(&root.path().join("client"));
+        let legacy_filesystems = LegacyFilesystems::under_profile(root.path());
+        let profile = Profile::under_root(root.path());
+        let daemon_runtime_paths = daemon_runtime_paths(&profile).unwrap();
         let doctor = Doctor {
-            client_filesystems,
+            profile,
+            legacy_filesystems,
+            daemon_runtime_paths,
             inventory: Inventory::test(state, Vec::new(), Vec::new()),
             docker_target: Err("test".to_owned()),
             output: Output::new(crate::ui::output::OutputMode::Human, false),
@@ -1541,7 +1622,7 @@ mod golden {
     #[test]
     fn dead_process_identity_becomes_a_doctor_remediation() {
         let root = TempDir::new().unwrap();
-        let endpoint = omnifs_bootstrap::Bootstrap::<Client>::under_root(root.path());
+        let endpoint = Profile::under_root(root.path());
         std::fs::write(
             endpoint.process_identity_path(),
             serde_json::to_vec(&serde_json::json!({
@@ -1566,5 +1647,81 @@ mod golden {
             finding.remediation,
             Some(Remediation::CleanStaleInstance { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn stopped_daemon_guard_excludes_start_for_its_full_lifetime() {
+        let root = TempDir::new().unwrap();
+        let profile = Profile::under_root(root.path());
+        let guard = acquire_stopped_daemon_guard(&profile).await.unwrap();
+        let contender = profile.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _lock = contender.acquire_spawn_lock().unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(
+            acquired_rx
+                .recv_timeout(std::time::Duration::from_millis(150))
+                .is_err(),
+            "a daemon start acquired the spawn lock during Doctor repair"
+        );
+        drop(guard);
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        thread.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_host_repair_never_touches_a_replacement_record() {
+        let root = TempDir::new().unwrap();
+        let profile = Profile::under_root(root.path());
+        let paths = daemon_runtime_paths(&profile).unwrap();
+        let id = fs::Id::new("legacy").unwrap();
+        let spec = fs::Spec::new(
+            id.clone(),
+            fs::Protocol::Nfs,
+            fs::Runtime::Host,
+            root.path().join("mount"),
+        )
+        .unwrap();
+        let state_dir = paths.attachment(&id).state_dir().to_path_buf();
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let record = |instance_id: &str| omnifs_mtab::RunnerRecord {
+            version: omnifs_mtab::RunnerRecord::VERSION,
+            instance_id: instance_id.to_owned(),
+            pid: 1,
+            process_group: 1,
+            spec: spec.clone(),
+            control_socket: state_dir.join(format!("{instance_id}.sock")),
+        };
+        let expected = record("11111111111111111111111111111111");
+        let replacement = record("22222222222222222222222222222222");
+        std::fs::write(
+            state_dir.join("runner.json"),
+            serde_json::to_vec(&replacement).unwrap(),
+        )
+        .unwrap();
+
+        let error = Remediation::CleanStaleHostRecord {
+            paths,
+            state_dir: state_dir.clone(),
+            record: expected,
+        }
+        .apply(&profile)
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("identity changed"), "{error:#}");
+        assert_eq!(
+            omnifs_mtab::RunnerRecord::read(&state_dir)
+                .unwrap()
+                .unwrap(),
+            replacement
+        );
     }
 }

@@ -188,13 +188,14 @@ async fn test_daemon_with_limits(
     preface_timeout: std::time::Duration,
     lease: Duration,
 ) -> TestRuntime {
-    let _ = dir;
-    let context = Arc::new(crate::context::DaemonContext::resolve().unwrap());
+    let profile = omnifs_bootstrap::Profile::under_root(dir.path());
+    let state_paths = omnifs_state::DaemonStatePaths::new(profile.root().join("daemon-state"));
+    let context = Arc::new(crate::context::DaemonContext::new(profile, state_paths).unwrap());
     context.prepare_startup_dirs().unwrap();
     let listener = context.bind_control_socket().unwrap();
     let state = Arc::new(
         omnifs_state::StateStore::open(
-            context.endpoint(),
+            context.state_paths().clone(),
             omnifs_state::StateStoreOptions::default(),
         )
         .await
@@ -265,7 +266,9 @@ async fn tonic_reports_starting_state_and_invalid_requests() {
     unsafe {
         std::env::set_var("OMNIFS_HOME", &home);
     }
-    let context = Arc::new(crate::context::DaemonContext::resolve().unwrap());
+    let profile = omnifs_bootstrap::Profile::resolve().unwrap();
+    let state_paths = omnifs_state::DaemonStatePaths::new(profile.root().join("daemon-state"));
+    let context = Arc::new(crate::context::DaemonContext::new(profile, state_paths).unwrap());
     context.prepare_startup_dirs().unwrap();
     let listener = context.bind_control_socket().unwrap();
     let (shutdown, _) = tokio::sync::watch::channel(false);

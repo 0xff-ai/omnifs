@@ -8,7 +8,6 @@ homepage.workspace = true
 description = "Daemon-private SQLx state store for Omnifs"
 
 [dependencies]
-omnifs-bootstrap = { workspace = true }
 omnifs-api = { workspace = true }
 omnifs-auth = { workspace = true }
 omnifs-core = { workspace = true }

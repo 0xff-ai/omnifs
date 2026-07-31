@@ -460,7 +460,7 @@ mod tests {
     }
 
     /// Leftover failed filesystem state (e.g. a stale entry under
-    /// `client/filesystems/state`) can flip the verdict to `Degraded` while the daemon
+    /// legacy runtime state can flip the verdict to `Degraded` while the daemon
     /// is otherwise running and there are still zero mounts; the screen must
     /// name that filesystem and reuse its own `fix` field verbatim.
     #[test]

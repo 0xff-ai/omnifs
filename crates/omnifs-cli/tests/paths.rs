@@ -5,15 +5,15 @@
 mod common;
 
 use common::with_env;
-use omnifs_bootstrap::{Bootstrap, Client, OMNIFS_HOME_ENV, ResolveError};
+use omnifs_bootstrap::{OMNIFS_HOME_ENV, Profile, ResolveError};
 
 #[test]
 fn endpoint_under_root_owns_only_bootstrap_paths() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("profile");
-    let endpoint = Bootstrap::<Client>::under_root(&root);
+    let endpoint = Profile::under_root(&root);
 
-    assert_eq!(endpoint.bootstrap_dir(), root);
+    assert_eq!(endpoint.root(), root);
     assert_eq!(endpoint.control_socket(), root.join("control.sock"));
     assert_eq!(endpoint.process_identity_path(), root.join("process.json"));
 }
@@ -21,7 +21,7 @@ fn endpoint_under_root_owns_only_bootstrap_paths() {
 #[test]
 fn endpoint_resolve_requires_home_or_omnifs_home() {
     with_env(&[("HOME", None), (OMNIFS_HOME_ENV, None)], || {
-        let Err(error) = Bootstrap::<Client>::for_client() else {
+        let Err(error) = Profile::resolve() else {
             panic!("endpoint unexpectedly resolved");
         };
         assert_eq!(error, ResolveError);
@@ -36,8 +36,8 @@ fn endpoint_resolve_requires_home_or_omnifs_home() {
             (OMNIFS_HOME_ENV, Some(root.to_str().unwrap())),
         ],
         || {
-            let endpoint = Bootstrap::<Client>::for_client().unwrap();
-            assert_eq!(endpoint.bootstrap_dir(), root);
+            let endpoint = Profile::resolve().unwrap();
+            assert_eq!(endpoint.root(), root);
         },
     );
 }

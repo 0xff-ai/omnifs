@@ -9,7 +9,7 @@ use clap::Args;
 
 use crate::error::{ExitCode, WithExitCode as _};
 use crate::ui::output::{Output, OutputMode};
-use omnifs_bootstrap::{Bootstrap, Client};
+use omnifs_bootstrap::Profile;
 use omnifs_inspector::{NonInteractiveFormat, SessionReceipt, SourceKind, run_plain, run_tui};
 
 /// The inspector's connection label for a live daemon. The daemon always runs
@@ -64,7 +64,7 @@ impl InspectArgs {
             // opening an empty canvas and exiting 0.
             rpc.ready().await?;
             check_record_path(self.record.as_deref())?;
-            let endpoint = Bootstrap::<Client>::for_client()?.control_socket();
+            let endpoint = Profile::resolve()?.control_socket();
             (
                 SourceKind::Socket {
                     endpoint,
@@ -102,7 +102,7 @@ impl InspectArgs {
         let rpc = crate::rpc::RpcClient::resolve()?;
         rpc.ready().await?;
         check_record_path(self.record.as_deref())?;
-        let endpoint = Bootstrap::<Client>::for_client()?.control_socket();
+        let endpoint = Profile::resolve()?.control_socket();
         let record = self.record.clone();
         let output = output.clone();
         tokio::task::spawn_blocking(move || {

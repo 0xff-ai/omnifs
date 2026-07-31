@@ -14,7 +14,7 @@ use omnifs_api::{
     RestartAttachmentRequest, RevokeCredentialRequest, ServingOutcome,
     SetCredentialMaterialRequest,
 };
-use omnifs_bootstrap::{Bootstrap, Client};
+use omnifs_bootstrap::Profile;
 use omnifs_core::{MountName, MutationId, ProviderId, ResourceName};
 use prost::Message as _;
 use std::time::Duration;
@@ -84,7 +84,7 @@ impl ProgressWatch {
 }
 
 pub(crate) struct RpcClient {
-    endpoint: Bootstrap<Client>,
+    endpoint: std::path::PathBuf,
     channel: OnceCell<Channel>,
     setup_timeout: Duration,
 }
@@ -92,11 +92,11 @@ pub(crate) struct RpcClient {
 type ControlClient = wire::control_client::ControlClient<Channel>;
 
 impl RpcClient {
-    pub(crate) fn from_endpoint(endpoint: Bootstrap<Client>) -> Self {
+    pub(crate) fn from_endpoint(endpoint: std::path::PathBuf) -> Self {
         Self::with_setup_timeout(endpoint, REQUEST_TIMEOUT)
     }
 
-    fn with_setup_timeout(endpoint: Bootstrap<Client>, setup_timeout: Duration) -> Self {
+    fn with_setup_timeout(endpoint: std::path::PathBuf, setup_timeout: Duration) -> Self {
         Self {
             endpoint,
             channel: OnceCell::new(),
@@ -106,7 +106,7 @@ impl RpcClient {
 
     pub(crate) fn resolve() -> anyhow::Result<Self> {
         Ok(Self {
-            endpoint: Bootstrap::<Client>::for_client()?,
+            endpoint: Profile::resolve()?.control_socket(),
             channel: OnceCell::new(),
             setup_timeout: REQUEST_TIMEOUT,
         })
@@ -141,7 +141,7 @@ impl RpcClient {
     }
 
     pub(crate) async fn status_optional(&self) -> anyhow::Result<Option<omnifs_api::DaemonStatus>> {
-        if !self.endpoint.control_socket().exists() {
+        if !self.endpoint.exists() {
             return Ok(None);
         }
         let response = bounded_unary!(self, get_status, wire::Empty {}).into_inner();
@@ -154,7 +154,7 @@ impl RpcClient {
         &self,
         stop_filesystems: bool,
     ) -> anyhow::Result<Option<ShutdownResult>> {
-        if !self.endpoint.control_socket().exists() {
+        if !self.endpoint.exists() {
             return Ok(None);
         }
         let response = bounded_unary!(
@@ -302,7 +302,7 @@ impl RpcClient {
         .with_context(|| {
             format!(
                 "provider import to {} timed out after {} seconds",
-                self.endpoint.control_socket().display(),
+                self.endpoint.display(),
                 PROVIDER_IMPORT_TIMEOUT.as_secs()
             )
         })?
@@ -565,7 +565,7 @@ impl RpcClient {
     }
 
     async fn client(&self) -> anyhow::Result<ControlClient> {
-        let socket = self.endpoint.control_socket().clone();
+        let socket = self.endpoint.clone();
         let socket_display = socket.display().to_string();
         let setup_timeout = self.setup_timeout;
         let channel = self
@@ -811,9 +811,8 @@ mod tests {
     #[tokio::test]
     async fn stalled_rpc_setup_respects_setup_timeout() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let endpoint = Bootstrap::<Client>::under_root(dir.path());
-        let listener =
-            tokio::net::UnixListener::bind(endpoint.control_socket()).expect("bind control socket");
+        let endpoint = Profile::under_root(dir.path()).control_socket();
+        let listener = tokio::net::UnixListener::bind(&endpoint).expect("bind control socket");
         tokio::spawn(async move {
             let (_stream, _) = listener.accept().await.expect("accept client");
             std::future::pending::<()>().await;
@@ -836,9 +835,8 @@ mod tests {
     #[tokio::test]
     async fn stalled_progress_setup_respects_setup_timeout() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let endpoint = Bootstrap::<Client>::under_root(dir.path());
-        let listener =
-            tokio::net::UnixListener::bind(endpoint.control_socket()).expect("bind control socket");
+        let endpoint = Profile::under_root(dir.path()).control_socket();
+        let listener = tokio::net::UnixListener::bind(&endpoint).expect("bind control socket");
         tokio::spawn(async move {
             let (_stream, _) = listener.accept().await.expect("accept client");
             std::future::pending::<()>().await;

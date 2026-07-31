@@ -1,5 +1,5 @@
 use super::*;
-use crate::paths::{CLONE_CACHE_DIR, PROJECTION_CACHE_DIR, WASMTIME_CACHE_DIR};
+use crate::paths::{CLONE_CACHE_DIR, PROJECTION_CACHE_DIR, StorePaths, WASMTIME_CACHE_DIR};
 use omnifs_api::{
     ActionKind, ActionPhase, AttachmentDefinition, CredentialDefinition, MountResourceDefinition,
     NormalizedResourceSet, ProviderDefinition, ResourceDefinition, ResourceLimits,
@@ -11,8 +11,8 @@ use std::path::PathBuf;
 #[test]
 fn daemon_log_is_owned_by_private_daemon_state() {
     let temp = tempfile::tempdir().unwrap();
-    let endpoint = Bootstrap::<Daemon>::under_root(temp.path());
-    drop(open_daemon_log(&endpoint).unwrap());
+    let paths = DaemonStatePaths::new(temp.path().join("daemon-state"));
+    drop(open_daemon_log(&paths).unwrap());
     let path = temp.path().join("daemon-state/logs/daemon.log");
     assert_eq!(
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
@@ -337,15 +337,14 @@ async fn rejects_corrupt_database() {
 #[tokio::test]
 async fn recreates_and_archives_a_corrupt_control_store() {
     let temp = tempfile::tempdir().unwrap();
-    let endpoint = Bootstrap::<Daemon>::under_root(temp.path());
-    let paths = StorePaths::for_endpoint(&endpoint);
+    let paths = StorePaths::under_root(&temp.path().join("daemon-state"));
     ensure_private_dir(&paths.control_store()).unwrap();
     std::fs::write(paths.database(), b"not sqlite").unwrap();
     ensure_private_dir(&paths.cache()).unwrap();
     std::fs::write(paths.cache().join("keep"), b"cache").unwrap();
 
     let (store, disposition) =
-        StateStore::recreate_control_store(&endpoint, StateStoreOptions::default())
+        StateStore::recreate_control_store(paths.clone(), StateStoreOptions::default())
             .await
             .unwrap();
 
@@ -390,8 +389,7 @@ fn control_store_rollback_restores_the_exact_archived_entry() {
 #[tokio::test]
 async fn repair_archives_a_symlink_without_following_it() {
     let temp = tempfile::tempdir().unwrap();
-    let endpoint = Bootstrap::<Daemon>::under_root(temp.path());
-    let paths = StorePaths::for_endpoint(&endpoint);
+    let paths = StorePaths::under_root(&temp.path().join("daemon-state"));
     ensure_private_dir(paths.root()).unwrap();
     let target = temp.path().join("outside");
     ensure_private_dir(&target).unwrap();
@@ -399,7 +397,7 @@ async fn repair_archives_a_symlink_without_following_it() {
     std::os::unix::fs::symlink(&target, paths.control_store()).unwrap();
 
     let (store, disposition) =
-        StateStore::recreate_control_store(&endpoint, StateStoreOptions::default())
+        StateStore::recreate_control_store(paths.clone(), StateStoreOptions::default())
             .await
             .unwrap();
 

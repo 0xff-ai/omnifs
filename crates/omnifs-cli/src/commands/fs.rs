@@ -13,14 +13,14 @@ use omnifs_api::{
     ProgressSnapshot, ProgressTarget, ResourceDeclarations, ResourceDefinition, ResourcePhase,
     RestartAttachmentRequest,
 };
-use omnifs_bootstrap::{Bootstrap, Client};
+use omnifs_bootstrap::Profile;
 use omnifs_core::{
     ActionId, AttachmentSpec, MutationId, ResourceKind, ResourceName, ResourceRevision, fs,
 };
 use serde::Serialize;
 
-use crate::client_fs_state::{ClientFilesystemState, Registry};
 use crate::error::{ExitCode, WithExitCode as _, WithHint as _};
+use crate::legacy_filesystems::LegacyFilesystems;
 use crate::rpc::RpcClient;
 use crate::ui::output::{Output, ResultVerdict};
 
@@ -102,6 +102,8 @@ struct ActionResult {
 #[derive(Debug, Clone, Serialize)]
 struct ListResult {
     attachments: Vec<ListRow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    legacy_issues: Vec<crate::legacy_filesystems::LegacyIssue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -161,21 +163,13 @@ fn resolve_definition(args: CreateArgs) -> Result<AttachmentDefinition> {
             PathBuf::from(fs::GUEST_LOCATION)
         },
     };
-    let assets = legacy_profile_assets()?;
     let docker_image = if runtime == fs::Runtime::Docker {
-        Some(
-            omnifs_fs_runtime::resolve_filesystem_image(
-                None,
-                assets.filesystem.docker_image.as_deref(),
-            )?
-            .to_string(),
-        )
+        Some(omnifs_fs_runtime::resolve_filesystem_image(None, None)?.to_string())
     } else {
         None
     };
-    let libkrun_guest_image = (runtime == fs::Runtime::Libkrun).then(|| {
-        omnifs_fs_runtime::resolve_guest_image_reference(assets.filesystem.guest_image.as_deref())
-    });
+    let libkrun_guest_image = (runtime == fs::Runtime::Libkrun)
+        .then(|| omnifs_fs_runtime::resolve_guest_image_reference(None));
     let spec = AttachmentSpec::new(
         protocol,
         runtime,
@@ -186,14 +180,9 @@ fn resolve_definition(args: CreateArgs) -> Result<AttachmentDefinition> {
     Ok(AttachmentDefinition { name, spec })
 }
 
-fn legacy_profile_assets() -> Result<crate::client_fs_state::ClientConfig> {
-    let root = crate::client_dir::client_root()?;
-    ClientFilesystemState::under_root(&root).config()
-}
-
 fn default_host_location(name: &ResourceName) -> Result<PathBuf> {
     Ok(default_host_location_under(
-        Bootstrap::<Client>::for_client()?.bootstrap_dir(),
+        Profile::resolve()?.root(),
         name,
     ))
 }
@@ -330,23 +319,13 @@ pub(crate) async fn ensure_setup_filesystem(
         );
         existing
     } else {
-        let config = legacy_profile_assets()?;
         let docker_image = if runtime == fs::Runtime::Docker {
-            Some(
-                omnifs_fs_runtime::resolve_filesystem_image(
-                    None,
-                    config.filesystem.docker_image.as_deref(),
-                )?
-                .to_string(),
-            )
+            Some(omnifs_fs_runtime::resolve_filesystem_image(None, None)?.to_string())
         } else {
             None
         };
-        let libkrun_guest_image = (runtime == fs::Runtime::Libkrun).then(|| {
-            omnifs_fs_runtime::resolve_guest_image_reference(
-                config.filesystem.guest_image.as_deref(),
-            )
-        });
+        let libkrun_guest_image = (runtime == fs::Runtime::Libkrun)
+            .then(|| omnifs_fs_runtime::resolve_guest_image_reference(None));
         AttachmentDefinition {
             name: name.clone(),
             spec: AttachmentSpec::new(
@@ -429,8 +408,9 @@ fn resource_name(id: &fs::Id) -> Result<ResourceName> {
 }
 
 fn missing_desired_attachment<T>(id: &fs::Id) -> Result<T> {
-    let legacy = legacy_registry()?
-        .list()?
+    let legacy = legacy_filesystems()?
+        .scan()?
+        .specs
         .into_iter()
         .find(|spec| spec.id() == id);
     let result = Err(anyhow!("attachment `{id}` is not desired"));
@@ -452,9 +432,8 @@ fn missing_desired_attachment<T>(id: &fs::Id) -> Result<T> {
     }
 }
 
-fn legacy_registry() -> Result<Registry> {
-    let root = crate::client_dir::client_root()?;
-    Ok(ClientFilesystemState::under_root(&root).registry())
+fn legacy_filesystems() -> Result<LegacyFilesystems> {
+    Ok(LegacyFilesystems::under_profile(Profile::resolve()?.root()))
 }
 
 async fn upsert_attachment(
@@ -835,7 +814,8 @@ async fn list(output: Output) -> Result<ExitCode> {
             _ => None,
         })
         .collect::<Vec<_>>();
-    for spec in legacy_registry()?.list()? {
+    let legacy = legacy_filesystems()?.scan()?;
+    for spec in legacy.specs {
         if rows.iter().any(|row| row.name == spec.id().as_str()) {
             continue;
         }
@@ -855,7 +835,10 @@ async fn list(output: Output) -> Result<ExitCode> {
         });
     }
     rows.sort_by(|left, right| left.name.cmp(&right.name));
-    let result = ListResult { attachments: rows };
+    let result = ListResult {
+        attachments: rows,
+        legacy_issues: legacy.issues,
+    };
     if output.is_structured() {
         output.emit_result(ResultVerdict::Ok, &result)?;
     } else if result.attachments.is_empty() {
@@ -875,6 +858,14 @@ async fn list(output: Output) -> Result<ExitCode> {
             if let Some(detail) = &row.detail {
                 let _ = writeln!(rendered, "  {detail}");
             }
+        }
+        for issue in &result.legacy_issues {
+            let _ = writeln!(
+                rendered,
+                "legacy spec issue\t{}\t{}",
+                issue.path.display(),
+                issue.message
+            );
         }
         output.report(rendered);
     }
@@ -1047,7 +1038,7 @@ mod tests {
     #[test]
     fn legacy_specs_only_produce_an_import_hint() {
         let dir = tempfile::tempdir().unwrap();
-        let state = ClientFilesystemState::under_root(dir.path());
+        let profile = dir.path();
         let spec = fs::Spec::new(
             fs::Id::new("old").unwrap(),
             fs::Protocol::Nfs,
@@ -1055,16 +1046,15 @@ mod tests {
             dir.path().join("mount"),
         )
         .unwrap();
-        let registry = state.registry();
-        let claim = registry.claim(spec.id()).unwrap();
-        claim.create(&spec).unwrap();
-        drop(claim);
-
-        let listed = state.registry().list().unwrap();
-        assert_eq!(listed, vec![spec]);
+        let specs = profile.join("client/filesystems/specs");
+        std::fs::create_dir_all(&specs).unwrap();
+        std::fs::write(specs.join("old.json"), serde_json::to_vec(&spec).unwrap()).unwrap();
+        let listed = LegacyFilesystems::under_profile(profile).scan().unwrap();
+        assert_eq!(listed.specs, vec![spec]);
+        assert!(listed.issues.is_empty());
         assert!(
-            dir.path()
-                .join("filesystems")
+            profile
+                .join("client/filesystems")
                 .join("runtime")
                 .read_dir()
                 .is_err(),
