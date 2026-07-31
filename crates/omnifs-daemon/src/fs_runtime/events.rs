@@ -116,7 +116,7 @@ pub type RuntimeEventReceiver = tokio::sync::mpsc::Receiver<RuntimeEvent>;
 
 impl RuntimeEventSink {
     #[must_use]
-    pub fn bounded(capacity: usize) -> (Self, RuntimeEventReceiver) {
+    pub(crate) fn bounded(capacity: usize) -> (Self, RuntimeEventReceiver) {
         assert!(capacity > 0, "runtime event capacity must be nonzero");
         let (sender, receiver) = tokio::sync::mpsc::channel(capacity);
         (
@@ -133,7 +133,7 @@ impl RuntimeEventSink {
     }
 
     /// Emit one fact without waiting for channel capacity.
-    pub fn emit(&self, event: RuntimeEvent) -> bool {
+    pub(crate) fn emit(&self, event: RuntimeEvent) -> bool {
         self.sender
             .as_ref()
             .is_some_and(|sender| sender.try_send(event).is_ok())

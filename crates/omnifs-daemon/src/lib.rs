@@ -11,6 +11,7 @@ mod credential_codec;
 mod credential_document;
 mod daemon;
 mod filesystem_supervisor;
+pub mod fs_runtime;
 mod generation_builder;
 mod log_stream;
 mod logging;

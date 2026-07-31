@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::error::ExitCode;
 use crate::ui::output::{Output, ResultVerdict};
-use omnifs_fs_runtime::BUILD_CHANNEL;
+use omnifs_daemon::fs_runtime::BUILD_CHANNEL;
 
 pub async fn run(output: Output) -> Result<ExitCode> {
     if output.is_structured() {

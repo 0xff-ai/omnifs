@@ -18,21 +18,19 @@ mod process;
 use std::path::PathBuf;
 
 pub use docker::{
-    ContainerName, DockerClient, DockerContainerIdentity, DockerTarget, ImageInspection,
-    OwnedFilesystemContainer, resolve_filesystem_image,
+    DockerClient, DockerContainerIdentity, DockerTarget, ImageInspection, OwnedFilesystemContainer,
+    resolve_filesystem_image,
 };
-pub use driver::{
-    AttachEndpoints, Candidate, ConfirmedRuntime, FilesystemRuntimePaths, LaunchRequest,
-    RuntimeDriver, RuntimePaths, err_after_rollback, owned_filesystems,
-};
-pub use events::{
-    Artifact, ContainerState, ImageState, RuntimeEvent, RuntimeEventReceiver, RuntimeEventSink,
-    RuntimeStage, RuntimeState,
-};
+pub use driver::{Candidate, FilesystemRuntimePaths, RuntimePaths, owned_filesystems};
+pub use events::RuntimeEventSink;
 pub use host::HostDriver;
 pub use image::{BUILD_CHANNEL, BuildChannel, ImageRef};
-pub use libkrun::{
-    LibkrunRunner, default_guest_image_for, ensure_socat_available, resolve_guest_image_reference,
+pub use libkrun::{LibkrunRunner, resolve_guest_image_reference};
+
+pub(crate) use driver::{AttachEndpoints, ConfirmedRuntime, RuntimeDriver};
+pub(crate) use events::{
+    Artifact, ContainerState, ImageState, RuntimeEvent, RuntimeEventReceiver, RuntimeStage,
+    RuntimeState,
 };
 
 /// An operation failure classified by its stable runtime stage.

@@ -21,7 +21,6 @@ omnifs-state = { workspace = true }
 omnifs-api = { workspace = true }
 omnifs-kcl = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
-omnifs-fs-runtime = { workspace = true }
 omnifs-nfs = { workspace = true }
 omnifs-thin = { workspace = true }
 omnifs-mtab = { workspace = true }

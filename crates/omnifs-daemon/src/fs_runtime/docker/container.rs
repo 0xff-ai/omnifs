@@ -19,7 +19,7 @@ use omnifs_core::{FILESYSTEM_GUEST_LOCATION, FilesystemProtocol, FilesystemRunti
 use omnifs_core::{FilesystemSpec, ResourceName};
 
 use super::{ContainerName, DockerTarget};
-use crate::{BUILD_CHANNEL, BuildChannel, ImageRef};
+use crate::fs_runtime::{BUILD_CHANNEL, BuildChannel, ImageRef};
 
 /// Base container name for the default profile. A non-default profile
 /// (an explicit `OMNIFS_HOME`) disambiguates with an 8-hex-char content hash

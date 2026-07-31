@@ -512,11 +512,11 @@ fn definition_for_pair(
         },
     };
     let docker_image = (runtime == FilesystemRuntime::Docker)
-        .then(|| omnifs_fs_runtime::resolve_filesystem_image(None, None))
+        .then(|| omnifs_daemon::fs_runtime::resolve_filesystem_image(None, None))
         .transpose()?
         .map(|value| value.to_string());
     let libkrun_guest_image = (runtime == FilesystemRuntime::Libkrun)
-        .then(|| omnifs_fs_runtime::resolve_guest_image_reference(None));
+        .then(|| omnifs_daemon::fs_runtime::resolve_guest_image_reference(None));
     Ok(FilesystemDefinition {
         name,
         spec: FilesystemSpec::new(

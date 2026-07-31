@@ -481,7 +481,7 @@ async fn build_daemon(
             if let Err(error) = daemon.install_reconciler(reconciler) {
                 return Err(close_failed_state(state, error).await);
             }
-            let filesystem_paths = omnifs_fs_runtime::RuntimePaths::daemon_owned(
+            let filesystem_paths = crate::fs_runtime::RuntimePaths::daemon_owned(
                 daemon.context.profile().root().to_path_buf(),
                 std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
                 runtime.state_paths.filesystems_runtime(),
@@ -489,7 +489,7 @@ async fn build_daemon(
                 runtime.state_paths.guest_images_cache(),
                 daemon.context.process_identity().executable().to_path_buf(),
             );
-            let filesystem_endpoints = omnifs_fs_runtime::AttachEndpoints::new(
+            let filesystem_endpoints = crate::fs_runtime::AttachEndpoints::new(
                 Some(daemon.context.attach_socket()),
                 daemon.attach_tcp(),
             );

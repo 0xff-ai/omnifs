@@ -51,11 +51,11 @@ use omnifs_libkrun::{
 };
 use tokio::io::AsyncReadExt as _;
 
-use crate::driver::ensure_identity_unchanged;
-use crate::process::is_alive as process_alive;
-use crate::{
-    BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, LaunchRequest, RuntimeAdvice, RuntimeEvent,
-    RuntimeEventSink, RuntimeStage, RuntimeState, advise, err_after_rollback,
+use crate::fs_runtime::driver::{LaunchRequest, ensure_identity_unchanged, err_after_rollback};
+use crate::fs_runtime::process::is_alive as process_alive;
+use crate::fs_runtime::{
+    BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, RuntimeAdvice, RuntimeEvent,
+    RuntimeEventSink, RuntimeStage, RuntimeState, advise,
 };
 
 const SSH_KEY_NAME: &str = "id_ed25519";
@@ -169,6 +169,9 @@ pub const fn default_guest_image_for(channel: BuildChannel) -> &'static str {
 /// `omnifs filesystem shell`'s libkrun dispatch calls this before building the ssh
 /// command: `shell_command` itself stays pure construction (no I/O), so the
 /// probe belongs at the one call site that is about to actually run it.
+// The crate fold made this provably uncalled; its first caller lands in a
+// later commit that wires it into the shell dispatch.
+#[allow(dead_code)]
 pub fn ensure_socat_available() -> Result<()> {
     match Command::new("socat")
         .arg("-V")
@@ -450,7 +453,7 @@ async fn resolve_guest_image(
     let path = match BUILD_CHANNEL {
         BuildChannel::Dev => PathBuf::from(resolved),
         BuildChannel::Release => {
-            crate::guest_image::ensure_guest_image(
+            crate::fs_runtime::guest_image::ensure_guest_image(
                 &ImageRef::new(resolved)?,
                 guest_image_cache,
                 events,
@@ -574,7 +577,7 @@ impl<'a> LibkrunLaunchLease<'a> {
                     .child
                     .take()
                     .context("libkrun child identity was lost after readiness publication")?;
-                crate::process::reap_managed_child(child);
+                crate::fs_runtime::process::reap_managed_child(child);
                 if let (Some(filesystem), Some(spec)) = (&self.filesystem, &self.spec) {
                     events.emit(RuntimeEvent::MountReady {
                         runtime: FilesystemRuntime::Libkrun,
@@ -685,10 +688,10 @@ impl<'a> LibkrunLaunchLease<'a> {
         self.instance_id = Some(runtime_instance.to_owned());
         let mut command = Command::new(installation.helper());
         helper_config.apply_to(&mut command);
-        crate::process::configure_detached_child(
+        crate::fs_runtime::process::configure_detached_child(
             &mut command,
             helper_config.diagnostic_log(),
-            crate::process::LogMode::TruncateRestricted0600,
+            crate::fs_runtime::process::LogMode::TruncateRestricted0600,
         )?;
 
         // The lease owns the child through readiness. Successful publication
@@ -781,7 +784,7 @@ impl<'a> LibkrunLaunchLease<'a> {
     }
 
     async fn wait_for_helper_record(&mut self) -> Result<HelperRecord> {
-        let ready = crate::process::poll_until_mut(
+        let ready = crate::fs_runtime::process::poll_until_mut(
             HELPER_RECORD_TIMEOUT,
             HELPER_POLL_INTERVAL,
             self,
@@ -937,8 +940,11 @@ impl<'a> LibkrunLaunchLease<'a> {
     }
 
     async fn wait_for_owned_child_exit(&mut self, timeout: Duration) -> Result<bool> {
-        Ok(
-            crate::process::poll_until_mut(timeout, HELPER_POLL_INTERVAL, self, |lease| {
+        Ok(crate::fs_runtime::process::poll_until_mut(
+            timeout,
+            HELPER_POLL_INTERVAL,
+            self,
+            |lease| {
                 Box::pin(async move {
                     let exited = lease
                         .child
@@ -948,10 +954,10 @@ impl<'a> LibkrunLaunchLease<'a> {
                         .is_some();
                     Ok(exited.then_some(()))
                 })
-            })
-            .await?
-            .is_some(),
+            },
         )
+        .await?
+        .is_some())
     }
 
     async fn wait_for_detached_exit(
@@ -959,7 +965,7 @@ impl<'a> LibkrunLaunchLease<'a> {
         expected: &HelperRecord,
         timeout: Duration,
     ) -> Result<()> {
-        crate::process::poll_until(timeout, HELPER_POLL_INTERVAL, || async {
+        crate::fs_runtime::process::poll_until(timeout, HELPER_POLL_INTERVAL, || async {
             match self.runner.read_helper_record()? {
                 None => Ok(Some(())),
                 Some(current) if current != *expected => {
@@ -1062,7 +1068,7 @@ impl LibkrunRunner {
         );
         let mut running = process_alive(record.pid);
         if running && let Err(error) = self.confirm_record(&record) {
-            let exited = crate::process::poll_until(
+            let exited = crate::fs_runtime::process::poll_until(
                 HELPER_CONTROL_EXIT_GRACE,
                 HELPER_POLL_INTERVAL,
                 || async { Ok((!process_alive(record.pid)).then_some(())) },
@@ -1300,7 +1306,7 @@ mod tests {
             serde_json::to_vec(&record).unwrap(),
         )
         .unwrap();
-        crate::process::reap_managed_child(child);
+        crate::fs_runtime::process::reap_managed_child(child);
         let runner = LibkrunRunner::new(dir);
 
         let (confirmed, running) = runner.confirmed(&filesystem, &spec).await.unwrap().unwrap();

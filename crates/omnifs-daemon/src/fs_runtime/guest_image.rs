@@ -14,7 +14,7 @@ use oci_client::secrets::RegistryAuth;
 use oci_client::{Client, Reference};
 use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 
-use crate::{Artifact, ImageRef, RuntimeEvent, RuntimeEventSink};
+use crate::fs_runtime::{Artifact, ImageRef, RuntimeEvent, RuntimeEventSink};
 
 /// Ensure the release-channel guest image is present as a decompressed local
 /// `.raw` file and return that immutable base path.

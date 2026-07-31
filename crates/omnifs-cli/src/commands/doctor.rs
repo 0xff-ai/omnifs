@@ -6,7 +6,7 @@
 use anyhow::Context as _;
 use omnifs_bootstrap::Profile;
 use omnifs_core::ResourceName;
-use omnifs_fs_runtime::{
+use omnifs_daemon::fs_runtime::{
     Candidate, DockerClient, DockerTarget, HostDriver, ImageInspection, ImageRef, LibkrunRunner,
     OwnedFilesystemContainer, RuntimeEventSink, RuntimePaths, owned_filesystems,
 };

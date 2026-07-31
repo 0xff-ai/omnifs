@@ -1,5 +1,9 @@
 //! Daemon-owned reconciliation of desired filesystems into exact runtimes.
 
+use crate::fs_runtime::{
+    AttachEndpoints, ConfirmedRuntime, RuntimeDriver, RuntimeEvent, RuntimeEventReceiver,
+    RuntimeEventSink, RuntimePaths, RuntimeStage, RuntimeState,
+};
 use crate::progress::ProgressHub;
 use crate::resource_control::ResourceControl;
 use anyhow::Context as _;
@@ -9,10 +13,6 @@ use omnifs_api::{
 };
 use omnifs_core::{
     FilesystemRuntime, FilesystemSpec, ResourceKey, ResourceKind, ResourceName, ResourceRevision,
-};
-use omnifs_fs_runtime::{
-    AttachEndpoints, ConfirmedRuntime, RuntimeDriver, RuntimeEvent, RuntimeEventReceiver,
-    RuntimeEventSink, RuntimePaths, RuntimeStage, RuntimeState,
 };
 use omnifs_state::{
     DesiredFilesystem, FilesystemInstance, FilesystemObservation, FilesystemPhase, StateStore,
@@ -1405,7 +1405,7 @@ async fn stop_exact(
     name: &ResourceName,
     spec: &FilesystemSpec,
     runtime_instance: &str,
-    confirmed: omnifs_fs_runtime::ConfirmedRuntime,
+    confirmed: crate::fs_runtime::ConfirmedRuntime,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         confirmed.runtime_instance() == runtime_instance,
@@ -1844,7 +1844,7 @@ mod tests {
     #[test]
     fn runtime_events_never_invent_byte_totals() {
         let (stage, completed, total) = runtime_progress(&RuntimeEvent::Download {
-            artifact: omnifs_fs_runtime::Artifact::FilesystemImage,
+            artifact: crate::fs_runtime::Artifact::FilesystemImage,
             completed_bytes: 41,
             total_bytes: None,
             source: "registry".to_owned(),

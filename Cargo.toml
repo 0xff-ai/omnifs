@@ -28,7 +28,6 @@ omnifs-api = { version = "0.2.1", path = "crates/omnifs-api" }
 omnifs-auth = { version = "0.2.1", path = "crates/omnifs-auth" }
 omnifs-bootstrap = { version = "0.2.1", path = "crates/omnifs-bootstrap" }
 omnifs-engine = { version = "0.2.1", path = "crates/omnifs-engine", default-features = false }
-omnifs-fs-runtime = { version = "0.2.1", path = "crates/omnifs-fs-runtime" }
 omnifs-fuse = { version = "0.2.1", path = "crates/omnifs-fuse", default-features = false }
 omnifs-inspector = { version = "0.2.1", path = "crates/omnifs-inspector" }
 omnifs-libkrun = { version = "0.2.1", path = "crates/omnifs-libkrun" }
@@ -66,6 +65,7 @@ jsonschema = { version = "0.46", default-features = false }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 tracing = "0.1"
 bollard = "0.20.0"
+futures-util = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 clap = { version = "4", features = ["derive", "wrap_help"] }

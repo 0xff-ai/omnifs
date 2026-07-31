@@ -1,9 +1,8 @@
 //! Host filesystem launch, runner probing, and control.
 
-use crate::driver::{ensure_identity_unchanged, ensure_record_matches};
-use crate::{
-    Candidate, LaunchRequest, RuntimeAdvice, RuntimeEvent, RuntimeEventSink, RuntimeStage,
-    RuntimeState, advise,
+use crate::fs_runtime::driver::{LaunchRequest, ensure_identity_unchanged, ensure_record_matches};
+use crate::fs_runtime::{
+    Candidate, RuntimeAdvice, RuntimeEvent, RuntimeEventSink, RuntimeStage, RuntimeState, advise,
 };
 use anyhow::{Context as _, Result, ensure};
 use omnifs_core::{FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName};
@@ -286,10 +285,10 @@ impl PendingHostFilesystem {
             .arg(&instance_id)
             .arg("--runner-control")
             .arg(&control_socket);
-        crate::process::configure_detached_child(
+        crate::fs_runtime::process::configure_detached_child(
             &mut command,
             log_path,
-            crate::process::LogMode::Append,
+            crate::fs_runtime::process::LogMode::Append,
         )?;
         let child = command.spawn().with_context(|| {
             format!(
@@ -328,8 +327,11 @@ impl PendingHostFilesystem {
             spec,
             last_phase: None,
         };
-        let ready =
-            crate::process::poll_until_mut(STARTUP_TIMEOUT, POLL_INTERVAL, &mut wait, |wait| {
+        let ready = crate::fs_runtime::process::poll_until_mut(
+            STARTUP_TIMEOUT,
+            POLL_INTERVAL,
+            &mut wait,
+            |wait| {
                 Box::pin(async move {
                     if let Some(status) = wait
                         .pending
@@ -391,14 +393,15 @@ impl PendingHostFilesystem {
                     }
                     Ok(None)
                 })
-            })
-            .await;
+            },
+        )
+        .await;
         let child = wait
             .pending
             .child
             .take()
             .context("host filesystem child identity was lost after readiness polling")?;
-        crate::process::reap_managed_child(child);
+        crate::fs_runtime::process::reap_managed_child(child);
         ready?.map_or_else(
             || {
                 Err(mount_startup_timeout(
@@ -444,7 +447,7 @@ async fn wait_for_cleanup(
         StopOutcome::Busy { message } => Some(message),
         StopOutcome::Failed { message } => anyhow::bail!("{message}"),
     };
-    crate::process::poll_until(STOP_TIMEOUT, POLL_INTERVAL, || async {
+    crate::fs_runtime::process::poll_until(STOP_TIMEOUT, POLL_INTERVAL, || async {
         let record_gone = RunnerRecord::read(state_dir)?.is_none();
         let mount_gone = !omnifs_nfs::mount_is_active(mount_point);
         Ok((record_gone && mount_gone).then_some(()))

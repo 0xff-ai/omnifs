@@ -23,14 +23,14 @@ pub use self::container::resolve_filesystem_image;
 use self::container::{
     FILESYSTEM_HOME_LABEL, FILESYSTEM_ID_LABEL, assert_locked_down, filesystem_command,
 };
-use crate::driver::ensure_identity_unchanged;
-use crate::{
-    BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, LaunchRequest, RuntimeAdvice, RuntimeEvent,
-    RuntimeEventSink, RuntimeStage, RuntimeState, advise, err_after_rollback,
+use crate::fs_runtime::driver::{LaunchRequest, ensure_identity_unchanged, err_after_rollback};
+use crate::fs_runtime::{
+    BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, RuntimeAdvice, RuntimeEvent,
+    RuntimeEventSink, RuntimeStage, RuntimeState, advise,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ContainerName(String);
+pub(crate) struct ContainerName(String);
 
 impl ContainerName {
     pub fn new(name: impl Into<String>) -> anyhow::Result<Self> {
@@ -84,7 +84,7 @@ impl DockerTarget {
         })
     }
 
-    pub fn container_name(&self) -> &ContainerName {
+    pub(crate) fn container_name(&self) -> &ContainerName {
         &self.container_name
     }
 
@@ -238,12 +238,16 @@ impl DockerClient {
     }
 
     async fn wait_for_mount_ready(&self) -> Result<()> {
-        crate::process::poll_until(MOUNT_READY_TIMEOUT, MOUNT_READY_POLL_INTERVAL, || async {
-            Ok(self
-                .mount_ready(FILESYSTEM_GUEST_LOCATION)
-                .await?
-                .then_some(()))
-        })
+        crate::fs_runtime::process::poll_until(
+            MOUNT_READY_TIMEOUT,
+            MOUNT_READY_POLL_INTERVAL,
+            || async {
+                Ok(self
+                    .mount_ready(FILESYSTEM_GUEST_LOCATION)
+                    .await?
+                    .then_some(()))
+            },
+        )
         .await?
         .with_context(|| {
             format!(
@@ -511,7 +515,7 @@ impl DockerClient {
 
     /// This runtime's own container identity, so lifecycle operations do not
     /// thread the name back in from each caller.
-    pub fn container_name(&self) -> &ContainerName {
+    pub(crate) fn container_name(&self) -> &ContainerName {
         self.target.container_name()
     }
 
@@ -601,7 +605,7 @@ impl DockerClient {
                         .values()
                         .fold(0_u64, |sum, layer| sum.saturating_add(layer.total));
                     self.events.emit(RuntimeEvent::Download {
-                        artifact: crate::Artifact::FilesystemImage,
+                        artifact: crate::fs_runtime::Artifact::FilesystemImage,
                         completed_bytes: current,
                         total_bytes: (total > 0).then_some(total),
                         source: source.to_owned(),
@@ -614,7 +618,7 @@ impl DockerClient {
         match result {
             Ok(()) => {
                 self.events.emit(RuntimeEvent::DownloadFinished {
-                    artifact: crate::Artifact::FilesystemImage,
+                    artifact: crate::fs_runtime::Artifact::FilesystemImage,
                     reference: image.to_owned(),
                     completed_bytes: None,
                 });
@@ -622,7 +626,7 @@ impl DockerClient {
             },
             Err(error) => {
                 self.events.emit(RuntimeEvent::DownloadFailed {
-                    artifact: crate::Artifact::FilesystemImage,
+                    artifact: crate::fs_runtime::Artifact::FilesystemImage,
                     reference: Some(image.to_owned()),
                 });
                 Err(error)
@@ -644,7 +648,7 @@ impl DockerClient {
                 self.events.emit(RuntimeEvent::Container {
                     name: name.to_string(),
                     image: None,
-                    state: crate::ContainerState::RemovingExisting,
+                    state: crate::fs_runtime::ContainerState::RemovingExisting,
                 });
                 self.stop_and_remove(name.as_str()).await?;
             },
@@ -654,7 +658,7 @@ impl DockerClient {
                 self.events.emit(RuntimeEvent::Container {
                     name: name.to_string(),
                     image: None,
-                    state: crate::ContainerState::Absent,
+                    state: crate::fs_runtime::ContainerState::Absent,
                 });
             },
             Err(error) => {
@@ -668,7 +672,7 @@ impl DockerClient {
         self.events.emit(RuntimeEvent::Container {
             name: id.to_owned(),
             image: None,
-            state: crate::ContainerState::StoppingConfirmed,
+            state: crate::fs_runtime::ContainerState::StoppingConfirmed,
         });
         self.stop_and_remove(id).await
     }
@@ -712,7 +716,7 @@ impl DockerClient {
         self.events.emit(RuntimeEvent::Container {
             name: self.container_name().to_string(),
             image: Some(self.image().to_string()),
-            state: crate::ContainerState::Creating,
+            state: crate::fs_runtime::ContainerState::Creating,
         });
         self.docker
             .create_container(
@@ -727,7 +731,7 @@ impl DockerClient {
         self.events.emit(RuntimeEvent::Container {
             name: self.container_name().to_string(),
             image: Some(self.image().to_string()),
-            state: crate::ContainerState::Starting,
+            state: crate::fs_runtime::ContainerState::Starting,
         });
         self.docker
             .start_container(
@@ -809,9 +813,9 @@ impl DockerClient {
                     (BuildChannel::Release, _) => None,
                 };
                 self.events.emit(RuntimeEvent::Image {
-                    artifact: crate::Artifact::FilesystemImage,
+                    artifact: crate::fs_runtime::Artifact::FilesystemImage,
                     reference: self.image().to_string(),
-                    state: crate::ImageState::Present { age },
+                    state: crate::fs_runtime::ImageState::Present { age },
                 });
                 Ok(())
             },
@@ -821,9 +825,9 @@ impl DockerClient {
                 // A registry-less reference is a local build product. Never
                 // reach for a registry: refuse and point at the dev build.
                 self.events.emit(RuntimeEvent::Image {
-                    artifact: crate::Artifact::FilesystemImage,
+                    artifact: crate::fs_runtime::Artifact::FilesystemImage,
                     reference: self.image().to_string(),
-                    state: crate::ImageState::Missing,
+                    state: crate::fs_runtime::ImageState::Missing,
                 });
                 let image = self.image();
                 let error = anyhow!(BUILD_CHANNEL.pull_refusal_reason())
@@ -837,9 +841,9 @@ impl DockerClient {
                 status_code: 404, ..
             }) => {
                 self.events.emit(RuntimeEvent::Image {
-                    artifact: crate::Artifact::FilesystemImage,
+                    artifact: crate::fs_runtime::Artifact::FilesystemImage,
                     reference: self.image().to_string(),
-                    state: crate::ImageState::Missing,
+                    state: crate::fs_runtime::ImageState::Missing,
                 });
                 self.pull_image_with_progress(self.image().as_str())
                     .await

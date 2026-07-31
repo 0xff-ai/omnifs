@@ -9,10 +9,10 @@ use omnifs_core::{
     filesystem_pair_supported_on_current_host,
 };
 
-use crate::docker::{DockerClient, DockerContainerIdentity, OwnedFilesystemContainer};
-use crate::host::HostDriver;
-use crate::libkrun::LibkrunRunner;
-use crate::{RuntimeError, RuntimeEvent, RuntimeEventSink, RuntimeStage, RuntimeState};
+use crate::fs_runtime::docker::{DockerClient, DockerContainerIdentity, OwnedFilesystemContainer};
+use crate::fs_runtime::host::HostDriver;
+use crate::fs_runtime::libkrun::LibkrunRunner;
+use crate::fs_runtime::{RuntimeError, RuntimeEvent, RuntimeEventSink, RuntimeStage, RuntimeState};
 
 /// Caller-supplied roots and executable identity used by all runtime drivers.
 #[derive(Debug, Clone)]
@@ -192,7 +192,10 @@ pub struct RuntimeDriver {
 pub enum ConfirmedRuntime {
     Host(
         omnifs_mtab::RunnerRecord,
-        omnifs_thin::host_control::RunnerPhase,
+        // The crate fold made this field's non-use provable (previously the
+        // pub API of a separate crate hid it from dead-code analysis).
+        // Retained verbatim pending a decision on removal.
+        #[allow(dead_code)] omnifs_thin::host_control::RunnerPhase,
     ),
     Docker(DockerContainerIdentity, bool),
     Libkrun(omnifs_libkrun::HelperRecord, bool),
@@ -285,11 +288,16 @@ impl RuntimeDriver {
         })
     }
 
+    // The crate fold made these accessors' non-use provable (previously the
+    // pub API of a separate crate hid them from dead-code analysis).
+    // Retained verbatim pending a decision on removal.
+    #[allow(dead_code)]
     #[must_use]
     pub fn spec(&self) -> &FilesystemSpec {
         &self.spec
     }
 
+    #[allow(dead_code)]
     #[must_use]
     pub fn filesystem(&self) -> &ResourceName {
         &self.filesystem
@@ -459,6 +467,7 @@ impl RuntimeDriver {
         }
     }
 
+    #[allow(dead_code)]
     #[must_use]
     pub fn container_name(&self) -> Option<&str> {
         match &self.backend {
@@ -498,7 +507,7 @@ pub async fn owned_filesystems(
     docker: Option<&DockerClient>,
 ) -> Vec<Candidate> {
     let mut candidates = Vec::new();
-    match crate::host::owned(paths.state_root()).await {
+    match crate::fs_runtime::host::owned(paths.state_root()).await {
         Ok(mut owned) => candidates.append(&mut owned),
         Err(error) => candidates.push(Candidate::ListingFailed {
             backend: "host",
