@@ -328,7 +328,7 @@ pub fn mount_input_from_json(config_json: &str) -> Result<MountBuildInput, Build
         .get("mount")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| BuildError::InvalidConfig("test config has no string `mount`".into()))?;
-    let name = omnifs_core::MountName::new(mount.to_owned())
+    let name = omnifs_core::ResourceName::new(mount.to_owned())
         .map_err(|error| BuildError::InvalidConfig(format!("invalid mount `{mount}`: {error}")))?;
 
     let (reference, bytes, manifest) = pin_provider(provider_file)?;

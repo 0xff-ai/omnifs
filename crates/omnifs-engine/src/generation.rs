@@ -2,7 +2,8 @@
 
 use omnifs_auth::{CredentialHealth, CredentialId};
 use omnifs_core::{
-    CredentialGeneration, CredentialVersion, MountName, MountRevision, MountVersion, ProviderRef,
+    CredentialGeneration, CredentialVersion, MountVersion, ProviderRef, ResourceName,
+    ResourceRevision,
 };
 use omnifs_vfs::{
     Namespace, NamespaceEpoch, NamespaceEventHub, NamespaceLease, NamespaceSubscription, NsError,
@@ -18,7 +19,7 @@ use tokio::time::Instant;
 const EVENT_CAPACITY: usize = 1024;
 
 pub struct ServingMountStatus {
-    pub name: MountName,
+    pub name: ResourceName,
     pub provider: ProviderRef,
     pub availability: crate::MountAvailability,
     pub auth_health: Option<CredentialHealth>,
@@ -26,14 +27,14 @@ pub struct ServingMountStatus {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GenerationProvenance {
-    revision: MountRevision,
+    revision: ResourceRevision,
     mounts: Vec<MountProvenance>,
     credentials: Vec<CredentialProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MountProvenance {
-    pub name: MountName,
+    pub name: ResourceName,
     pub version: MountVersion,
 }
 
@@ -47,7 +48,7 @@ pub struct CredentialProvenance {
 impl GenerationProvenance {
     #[must_use]
     pub fn new(
-        revision: MountRevision,
+        revision: ResourceRevision,
         mut mounts: Vec<MountProvenance>,
         mut credentials: Vec<CredentialProvenance>,
     ) -> Self {
@@ -67,12 +68,12 @@ impl GenerationProvenance {
     }
 
     #[must_use]
-    pub const fn revision(&self) -> MountRevision {
+    pub const fn revision(&self) -> ResourceRevision {
         self.revision
     }
 
     #[must_use]
-    pub fn mount_version(&self, name: &MountName) -> Option<MountVersion> {
+    pub fn mount_version(&self, name: &ResourceName) -> Option<MountVersion> {
         self.mounts
             .binary_search_by(|candidate| candidate.name.cmp(name))
             .ok()
@@ -652,13 +653,13 @@ mod tests {
 
     #[tokio::test]
     async fn active_generation_retains_exact_provenance() {
-        let mount = MountName::new("demo").unwrap();
+        let mount = ResourceName::new("demo").unwrap();
         let mount_version = MountVersion::from_digest([0x11; 32]);
         let credential = CredentialId::new("demo", "token", "work").unwrap();
         let credential_version = CredentialVersion::initial();
         let credential_generation = CredentialGeneration::initial();
         let provenance = GenerationProvenance::new(
-            MountRevision::new(7),
+            ResourceRevision::new(7),
             vec![MountProvenance {
                 name: mount.clone(),
                 version: mount_version,

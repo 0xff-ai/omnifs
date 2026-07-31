@@ -74,7 +74,7 @@ pub mod cache {
 
     pub fn mount(
         caches: &std::sync::Arc<Caches>,
-        name: &omnifs_core::MountName,
+        name: &omnifs_core::ResourceName,
         spec_source: &[u8],
         provider_id: omnifs_core::ProviderId,
     ) -> anyhow::Result<std::sync::Arc<crate::cache::mount::MountResources>> {

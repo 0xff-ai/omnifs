@@ -331,7 +331,7 @@ enum ReconcileOutcome {
 
 struct PublishedGeneration {
     retired: RetiredGeneration,
-    mount_revision: omnifs_core::MountRevision,
+    mount_revision: omnifs_core::ResourceRevision,
     pending_refreshes: crate::generation_builder::PendingRefreshes,
 }
 

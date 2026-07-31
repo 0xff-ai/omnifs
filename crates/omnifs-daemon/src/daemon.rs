@@ -9,7 +9,7 @@ use omnifs_api::{
     AttachmentPhase as ApiAttachmentPhase, AttachmentStatus, CONTROL_SHUTDOWN_DRAIN_SECS,
     ControlError, ControlErrorCode, CredentialHealth, DaemonHealth, DaemonInventory, DaemonPhase,
     DaemonRecovery, DaemonStatus, GetAttachmentAccessRequest, HealthReport, HealthState,
-    MountHealth, MountInfo, MountRecord, ResourceDefinition,
+    MountHealth, MountInfo, MountRecord,
 };
 use omnifs_engine::{Inspector, ServingCell};
 use omnifs_state::StateStore;
@@ -426,8 +426,9 @@ impl Daemon {
 
     pub(crate) async fn recovery(&self) -> anyhow::Result<DaemonRecovery> {
         let state = self.state.serving_state().await?;
-        let durable_revision =
-            omnifs_core::MountRevision::new(self.state.resource_snapshot().await?.revision.get());
+        let durable_revision = omnifs_core::ResourceRevision::new(
+            self.state.resource_snapshot().await?.revision.get(),
+        );
         let serving = self.serving.provenance();
         let phase = match state.recovery {
             omnifs_state::RecoveryState::Ready => DaemonPhase::Ready,
@@ -465,82 +466,9 @@ impl Daemon {
     }
 
     pub(crate) async fn mount_records(&self) -> anyhow::Result<Vec<MountRecord>> {
-        let snapshot = self.state.resource_snapshot().await?;
-        let revision = omnifs_core::MountRevision::new(snapshot.revision.get());
-        let mut providers = std::collections::HashMap::new();
-        for resource in snapshot.resources.resources() {
-            let ResourceDefinition::Provider(provider) = resource else {
-                continue;
-            };
-            let metadata = self
-                .state
-                .load_provider_metadata(provider.artifact)
-                .await?
-                .with_context(|| {
-                    format!(
-                        "desired provider `{}` artifact {} is not retained",
-                        provider.name, provider.artifact
-                    )
-                })?;
-            providers.insert(provider.name.clone(), metadata);
-        }
-        let mut credentials = std::collections::HashMap::new();
-        for resource in snapshot.resources.resources() {
-            let ResourceDefinition::Credential(credential) = resource else {
-                continue;
-            };
-            let provider = providers.get(&credential.provider).with_context(|| {
-                format!(
-                    "desired credential `{}` provider `{}` is absent",
-                    credential.name, credential.provider
-                )
-            })?;
-            credentials.insert(
-                credential.name.clone(),
-                omnifs_auth::CredentialId::new(
-                    provider.reference.meta.name.to_string(),
-                    credential.scheme.clone(),
-                    credential.account.clone(),
-                )?,
-            );
-        }
-        let mut mounts = Vec::new();
-        for resource in snapshot.resources.resources().iter().cloned() {
-            let ResourceDefinition::Mount(mount) = resource else {
-                continue;
-            };
-            let provider = providers.get(&mount.provider).with_context(|| {
-                format!(
-                    "desired mount `{}` provider `{}` is absent",
-                    mount.name, mount.provider
-                )
-            })?;
-            let credential = mount
-                .credential
-                .as_ref()
-                .map(|name| {
-                    credentials.get(name).cloned().with_context(|| {
-                        format!(
-                            "desired mount `{}` credential `{name}` is absent",
-                            mount.name
-                        )
-                    })
-                })
-                .transpose()?;
-            mounts.push(omnifs_state::StoredMount::prepare(
-                omnifs_state::MountDocument {
-                    name: omnifs_core::MountName::new(mount.name.to_string())?,
-                    provider: provider.reference.clone(),
-                    credential,
-                    limits: mount.limits.map(|limits| omnifs_state::MountLimits {
-                        max_memory_mb: limits.max_memory_mb,
-                        max_fetch_blob_bytes: limits.max_fetch_blob_bytes,
-                    }),
-                    config: mount.config,
-                },
-                revision,
-            )?);
-        }
+        let mounts = crate::generation_builder::ResolvedDesired::load(&self.state)
+            .await?
+            .mounts;
         let mut health = self.live_mount_healths();
         mounts
             .into_iter()
@@ -783,10 +711,10 @@ impl LiveMountHealths {
 
     pub(crate) fn take(
         &mut self,
-        mount: &omnifs_state::StoredMount,
+        mount: &crate::generation_builder::ResolvedMount,
     ) -> (MountHealth, Option<CredentialHealth>) {
         self.0
-            .remove(mount.document.name.as_str())
+            .remove(mount.name.as_str())
             .filter(|live| live.version == mount.version)
             .map_or_else(Self::missing, |live| (live.health, live.auth_health))
     }

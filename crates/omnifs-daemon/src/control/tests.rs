@@ -494,7 +494,7 @@ async fn typed_resources_apply_fast_and_progress_recovers_after_disconnect() {
         .unwrap()
         .into_inner();
     let plan = grpc::plan_resources_response(&plan_wire).unwrap();
-    assert_eq!(plan.base_revision, omnifs_core::ResourceRevision::new(1));
+    assert_eq!(plan.base_revision, omnifs_core::ResourceRevision::new(0));
     assert_eq!(plan.changes.len(), 3);
 
     let secret = b"service-boundary-secret";

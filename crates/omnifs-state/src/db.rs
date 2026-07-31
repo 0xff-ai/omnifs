@@ -1,7 +1,7 @@
 //! Connection configuration, integrity, and the shared transaction dance.
 
 use anyhow::Context as _;
-use omnifs_core::MountRevision;
+use omnifs_core::ResourceRevision;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqliteSynchronous};
 use sqlx::{Connection as _, SqlitePool};
 use std::fmt::Display;
@@ -132,9 +132,9 @@ impl Db<'_> {
             RecoveryTransition::Serving { revision } => {
                 sqlx::query(
                     "UPDATE recovery_state \
-                     SET state = 'ready', detail = NULL, serving_mount_revision = ?1, \
+                     SET state = 'ready', detail = NULL, serving_resource_revision = ?1, \
                          updated_at = unixepoch() \
-                     WHERE singleton = 1 AND serving_mount_revision <= ?1",
+                     WHERE singleton = 1 AND serving_resource_revision <= ?1",
                 )
                 .bind(sql_int(revision.get(), "mount revision")?)
                 .execute(&mut *self.0)
@@ -196,6 +196,6 @@ fn decode_attach_port(port: i64) -> anyhow::Result<NonZeroU16> {
 
 /// One durable move of the serving head.
 pub(crate) enum RecoveryTransition {
-    Serving { revision: MountRevision },
+    Serving { revision: ResourceRevision },
     RecoveryRequired { detail: String },
 }

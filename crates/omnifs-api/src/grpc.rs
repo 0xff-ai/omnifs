@@ -31,8 +31,8 @@ use crate::{
 };
 use omnifs_core::{
     ActionId, AttachmentSpec, AttachmentVersion, AuthRuntimeFingerprint, CredentialGeneration,
-    CredentialVersion, MountName, MountRevision, MountVersion, MutationId, ProviderId,
-    ResourceDigest, ResourceKey, ResourceKind, ResourceName, ResourceRevision,
+    CredentialVersion, MountVersion, MutationId, ProviderId, ResourceDigest, ResourceKey,
+    ResourceKind, ResourceName, ResourceRevision,
 };
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -293,8 +293,8 @@ pub fn daemon_recovery(v: &wire::DaemonRecovery) -> Result<DaemonRecovery, FromG
             wire::DaemonPhase::try_from(v.phase)
                 .map_err(|_| FromGrpcError::Invalid("daemon phase"))?,
         )?,
-        durable_revision: v.durable_revision.map(MountRevision::new),
-        serving_revision: v.serving_revision.map(MountRevision::new),
+        durable_revision: v.durable_revision.map(ResourceRevision::new),
+        serving_revision: v.serving_revision.map(ResourceRevision::new),
         store_health: health_report(&req(v.store_health.clone(), "store health")?)?,
         repair: v.repair.as_ref().map(recovery_offer).transpose()?,
     })
@@ -302,8 +302,8 @@ pub fn daemon_recovery(v: &wire::DaemonRecovery) -> Result<DaemonRecovery, FromG
 pub fn to_daemon_recovery(v: &DaemonRecovery) -> wire::DaemonRecovery {
     wire::DaemonRecovery {
         phase: to_daemon_phase(v.phase),
-        durable_revision: v.durable_revision.map(MountRevision::get),
-        serving_revision: v.serving_revision.map(MountRevision::get),
+        durable_revision: v.durable_revision.map(ResourceRevision::get),
+        serving_revision: v.serving_revision.map(ResourceRevision::get),
         store_health: Some(to_health_report(&v.store_health)),
         repair: v.repair.as_ref().map(to_recovery_offer),
     }
@@ -336,7 +336,7 @@ pub fn mount_record(v: &wire::MountRecord) -> Result<MountRecord, FromGrpcError>
         definition: mount_definition(&req(v.definition.clone(), "mount definition")?)?,
         provider: provider_reference(&req(v.provider.clone(), "mount provider")?)?,
         version: mount_version(&v.version)?,
-        revision: MountRevision::new(v.revision),
+        revision: ResourceRevision::new(v.revision),
         health: mount_health(&req(v.health.clone(), "mount health")?)?,
         auth_health: v
             .auth_health
@@ -432,8 +432,8 @@ pub fn daemon_inventory(v: &wire::DaemonInventory) -> Result<DaemonInventory, Fr
             wire::DaemonPhase::try_from(v.phase)
                 .map_err(|_| FromGrpcError::Invalid("daemon phase"))?,
         )?,
-        durable_revision: v.durable_revision.map(MountRevision::new),
-        serving_revision: v.serving_revision.map(MountRevision::new),
+        durable_revision: v.durable_revision.map(ResourceRevision::new),
+        serving_revision: v.serving_revision.map(ResourceRevision::new),
         health: daemon_health(&req(v.health.clone(), "daemon health")?)?,
         mounts: v
             .mounts
@@ -478,8 +478,8 @@ pub fn to_daemon_inventory(v: &DaemonInventory) -> wire::DaemonInventory {
     wire::DaemonInventory {
         info: Some(to_daemon_info(&v.info)),
         phase: to_daemon_phase(v.phase),
-        durable_revision: v.durable_revision.map(MountRevision::get),
-        serving_revision: v.serving_revision.map(MountRevision::get),
+        durable_revision: v.durable_revision.map(ResourceRevision::get),
+        serving_revision: v.serving_revision.map(ResourceRevision::get),
         health: Some(to_daemon_health(&v.health)),
         mounts: v.mounts.iter().map(to_mount_record).collect(),
         credentials: v.credentials.iter().map(to_credential_status).collect(),
@@ -643,7 +643,8 @@ pub fn to_provider_import_receipt(v: &ProviderImportReceipt) -> wire::ProviderIm
 }
 
 pub fn mount_definition(v: &wire::MountDefinition) -> Result<MountDefinition, FromGrpcError> {
-    let name = MountName::new(v.name.clone()).map_err(|_| FromGrpcError::Invalid("mount name"))?;
+    let name =
+        ResourceName::new(v.name.clone()).map_err(|_| FromGrpcError::Invalid("mount name"))?;
     serde_json::from_slice::<serde_json::Value>(&v.config)
         .map_err(|e| FromGrpcError::Json(e.to_string()))?;
     Ok(MountDefinition {

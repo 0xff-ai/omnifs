@@ -114,29 +114,3 @@ pub enum MountVersionParseError {
     #[error("mount version must contain only lowercase hex characters")]
     NotLowerHex,
 }
-
-/// Durable revision of the complete configured mount set.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(transparent)]
-pub struct MountRevision(u64);
-
-impl MountRevision {
-    #[must_use]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-
-    pub const fn next(self) -> Option<Self> {
-        match self.0.checked_add(1) {
-            Some(value) => Some(Self(value)),
-            None => None,
-        }
-    }
-}

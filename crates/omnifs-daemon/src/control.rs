@@ -9,7 +9,7 @@ mod service;
 
 use super::context::DaemonContext;
 use super::provider_bundle::EmbeddedProviders;
-use crate::generation_builder::credential_scopes;
+use crate::generation_builder::{ResolvedMount, credential_scopes};
 use crate::log_stream;
 use anyhow::Context as _;
 use bytes::Bytes;

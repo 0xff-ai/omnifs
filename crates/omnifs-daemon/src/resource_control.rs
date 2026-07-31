@@ -1066,7 +1066,7 @@ mod tests {
         let (_temp, state, control, digest) = control_fixture().await;
         let desired = declarations(digest);
         let plan = control.plan(desired.clone()).await.unwrap();
-        assert_eq!(plan.base_revision, ResourceRevision::new(1));
+        assert_eq!(plan.base_revision, ResourceRevision::new(0));
         assert_eq!(plan.changes.len(), 1);
         assert_eq!(plan.changes[0].action, ResourceChangeAction::Create);
 

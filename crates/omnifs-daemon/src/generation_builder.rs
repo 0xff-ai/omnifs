@@ -20,8 +20,8 @@ use omnifs_auth::{
     DurableCredentialSnapshot, OAuthClient, OAuthRequest, RefreshSink,
 };
 use omnifs_core::{
-    ActionId, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MountName,
-    MountRevision, ProviderId, ResourceName,
+    ActionId, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MountVersion,
+    ProviderId, ResourceName, ResourceRevision,
 };
 use omnifs_engine::{
     CredentialProvenance, GenerationProvenance, HostOnline, MountBuildInput, MountBuildState,
@@ -29,8 +29,8 @@ use omnifs_engine::{
     RuntimeMountConfig,
 };
 use omnifs_state::{
-    CredentialRevocationFinish, CredentialState, MountDocument, MountLimits, StateStore,
-    StoredCredential, StoredMount, StoredProvider, StoredProviderMetadata,
+    CredentialRevocationFinish, CredentialState, StateStore, StoredCredential, StoredProvider,
+    StoredProviderMetadata,
 };
 use refresh_sink::StateRefreshSink;
 use secrecy::SecretString;
@@ -43,29 +43,72 @@ use time::OffsetDateTime;
 /// commits desired state first; `load` then re-reads the result, so the draft
 /// always reflects the durable outcome rather than staging it separately.
 pub(crate) struct GenerationDraft {
-    revision: MountRevision,
-    mounts: Vec<StoredMount>,
+    revision: ResourceRevision,
+    mounts: Vec<ResolvedMount>,
     credentials: Vec<CredentialRuntime>,
     pending_refreshes: Vec<PendingRefresh>,
 }
 
-pub(crate) fn empty_generation(host: &HostOnline) -> anyhow::Result<PublishReadyGeneration> {
-    let table = Arc::new(MountTable::prepare_durable(host, Vec::new())?);
-    Ok(PreparedGeneration::new(
-        table,
-        tokio::runtime::Handle::current(),
-        GenerationProvenance::default(),
-    )
-    .activate())
+pub(crate) struct ResolvedDesired {
+    pub(crate) revision: ResourceRevision,
+    pub(crate) mounts: Vec<ResolvedMount>,
+    credentials: Vec<CredentialId>,
 }
 
-impl GenerationDraft {
-    /// Resolve the authoritative declarative resources into one immutable
-    /// serving draft. Provider resource names are aliases only; mounted
-    /// generations pin the exact retained artifact digest.
-    pub(crate) async fn load_resources(state: &StateStore) -> anyhow::Result<Self> {
+pub(crate) struct ResolvedMount {
+    pub(crate) name: ResourceName,
+    pub(crate) provider: omnifs_core::ProviderRef,
+    pub(crate) credential: Option<CredentialId>,
+    pub(crate) limits: Option<omnifs_api::ResourceLimits>,
+    pub(crate) config: serde_json::Value,
+    pub(crate) canonical: Vec<u8>,
+    pub(crate) version: MountVersion,
+    pub(crate) revision: ResourceRevision,
+}
+
+impl ResolvedMount {
+    fn new(
+        definition: &omnifs_api::MountResourceDefinition,
+        provider: omnifs_core::ProviderRef,
+        credential: Option<CredentialId>,
+        revision: ResourceRevision,
+    ) -> anyhow::Result<Self> {
+        let credential_key = credential.as_ref().map(|id| {
+            (
+                id.provider_name().to_owned(),
+                id.scheme().to_owned(),
+                id.account().to_owned(),
+            )
+        });
+        let canonical = serde_json::to_vec(&(
+            definition.name.as_str(),
+            provider.id,
+            provider.meta.name.as_str(),
+            provider.meta.version.as_ref().map(ToString::to_string),
+            credential_key,
+            &definition.limits,
+            &definition.config,
+        ))
+        .context("encode resolved mount")?;
+        let mut hasher = blake3::Hasher::new_derive_key("omnifs resolved mount version v1");
+        hasher.update(&canonical);
+        Ok(Self {
+            name: definition.name.clone(),
+            provider,
+            credential,
+            limits: definition.limits.clone(),
+            config: definition.config.clone(),
+            canonical,
+            version: MountVersion::from_digest(*hasher.finalize().as_bytes()),
+            revision,
+        })
+    }
+}
+
+impl ResolvedDesired {
+    pub(crate) async fn load(state: &StateStore) -> anyhow::Result<Self> {
         let desired = state.resource_snapshot().await?;
-        let revision = MountRevision::new(desired.revision.get());
+        let revision = desired.revision;
         let mut providers = HashMap::<ResourceName, StoredProviderMetadata>::new();
         for resource in desired.resources.resources() {
             let ResourceDefinition::Provider(provider) = resource else {
@@ -84,8 +127,6 @@ impl GenerationDraft {
         }
 
         let mut credential_ids = HashMap::new();
-        let mut credentials = Vec::new();
-        let mut pending_refreshes = Vec::new();
         for resource in desired.resources.resources() {
             let ResourceDefinition::Credential(credential) = resource else {
                 continue;
@@ -96,16 +137,14 @@ impl GenerationDraft {
                     credential.name, credential.provider
                 )
             })?;
-            let id = omnifs_auth::CredentialId::new(
-                provider.reference.meta.name.to_string(),
-                credential.scheme.clone(),
-                credential.account.clone(),
-            )?;
-            credential_ids.insert(credential.name.clone(), id.clone());
-            let Some(stored) = state.get_credential(&id).await? else {
-                continue;
-            };
-            collect_credential(stored, &mut credentials, &mut pending_refreshes)?;
+            credential_ids.insert(
+                credential.name.clone(),
+                CredentialId::new(
+                    provider.reference.meta.name.to_string(),
+                    credential.scheme.clone(),
+                    credential.account.clone(),
+                )?,
+            );
         }
 
         let mut mounts = Vec::new();
@@ -131,17 +170,10 @@ impl GenerationDraft {
                     })
                 })
                 .transpose()?;
-            mounts.push(StoredMount::prepare(
-                MountDocument {
-                    name: MountName::new(mount.name.to_string())?,
-                    provider: provider.reference.clone(),
-                    credential,
-                    limits: mount.limits.as_ref().map(|limits| MountLimits {
-                        max_memory_mb: limits.max_memory_mb,
-                        max_fetch_blob_bytes: limits.max_fetch_blob_bytes,
-                    }),
-                    config: mount.config.clone(),
-                },
+            mounts.push(ResolvedMount::new(
+                mount,
+                provider.reference.clone(),
+                credential,
                 revision,
             )?);
         }
@@ -149,6 +181,39 @@ impl GenerationDraft {
         Ok(Self {
             revision,
             mounts,
+            credentials: credential_ids.into_values().collect(),
+        })
+    }
+}
+
+pub(crate) fn empty_generation(host: &HostOnline) -> anyhow::Result<PublishReadyGeneration> {
+    let table = Arc::new(MountTable::prepare_durable(host, Vec::new())?);
+    Ok(PreparedGeneration::new(
+        table,
+        tokio::runtime::Handle::current(),
+        GenerationProvenance::default(),
+    )
+    .activate())
+}
+
+impl GenerationDraft {
+    /// Resolve the authoritative declarative resources into one immutable
+    /// serving draft. Provider resource names are aliases only; mounted
+    /// generations pin the exact retained artifact digest.
+    pub(crate) async fn load_resources(state: &StateStore) -> anyhow::Result<Self> {
+        let resolved = ResolvedDesired::load(state).await?;
+        let mut credentials = Vec::new();
+        let mut pending_refreshes = Vec::new();
+        for id in resolved.credentials {
+            let Some(stored) = state.get_credential(&id).await? else {
+                continue;
+            };
+            collect_credential(stored, &mut credentials, &mut pending_refreshes)?;
+        }
+
+        Ok(Self {
+            revision: resolved.revision,
+            mounts: resolved.mounts,
             credentials,
             pending_refreshes,
         })
@@ -160,7 +225,7 @@ impl GenerationDraft {
             self.mounts
                 .iter()
                 .map(|mount| MountProvenance {
-                    name: mount.document.name.clone(),
+                    name: mount.name.clone(),
                     version: mount.version,
                 })
                 .collect(),
@@ -203,7 +268,7 @@ impl GenerationDraft {
 
         let mut providers: HashMap<ProviderId, Option<LoadedProvider>> = HashMap::new();
         for mount in &mounts {
-            let id = mount.document.provider.id;
+            let id = mount.provider.id;
             if let std::collections::hash_map::Entry::Vacant(entry) = providers.entry(id) {
                 let provider = state
                     .load_provider(id)
@@ -239,7 +304,7 @@ impl GenerationDraft {
         let mut inputs = Vec::with_capacity(mounts.len());
         for mount in mounts {
             let provider = providers
-                .get(&mount.document.provider.id)
+                .get(&mount.provider.id)
                 .expect("every mount provider was loaded")
                 .as_ref();
             inputs.push(build_mount_input(mount, provider, &credentials, &service)?);
@@ -296,7 +361,7 @@ pub(crate) struct GenerationBuild {
 /// caller is ready to publish.
 pub(crate) struct GenerationParts {
     pub(crate) ready: PublishReadyGeneration,
-    pub(crate) revision: MountRevision,
+    pub(crate) revision: ResourceRevision,
     pub(crate) pending_refreshes: PendingRefreshes,
 }
 
@@ -462,19 +527,16 @@ pub(crate) async fn finish_resource_credential_revocation(
 }
 
 fn build_mount_input(
-    mount: StoredMount,
+    mount: ResolvedMount,
     provider: Option<&LoadedProvider>,
     credentials: &HashMap<CredentialId, CredentialRuntime>,
     service: &Arc<CredentialService>,
 ) -> anyhow::Result<MountBuildInput> {
     let config = RuntimeMountConfig {
-        name: mount.document.name.clone(),
-        provider: mount.document.provider.clone(),
-        config: mount.document.config,
-        max_fetch_blob_bytes: mount
-            .document
-            .limits
-            .and_then(|limits| limits.max_fetch_blob_bytes),
+        name: mount.name,
+        provider: mount.provider.clone(),
+        config: mount.config,
+        max_fetch_blob_bytes: mount.limits.and_then(|limits| limits.max_fetch_blob_bytes),
     };
     let canonical = Arc::from(mount.canonical.into_boxed_slice());
     let Some(provider) = provider else {
@@ -489,7 +551,7 @@ fn build_mount_input(
         bytes: Arc::clone(&provider.bytes),
         manifest: provider.manifest.clone(),
     });
-    let state = match mount.document.credential.as_ref() {
+    let state = match mount.credential.as_ref() {
         None => MountBuildState::Active {
             auth: None,
             credential_generation: None,

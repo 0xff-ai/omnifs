@@ -6,8 +6,8 @@ use fjall::{
     KeyspaceCreateOptions, OptimisticTxDatabase, OptimisticTxKeyspace, OptimisticWriteTx,
     PersistMode,
 };
-use omnifs_core::MountName;
 use omnifs_core::ProviderId;
+use omnifs_core::ResourceName;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -22,13 +22,13 @@ pub const PROJECTION_MANIFEST_VERSION: u32 = 1;
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProjectionManifest {
     pub version: u32,
-    pub mount: MountName,
+    pub mount: ResourceName,
     pub spec_digest: String,
     pub provider_id: ProviderId,
 }
 
 impl ProjectionManifest {
-    fn new(mount: &MountName, spec_source: &[u8], provider_id: ProviderId) -> Self {
+    fn new(mount: &ResourceName, spec_source: &[u8], provider_id: ProviderId) -> Self {
         Self {
             version: PROJECTION_MANIFEST_VERSION,
             mount: mount.clone(),
@@ -39,7 +39,7 @@ impl ProjectionManifest {
 
     fn validate(
         &self,
-        mount: &MountName,
+        mount: &ResourceName,
         spec_source: &[u8],
         provider_id: ProviderId,
     ) -> Result<(), ProjectionStoreError> {
@@ -61,7 +61,7 @@ impl ProjectionStore {
         root: impl AsRef<Path>,
         database: &OptimisticTxDatabase,
         id: ProjectionId,
-        mount: &MountName,
+        mount: &ResourceName,
         spec_source: &[u8],
         provider_id: ProviderId,
     ) -> Result<Self, ProjectionStoreError> {

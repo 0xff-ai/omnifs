@@ -4,7 +4,6 @@ pub mod attachment;
 mod auth_fingerprint;
 mod content_type;
 mod file;
-mod mount_name;
 mod mutation;
 mod operation;
 pub mod path;
@@ -22,7 +21,6 @@ pub use attachment::{
 pub use auth_fingerprint::{AuthRuntimeFingerprint, AuthRuntimeFingerprintParseError};
 pub use content_type::ContentType;
 pub use file::{FileSize, ReadMode, Stability};
-pub use mount_name::{MountName, MountNameError};
 pub use mutation::{MutationId, MutationIdError};
 pub use operation::{ActionId, ActionIdError};
 pub use path::{ParseError, Path, Segment};
@@ -36,5 +34,5 @@ pub use resource::{
     ResourceNameError, ResourceRevision, ResourceRevisionParseError,
 };
 pub use state_version::{
-    CredentialGeneration, CredentialVersion, MountRevision, MountVersion, MountVersionParseError,
+    CredentialGeneration, CredentialVersion, MountVersion, MountVersionParseError,
 };

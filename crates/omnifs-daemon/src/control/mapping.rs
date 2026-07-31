@@ -4,24 +4,23 @@
 use super::*;
 
 pub(crate) fn api_mount_record(
-    mount: omnifs_state::StoredMount,
+    mount: ResolvedMount,
     health: MountHealth,
     auth_health: Option<CredentialHealth>,
 ) -> anyhow::Result<MountRecord> {
-    let document = mount.document;
-    let provider = api_provider_reference(document.provider.clone());
+    let provider = api_provider_reference(mount.provider.clone());
     let definition = ApiMountDefinition {
-        name: document.name,
-        provider: document.provider.id,
-        auth: document.credential.map(|id| omnifs_api::MountCredential {
+        name: mount.name,
+        provider: mount.provider.id,
+        auth: mount.credential.map(|id| omnifs_api::MountCredential {
             scheme: id.scheme().to_owned(),
             account_label: id.account().to_owned(),
         }),
-        limits: document.limits.map(|limits| ApiMountLimits {
+        limits: mount.limits.map(|limits| ApiMountLimits {
             max_memory_mb: limits.max_memory_mb,
             max_fetch_blob_bytes: limits.max_fetch_blob_bytes,
         }),
-        config: serde_json::to_vec(&document.config).context("encode mount config")?,
+        config: serde_json::to_vec(&mount.config).context("encode mount config")?,
     };
     Ok(MountRecord {
         definition,

@@ -1,11 +1,11 @@
-use omnifs_core::{MountName, MountRevision, MountVersion, ProviderId};
+use omnifs_core::{MountVersion, ProviderId, ResourceName, ResourceRevision};
 use serde::{Deserialize, Serialize};
 
 /// Client-authored fields of one daemon-owned mount.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MountDefinition {
-    pub name: MountName,
+    pub name: ResourceName,
     pub provider: ProviderId,
     pub auth: Option<MountCredential>,
     pub limits: Option<MountLimits>,
@@ -33,7 +33,7 @@ pub struct MountRecord {
     pub definition: MountDefinition,
     pub provider: crate::ProviderReference,
     pub version: MountVersion,
-    pub revision: MountRevision,
+    pub revision: ResourceRevision,
     pub health: MountHealth,
     /// Non-secret credential readiness for this mount, when it has a
     /// credential binding. This is separate from serving/provider health.
@@ -55,7 +55,7 @@ mod tests {
     #[test]
     fn mount_definition_round_trips_through_json_with_empty_fields() {
         let definition = MountDefinition {
-            name: MountName::new("demo").unwrap(),
+            name: ResourceName::new("demo").unwrap(),
             provider: ProviderId::from_wasm_bytes(b"demo"),
             auth: None,
             limits: Some(MountLimits {

@@ -403,29 +403,48 @@ async fn credential_action_target(
     connection: &mut SqliteConnection,
     credential: &ResourceName,
 ) -> Result<CredentialActionTarget, ActionWriteError> {
-    let row = sqlx::query(
-        "SELECT providers.name AS provider_metadata_name, \
-                provider_resources.provider_digest, \
-                credential_resources.scheme, credential_resources.account \
-         FROM credential_resources \
-         JOIN provider_resources \
-           ON provider_resources.name = credential_resources.provider_name \
-         JOIN providers ON providers.digest = provider_resources.provider_digest \
-         WHERE credential_resources.name = ?1",
-    )
-    .bind(credential.as_str())
-    .fetch_optional(connection)
-    .await
-    .context("read credential action target")?
-    .ok_or_else(|| ActionWriteError::ResourceNotFound(credential.clone()))?;
+    let snapshot = crate::resource::read_resource_snapshot(connection).await?;
+    let definition = snapshot
+        .resources
+        .resources()
+        .iter()
+        .find_map(|resource| match resource {
+            omnifs_api::ResourceDefinition::Credential(definition)
+                if definition.name == *credential =>
+            {
+                Some(definition)
+            },
+            _ => None,
+        })
+        .ok_or_else(|| ActionWriteError::ResourceNotFound(credential.clone()))?;
+    let provider = snapshot
+        .resources
+        .resources()
+        .iter()
+        .find_map(|resource| match resource {
+            omnifs_api::ResourceDefinition::Provider(provider)
+                if provider.name == definition.provider =>
+            {
+                Some(provider)
+            },
+            _ => None,
+        })
+        .context("credential resource provider is absent")?;
+    let provider_metadata_name: String =
+        sqlx::query_scalar("SELECT name FROM providers WHERE digest = ?1")
+            .bind(provider.artifact.as_bytes().as_slice())
+            .fetch_optional(connection)
+            .await
+            .context("read credential provider metadata")?
+            .context("credential provider artifact is absent")?;
     Ok(CredentialActionTarget {
         id: CredentialId::new(
-            row.text("provider_metadata_name")?,
-            row.text("scheme")?,
-            row.text("account")?,
+            provider_metadata_name,
+            definition.scheme.clone(),
+            definition.account.clone(),
         )
         .context("stored credential resource has invalid identity")?,
-        provider: ProviderId::from_digest(row.digest("provider_digest")?),
+        provider: provider.artifact,
     })
 }
 
@@ -498,13 +517,20 @@ async fn attachment_action_target(
     connection: &mut SqliteConnection,
     attachment: &ResourceName,
 ) -> Result<(), ActionWriteError> {
-    sqlx::query_scalar::<_, i64>("SELECT 1 FROM attachment_resources WHERE name = ?1")
-        .bind(attachment.as_str())
-        .fetch_optional(connection)
-        .await
-        .context("read attachment action target")?
-        .ok_or_else(|| ActionWriteError::AttachmentResourceNotFound(attachment.clone()))?;
-    Ok(())
+    let snapshot = crate::resource::read_resource_snapshot(connection).await?;
+    snapshot
+        .resources
+        .resources()
+        .iter()
+        .any(|resource| {
+            matches!(
+                resource,
+                omnifs_api::ResourceDefinition::Attachment(definition)
+                    if definition.name == *attachment
+            )
+        })
+        .then_some(())
+        .ok_or_else(|| ActionWriteError::AttachmentResourceNotFound(attachment.clone()))
 }
 
 async fn attachment_action_generation(

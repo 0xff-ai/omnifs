@@ -16,7 +16,7 @@
 
 use fjall::OptimisticTxDatabase;
 use fjall::Readable;
-use omnifs_core::MountName;
+use omnifs_core::ResourceName;
 use omnifs_core::path::Path;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -362,7 +362,7 @@ impl Caches {
     /// Return the sole owner of one mount's cache and blob resources.
     pub(crate) fn mount(
         self: &Arc<Self>,
-        mount: &MountName,
+        mount: &ResourceName,
         projection_id: ProjectionId,
         provider_id: ProviderId,
         spec_source: &[u8],
@@ -378,7 +378,7 @@ impl Caches {
     /// the serving cell activates this owner.
     pub(crate) fn prepare_mount(
         self: &Arc<Self>,
-        mount: &MountName,
+        mount: &ResourceName,
         projection_id: ProjectionId,
         provider_id: ProviderId,
         spec_source: &[u8],
@@ -522,7 +522,7 @@ pub struct Coherence {
 impl MountResources {
     fn new(
         caches: &Caches,
-        mount: &MountName,
+        mount: &ResourceName,
         projection_id: ProjectionId,
         provider_id: ProviderId,
         spec_source: &[u8],
@@ -1847,7 +1847,7 @@ mod tests {
     fn open_store(mount: &str) -> (tempfile::TempDir, Arc<Caches>, Arc<MountResources>) {
         let dir = tempfile::tempdir().unwrap();
         let caches = Caches::open(dir.path()).unwrap();
-        let name = MountName::new(mount).unwrap();
+        let name = ResourceName::new(mount).unwrap();
         let source = mount.as_bytes();
         let provider_id = ProviderId::from_wasm_bytes(source);
         let projection_id = ProjectionId::new(source, provider_id);
@@ -1909,7 +1909,7 @@ mod tests {
     #[test]
     fn successor_generation_fences_retired_projection_writes() {
         let (_dir, caches, first) = open_store("m");
-        let name = MountName::new("m").unwrap();
+        let name = ResourceName::new("m").unwrap();
         let source = b"m";
         let provider_id = ProviderId::from_wasm_bytes(source);
         let projection_id = ProjectionId::new(source, provider_id);
@@ -1986,7 +1986,7 @@ mod tests {
             b"from-a"
         );
 
-        let name_b = MountName::new("b").unwrap();
+        let name_b = ResourceName::new("b").unwrap();
         let source = b"b";
         let provider_id = ProviderId::from_wasm_bytes(source);
         let store_b = caches

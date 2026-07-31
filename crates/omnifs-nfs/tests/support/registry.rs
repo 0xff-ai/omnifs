@@ -40,7 +40,7 @@ pub fn load_registry_from_mount_dir(
         &host,
         vec![MountBuildInput {
             config: RuntimeMountConfig {
-                name: omnifs_core::MountName::new(mount).expect("mount name"),
+                name: omnifs_core::ResourceName::new(mount).expect("mount name"),
                 provider: artifact.reference(),
                 config,
                 max_fetch_blob_bytes: None,

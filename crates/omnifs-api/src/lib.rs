@@ -1,6 +1,6 @@
 //! Shared control-plane domain and wire types for the `omnifs` CLI and daemon.
 
-use omnifs_core::MountRevision;
+use omnifs_core::ResourceRevision;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -149,8 +149,8 @@ pub struct RepairReceipt {
 #[serde(deny_unknown_fields)]
 pub struct DaemonRecovery {
     pub phase: DaemonPhase,
-    pub durable_revision: Option<MountRevision>,
-    pub serving_revision: Option<MountRevision>,
+    pub durable_revision: Option<ResourceRevision>,
+    pub serving_revision: Option<ResourceRevision>,
     pub store_health: HealthReport,
     pub repair: Option<RecoveryOffer>,
 }
@@ -161,8 +161,8 @@ pub struct DaemonRecovery {
 pub struct DaemonInventory {
     pub info: DaemonInfo,
     pub phase: DaemonPhase,
-    pub durable_revision: Option<MountRevision>,
-    pub serving_revision: Option<MountRevision>,
+    pub durable_revision: Option<ResourceRevision>,
+    pub serving_revision: Option<ResourceRevision>,
     pub health: DaemonHealth,
     pub mounts: Vec<MountRecord>,
     pub credentials: Vec<CredentialStatus>,
@@ -320,7 +320,7 @@ mod tests {
         CredentialHealth, DaemonInfo, DaemonPhase, DaemonRecovery, HealthReport, HealthState,
         RecoveryId, RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt,
     };
-    use omnifs_core::MountRevision;
+    use omnifs_core::ResourceRevision;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
 
@@ -352,7 +352,7 @@ mod tests {
 
         let recovery = DaemonRecovery {
             phase: DaemonPhase::RecoveryRequired,
-            durable_revision: Some(MountRevision::new(7)),
+            durable_revision: Some(ResourceRevision::new(7)),
             serving_revision: None,
             store_health: HealthReport::new(HealthState::Degraded, "store unavailable"),
             repair: Some(RecoveryOffer {

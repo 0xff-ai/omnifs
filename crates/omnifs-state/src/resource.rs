@@ -1,26 +1,23 @@
-//! Durable desired resources, one-time legacy backfill, and atomic full-set apply.
+//! Durable desired resources and atomic full-set apply.
 
 pub(crate) mod codec;
 
-use crate::credential::{CredentialDocument, CredentialSummary, credential_summaries_query};
+use crate::credential::CredentialDocument;
 use crate::db::Db;
-use crate::mount::{MountLimits, StoredMount, mounts_query};
 use crate::row::{RowExt as _, sql_int};
 use anyhow::Context as _;
 use omnifs_api::{
-    ApplyReceipt, AttachmentDefinition, CredentialDefinition, MountResourceDefinition,
-    NormalizedResourceSet, ProviderDefinition, ResourceChangeAction, ResourceDefinition,
-    ResourceLimits, plan,
+    ApplyReceipt, AttachmentDefinition, NormalizedResourceSet, ResourceChangeAction,
+    ResourceDefinition, plan,
 };
 use omnifs_core::{
-    AttachmentVersion, MutationId, ProviderId, ResourceDigest, ResourceKind, ResourceName,
-    ResourceRevision,
+    AttachmentVersion, MutationId, ResourceDigest, ResourceKind, ResourceName, ResourceRevision,
 };
+use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnection, SqliteRow};
-use sqlx::{Row as _, SqlitePool};
 use std::collections::{BTreeMap, BTreeSet};
 
-use codec::{decode_attachment, decode_mount, encode_attachment, encode_mount};
+use codec::{decode_resources, encode_attachment, encode_resources};
 
 const APPLY_RECEIPT_LIMIT: i64 = 256;
 const APPLY_INPUT_DOMAIN: &[u8] = b"omnifs-resource-apply-input-v1\0";
@@ -31,6 +28,11 @@ pub struct ResourceSnapshot {
     pub revision: ResourceRevision,
     pub desired_digest: ResourceDigest,
     pub resources: NormalizedResourceSet,
+}
+
+struct StoredResources {
+    snapshot: ResourceSnapshot,
+    revisions: BTreeMap<omnifs_core::ResourceKey, ResourceRevision>,
 }
 
 /// One exact desired attachment row with its durable content version and
@@ -89,44 +91,6 @@ pub enum ResourceApplyError {
 }
 
 impl Db<'_> {
-    pub(crate) async fn initialize_resources(&mut self) -> anyhow::Result<()> {
-        self.transact("resource backfill", async |db| {
-            if resource_initialized(db.raw()).await? {
-                return Ok(());
-            }
-            let definitions = legacy_resource_definitions(db.raw()).await?;
-            let normalized =
-                NormalizedResourceSet::new(definitions).context("normalize migrated resources")?;
-            let mount_revision: i64 =
-                sqlx::query_scalar("SELECT revision FROM mount_state WHERE singleton = 1")
-                    .fetch_one(db.raw())
-                    .await
-                    .context("read legacy mount revision")?;
-            let revision = ResourceRevision::new(
-                u64::try_from(mount_revision)
-                    .context("legacy mount revision is negative")?
-                    .max(1),
-            );
-            let mutation_id = MutationId::from_bytes([0; 16]);
-            for resource in normalized.resources() {
-                write_resource(db.raw(), resource, revision, mutation_id).await?;
-            }
-            sqlx::query(
-                "UPDATE resource_state \
-                 SET revision = ?1, desired_digest = ?2, initialized = 1, \
-                     updated_at = unixepoch() \
-                 WHERE singleton = 1",
-            )
-            .bind(sql_int(revision.get(), "resource revision")?)
-            .bind(normalized.digest().as_bytes().as_slice())
-            .execute(db.raw())
-            .await
-            .context("finish resource backfill")?;
-            Ok(())
-        })
-        .await
-    }
-
     pub(crate) async fn apply_resources(
         &mut self,
         request: ResourceApplyRequest,
@@ -154,12 +118,12 @@ impl Db<'_> {
             return Ok(receipt);
         }
 
-        let current = read_resource_snapshot(self.raw()).await?;
-        if current.desired_digest == request.desired.digest() {
+        let current = read_stored_resources(self.raw()).await?;
+        if current.snapshot.desired_digest == request.desired.digest() {
             let receipt = ApplyReceipt {
                 mutation_id: request.mutation_id,
-                revision: current.revision,
-                desired_digest: current.desired_digest,
+                revision: current.snapshot.revision,
+                desired_digest: current.snapshot.desired_digest,
                 created: 0,
                 updated: 0,
                 deleted: 0,
@@ -168,43 +132,68 @@ impl Db<'_> {
             write_receipt(self.raw(), input_digest, &receipt).await?;
             return Ok(receipt);
         }
-        if current.revision != request.base_revision {
+        if current.snapshot.revision != request.base_revision {
             return Err(ResourceApplyError::StaleRevision {
                 expected: request.base_revision,
-                actual: current.revision,
+                actual: current.snapshot.revision,
             });
         }
 
-        let changes = plan(&current.resources, &request.desired);
+        let changes = plan(&current.snapshot.resources, &request.desired);
         let created = count_changes(&changes, ResourceChangeAction::Create)?;
         let updated = count_changes(&changes, ResourceChangeAction::Update)?;
         let deleted = count_changes(&changes, ResourceChangeAction::Delete)?;
         let revision = current
+            .snapshot
             .revision
             .next()
             .context("resource revision exhausted")?;
 
-        apply_resource_row_changes(
-            self.raw(),
-            &changes,
-            &request.desired,
-            revision,
-            request.mutation_id,
-        )
-        .await?;
+        reconcile_attachment_instances(self.raw(), &changes, &request.desired).await?;
         for sidecar in request.credential_secrets {
             self.submit_credential_row(sidecar.document)
                 .await
                 .map_err(|error| anyhow::anyhow!(error))?;
         }
 
+        let changed_keys = changes
+            .iter()
+            .filter(|change| {
+                matches!(
+                    change.action,
+                    ResourceChangeAction::Create | ResourceChangeAction::Update
+                )
+            })
+            .map(|change| change.key.clone())
+            .collect::<BTreeSet<_>>();
+        let stored = request
+            .desired
+            .resources()
+            .iter()
+            .cloned()
+            .map(|resource| {
+                let key = resource.key();
+                let resource_revision = if changed_keys.contains(&key) {
+                    revision
+                } else {
+                    current
+                        .revisions
+                        .get(&key)
+                        .copied()
+                        .context("unchanged resource has no stored revision")?
+                };
+                Ok((resource, resource_revision))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let canonical = encode_resources(stored)?;
         sqlx::query(
             "UPDATE resource_state \
-             SET revision = ?1, desired_digest = ?2, updated_at = unixepoch() \
-             WHERE singleton = 1 AND initialized = 1",
+             SET revision = ?1, desired_digest = ?2, resources = ?3, updated_at = unixepoch() \
+             WHERE singleton = 1",
         )
         .bind(sql_int(revision.get(), "resource revision")?)
         .bind(request.desired.digest().as_bytes().as_slice())
+        .bind(canonical)
         .execute(self.raw())
         .await
         .context("advance desired resource state")?;
@@ -233,39 +222,22 @@ pub(crate) async fn snapshot(pool: &SqlitePool) -> anyhow::Result<ResourceSnapsh
     Ok(snapshot)
 }
 
-async fn read_resource_snapshot(
+pub(crate) async fn read_resource_snapshot(
     connection: &mut SqliteConnection,
 ) -> anyhow::Result<ResourceSnapshot> {
-    let (revision, desired_digest) = read_resource_head(connection).await?;
-    let mut resources = Vec::new();
-    read_provider_resources(connection, &mut resources).await?;
-    read_credential_resources(connection, &mut resources).await?;
-    read_mount_resources(connection, &mut resources).await?;
-    read_attachment_resources(connection, &mut resources).await?;
-    let resources =
-        NormalizedResourceSet::new(resources).context("validate stored desired resources")?;
-    anyhow::ensure!(
-        resources.digest() == desired_digest,
-        "stored desired resource digest does not match resource rows"
-    );
-    Ok(ResourceSnapshot {
-        revision,
-        desired_digest,
-        resources,
-    })
+    Ok(read_stored_resources(connection).await?.snapshot)
 }
 
-async fn read_resource_head(
+async fn read_stored_resources(
     connection: &mut SqliteConnection,
-) -> anyhow::Result<(ResourceRevision, ResourceDigest)> {
-    let (revision, digest, initialized) = sqlx::query_as::<_, (i64, Vec<u8>, i64)>(
-        "SELECT revision, desired_digest, initialized \
-             FROM resource_state WHERE singleton = 1",
+) -> anyhow::Result<StoredResources> {
+    let (revision, digest, canonical) = sqlx::query_as::<_, (i64, Vec<u8>, Vec<u8>)>(
+        "SELECT revision, desired_digest, resources \
+         FROM resource_state WHERE singleton = 1",
     )
     .fetch_one(&mut *connection)
     .await
-    .context("read resource state")?;
-    anyhow::ensure!(initialized == 1, "resource state is not initialized");
+    .context("read desired resources")?;
     let revision =
         ResourceRevision::new(u64::try_from(revision).context("resource revision is negative")?);
     let desired_digest =
@@ -275,324 +247,107 @@ async fn read_resource_head(
                 bytes.len()
             )
         })?);
-    Ok((revision, desired_digest))
-}
-
-async fn read_provider_resources(
-    connection: &mut SqliteConnection,
-    resources: &mut Vec<ResourceDefinition>,
-) -> anyhow::Result<()> {
-    for row in sqlx::query("SELECT name, provider_digest FROM provider_resources ORDER BY name")
-        .fetch_all(&mut *connection)
-        .await
-        .context("read provider resources")?
-    {
-        let name_text: String = row.try_get("name").context("read provider resource name")?;
-        let name = ResourceName::new(name_text.clone())
-            .with_context(|| format!("decode provider resource `{name_text}`"))?;
-        resources.push(ResourceDefinition::Provider(ProviderDefinition {
-            name,
-            artifact: ProviderId::from_digest(
-                row.digest("provider_digest")
-                    .with_context(|| format!("decode provider resource `{name_text}`"))?,
-            ),
-        }));
-    }
-    Ok(())
-}
-
-async fn read_credential_resources(
-    connection: &mut SqliteConnection,
-    resources: &mut Vec<ResourceDefinition>,
-) -> anyhow::Result<()> {
-    for row in sqlx::query(
-        "SELECT name, provider_name, scheme, account \
-         FROM credential_resources ORDER BY name",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .context("read credential resources")?
-    {
-        let name_text: String = row
-            .try_get("name")
-            .context("read credential resource name")?;
-        let definition = CredentialDefinition {
-            name: ResourceName::new(name_text.clone())
-                .with_context(|| format!("decode credential resource `{name_text}`"))?,
-            provider: ResourceName::new(row.text("provider_name")?)
-                .with_context(|| format!("decode credential resource `{name_text}` provider"))?,
-            scheme: row.text("scheme")?,
-            account: row.text("account")?,
-        };
-        resources.push(ResourceDefinition::Credential(definition));
-    }
-    Ok(())
-}
-
-async fn read_mount_resources(
-    connection: &mut SqliteConnection,
-    resources: &mut Vec<ResourceDefinition>,
-) -> anyhow::Result<()> {
-    for row in sqlx::query(
-        "SELECT name, canonical, version, provider_name, credential_name \
-         FROM mount_resources ORDER BY name",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .context("read mount resources")?
-    {
-        let name_text: String = row.try_get("name").context("read mount resource name")?;
-        let canonical = row.bytes("canonical")?;
-        let definition = decode_mount(&canonical, row.digest("version")?)
-            .with_context(|| format!("decode mount resource `{name_text}`"))?;
-        anyhow::ensure!(
-            definition.name.as_str() == name_text
-                && definition.provider.as_str() == row.text("provider_name")?
-                && definition.credential.as_ref().map(ResourceName::as_str)
-                    == row.optional_text("credential_name")?.as_deref(),
-            "mount resource `{name_text}` indexed fields do not match canonical bytes"
-        );
-        resources.push(ResourceDefinition::Mount(definition));
-    }
-    Ok(())
-}
-
-async fn read_attachment_resources(
-    connection: &mut SqliteConnection,
-    resources: &mut Vec<ResourceDefinition>,
-) -> anyhow::Result<()> {
-    for row in
-        sqlx::query("SELECT name, canonical, version FROM attachment_resources ORDER BY name")
-            .fetch_all(&mut *connection)
-            .await
-            .context("read attachment resources")?
-    {
-        let name_text: String = row
-            .try_get("name")
-            .context("read attachment resource name")?;
-        let canonical = row.bytes("canonical")?;
-        let definition = decode_attachment(
-            &canonical,
-            AttachmentVersion::from_digest(row.digest("version")?),
-        )
-        .with_context(|| format!("decode attachment resource `{name_text}`"))?;
-        anyhow::ensure!(
-            definition.name.as_str() == name_text,
-            "attachment resource `{name_text}` name does not match canonical bytes"
-        );
-        resources.push(ResourceDefinition::Attachment(definition));
-    }
-    Ok(())
+    let decoded = decode_resources(&canonical)?;
+    let revisions = decoded
+        .iter()
+        .map(|(resource, revision)| (resource.key(), *revision))
+        .collect();
+    let resources =
+        NormalizedResourceSet::new(decoded.into_iter().map(|(resource, _)| resource).collect())
+            .context("validate stored desired resources")?;
+    anyhow::ensure!(
+        resources.digest() == desired_digest,
+        "stored desired resource digest does not match resource bytes"
+    );
+    Ok(StoredResources {
+        snapshot: ResourceSnapshot {
+            revision,
+            desired_digest,
+            resources,
+        },
+        revisions,
+    })
 }
 
 pub(crate) async fn desired_attachments(
     pool: &SqlitePool,
 ) -> anyhow::Result<Vec<DesiredAttachment>> {
-    let mut attachments = Vec::new();
-    for row in sqlx::query(
-        "SELECT name, canonical, version, revision \
-         FROM attachment_resources ORDER BY name",
-    )
-    .fetch_all(pool)
-    .await
-    .context("read desired attachment resources")?
-    {
-        let name_text: String = row
-            .try_get("name")
-            .context("read desired attachment resource name")?;
-        let version = AttachmentVersion::from_digest(row.digest("version")?);
-        let definition = decode_attachment(&row.bytes("canonical")?, version)
-            .with_context(|| format!("decode desired attachment resource `{name_text}`"))?;
-        anyhow::ensure!(
-            definition.name.as_str() == name_text,
-            "attachment resource `{name_text}` name does not match canonical bytes"
-        );
-        attachments.push(DesiredAttachment {
-            definition,
-            version,
-            revision: ResourceRevision::new(row.unsigned("revision")?),
-        });
-    }
-    Ok(attachments)
+    let mut connection = pool.acquire().await.context("acquire desired resources")?;
+    let stored = read_stored_resources(&mut connection).await?;
+    stored
+        .snapshot
+        .resources
+        .resources()
+        .iter()
+        .filter_map(|resource| match resource {
+            ResourceDefinition::Attachment(definition) => Some(definition.clone()),
+            _ => None,
+        })
+        .map(|definition| {
+            let revision = stored
+                .revisions
+                .get(&definition.key())
+                .copied()
+                .context("desired attachment has no stored revision")?;
+            let (_, version) = encode_attachment(&definition)?;
+            Ok(DesiredAttachment {
+                definition,
+                version,
+                revision,
+            })
+        })
+        .collect()
 }
 
-async fn apply_resource_row_changes(
+async fn reconcile_attachment_instances(
     connection: &mut SqliteConnection,
     changes: &[omnifs_api::ResourceChange],
     desired: &NormalizedResourceSet,
-    revision: ResourceRevision,
-    mutation_id: MutationId,
 ) -> anyhow::Result<()> {
-    let changed_keys: BTreeSet<_> = changes
+    let changed = changes
         .iter()
         .filter(|change| {
-            matches!(
-                change.action,
-                ResourceChangeAction::Create | ResourceChangeAction::Update
-            )
+            change.key.kind == ResourceKind::Attachment
+                && matches!(
+                    change.action,
+                    ResourceChangeAction::Create | ResourceChangeAction::Update
+                )
         })
-        .map(|change| change.key.clone())
-        .collect();
-    // Normalized resources are dependency ordered. Upsert new parents and
-    // retarget children before deleting obsolete rows, so provider or
-    // credential renames never violate the foreign-key graph mid-transaction.
-    for resource in desired.resources() {
-        if changed_keys.contains(&resource.key()) {
-            write_resource(connection, resource, revision, mutation_id).await?;
-        }
+        .map(|change| change.key.name.clone())
+        .collect::<BTreeSet<_>>();
+    for definition in desired.resources().iter().filter_map(|resource| {
+        let ResourceDefinition::Attachment(definition) = resource else {
+            return None;
+        };
+        changed.contains(&definition.name).then_some(definition)
+    }) {
+        upsert_attachment_instance(connection, definition).await?;
     }
-    for kind in [
-        ResourceKind::Mount,
-        ResourceKind::Attachment,
-        ResourceKind::Credential,
-        ResourceKind::Provider,
-    ] {
-        for change in changes
-            .iter()
-            .filter(|change| change.action == ResourceChangeAction::Delete)
-            .filter(|change| change.key.kind == kind)
-        {
-            delete_resource(connection, &change.key.name, kind).await?;
-        }
+    for name in changes.iter().filter_map(|change| {
+        (change.key.kind == ResourceKind::Attachment
+            && change.action == ResourceChangeAction::Delete)
+            .then_some(&change.key.name)
+    }) {
+        sqlx::query(
+            "UPDATE attachment_instances \
+             SET desired_version = NULL, desired_spec = NULL, phase = 'deleting', \
+                 deleting = 1, last_error_code = NULL, last_error_detail = NULL, \
+                 retry_at = NULL, updated_at = unixepoch() \
+             WHERE name = ?1",
+        )
+        .bind(name.as_str())
+        .execute(&mut *connection)
+        .await
+        .with_context(|| format!("mark attachment resource `{name}` deleting"))?;
     }
     Ok(())
 }
 
-async fn write_resource(
-    connection: &mut SqliteConnection,
-    resource: &ResourceDefinition,
-    revision: ResourceRevision,
-    mutation_id: MutationId,
-) -> anyhow::Result<()> {
-    let revision = sql_int(revision.get(), "resource revision")?;
-    match resource {
-        ResourceDefinition::Provider(definition) => {
-            write_provider(connection, definition, revision, mutation_id).await
-        },
-        ResourceDefinition::Credential(definition) => {
-            write_credential(connection, definition, revision, mutation_id).await
-        },
-        ResourceDefinition::Mount(definition) => {
-            write_mount(connection, definition, revision, mutation_id).await
-        },
-        ResourceDefinition::Attachment(definition) => {
-            write_attachment(connection, definition, revision, mutation_id).await
-        },
-    }
-}
-
-async fn write_provider(
-    connection: &mut SqliteConnection,
-    definition: &ProviderDefinition,
-    revision: i64,
-    mutation_id: MutationId,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "INSERT INTO provider_resources(\
-             name, provider_digest, revision, last_mutation_id, updated_at\
-         ) VALUES (?1, ?2, ?3, ?4, unixepoch()) \
-         ON CONFLICT(name) DO UPDATE SET \
-             provider_digest = excluded.provider_digest, \
-             revision = excluded.revision, \
-             last_mutation_id = excluded.last_mutation_id, \
-             updated_at = excluded.updated_at",
-    )
-    .bind(definition.name.as_str())
-    .bind(definition.artifact.as_bytes().as_slice())
-    .bind(revision)
-    .bind(mutation_id.as_bytes().as_slice())
-    .execute(connection)
-    .await
-    .with_context(|| format!("write provider resource `{}`", definition.name))?;
-    Ok(())
-}
-
-async fn write_credential(
-    connection: &mut SqliteConnection,
-    definition: &CredentialDefinition,
-    revision: i64,
-    mutation_id: MutationId,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "INSERT INTO credential_resources(\
-             name, provider_name, scheme, account, revision, last_mutation_id, updated_at\
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch()) \
-         ON CONFLICT(name) DO UPDATE SET \
-             provider_name = excluded.provider_name, scheme = excluded.scheme, \
-             account = excluded.account, revision = excluded.revision, \
-             last_mutation_id = excluded.last_mutation_id, \
-             updated_at = excluded.updated_at",
-    )
-    .bind(definition.name.as_str())
-    .bind(definition.provider.as_str())
-    .bind(&definition.scheme)
-    .bind(&definition.account)
-    .bind(revision)
-    .bind(mutation_id.as_bytes().as_slice())
-    .execute(connection)
-    .await
-    .with_context(|| format!("write credential resource `{}`", definition.name))?;
-    Ok(())
-}
-
-async fn write_mount(
-    connection: &mut SqliteConnection,
-    definition: &MountResourceDefinition,
-    revision: i64,
-    mutation_id: MutationId,
-) -> anyhow::Result<()> {
-    let (canonical, version) = encode_mount(definition)?;
-    sqlx::query(
-        "INSERT INTO mount_resources(\
-             name, canonical, version, provider_name, credential_name, \
-             revision, last_mutation_id, updated_at\
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch()) \
-         ON CONFLICT(name) DO UPDATE SET \
-             canonical = excluded.canonical, version = excluded.version, \
-             provider_name = excluded.provider_name, \
-             credential_name = excluded.credential_name, \
-             revision = excluded.revision, \
-             last_mutation_id = excluded.last_mutation_id, \
-             updated_at = excluded.updated_at",
-    )
-    .bind(definition.name.as_str())
-    .bind(canonical)
-    .bind(version.as_slice())
-    .bind(definition.provider.as_str())
-    .bind(definition.credential.as_ref().map(ResourceName::as_str))
-    .bind(revision)
-    .bind(mutation_id.as_bytes().as_slice())
-    .execute(connection)
-    .await
-    .with_context(|| format!("write mount resource `{}`", definition.name))?;
-    Ok(())
-}
-
-async fn write_attachment(
+async fn upsert_attachment_instance(
     connection: &mut SqliteConnection,
     definition: &AttachmentDefinition,
-    revision: i64,
-    mutation_id: MutationId,
 ) -> anyhow::Result<()> {
     let (canonical, version) = encode_attachment(definition)?;
-    sqlx::query(
-        "INSERT INTO attachment_resources(\
-             name, canonical, version, revision, last_mutation_id, updated_at\
-         ) VALUES (?1, ?2, ?3, ?4, ?5, unixepoch()) \
-         ON CONFLICT(name) DO UPDATE SET \
-             canonical = excluded.canonical, version = excluded.version, \
-             revision = excluded.revision, \
-             last_mutation_id = excluded.last_mutation_id, \
-             updated_at = excluded.updated_at",
-    )
-    .bind(definition.name.as_str())
-    .bind(&canonical)
-    .bind(version.as_bytes().as_slice())
-    .bind(revision)
-    .bind(mutation_id.as_bytes().as_slice())
-    .execute(&mut *connection)
-    .await
-    .with_context(|| format!("write attachment resource `{}`", definition.name))?;
     sqlx::query(
         "INSERT INTO attachment_instances(\
              name, desired_version, desired_spec, observed_version, observed_spec, phase, \
@@ -612,38 +367,6 @@ async fn write_attachment(
     .execute(connection)
     .await
     .with_context(|| format!("initialize observed attachment state `{}`", definition.name))?;
-    Ok(())
-}
-
-async fn delete_resource(
-    connection: &mut SqliteConnection,
-    name: &ResourceName,
-    kind: ResourceKind,
-) -> anyhow::Result<()> {
-    if kind == ResourceKind::Attachment {
-        sqlx::query(
-            "UPDATE attachment_instances \
-             SET desired_version = NULL, desired_spec = NULL, phase = 'deleting', \
-                 deleting = 1, last_error_code = NULL, last_error_detail = NULL, \
-                 retry_at = NULL, updated_at = unixepoch() \
-             WHERE name = ?1",
-        )
-        .bind(name.as_str())
-        .execute(&mut *connection)
-        .await
-        .with_context(|| format!("mark attachment resource `{name}` deleting"))?;
-    }
-    let statement = match kind {
-        ResourceKind::Provider => "DELETE FROM provider_resources WHERE name = ?1",
-        ResourceKind::Credential => "DELETE FROM credential_resources WHERE name = ?1",
-        ResourceKind::Mount => "DELETE FROM mount_resources WHERE name = ?1",
-        ResourceKind::Attachment => "DELETE FROM attachment_resources WHERE name = ?1",
-    };
-    sqlx::query(statement)
-        .bind(name.as_str())
-        .execute(connection)
-        .await
-        .with_context(|| format!("delete {kind} resource `{name}`"))?;
     Ok(())
 }
 
@@ -815,272 +538,4 @@ fn count_changes(
             .count(),
     )
     .context("resource change count exceeds u32")
-}
-
-async fn resource_initialized(connection: &mut SqliteConnection) -> anyhow::Result<bool> {
-    let initialized: i64 =
-        sqlx::query_scalar("SELECT initialized FROM resource_state WHERE singleton = 1")
-            .fetch_one(connection)
-            .await
-            .context("read resource initialization state")?;
-    match initialized {
-        0 => Ok(false),
-        1 => Ok(true),
-        value => anyhow::bail!("stored resource initialized flag is invalid: {value}"),
-    }
-}
-
-async fn legacy_resource_definitions(
-    connection: &mut SqliteConnection,
-) -> anyhow::Result<Vec<ResourceDefinition>> {
-    let provider_rows = sqlx::query_as::<_, (Vec<u8>, String)>(
-        "SELECT DISTINCT providers.digest, providers.name \
-         FROM providers \
-         JOIN (\
-             SELECT provider_digest FROM mounts \
-             UNION \
-             SELECT provider_digest FROM credentials WHERE status <> 'deleted'\
-         ) used ON used.provider_digest = providers.digest \
-         ORDER BY providers.name, providers.digest",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .context("read providers for resource backfill")?;
-    let credentials = sqlx::query_as::<_, CredentialSummary>(credential_summaries_query!(
-        "WHERE status <> 'deleted' ORDER BY provider_name, scheme, account"
-    ))
-    .fetch_all(&mut *connection)
-    .await
-    .context("read credentials for resource backfill")?;
-    let mounts = sqlx::query_as::<_, StoredMount>(mounts_query!("ORDER BY name"))
-        .fetch_all(&mut *connection)
-        .await
-        .context("read mounts for resource backfill")?;
-
-    let (mut definitions, provider_names) = migrated_providers(provider_rows)?;
-    let (credential_definitions, credential_names) =
-        migrated_credentials(credentials, &provider_names)?;
-    definitions.extend(credential_definitions);
-    definitions.extend(migrated_mounts(mounts, &provider_names, &credential_names)?);
-    Ok(definitions)
-}
-
-type ProviderNameMap = BTreeMap<[u8; 32], ResourceName>;
-
-fn migrated_providers(
-    provider_rows: Vec<(Vec<u8>, String)>,
-) -> anyhow::Result<(Vec<ResourceDefinition>, ProviderNameMap)> {
-    let mut definitions = Vec::with_capacity(provider_rows.len());
-    let mut names = BTreeMap::new();
-    let mut used_provider_names = BTreeSet::new();
-    let mut metadata_counts = BTreeMap::<String, usize>::new();
-    for (_, metadata_name) in &provider_rows {
-        *metadata_counts.entry(metadata_name.clone()).or_default() += 1;
-    }
-    for (digest, metadata_name) in provider_rows {
-        let digest: [u8; 32] = digest.try_into().map_err(|bytes: Vec<u8>| {
-            anyhow::anyhow!(
-                "legacy provider `{metadata_name}` digest has {} bytes",
-                bytes.len()
-            )
-        })?;
-        let provider_id = ProviderId::from_digest(digest);
-        let direct = metadata_counts.get(&metadata_name) == Some(&1)
-            && ResourceName::new(metadata_name.clone()).is_ok()
-            && !used_provider_names.contains(&ResourceName::new(metadata_name.clone())?);
-        let name = if direct {
-            ResourceName::new(metadata_name.clone())?
-        } else {
-            unique_suffixed_name(
-                &metadata_name,
-                provider_id.as_bytes(),
-                "provider",
-                &used_provider_names,
-            )?
-        };
-        used_provider_names.insert(name.clone());
-        names.insert(*provider_id.as_bytes(), name.clone());
-        definitions.push(ResourceDefinition::Provider(ProviderDefinition {
-            name,
-            artifact: provider_id,
-        }));
-    }
-    Ok((definitions, names))
-}
-
-type CredentialNameMap = BTreeMap<(String, String, String), ResourceName>;
-
-fn migrated_credentials(
-    credentials: Vec<CredentialSummary>,
-    provider_names: &ProviderNameMap,
-) -> anyhow::Result<(Vec<ResourceDefinition>, CredentialNameMap)> {
-    let mut definitions = Vec::with_capacity(credentials.len());
-    let mut credential_names = BTreeMap::new();
-    let mut used_credential_names = BTreeSet::new();
-    let mut account_counts = BTreeMap::<String, usize>::new();
-    for credential in &credentials {
-        *account_counts
-            .entry(credential.id.account().to_owned())
-            .or_default() += 1;
-    }
-    for credential in credentials {
-        let provider = provider_names
-            .get(credential.provider.as_bytes())
-            .cloned()
-            .with_context(|| {
-                format!(
-                    "credential {} has no retained provider resource",
-                    credential.id
-                )
-            })?;
-        let account = credential.id.account().to_owned();
-        let direct = account_counts.get(&account) == Some(&1)
-            && ResourceName::new(account.clone()).is_ok()
-            && !used_credential_names.contains(&ResourceName::new(account.clone())?);
-        let name = if direct {
-            ResourceName::new(account.clone())?
-        } else {
-            let digest = credential_name_digest(
-                credential.id.provider_name(),
-                credential.id.scheme(),
-                credential.id.account(),
-            );
-            unique_suffixed_name("credential", &digest, "credential", &used_credential_names)?
-        };
-        used_credential_names.insert(name.clone());
-        credential_names.insert(
-            (
-                credential.id.provider_name().to_owned(),
-                credential.id.scheme().to_owned(),
-                credential.id.account().to_owned(),
-            ),
-            name.clone(),
-        );
-        definitions.push(ResourceDefinition::Credential(CredentialDefinition {
-            name,
-            provider,
-            scheme: credential.id.scheme().to_owned(),
-            account,
-        }));
-    }
-    Ok((definitions, credential_names))
-}
-
-fn migrated_mounts(
-    mounts: Vec<StoredMount>,
-    provider_names: &ProviderNameMap,
-    credential_names: &CredentialNameMap,
-) -> anyhow::Result<Vec<ResourceDefinition>> {
-    let mut definitions = Vec::with_capacity(mounts.len());
-    for mount in mounts {
-        let provider = provider_names
-            .get(mount.document.provider.id.as_bytes())
-            .cloned()
-            .with_context(|| {
-                format!(
-                    "mount `{}` has no retained provider resource",
-                    mount.document.name
-                )
-            })?;
-        let credential = mount
-            .document
-            .credential
-            .as_ref()
-            .map(|credential| {
-                credential_names
-                    .get(&(
-                        credential.provider_name().to_owned(),
-                        credential.scheme().to_owned(),
-                        credential.account().to_owned(),
-                    ))
-                    .cloned()
-                    .with_context(|| {
-                        format!(
-                            "mount `{}` has no active credential resource",
-                            mount.document.name
-                        )
-                    })
-            })
-            .transpose()?;
-        definitions.push(ResourceDefinition::Mount(MountResourceDefinition {
-            name: ResourceName::new(mount.document.name.to_string())?,
-            provider,
-            credential,
-            config: mount.document.config,
-            limits: mount.document.limits.map(
-                |MountLimits {
-                     max_memory_mb,
-                     max_fetch_blob_bytes,
-                 }| ResourceLimits {
-                    max_memory_mb,
-                    max_fetch_blob_bytes,
-                },
-            ),
-        }));
-    }
-    Ok(definitions)
-}
-
-fn unique_suffixed_name(
-    source: &str,
-    digest: &[u8; 32],
-    fallback: &str,
-    used: &BTreeSet<ResourceName>,
-) -> anyhow::Result<ResourceName> {
-    let mut base = String::new();
-    let mut last_dash = false;
-    for character in source.chars().flat_map(char::to_lowercase) {
-        let next = if character.is_ascii_lowercase() || character.is_ascii_digit() {
-            last_dash = false;
-            Some(character)
-        } else if !last_dash && !base.is_empty() {
-            last_dash = true;
-            Some('-')
-        } else {
-            None
-        };
-        if let Some(next) = next {
-            base.push(next);
-        }
-    }
-    while base.ends_with('-') {
-        base.pop();
-    }
-    if base.is_empty() {
-        base.push_str(fallback);
-    }
-    let hex = hex::encode(digest);
-    for prefix_length in (8..=hex.len()).step_by(2) {
-        let max_base = 32_usize
-            .checked_sub(prefix_length + 1)
-            .context("resource digest suffix is too long")?;
-        let mut truncated = base.chars().take(max_base).collect::<String>();
-        while truncated.ends_with('-') {
-            truncated.pop();
-        }
-        if truncated.is_empty() {
-            truncated.push_str(fallback);
-            truncated.truncate(max_base);
-        }
-        let candidate = ResourceName::new(format!("{truncated}-{}", &hex[..prefix_length]))?;
-        if !used.contains(&candidate) {
-            return Ok(candidate);
-        }
-    }
-    anyhow::bail!("could not derive a unique resource name from `{source}`")
-}
-
-fn credential_name_digest(provider: &str, scheme: &str, account: &str) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"omnifs-credential-resource-name-v1\0");
-    for value in [provider, scheme, account] {
-        hasher.update(
-            u64::try_from(value.len())
-                .expect("credential identity length fits u64")
-                .to_be_bytes()
-                .as_slice(),
-        );
-        hasher.update(value.as_bytes());
-    }
-    *hasher.finalize().as_bytes()
 }

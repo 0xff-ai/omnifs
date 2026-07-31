@@ -8,7 +8,7 @@ use anyhow::Result;
 #[cfg(test)]
 use omnifs_api::DaemonPhase;
 use omnifs_api::{CredentialHealth, DaemonInventory, HealthState, MountHealth, MountRecord};
-use omnifs_core::MountRevision;
+use omnifs_core::ResourceRevision;
 #[cfg(test)]
 use omnifs_core::{ATTACHMENT_GUEST_LOCATION, AttachmentProtocol};
 use omnifs_core::{AttachmentRuntime, AttachmentSpec, ResourceName};
@@ -22,8 +22,8 @@ use omnifs_bootstrap::Profile;
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Inventory {
     pub(crate) home: PathBuf,
-    pub(crate) durable_revision: Option<MountRevision>,
-    pub(crate) serving_revision: Option<MountRevision>,
+    pub(crate) durable_revision: Option<ResourceRevision>,
+    pub(crate) serving_revision: Option<ResourceRevision>,
     pub(crate) daemon: DaemonFacts,
     pub(crate) attachments: Vec<AttachmentAccessStatus>,
     pub(crate) mounts: Vec<MountStatus>,

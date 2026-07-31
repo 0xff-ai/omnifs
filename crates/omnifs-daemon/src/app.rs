@@ -6,7 +6,7 @@ use omnifs_api::{
     ProgressSnapshot, ProviderPreparationProgress, ProviderPreparationStage, RecoveryId,
     RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt, ResourceDefinition,
 };
-use omnifs_core::{MountRevision, ResourceRevision};
+use omnifs_core::ResourceRevision;
 use omnifs_engine::{
     ComponentEngine, HostOnline, HostRuntimeOpen, Inspector, ServingCell, init_global_from_env,
 };
@@ -570,7 +570,7 @@ async fn runtime_failure(state: &StateStore, error: anyhow::Error) -> StartupFai
         .resource_snapshot()
         .await
         .ok()
-        .map(|snapshot| MountRevision::new(snapshot.revision.get()));
+        .map(|snapshot| ResourceRevision::new(snapshot.revision.get()));
     let serving = state.serving_state().await.ok();
     StartupFailure::Runtime {
         error,
@@ -587,8 +587,8 @@ enum StartupFailure {
     Store(anyhow::Error),
     Runtime {
         error: anyhow::Error,
-        durable_revision: Option<MountRevision>,
-        serving_revision: Option<MountRevision>,
+        durable_revision: Option<ResourceRevision>,
+        serving_revision: Option<ResourceRevision>,
     },
 }
 

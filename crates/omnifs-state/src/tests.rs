@@ -235,12 +235,12 @@ async fn opens_migrates_and_joins_the_writer() {
         .await
         .unwrap();
 
-    assert_eq!(store.resource_snapshot().await.unwrap().revision.get(), 1);
+    assert_eq!(store.resource_snapshot().await.unwrap().revision.get(), 0);
     assert_eq!(
         store.serving_state().await.unwrap(),
         ServingState {
             recovery: RecoveryState::Ready,
-            revision: MountRevision::default(),
+            revision: ResourceRevision::default(),
         }
     );
     let engine = store.engine_paths();
@@ -353,7 +353,7 @@ async fn recreates_and_archives_a_corrupt_control_store() {
         disposition,
         ControlStoreRepairDisposition::CorruptStoreArchived
     );
-    assert_eq!(store.resource_snapshot().await.unwrap().revision.get(), 1);
+    assert_eq!(store.resource_snapshot().await.unwrap().revision.get(), 0);
     assert_eq!(std::fs::read(paths.cache().join("keep")).unwrap(), b"cache");
     let archives = std::fs::read_dir(paths.root())
         .unwrap()
@@ -922,7 +922,7 @@ async fn resource_apply_is_atomic_idempotent_and_stamps_changed_rows() {
         .unwrap_err();
     assert!(matches!(stale, ResourceApplyError::StaleRevision { .. }));
 
-    sqlx::query("CREATE TRIGGER fail_mount_resource_update BEFORE UPDATE ON mount_resources BEGIN SELECT RAISE(ABORT, 'test rollback'); END")
+    sqlx::query("CREATE TRIGGER fail_resource_update BEFORE UPDATE ON resource_state BEGIN SELECT RAISE(ABORT, 'test rollback'); END")
         .execute(&store.reads)
         .await
         .unwrap();
@@ -937,7 +937,7 @@ async fn resource_apply_is_atomic_idempotent_and_stamps_changed_rows() {
         .await
         .unwrap_err();
     assert!(matches!(rollback, ResourceApplyError::Store(_)));
-    sqlx::query("DROP TRIGGER fail_mount_resource_update")
+    sqlx::query("DROP TRIGGER fail_resource_update")
         .execute(&store.reads)
         .await
         .unwrap();
@@ -959,35 +959,10 @@ async fn resource_apply_is_atomic_idempotent_and_stamps_changed_rows() {
         (applied.created, applied.updated, applied.deleted),
         (0, 1, 0)
     );
-    let revision = applied.revision;
-    let row: Vec<u8> = sqlx::query_scalar(
-        "SELECT last_mutation_id FROM mount_resources WHERE name = 'demo-mount'",
-    )
-    .fetch_one(&store.reads)
-    .await
-    .unwrap();
-    assert_eq!(row, mutation_id(85).as_bytes());
-    let provider_row: Vec<u8> =
-        sqlx::query_scalar("SELECT last_mutation_id FROM provider_resources WHERE name = 'demo'")
-            .fetch_one(&store.reads)
-            .await
-            .unwrap();
-    assert_eq!(provider_row, first_id.as_bytes());
-    let credential_row: Vec<u8> = sqlx::query_scalar(
-        "SELECT last_mutation_id FROM credential_resources WHERE name = 'alice'",
-    )
-    .fetch_one(&store.reads)
-    .await
-    .unwrap();
-    assert_eq!(credential_row, first_id.as_bytes());
-    let attachment_row: Vec<u8> = sqlx::query_scalar(
-        "SELECT last_mutation_id FROM attachment_resources WHERE name = 'demo-fs'",
-    )
-    .fetch_one(&store.reads)
-    .await
-    .unwrap();
-    assert_eq!(attachment_row, first_id.as_bytes());
-    assert_eq!(store.resource_snapshot().await.unwrap().revision, revision);
+    assert_eq!(
+        store.resource_snapshot().await.unwrap().revision,
+        applied.revision
+    );
     store.shutdown().await.unwrap();
 }
 
@@ -1006,13 +981,13 @@ async fn corrupt_stored_resource_reports_table_and_name() {
         })
         .await
         .unwrap();
-    sqlx::query("UPDATE attachment_resources SET canonical = X'00' WHERE name = 'demo-fs'")
+    sqlx::query("UPDATE resource_state SET resources = X'00' WHERE singleton = 1")
         .execute(&store.reads)
         .await
         .unwrap();
     let error = store.resource_snapshot().await.unwrap_err();
     let text = error.to_string();
-    assert!(text.contains("decode attachment resource `demo-fs`"));
+    assert!(text.contains("unknown version"));
     store.shutdown().await.unwrap();
 }
 

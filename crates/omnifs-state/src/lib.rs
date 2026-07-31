@@ -5,7 +5,6 @@ mod attachment;
 mod blob;
 mod credential;
 mod db;
-mod mount;
 mod paths;
 mod provider;
 mod resource;
@@ -14,8 +13,8 @@ mod writer;
 
 use anyhow::Context as _;
 use omnifs_core::{
-    ActionId, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MountRevision,
-    ProviderId,
+    ActionId, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, ProviderId,
+    ResourceRevision,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnection, SqlitePoolOptions};
@@ -44,7 +43,6 @@ pub use credential::{
     CredentialRevocationFinish, CredentialState, CredentialSummary, SecretMaterial,
     StoredCredential, next_submitted,
 };
-pub use mount::{MountDocument, MountLimits, StoredMount};
 pub use paths::DaemonStatePaths;
 pub use provider::{
     ProviderImportDisposition, ProviderImportOutcome, ProviderUpload, StoredProvider,
@@ -163,13 +161,9 @@ impl StateStore {
         db::check_integrity(&reads).await?;
         paths.restrict_database_files()?;
 
-        let mut writer_connection = SqliteConnection::connect_with(&connect_options)
+        let writer_connection = SqliteConnection::connect_with(&connect_options)
             .await
             .context("open StateStore writer connection")?;
-        Db::new(&mut writer_connection)
-            .initialize_resources()
-            .await
-            .context("initialize desired resources")?;
         let (credential_refresh_wakeup, _wakeup_receiver) = watch::channel(());
 
         Ok(Self {
@@ -347,7 +341,7 @@ impl StateStore {
 
     pub async fn serving_state(&self) -> anyhow::Result<ServingState> {
         let (state, detail, revision) = sqlx::query_as::<_, (String, Option<String>, i64)>(
-            "SELECT state, detail, serving_mount_revision \
+            "SELECT state, detail, serving_resource_revision \
              FROM recovery_state WHERE singleton = 1",
         )
         .fetch_one(&self.reads)
@@ -355,7 +349,7 @@ impl StateStore {
         .context("read recovery state")?;
         Ok(ServingState {
             recovery: RecoveryState::from_row(&state, detail)?,
-            revision: MountRevision::new(
+            revision: ResourceRevision::new(
                 u64::try_from(revision).context("serving revision is negative")?,
             ),
         })
@@ -374,7 +368,7 @@ impl StateStore {
             .await?
     }
 
-    pub async fn mark_serving(&self, revision: MountRevision) -> anyhow::Result<()> {
+    pub async fn mark_serving(&self, revision: ResourceRevision) -> anyhow::Result<()> {
         self.transition(RecoveryTransition::Serving { revision })
             .await
     }
@@ -686,7 +680,7 @@ impl RecoveryState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServingState {
     pub recovery: RecoveryState,
-    pub revision: MountRevision,
+    pub revision: ResourceRevision,
 }
 
 #[cfg(test)]
