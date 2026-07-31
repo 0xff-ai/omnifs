@@ -387,6 +387,13 @@ async fn reconcile_one_active(
         {
             return Ok(WorkOutcome::Waiting);
         }
+        context.resources.mark_attachment_phase(
+            current_revision,
+            &work.name,
+            ResourcePhase::Pending,
+            None,
+            None,
+        );
         publish_phase(
             context,
             &desired,
@@ -415,6 +422,7 @@ async fn reconcile_one_active(
                 tracing::warn!(attachment = %work.name, %error, "stored attachment runtime spec is invalid");
                 return terminal_failure(
                     context,
+                    current_revision,
                     &desired,
                     work,
                     "attachment_runtime_config_invalid",
@@ -446,8 +454,14 @@ async fn reconcile_one_active(
                         {
                             return Ok(WorkOutcome::Waiting);
                         }
-                        finish_ready(context, &desired, work.action.as_ref(), &work.instance)
-                            .await?;
+                        finish_ready(
+                            context,
+                            &desired,
+                            work.action.as_ref(),
+                            &work.instance,
+                            current_revision,
+                        )
+                        .await?;
                         return Ok(WorkOutcome::Settled);
                     },
                     ConfirmedSession::Absent => {},
@@ -465,6 +479,7 @@ async fn reconcile_one_active(
                             tracing::warn!(attachment = %work.name, %error, "unready attachment runtime stop failed");
                             return retry_or_fail(
                                 context,
+                                current_revision,
                                 &desired,
                                 work,
                                 "attachment_stop_failed",
@@ -474,7 +489,7 @@ async fn reconcile_one_active(
                         }
                     },
                 }
-                if !clear_observed(context, work).await? {
+                if !clear_observed(context, current_revision, work).await? {
                     return Ok(WorkOutcome::Waiting);
                 }
             },
@@ -484,7 +499,7 @@ async fn reconcile_one_active(
                     %runtime_instance,
                     "confirmed attachment runtime requires replacement"
                 );
-                if !record_stopping(context, &desired, work).await? {
+                if !record_stopping(context, current_revision, &desired, work).await? {
                     return Ok(WorkOutcome::Waiting);
                 }
                 if let Err(error) = stop_exact(
@@ -499,6 +514,7 @@ async fn reconcile_one_active(
                     tracing::warn!(attachment = %work.name, %error, "attachment restart stop failed");
                     return retry_or_fail(
                         context,
+                        current_revision,
                         &desired,
                         work,
                         "attachment_stop_failed",
@@ -512,6 +528,7 @@ async fn reconcile_one_active(
                     tracing::warn!(attachment = %work.name, %error, "attachment session did not drain");
                     return retry_or_fail(
                         context,
+                        current_revision,
                         &desired,
                         work,
                         "attachment_session_drain_failed",
@@ -519,7 +536,7 @@ async fn reconcile_one_active(
                     )
                     .await;
                 }
-                if !clear_observed(context, work).await? {
+                if !clear_observed(context, current_revision, work).await? {
                     return Ok(WorkOutcome::Waiting);
                 }
             },
@@ -529,7 +546,7 @@ async fn reconcile_one_active(
                     %runtime_instance,
                     "durable attachment runtime is absent; clearing its observation"
                 );
-                if !clear_observed(context, work).await? {
+                if !clear_observed(context, current_revision, work).await? {
                     return Ok(WorkOutcome::Waiting);
                 }
             },
@@ -542,6 +559,7 @@ async fn reconcile_one_active(
                 );
                 return terminal_failure(
                     context,
+                    current_revision,
                     &desired,
                     work,
                     "attachment_identity_conflict",
@@ -572,6 +590,13 @@ async fn reconcile_one_active(
     {
         return Ok(WorkOutcome::Waiting);
     }
+    context.resources.mark_attachment_phase(
+        current_revision,
+        &work.name,
+        ResourcePhase::Preparing,
+        None,
+        None,
+    );
     publish_phase(
         context,
         &desired,
@@ -606,6 +631,7 @@ async fn reconcile_one_active(
             let _ = event_task.await;
             return terminal_failure(
                 context,
+                current_revision,
                 &desired,
                 work,
                 "attachment_runtime_config_invalid",
@@ -632,6 +658,7 @@ async fn reconcile_one_active(
         tracing::warn!(attachment = %work.name, stage = ?error.stage(), %error, "attachment launch failed");
         return retry_or_fail(
             context,
+            current_revision,
             &desired,
             work,
             "attachment_launch_failed",
@@ -642,6 +669,7 @@ async fn reconcile_one_active(
     if !context.vfs.wait_for_session(&expected, SESSION_WAIT).await {
         return retry_or_fail(
             context,
+            current_revision,
             &desired,
             work,
             "attachment_session_timeout",
@@ -691,7 +719,14 @@ async fn reconcile_one_active(
     {
         return Ok(WorkOutcome::Waiting);
     }
-    finish_ready(context, &desired, work.action.as_ref(), &work.instance).await?;
+    finish_ready(
+        context,
+        &desired,
+        work.action.as_ref(),
+        &work.instance,
+        current_revision,
+    )
+    .await?;
     Ok(WorkOutcome::Settled)
 }
 
@@ -879,7 +914,8 @@ async fn stop_all_runtimes(context: &ReconcileContext) -> anyhow::Result<Vec<Res
         };
         let stopped = match driver.confirmed(&runtime_instance).await {
             Ok(Some(confirmed)) => {
-                match driver.stop_confirmed(&runtime_instance, confirmed).await {
+                match stop_exact(context, &instance.name, &spec, &runtime_instance, confirmed).await
+                {
                     Ok(()) => true,
                     Err(error) => {
                         tracing::warn!(attachment = %instance.name, %error, "attachment runtime did not stop during shutdown");
@@ -934,6 +970,7 @@ async fn stop_all_runtimes(context: &ReconcileContext) -> anyhow::Result<Vec<Res
 
 async fn record_stopping(
     context: &ReconcileContext,
+    current_revision: ResourceRevision,
     desired: &DesiredAttachment,
     work: &mut Work,
 ) -> anyhow::Result<bool> {
@@ -945,6 +982,13 @@ async fn record_stopping(
     {
         return Ok(false);
     }
+    context.resources.mark_attachment_phase(
+        current_revision,
+        &work.name,
+        ResourcePhase::Preparing,
+        None,
+        None,
+    );
     publish_phase(
         context,
         desired,
@@ -963,6 +1007,7 @@ async fn finish_ready(
     desired: &DesiredAttachment,
     action: Option<&ActionReceipt>,
     _instance: &AttachmentInstance,
+    current_revision: ResourceRevision,
 ) -> anyhow::Result<()> {
     publish_phase(
         context,
@@ -971,11 +1016,18 @@ async fn finish_ready(
         AttachmentProgressStage::Ready,
         PhaseReport::default(),
     );
-    let terminal = context
+    let desired_terminal = context
         .resources
         .mark_attachment_ready(desired.revision, &desired.definition.name);
-    if terminal {
+    if desired_terminal {
         publish_revision_ready(context.resources.progress(), desired.revision);
+    }
+    if current_revision != desired.revision
+        && context
+            .resources
+            .mark_attachment_ready(current_revision, &desired.definition.name)
+    {
+        publish_revision_ready(context.resources.progress(), current_revision);
     }
     if let Some(action) = action {
         let ready = context
@@ -993,13 +1045,14 @@ async fn finish_ready(
 
 async fn retry_or_fail(
     context: &ReconcileContext,
+    current_revision: ResourceRevision,
     desired: &DesiredAttachment,
     work: &mut Work,
     code: &str,
     detail: &str,
 ) -> anyhow::Result<WorkOutcome> {
     if work.retry_count.saturating_add(1) >= MAX_RETRY_ATTEMPTS {
-        return terminal_failure(context, desired, work, code, detail).await;
+        return terminal_failure(context, current_revision, desired, work, code, detail).await;
     }
     let next = retry_delay(work.retry_count.saturating_add(1));
     let retry_at =
@@ -1038,7 +1091,7 @@ async fn retry_or_fail(
     );
     mark_resource_phase(
         context,
-        desired.revision,
+        current_revision,
         &work.name,
         ResourcePhase::Retrying,
         Some(code),
@@ -1049,6 +1102,7 @@ async fn retry_or_fail(
 
 async fn terminal_failure(
     context: &ReconcileContext,
+    current_revision: ResourceRevision,
     desired: &DesiredAttachment,
     work: &mut Work,
     code: &str,
@@ -1078,7 +1132,7 @@ async fn terminal_failure(
     );
     mark_resource_phase(
         context,
-        desired.revision,
+        current_revision,
         &work.name,
         ResourcePhase::Failed,
         Some(code),
@@ -1260,21 +1314,9 @@ fn mark_resource_phase(
     error_code: Option<&str>,
     detail: Option<&str>,
 ) {
-    let key = ResourceKey::new(ResourceKind::Attachment, name.clone());
     context
         .resources
-        .progress()
-        .update_revision_snapshot(revision, |snapshot| {
-            if let Some(status) = snapshot
-                .resources
-                .iter_mut()
-                .find(|status| status.key == key)
-            {
-                status.phase = phase;
-                status.error_code = error_code.map(str::to_owned);
-                status.detail = detail.map(str::to_owned);
-            }
-        });
+        .mark_attachment_phase(revision, name, phase, error_code, detail);
 }
 
 async fn forward_runtime_events(
@@ -1386,6 +1428,17 @@ async fn stop_exact(
     runtime_instance: &str,
     confirmed: omnifs_fs_runtime::ConfirmedRuntime,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        confirmed.runtime_instance() == runtime_instance,
+        "confirmed attachment runtime instance changed before exact stop"
+    );
+    let expected_session = session(name, spec, runtime_instance);
+    context
+        .vfs
+        .begin_session_stop(&expected_session)
+        .map_err(anyhow::Error::msg)?;
+    wait_for_session_absence(context, name, runtime_instance).await?;
+
     let driver = runtime_driver(context, name, spec)?;
     driver
         .stop_confirmed(runtime_instance, confirmed)
@@ -1395,6 +1448,10 @@ async fn stop_exact(
         driver.confirmed(runtime_instance).await?.is_none(),
         "attachment runtime is still present after exact stop"
     );
+    context
+        .vfs
+        .finish_session_stop(&expected_session)
+        .map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
@@ -1481,15 +1538,29 @@ fn namespace_ready(progress: &ProgressHub, revision: ResourceRevision) -> bool {
     })
 }
 
-async fn clear_observed(context: &ReconcileContext, work: &mut Work) -> anyhow::Result<bool> {
-    update_observation(&context.state, &mut work.instance, |observation| {
+async fn clear_observed(
+    context: &ReconcileContext,
+    current_revision: ResourceRevision,
+    work: &mut Work,
+) -> anyhow::Result<bool> {
+    let updated = update_observation(&context.state, &mut work.instance, |observation| {
         observation.observed_version = None;
         observation.observed_spec = None;
         observation.runtime_instance = None;
         observation.phase = AttachmentPhase::Pending;
         observation.retry_at = None;
     })
-    .await
+    .await?;
+    if updated {
+        context.resources.mark_attachment_phase(
+            current_revision,
+            &work.name,
+            ResourcePhase::Pending,
+            None,
+            None,
+        );
+    }
+    Ok(updated)
 }
 
 async fn update_observation(
@@ -1862,6 +1933,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retained_attachment_readiness_and_loss_track_the_current_restart_revision() {
+        let fixture = fixture().await;
+        let work = fixture.work().await;
+        let desired = work.desired.unwrap();
+        let current_revision = desired.revision.next().unwrap();
+        fixture.resources.progress().publish_snapshot(
+            ProgressTarget::DesiredRevision(current_revision),
+            ProgressSnapshot {
+                desired_revision: current_revision,
+                observed_revision: None,
+                resources: vec![omnifs_api::ResourceStatus {
+                    key: desired.definition.key(),
+                    desired_revision: current_revision,
+                    observed_revision: None,
+                    phase: ResourcePhase::Pending,
+                    error_code: None,
+                    detail: None,
+                }],
+                actions: Vec::new(),
+                providers: Vec::new(),
+                serving: None,
+                credentials: Vec::new(),
+                attachments: Vec::new(),
+            },
+        );
+
+        finish_ready(
+            &fixture.context,
+            &desired,
+            None,
+            &work.instance,
+            current_revision,
+        )
+        .await
+        .unwrap();
+
+        let (_, snapshot) = fixture
+            .resources
+            .progress()
+            .snapshot_for(ProgressTarget::DesiredRevision(current_revision));
+        assert_eq!(snapshot.observed_revision, Some(current_revision));
+        assert_eq!(snapshot.resources[0].phase, ResourcePhase::Ready);
+        assert_eq!(
+            snapshot.resources[0].observed_revision,
+            Some(current_revision)
+        );
+
+        fixture.resources.mark_attachment_phase(
+            current_revision,
+            &desired.definition.name,
+            ResourcePhase::Pending,
+            None,
+            None,
+        );
+        let (_, snapshot) = fixture
+            .resources
+            .progress()
+            .snapshot_for(ProgressTarget::DesiredRevision(current_revision));
+        assert_eq!(snapshot.observed_revision, None);
+        assert_eq!(snapshot.resources[0].phase, ResourcePhase::Pending);
+        assert_eq!(snapshot.resources[0].observed_revision, None);
+        assert_eq!(
+            fixture
+                .resources
+                .progress()
+                .target_state(ProgressTarget::DesiredRevision(current_revision)),
+            crate::progress::ProgressTargetState::Watching
+        );
+        fixture.state.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn deleting_an_attachment_finishes_its_pending_restart_action() {
         let fixture = fixture().await;
         let action_id = ActionId::from_bytes([0x61; 16]);
@@ -1916,6 +2059,7 @@ mod tests {
             assert!(matches!(
                 retry_or_fail(
                     &fixture.context,
+                    desired.revision,
                     &desired,
                     &mut work,
                     "attachment_launch_failed",
@@ -1932,6 +2076,7 @@ mod tests {
         assert!(matches!(
             retry_or_fail(
                 &fixture.context,
+                desired.revision,
                 &desired,
                 &mut work,
                 "attachment_launch_failed",
@@ -1970,6 +2115,7 @@ mod tests {
         assert!(matches!(
             retry_or_fail(
                 &fixture.context,
+                stale_desired.revision,
                 &stale_desired,
                 &mut stale_work,
                 "attachment_launch_failed",

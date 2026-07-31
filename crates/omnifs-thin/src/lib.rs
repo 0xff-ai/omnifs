@@ -46,7 +46,7 @@ pub struct RunFsArgs {
     /// Runtime identity supplied by the launcher.
     #[arg(long)]
     runtime: AttachmentRuntime,
-    /// Mount location resolved in the persisted filesystem spec.
+    /// Mount location resolved in the desired Attachment spec.
     #[arg(long)]
     location: PathBuf,
     /// Docker image reference retained in the exact desired attachment spec.

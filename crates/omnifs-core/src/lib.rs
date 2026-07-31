@@ -17,6 +17,7 @@ pub use attachment::{
     ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec,
     AttachmentSpecError, AttachmentVersion, ParseAttachmentProtocolError,
     ParseAttachmentRuntimeError, RuntimeInstanceId, RuntimeInstanceIdError,
+    attachment_pair_supported_on_current_host,
 };
 pub use auth_fingerprint::{AuthRuntimeFingerprint, AuthRuntimeFingerprintParseError};
 pub use content_type::ContentType;

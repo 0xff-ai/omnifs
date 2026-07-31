@@ -157,7 +157,7 @@ async fn prepare_setup(rpc: &RpcClient, output: &Output) -> Result<PreparedSetup
             && crate::ui::consent::resolve_confirm(
                 output.prompt_mode(),
                 format!(
-                    "Attach the recommended filesystem ({} {} at {})?",
+                    "Create the recommended Attachment ({} {} at {})?",
                     definition.spec.protocol(),
                     definition.spec.runtime(),
                     definition.spec.location().display()

@@ -2,8 +2,8 @@
 
 use crate::error::ExitCode;
 use crate::inventory::{
-    ActionTarget, DaemonHealth, FilesystemState, FilesystemStatus, Inventory, MountStatus,
-    NextAction, ServingState, Severity,
+    ActionTarget, AttachmentAccessState, AttachmentAccessStatus, DaemonHealth, Inventory,
+    MountStatus, NextAction, ServingState, Severity,
 };
 use crate::ui::output::ResultVerdict;
 use crate::ui::render::count;
@@ -59,7 +59,7 @@ impl InventoryReport {
                 TableMeta::new("serving", count(self.inventory.mounts.len(), "mount")),
                 TableMeta::new(
                     "",
-                    count(self.inventory.attached_filesystem_count(), "filesystem"),
+                    count(self.inventory.ready_attachment_count(), "attachment"),
                 ),
             ],
             None => vec![TableMeta::new(
@@ -89,15 +89,15 @@ impl InventoryReport {
             next_action.as_ref(),
         )));
 
-        let clean_stopped_filesystems = daemon_health == DaemonHealth::Stopped
+        let clean_stopped_attachments = daemon_health == DaemonHealth::Stopped
             && self
                 .inventory
-                .filesystems
+                .attachments
                 .iter()
-                .all(|filesystem| filesystem.state == FilesystemState::Detached);
-        if !clean_stopped_filesystems {
-            report.push(TableBlock::Resources(filesystem_table(
-                &self.inventory.filesystems,
+                .all(|attachment| attachment.state == AttachmentAccessState::Detached);
+        if !clean_stopped_attachments {
+            report.push(TableBlock::Resources(attachment_table(
+                &self.inventory.attachments,
                 next_action.as_ref(),
             )));
         }
@@ -109,10 +109,10 @@ impl InventoryReport {
         self.inventory.next_action().filter(|action| {
             matches!(
                 action,
-                NextAction::AttachFilesystem { .. }
-                    | NextAction::CreateFilesystem
+                NextAction::WaitForAttachment { .. }
+                    | NextAction::CreateAttachment
                     | NextAction::Browse { .. }
-                    | NextAction::EnterFilesystem { .. }
+                    | NextAction::EnterAttachment { .. }
             )
         })
     }
@@ -120,13 +120,13 @@ impl InventoryReport {
 
 /// Shared table builders for list/show consumers. The report delegates to
 /// these concrete schema owners, so callers cannot drift from status output.
-pub(crate) fn filesystem_table(
-    filesystems: &[FilesystemStatus],
+pub(crate) fn attachment_table(
+    attachments: &[AttachmentAccessStatus],
     next_action: Option<&NextAction>,
 ) -> TableResources {
     let mut table = TableResources::new(
-        "Filesystems",
-        filesystem_summary(filesystems),
+        "Attachments",
+        attachment_summary(attachments),
         vec![
             TableColumn::new("Name", TablePriority::Identity, TableWidth::Auto),
             TableColumn::new("Protocol", TablePriority::Identity, TableWidth::Auto),
@@ -136,26 +136,26 @@ pub(crate) fn filesystem_table(
             TableColumn::new("State", TablePriority::Essential, TableWidth::Auto),
         ],
     );
-    for filesystem in filesystems {
+    for attachment in attachments {
         let mut row = TableRow::new(
             [
-                TableCell::new(filesystem.name.as_str()),
-                TableCell::new(filesystem.spec.protocol().as_str()),
-                TableCell::new(filesystem.spec.runtime().as_str()),
-                TableCell::new(filesystem.spec.location().display().to_string()),
-                TableCell::new(format!("all {}", count(filesystem.mount_count, "mount"))),
+                TableCell::new(attachment.name.as_str()),
+                TableCell::new(attachment.spec.protocol().as_str()),
+                TableCell::new(attachment.spec.runtime().as_str()),
+                TableCell::new(attachment.spec.location().display().to_string()),
+                TableCell::new(format!("all {}", count(attachment.mount_count, "mount"))),
                 TableCell::state(TableState::new(
-                    filesystem.state.severity().into(),
-                    filesystem.state.label(),
+                    attachment.state.severity().into(),
+                    attachment.state.label(),
                 )),
             ],
-            TableState::new(filesystem.state.severity().into(), filesystem.state.label()),
+            TableState::new(attachment.state.severity().into(), attachment.state.label()),
         );
         if matches!(
             next_action,
             Some(NextAction::Doctor {
-                target: ActionTarget::Filesystem(id)
-            }) if id == &filesystem.name
+                target: ActionTarget::Attachment(id)
+            }) if id == &attachment.name
         ) {
             row = row.with_action(TableAction::fix("omnifs doctor"));
         }
@@ -214,21 +214,21 @@ pub(crate) fn mount_table(
     table
 }
 
-fn filesystem_summary(filesystems: &[FilesystemStatus]) -> String {
-    if filesystems.is_empty() {
+fn attachment_summary(attachments: &[AttachmentAccessStatus]) -> String {
+    if attachments.is_empty() {
         return "none configured".to_owned();
     }
     let count_state = |state| {
-        filesystems
+        attachments
             .iter()
-            .filter(|filesystem| filesystem.state == state)
+            .filter(|attachment| attachment.state == state)
             .count()
     };
     let parts = [
-        FilesystemState::Attached,
-        FilesystemState::Detached,
-        FilesystemState::Unknown,
-        FilesystemState::Failed,
+        AttachmentAccessState::Attached,
+        AttachmentAccessState::Detached,
+        AttachmentAccessState::Unknown,
+        AttachmentAccessState::Failed,
     ]
     .into_iter()
     .map(|state| (count_state(state), state.label()))
@@ -238,7 +238,7 @@ fn filesystem_summary(filesystems: &[FilesystemStatus]) -> String {
     if parts.len() == 1 {
         parts[0].clone()
     } else {
-        format!("{} configured, {}", filesystems.len(), parts.join(", "))
+        format!("{} configured, {}", attachments.len(), parts.join(", "))
     }
 }
 
@@ -328,7 +328,7 @@ mod tests {
     fn running_context_metadata_reports_pid_mounts_and_filesystems_as_one_sentence() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
-            vec![crate::inventory::FilesystemStatus {
+            vec![crate::inventory::AttachmentAccessStatus {
                 name: "host".parse().unwrap(),
                 spec: omnifs_core::AttachmentSpec::new(
                     omnifs_core::AttachmentProtocol::Nfs,
@@ -338,7 +338,7 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-                state: crate::inventory::FilesystemState::Attached,
+                state: crate::inventory::AttachmentAccessState::Attached,
                 mount_count: 1,
                 fix: None,
             }],
@@ -352,12 +352,12 @@ mod tests {
                     color: false,
                 });
         assert!(
-            rendered.contains("daemon pid 1, serving 0 mounts, 1 filesystem"),
+            rendered.contains("daemon pid 1, serving 0 mounts, 1 attachment"),
             "{rendered}"
         );
     }
 
-    /// The full shape: context line, `Mounts` and `Filesystems`
+    /// The full shape: context line, `Mounts` and `Attachments`
     /// sections, and a degraded mount row carrying its `fix:` line on the
     /// following line, full width, never truncated. (`Inventory::test`
     /// fixes the daemon pid at 1 rather than the illustrative
@@ -367,7 +367,7 @@ mod tests {
     fn status_report_matches_the_documented_shape_with_a_degraded_row() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
-            vec![crate::inventory::FilesystemStatus {
+            vec![crate::inventory::AttachmentAccessStatus {
                 name: "host".parse().unwrap(),
                 spec: omnifs_core::AttachmentSpec::new(
                     omnifs_core::AttachmentProtocol::Nfs,
@@ -377,7 +377,7 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-                state: crate::inventory::FilesystemState::Attached,
+                state: crate::inventory::AttachmentAccessState::Attached,
                 mount_count: 2,
                 fix: None,
             }],
@@ -427,13 +427,13 @@ mod tests {
         // the illustrative all-clear `● healthy`.
         assert!(lines[0].trim_end().ends_with("▲ degraded"), "{rendered}");
         assert!(
-            lines[1].contains("daemon pid 1, serving 2 mounts, 1 filesystem"),
+            lines[1].contains("daemon pid 1, serving 2 mounts, 1 attachment"),
             "{rendered}"
         );
-        assert!(rendered.contains("Filesystems"), "{rendered}");
+        assert!(rendered.contains("Attachments"), "{rendered}");
         assert!(rendered.contains("Mounts"), "{rendered}");
         assert!(
-            rendered.find("Mounts").unwrap() < rendered.find("Filesystems").unwrap(),
+            rendered.find("Mounts").unwrap() < rendered.find("Attachments").unwrap(),
             "{rendered}"
         );
         assert!(rendered.contains("github"), "{rendered}");
@@ -478,7 +478,7 @@ mod tests {
     fn clean_stopped_status_hides_detached_filesystem_rows() {
         let inventory = Inventory::test(
             DaemonHealth::Stopped,
-            vec![crate::inventory::FilesystemStatus {
+            vec![crate::inventory::AttachmentAccessStatus {
                 name: "host".parse().unwrap(),
                 spec: omnifs_core::AttachmentSpec::new(
                     omnifs_core::AttachmentProtocol::Nfs,
@@ -488,7 +488,7 @@ mod tests {
                     None,
                 )
                 .unwrap(),
-                state: crate::inventory::FilesystemState::Detached,
+                state: crate::inventory::AttachmentAccessState::Detached,
                 mount_count: 0,
                 fix: None,
             }],
@@ -501,7 +501,7 @@ mod tests {
                     width: 120,
                     color: false,
                 });
-        assert!(!rendered.contains("Filesystems"), "{rendered}");
+        assert!(!rendered.contains("Attachments"), "{rendered}");
     }
 
     /// Regression for the footgun this slice fixes: a live mount whose auth

@@ -4748,6 +4748,7 @@ dependencies = [
  "omnifs-core",
  "omnifs-engine",
  "omnifs-fuse",
+ "omnifs-libkrun",
  "omnifs-nfs",
  "omnifs-provider",
  "omnifs-wit",

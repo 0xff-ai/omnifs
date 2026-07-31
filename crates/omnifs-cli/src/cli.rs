@@ -77,7 +77,7 @@ pub enum Commands {
 
     /// Stop the daemon and clean up
     ///
-    /// Asks attached filesystems to stop, drains them for a bounded time, then
+    /// Asks attached attachments to stop, drains them for a bounded time, then
     /// stops the daemon. Busy stragglers are reported for `omnifs doctor`.
     Down,
     /// Tail the daemon log
@@ -119,7 +119,7 @@ pub enum Commands {
     #[command(hide = true)]
     Daemon,
 
-    /// Run a host filesystem. Internal: launched by filesystem lifecycle commands.
+    /// Run a host attachment. Internal: launched by attachment lifecycle commands.
     #[command(hide = true)]
     RunFs(omnifs_thin::RunFsArgs),
 }
@@ -417,7 +417,7 @@ fn fresh_profile_screen(
 /// The one actionable fact behind a `Degraded` verdict on a mount-less
 /// profile, if any: `Inventory::verdict` (inventory.rs) has two disjuncts
 /// that can still fire when `mounts` is empty (a daemon that failed or went
-/// unreachable, or a filesystem severe enough to flip the verdict while the
+/// unreachable, or a attachment severe enough to flip the verdict while the
 /// daemon is otherwise up), and the mount-related disjuncts are moot on an
 /// empty mount list. Returns the label and the one action selected by
 /// `Inventory::next_action`.
@@ -436,18 +436,18 @@ fn fresh_profile_degradation(inventory: &crate::inventory::Inventory) -> Option<
             command,
         )),
         crate::inventory::NextAction::Doctor {
-            target: crate::inventory::ActionTarget::Filesystem(id),
+            target: crate::inventory::ActionTarget::Attachment(id),
         } => inventory
-            .filesystems
+            .attachments
             .iter()
-            .find(|filesystem| filesystem.name == id)
-            .map(|filesystem| {
+            .find(|attachment| attachment.name == id)
+            .map(|attachment| {
                 (
                     format!(
-                        "{} ({}) filesystem is {}",
-                        filesystem.spec.protocol().as_str(),
-                        filesystem.spec.runtime().as_str(),
-                        filesystem.state.label()
+                        "{} ({}) attachment is {}",
+                        attachment.spec.protocol().as_str(),
+                        attachment.spec.runtime().as_str(),
+                        attachment.state.label()
                     ),
                     command,
                 )
@@ -548,13 +548,13 @@ mod tests {
         );
     }
 
-    /// Leftover failed filesystem state (e.g. a stale entry under
+    /// Leftover failed attachment state (e.g. a stale entry under
     /// legacy runtime state can flip the verdict to `Degraded` while the daemon
     /// is otherwise running and there are still zero mounts; the screen must
-    /// name that filesystem and reuse its own `fix` field verbatim.
+    /// name that attachment and reuse its own `fix` field verbatim.
     #[test]
     fn fresh_profile_screen_names_a_failed_filesystem_while_daemon_is_up() {
-        let filesystem = crate::inventory::FilesystemStatus {
+        let attachment = crate::inventory::AttachmentAccessStatus {
             name: "test".parse().unwrap(),
             spec: omnifs_core::AttachmentSpec::new(
                 omnifs_core::AttachmentProtocol::Fuse,
@@ -564,13 +564,13 @@ mod tests {
                 None,
             )
             .unwrap(),
-            state: crate::inventory::FilesystemState::Failed,
+            state: crate::inventory::AttachmentAccessState::Failed,
             mount_count: 0,
             fix: Some("omnifs logs (container exited)".to_owned()),
         };
         let inventory = crate::inventory::Inventory::test(
             crate::inventory::DaemonHealth::Running,
-            vec![filesystem],
+            vec![attachment],
             Vec::new(),
         );
         assert_eq!(
@@ -580,13 +580,13 @@ mod tests {
         assert_eq!(
             super::fresh_profile_degradation(&inventory),
             Some((
-                "fuse (docker) filesystem is failed".to_owned(),
+                "fuse (docker) attachment is failed".to_owned(),
                 "omnifs doctor".to_owned()
             ))
         );
         let screen = super::fresh_profile_screen(&inventory, caps(false));
         assert!(
-            screen.contains("fuse (docker) filesystem is failed:  `omnifs doctor`"),
+            screen.contains("fuse (docker) attachment is failed:  `omnifs doctor`"),
             "{screen}"
         );
     }

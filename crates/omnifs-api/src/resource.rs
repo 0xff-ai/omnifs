@@ -6,7 +6,8 @@ use crate::{
 };
 use omnifs_core::{
     AttachmentSpec, MutationId, ProviderId, ResourceDigest, ResourceKey, ResourceKind,
-    ResourceName, ResourceRevision, validate_account, validate_key_part,
+    ResourceName, ResourceRevision, attachment_pair_supported_on_current_host, validate_account,
+    validate_key_part,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -199,6 +200,18 @@ fn validate_resource(resource: &ResourceDefinition) -> Result<(), ResourceDefini
             return Err(ResourceDefinitionError::MountConfigNotObject(
                 mount.name.clone(),
             ));
+        },
+        ResourceDefinition::Attachment(attachment)
+            if !attachment_pair_supported_on_current_host(
+                attachment.spec.protocol(),
+                attachment.spec.runtime(),
+            ) =>
+        {
+            return Err(ResourceDefinitionError::UnsupportedAttachmentPlatform {
+                attachment: attachment.name.clone(),
+                protocol: attachment.spec.protocol(),
+                runtime: attachment.spec.runtime(),
+            });
         },
         _ => {},
     }
@@ -536,6 +549,14 @@ pub enum ResourceDefinitionError {
     InvalidCredentialField(String),
     #[error("mount {0} config must be a JSON object")]
     MountConfigNotObject(ResourceName),
+    #[error(
+        "Attachment {attachment} uses {protocol}/{runtime}, which this daemon host cannot launch"
+    )]
+    UnsupportedAttachmentPlatform {
+        attachment: ResourceName,
+        protocol: omnifs_core::AttachmentProtocol,
+        runtime: omnifs_core::AttachmentRuntime,
+    },
     #[error("mount {mount} references missing provider {provider}")]
     MissingProvider {
         mount: ResourceName,

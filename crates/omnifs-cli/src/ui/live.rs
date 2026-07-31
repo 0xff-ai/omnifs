@@ -210,12 +210,12 @@ mod tests {
 
     #[test]
     fn spinner_line_aligns_to_the_block_scoped_key_width() {
-        // `key_width` 9 mirrors `up`'s real block (`providers`/`filesystems`
-        // tie at 9 chars): "daemon" (6) plus the 3-space gap this test's
+        // `key_width` 11 mirrors the status block (`providers`/`attachments`):
+        // "daemon" (6) plus the 3-space gap this test's
         // width leaves after the wider sibling keys lands "starting" at
-        // column 16 (2-space indent + 1 frame + 1 space + 6 key + 6 pad).
-        let plain = super::super::strip_ansi(&spinner_line("⠋", "daemon", "starting", 9));
-        assert_eq!(plain.chars().nth(16), Some('s'), "{plain:?}");
+        // column 18 (2-space indent + 1 frame + 1 space + 6 key + 8 pad).
+        let plain = super::super::strip_ansi(&spinner_line("⠋", "daemon", "starting", 11));
+        assert_eq!(plain.chars().nth(18), Some('s'), "{plain:?}");
     }
 
     #[test]

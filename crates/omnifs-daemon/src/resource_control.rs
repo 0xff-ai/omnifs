@@ -478,6 +478,38 @@ impl ResourceControl {
         self.finish_attachment_status(revision, name, false)
     }
 
+    /// Mark one Attachment non-ready in the current revision snapshot.
+    ///
+    /// The durable Attachment row is updated before this call. Keeping the
+    /// expected revision explicit prevents stale reconciliation work from
+    /// downgrading a newer apply. A non-ready resource also makes the whole
+    /// revision non-terminal until the supervisor proves a new exact session.
+    pub(crate) fn mark_attachment_phase(
+        &self,
+        revision: ResourceRevision,
+        name: &ResourceName,
+        phase: ResourcePhase,
+        error_code: Option<&str>,
+        detail: Option<&str>,
+    ) {
+        debug_assert_ne!(phase, ResourcePhase::Ready);
+        let key = ResourceKey::new(ResourceKind::Attachment, name.clone());
+        self.progress
+            .update_revision_snapshot(revision, |snapshot| {
+                if let Some(status) = snapshot
+                    .resources
+                    .iter_mut()
+                    .find(|status| status.key == key)
+                {
+                    status.phase = phase;
+                    status.observed_revision = None;
+                    status.error_code = error_code.map(str::to_owned);
+                    status.detail = detail.map(str::to_owned);
+                    snapshot.observed_revision = None;
+                }
+            });
+    }
+
     pub(crate) fn clear_deleted_attachment(
         &self,
         revision: ResourceRevision,

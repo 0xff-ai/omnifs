@@ -195,7 +195,7 @@ impl AttachmentSpec {
         docker_image: Option<String>,
         libkrun_guest_image: Option<String>,
     ) -> Result<Self, AttachmentSpecError> {
-        if !supported_pair(protocol, runtime) {
+        if !valid_pair(protocol, runtime) {
             return Err(AttachmentSpecError::UnsupportedPair { protocol, runtime });
         }
         match runtime {
@@ -274,7 +274,27 @@ fn validate_asset(field: &'static str, value: Option<&str>) -> Result<(), Attach
     Ok(())
 }
 
-fn supported_pair(protocol: AttachmentProtocol, runtime: AttachmentRuntime) -> bool {
+fn valid_pair(protocol: AttachmentProtocol, runtime: AttachmentRuntime) -> bool {
+    matches!(
+        (protocol, runtime),
+        (AttachmentProtocol::Nfs, AttachmentRuntime::Host)
+            | (
+                AttachmentProtocol::Fuse,
+                AttachmentRuntime::Host | AttachmentRuntime::Docker | AttachmentRuntime::Libkrun
+            )
+    )
+}
+
+/// Whether the current daemon host can launch this protocol/runtime pair.
+///
+/// This is separate from [`AttachmentSpec`] parsing because Docker and
+/// libkrun launch the Linux guest with the daemon's exact spec. A libkrun
+/// guest must accept `fuse/libkrun` even though Linux cannot host libkrun.
+#[must_use]
+pub const fn attachment_pair_supported_on_current_host(
+    protocol: AttachmentProtocol,
+    runtime: AttachmentRuntime,
+) -> bool {
     match (protocol, runtime) {
         (AttachmentProtocol::Nfs, AttachmentRuntime::Host)
         | (AttachmentProtocol::Fuse, AttachmentRuntime::Docker) => {
@@ -290,7 +310,7 @@ fn supported_pair(protocol: AttachmentProtocol, runtime: AttachmentRuntime) -> b
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AttachmentSpecError {
-    #[error("{protocol}/{runtime} is not supported on this platform")]
+    #[error("{protocol}/{runtime} is not a valid Attachment protocol/runtime pair")]
     UnsupportedPair {
         protocol: AttachmentProtocol,
         runtime: AttachmentRuntime,
@@ -370,21 +390,17 @@ impl<'de> Deserialize<'de> for AttachmentVersion {
 mod tests {
     use super::*;
 
-    fn supported() -> (AttachmentProtocol, AttachmentRuntime) {
-        if cfg!(target_os = "linux") {
-            (AttachmentProtocol::Fuse, AttachmentRuntime::Host)
-        } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-            (AttachmentProtocol::Fuse, AttachmentRuntime::Libkrun)
-        } else {
-            (AttachmentProtocol::Nfs, AttachmentRuntime::Host)
-        }
-    }
-
     #[test]
     fn rejects_invalid_locations_assets_and_pairs() {
-        let (protocol, runtime) = supported();
         assert!(
-            AttachmentSpec::new(protocol, runtime, PathBuf::from("relative"), None, None).is_err()
+            AttachmentSpec::new(
+                AttachmentProtocol::Fuse,
+                AttachmentRuntime::Host,
+                PathBuf::from("relative"),
+                None,
+                None
+            )
+            .is_err()
         );
         assert!(
             AttachmentSpec::new(
@@ -398,7 +414,7 @@ mod tests {
         );
         assert!(
             AttachmentSpec::new(
-                protocol,
+                AttachmentProtocol::Fuse,
                 AttachmentRuntime::Host,
                 PathBuf::from("/tmp/omnifs"),
                 Some("image".into()),
@@ -409,18 +425,30 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_through_strict_serde() {
-        let (protocol, runtime) = supported();
-        let location = if runtime == AttachmentRuntime::Host {
-            PathBuf::from("/tmp/omnifs")
-        } else {
-            PathBuf::from(ATTACHMENT_GUEST_LOCATION)
-        };
-        let spec = AttachmentSpec::new(protocol, runtime, location, None, None).unwrap();
+    fn exact_libkrun_spec_round_trips_inside_its_linux_guest() {
+        let spec = AttachmentSpec::new(
+            AttachmentProtocol::Fuse,
+            AttachmentRuntime::Libkrun,
+            ATTACHMENT_GUEST_LOCATION.into(),
+            None,
+            Some("guest.raw".into()),
+        )
+        .unwrap();
         let encoded = serde_json::to_vec(&spec).unwrap();
         assert_eq!(
             serde_json::from_slice::<AttachmentSpec>(&encoded).unwrap(),
             spec
+        );
+    }
+
+    #[test]
+    fn host_support_is_distinct_from_exact_spec_validity() {
+        assert_eq!(
+            attachment_pair_supported_on_current_host(
+                AttachmentProtocol::Fuse,
+                AttachmentRuntime::Libkrun
+            ),
+            cfg!(all(target_os = "macos", target_arch = "aarch64"))
         );
     }
 

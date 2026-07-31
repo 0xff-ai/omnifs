@@ -4,9 +4,9 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -45,9 +45,9 @@ fn run_with<A: Api>(api: &A, config: &Config, diagnostic: &File) -> Result<(), E
     let bridge_thread = bridge.spawn(shutdown_fd, Arc::clone(&stop));
 
     let result = context.start();
-    stop.store(true, Ordering::Release);
+    bridge_thread.stop();
     let _ = control_thread.join();
-    let _ = bridge_thread.join();
+    bridge_thread.join();
     drop(files);
     result
 }
@@ -154,6 +154,37 @@ struct AttachBridge {
     listener: UnixListener,
 }
 
+struct AttachBridgeThread {
+    join: thread::JoinHandle<()>,
+    active: Arc<Mutex<Option<ActiveRelay>>>,
+    stop: Arc<AtomicBool>,
+}
+
+struct ActiveRelay {
+    guest: UnixStream,
+    daemon: UnixStream,
+}
+
+impl AttachBridgeThread {
+    fn stop(&self) {
+        use std::net::Shutdown;
+
+        self.stop.store(true, Ordering::Release);
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(active) = active.as_ref() {
+            let _ = active.guest.shutdown(Shutdown::Both);
+            let _ = active.daemon.shutdown(Shutdown::Both);
+        }
+    }
+
+    fn join(self) {
+        let _ = self.join.join();
+    }
+}
+
 impl AttachBridge {
     fn bind(path: &Path, target: &Path) -> Result<Self, Error> {
         let listener = UnixListener::bind(path)
@@ -170,16 +201,20 @@ impl AttachBridge {
         })
     }
 
-    fn spawn(self, shutdown_fd: ShutdownFd, stop: Arc<AtomicBool>) -> thread::JoinHandle<()> {
-        thread::spawn(move || {
-            if let Err(error) = self.serve(&stop) {
+    fn spawn(self, shutdown_fd: ShutdownFd, stop: Arc<AtomicBool>) -> AttachBridgeThread {
+        let active = Arc::new(Mutex::new(None));
+        let thread_active = Arc::clone(&active);
+        let thread_stop = Arc::clone(&stop);
+        let join = thread::spawn(move || {
+            if let Err(error) = self.serve(&thread_stop, &thread_active) {
                 eprintln!("omnifs-libkrun: attach bridge failed: {error}");
                 let _ = shutdown_fd.signal();
             }
-        })
+        });
+        AttachBridgeThread { join, active, stop }
     }
 
-    fn serve(self, stop: &AtomicBool) -> Result<(), Error> {
+    fn serve(self, stop: &AtomicBool, active: &Mutex<Option<ActiveRelay>>) -> Result<(), Error> {
         while !stop.load(Ordering::Acquire) {
             match self.listener.accept() {
                 Ok((guest, _)) => {
@@ -191,7 +226,7 @@ impl AttachBridge {
                         )
                     })?;
                     match UnixStream::connect(&self.target) {
-                        Ok(daemon) => Self::relay(guest, daemon, &self.path)?,
+                        Ok(daemon) => Self::relay(guest, daemon, &self.path, stop, active)?,
                         Err(error)
                             if matches!(
                                 error.kind(),
@@ -227,7 +262,13 @@ impl AttachBridge {
         Ok(())
     }
 
-    fn relay(guest: UnixStream, daemon: UnixStream, path: &Path) -> Result<(), Error> {
+    fn relay(
+        guest: UnixStream,
+        daemon: UnixStream,
+        path: &Path,
+        stop: &AtomicBool,
+        active: &Mutex<Option<ActiveRelay>>,
+    ) -> Result<(), Error> {
         use std::net::Shutdown;
 
         let mut guest_reader = guest
@@ -246,6 +287,21 @@ impl AttachBridge {
             .map_err(|error| Error::io("clone daemon attach bridge shutdown for", path, error))?;
         let mut daemon_writer = daemon;
 
+        {
+            let mut active = active.lock().unwrap_or_else(|poison| poison.into_inner());
+            if stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            *active = Some(ActiveRelay {
+                guest: guest_shutdown.try_clone().map_err(|error| {
+                    Error::io("track guest attach bridge stream for", path, error)
+                })?,
+                daemon: daemon_shutdown.try_clone().map_err(|error| {
+                    Error::io("track daemon attach bridge stream for", path, error)
+                })?,
+            });
+        }
+
         let (done_tx, done_rx) = mpsc::sync_channel(2);
         thread::scope(|scope| {
             let guest_to_daemon = done_tx.clone();
@@ -262,6 +318,7 @@ impl AttachBridge {
             let _ = guest_shutdown.shutdown(Shutdown::Both);
             let _ = daemon_shutdown.shutdown(Shutdown::Both);
         });
+        *active.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
         Ok(())
     }
 }
@@ -403,6 +460,7 @@ impl Drop for Control {
 
 struct PublishedPid {
     pid_file: PathBuf,
+    record: HelperRecord,
 }
 
 impl PublishedPid {
@@ -433,13 +491,16 @@ impl PublishedPid {
             .map_err(|error| Error::io("sync helper record", pid_file, error))?;
         Ok(Self {
             pid_file: pid_file.to_path_buf(),
+            record,
         })
     }
 }
 
 impl Drop for PublishedPid {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.pid_file);
+        if HelperRecord::read(&self.pid_file).ok().flatten().as_ref() == Some(&self.record) {
+            let _ = std::fs::remove_file(&self.pid_file);
+        }
     }
 }
 
@@ -708,7 +769,9 @@ mod tests {
 
         let stop = Arc::new(AtomicBool::new(false));
         let bridge_stop = Arc::clone(&stop);
-        let bridge_thread = thread::spawn(move || bridge.serve(&bridge_stop));
+        let active = Arc::new(Mutex::new(None));
+        let bridge_active = Arc::clone(&active);
+        let bridge_thread = thread::spawn(move || bridge.serve(&bridge_stop, &bridge_active));
 
         let mut guest = UnixStream::connect(&bridge_path).unwrap();
         let (mut daemon, _) = target.accept().unwrap();
@@ -746,6 +809,37 @@ mod tests {
     }
 
     #[test]
+    fn attach_bridge_stop_interrupts_an_active_relay() {
+        let temp = tempfile::tempdir().unwrap();
+        let target_path = temp.path().join("daemon.sock");
+        let bridge_path = temp.path().join(ATTACH_BRIDGE_SOCKET_NAME);
+        let target = UnixListener::bind(&target_path).unwrap();
+        let bridge = AttachBridge::bind(&bridge_path, &target_path).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (_signal_reader, signal_writer) = UnixStream::pair().unwrap();
+        let bridge_thread = bridge.spawn(
+            ShutdownFd::from_raw(signal_writer.as_raw_fd()),
+            Arc::clone(&stop),
+        );
+
+        let mut guest = UnixStream::connect(&bridge_path).unwrap();
+        let (mut daemon, _) = target.accept().unwrap();
+        guest.write_all(b"active").unwrap();
+        let mut request = [0_u8; 6];
+        daemon.read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"active");
+        guest
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        bridge_thread.stop();
+        bridge_thread.join();
+
+        assert_eq!(guest.read(&mut [0_u8; 1]).unwrap(), 0);
+        assert!(!bridge_path.exists());
+    }
+
+    #[test]
     fn helper_control_proves_identity_before_shutdown() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(crate::CONTROL_SOCKET_NAME);
@@ -779,5 +873,39 @@ mod tests {
         stop.store(true, Ordering::Release);
         thread.join().unwrap().unwrap();
         drop(signal_writer);
+    }
+
+    #[test]
+    fn published_pid_drop_never_removes_a_replacement_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(crate::PID_FILE_NAME);
+        let attachment = omnifs_core::ResourceName::new("demo").unwrap();
+        let spec = omnifs_core::AttachmentSpec::new(
+            omnifs_core::AttachmentProtocol::Fuse,
+            omnifs_core::AttachmentRuntime::Libkrun,
+            omnifs_core::ATTACHMENT_GUEST_LOCATION.into(),
+            None,
+            Some("guest.raw".into()),
+        )
+        .unwrap();
+        let published = PublishedPid::publish(
+            &path,
+            &attachment,
+            &spec,
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let replacement = HelperRecord::new(
+            std::process::id(),
+            attachment,
+            spec,
+            "fedcba9876543210fedcba9876543210",
+        )
+        .unwrap();
+        std::fs::write(&path, serde_json::to_vec(&replacement).unwrap()).unwrap();
+
+        drop(published);
+
+        assert_eq!(HelperRecord::read(&path).unwrap(), Some(replacement));
     }
 }

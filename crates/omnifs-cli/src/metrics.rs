@@ -64,7 +64,7 @@ pub(crate) fn record_cli_exit(cmd: &str, exit: i32) {
     };
     // Metrics need only the profile config and profile-local metrics
     // directory. A normal CLI invocation must not prepare the retired
-    // client-owned filesystem tree as a side effect.
+    // legacy filesystem tree as a side effect.
     if !enabled(&profile) {
         return;
     }

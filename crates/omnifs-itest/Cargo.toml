@@ -27,6 +27,7 @@ time = { workspace = true, features = ["formatting"] }
 
 [dev-dependencies]
 omnifs-fuse = { workspace = true }
+omnifs-libkrun = { workspace = true }
 rusqlite = { workspace = true }
 base64 = "0.22"
 hickory-proto = "0.26"

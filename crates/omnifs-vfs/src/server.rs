@@ -114,6 +114,7 @@ struct SessionState {
     connections: BTreeMap<u64, SessionConnection>,
     entries: BTreeMap<SessionKey, SessionEntry>,
     replacements: BTreeMap<SessionKey, Session>,
+    stop_fences: BTreeMap<SessionKey, Session>,
     phase: SessionRegistryPhase,
 }
 
@@ -131,6 +132,7 @@ impl Sessions {
                 connections: BTreeMap::new(),
                 entries: BTreeMap::new(),
                 replacements: BTreeMap::new(),
+                stop_fences: BTreeMap::new(),
                 phase: SessionRegistryPhase::Running,
             }),
             changed,
@@ -152,6 +154,21 @@ impl Sessions {
         if state.phase != SessionRegistryPhase::Running {
             return Err("daemon is draining and is not accepting VFS sessions".to_owned());
         }
+        let requested = Session {
+            attachment: key.0.clone(),
+            spec: spec.clone(),
+            runtime_instance: runtime_instance.to_owned(),
+        };
+        if let Some(stopping) = state.stop_fences.get(&key) {
+            return Err(if stopping == &requested {
+                format!("attachment `{}` is stopping its exact VFS session", key.0)
+            } else {
+                format!(
+                    "attachment `{}` has a stop fence for a different exact VFS session",
+                    key.0
+                )
+            });
+        }
         if let Some(existing) = state.entries.get(&key) {
             if existing.spec != *spec {
                 return Err(format!(
@@ -166,11 +183,6 @@ impl Sessions {
                 ));
             }
         } else if let Some(approved) = state.replacements.get(&key) {
-            let requested = Session {
-                attachment: key.0.clone(),
-                spec: spec.clone(),
-                runtime_instance: runtime_instance.to_owned(),
-            };
             if approved != &requested {
                 return Err(format!(
                     "attachment `{}` has a supervisor-approved replacement for a different exact runtime identity",
@@ -272,6 +284,72 @@ impl Sessions {
             control.send_replace(true);
         }
         Ok(())
+    }
+
+    fn begin_stop(&self, expected: &Session) -> Result<(), String> {
+        let key = SessionKey(expected.attachment.clone());
+        let controls = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(stopping) = state.stop_fences.get(&key) {
+                if stopping == expected {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "attachment `{}` already has a stop fence for a different exact VFS session",
+                    expected.attachment
+                ));
+            }
+            let Some(current) = state.entries.get(&key) else {
+                return Ok(());
+            };
+            if current.spec != expected.spec
+                || current.runtime_instance != expected.runtime_instance
+            {
+                return Err(format!(
+                    "attachment `{}` changed before its exact VFS session stop began",
+                    expected.attachment
+                ));
+            }
+            state.stop_fences.insert(key.clone(), expected.clone());
+            state
+                .connections
+                .values()
+                .filter(|connection| connection.key == key)
+                .map(|connection| connection.control.clone())
+                .collect::<Vec<_>>()
+        };
+        for control in controls {
+            control.send_replace(true);
+        }
+        Ok(())
+    }
+
+    fn finish_stop(&self, expected: &Session) -> Result<(), String> {
+        let key = SessionKey(expected.attachment.clone());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(current) = state.entries.get(&key) {
+            return Err(format!(
+                "attachment `{}` still has a live VFS session for runtime instance `{}`",
+                expected.attachment, current.runtime_instance
+            ));
+        }
+        match state.stop_fences.get(&key) {
+            Some(stopping) if stopping == expected => {
+                state.stop_fences.remove(&key);
+                Ok(())
+            },
+            Some(_) => Err(format!(
+                "attachment `{}` has a stop fence for a different exact VFS session",
+                expected.attachment
+            )),
+            None => Ok(()),
+        }
     }
 
     fn snapshot(&self) -> Vec<Session> {
@@ -512,6 +590,18 @@ impl VfsServer {
         replacement: &Session,
     ) -> Result<(), String> {
         self.sessions.begin_replacement(previous, replacement)
+    }
+
+    /// Stop one exact live session and reject every reconnect for that
+    /// attachment until its runtime owner completes the stop fence.
+    pub fn begin_session_stop(&self, expected: &Session) -> Result<(), String> {
+        self.sessions.begin_stop(expected)
+    }
+
+    /// Release one exact stop fence after both the VFS session and its runtime
+    /// identity are gone.
+    pub fn finish_session_stop(&self, expected: &Session) -> Result<(), String> {
+        self.sessions.finish_stop(expected)
     }
 
     /// Stop admitting sessions and push a stop command to every live

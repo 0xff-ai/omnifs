@@ -143,11 +143,24 @@ impl HostDriver {
     /// [`Self::confirmed`] first; an identity that has already disappeared is a
     /// no-op there, not an error here.
     pub async fn stop_confirmed(&self, expected: &RunnerRecord) -> Result<()> {
-        let record = RunnerRecord::read(&self.state_dir)?
-            .context("runner record disappeared before confirmed stop")?;
+        let Some(record) = RunnerRecord::read(&self.state_dir)? else {
+            anyhow::ensure!(
+                !omnifs_nfs::mount_is_active_checked(expected.spec.location())?,
+                "runner record disappeared while its exact mount remained active"
+            );
+            return Ok(());
+        };
         ensure_identity_unchanged(Some(&record), expected, "runner")?;
         let client = RunnerControlClient::new(&record);
-        client.ping().await.context("reconfirm host filesystem")?;
+        if let Err(error) = client.ping().await.context("reconfirm host filesystem") {
+            return wait_for_cleanup(
+                &self.state_dir,
+                record.spec.location(),
+                StopOutcome::Stopped,
+            )
+            .await
+            .with_context(|| format!("{error:#}"));
+        }
         let (_, outcome) = client.stop().await?;
         wait_for_cleanup(&self.state_dir, record.spec.location(), outcome).await
     }
@@ -188,7 +201,7 @@ impl HostDriver {
 }
 
 struct PendingHostFilesystem {
-    child: Child,
+    child: Option<Child>,
     state_dir: PathBuf,
     instance_id: String,
     log_path: PathBuf,
@@ -286,7 +299,7 @@ impl PendingHostFilesystem {
             )
         })?;
         Ok(Self {
-            child,
+            child: Some(child),
             state_dir,
             instance_id,
             log_path: log_path.to_path_buf(),
@@ -321,6 +334,8 @@ impl PendingHostFilesystem {
                     if let Some(status) = wait
                         .pending
                         .child
+                        .as_mut()
+                        .context("host filesystem child identity was lost before readiness")?
                         .try_wait()
                         .context("inspect host filesystem process")?
                     {
@@ -377,8 +392,14 @@ impl PendingHostFilesystem {
                     Ok(None)
                 })
             })
-            .await?;
-        ready.map_or_else(
+            .await;
+        let child = wait
+            .pending
+            .child
+            .take()
+            .context("host filesystem child identity was lost after readiness polling")?;
+        crate::process::reap_managed_child(child);
+        ready?.map_or_else(
             || {
                 let phase = phase_label(wait.last_phase.clone());
                 Err(advise(

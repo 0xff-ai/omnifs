@@ -37,10 +37,10 @@ use tempfile::TempDir;
 /// `filesystem_matrix`'s own `DOCKER_SCRATCH` in a different container.
 const DOCKER_SCRATCH: &str = "/tmp/omnifs-matrix";
 
-/// The Docker label `fs_container.rs` stamps on every filesystem
-/// container with the workspace's config dir. Discovering containers by this
-/// label (rather than recomputing the launcher's naming hash) keeps the
-/// naming rule owned in one place.
+/// The Docker runtime stamps this label on every filesystem container with
+/// the workspace's config dir. Discovering containers by this label rather
+/// than recomputing the launcher's naming hash keeps the naming rule in one
+/// place.
 const HOME_LABEL: &str = "ai.0xff.omnifs.home";
 
 fn acceptance_gated() -> bool {
@@ -410,7 +410,7 @@ impl Fixture {
 
     /// Every filesystem container labeled for this fixture's home. Discovery by
     /// label (not by recomputing the launcher's naming hash) keeps the naming
-    /// rule owned solely by `fs_container.rs`.
+    /// rule owned solely by the Docker runtime.
     fn containers(&self) -> Vec<String> {
         let filter = format!("label={HOME_LABEL}={}", self.home_path().display());
         docker_output(&["ps", "-a", "--filter", &filter, "--format", "{{.Names}}"])
@@ -585,8 +585,8 @@ fn wait_until_serves(container: &str, timeout: Duration) {
 // (f) No-credentials structural contract
 // ===========================================================================
 
-/// The fail-closed contract `assert_locked_down`
-/// (`crates/omnifs-cli/src/fs_container.rs`) enforces at launch time,
+/// The fail-closed contract in `omnifs_fs_runtime::docker` enforces at launch
+/// time,
 /// re-checked here from the outside with plain `docker inspect`/`docker exec`:
 /// no mounts of any kind, an env set of exactly the two attach vars plus the
 /// image's own defaults, and no guest home or credentials file anywhere in the

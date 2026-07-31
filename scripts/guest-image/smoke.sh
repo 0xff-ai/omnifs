@@ -54,6 +54,7 @@ fi
   --attachment-name "smoke" \
   --runtime-instance "00000000000000000000000000000000" \
   --attach-addr "vsock:1024" \
+  --libkrun-guest-image "$image" \
   || exit 1
 
 helper_pid=""

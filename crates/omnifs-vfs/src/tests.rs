@@ -905,6 +905,74 @@ async fn supervisor_approved_replacement_fences_the_old_session() {
 }
 
 #[tokio::test]
+async fn exact_session_stop_fences_reconnect_until_runtime_cleanup_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("ns.sock");
+    let server = start_local_server(StubNamespace::new(), &socket);
+    let expected = Session {
+        attachment: test_attachment(),
+        spec: test_identity(),
+        runtime_instance: test_runtime_instance(),
+    };
+    let (teardown_tx, mut teardown_rx) = tokio::sync::mpsc::channel(1);
+    let namespace = WireNamespace::attach_with_teardown(
+        AttachTarget::Unix(socket.clone()),
+        expected.attachment.clone(),
+        expected.spec.clone(),
+        expected.runtime_instance.clone(),
+        tokio::runtime::Handle::current(),
+        teardown_tx,
+    )
+    .await
+    .unwrap();
+    assert!(
+        server
+            .wait_for_session(&expected, Duration::from_secs(1))
+            .await
+    );
+
+    server.begin_session_stop(&expected).unwrap();
+    let request = tokio::time::timeout(Duration::from_secs(1), teardown_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.reason(), crate::TeardownReason::ServerStop);
+    let rejected = WireNamespace::attach(
+        AttachTarget::Unix(socket.clone()),
+        expected.attachment.clone(),
+        expected.spec.clone(),
+        expected.runtime_instance.clone(),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .err()
+    .expect("an exact stop fence must reject reconnects");
+    assert!(matches!(rejected, WireError::Rejected(_)));
+
+    request.complete(crate::TeardownOutcome::Stopped);
+    assert!(
+        server
+            .drain_sessions(Duration::from_secs(1))
+            .await
+            .is_empty()
+    );
+    server.finish_session_stop(&expected).unwrap();
+    let replacement = WireNamespace::attach(
+        AttachTarget::Unix(socket),
+        expected.attachment.clone(),
+        expected.spec.clone(),
+        expected.runtime_instance.clone(),
+        tokio::runtime::Handle::current(),
+    )
+    .await
+    .expect("runtime cleanup releases the exact stop fence");
+
+    drop(replacement);
+    drop(namespace);
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn server_stop_reaches_client_and_drain_waits_for_detach() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("ns.sock");

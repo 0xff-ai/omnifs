@@ -52,7 +52,6 @@ use omnifs_libkrun::{
 use tokio::io::AsyncReadExt as _;
 
 use crate::driver::ensure_identity_unchanged;
-#[cfg(test)]
 use crate::process::is_alive as process_alive;
 use crate::{
     BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, LaunchRequest, RuntimeAdvice, RuntimeEvent,
@@ -72,6 +71,11 @@ const LAUNCH_READY_TIMEOUT: Duration = Duration::from_secs(90);
 const HELPER_RECORD_TIMEOUT: Duration = Duration::from_secs(5);
 /// Poll interval shared by every short deadline-poll loop in this module.
 const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// A VFS disconnect can wake reconciliation just before the direct-child
+/// reaper observes an abrupt helper exit. Give only that exact exit race time
+/// to settle before classifying an unreachable live helper as an identity
+/// conflict.
+const HELPER_CONTROL_EXIT_GRACE: Duration = Duration::from_secs(1);
 /// How long teardown waits for a directly-owned child (still attached to
 /// this process) to exit on its own before escalating to `kill`.
 const CHILD_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -180,8 +184,9 @@ pub fn ensure_socat_available() -> Result<()> {
     }
 }
 
-/// The libkrun microVM filesystem runner. Durable client state and explicit
-/// teardown live here; one launch's resources live in [`LibkrunLaunchLease`].
+/// The libkrun microVM filesystem runner. Daemon-owned runtime state and
+/// explicit teardown live here; one launch's resources live in
+/// [`LibkrunLaunchLease`].
 pub struct LibkrunRunner {
     dir: PathBuf,
 }
@@ -565,6 +570,11 @@ impl<'a> LibkrunLaunchLease<'a> {
     ) -> Result<()> {
         match self.run_to_publish(attached, events).await {
             Ok(()) => {
+                let child = self
+                    .child
+                    .take()
+                    .context("libkrun child identity was lost after readiness publication")?;
+                crate::process::reap_managed_child(child);
                 if let (Some(attachment), Some(spec)) = (&self.attachment, &self.spec) {
                     events.emit(RuntimeEvent::MountReady {
                         runtime: AttachmentRuntime::Libkrun,
@@ -681,9 +691,9 @@ impl<'a> LibkrunLaunchLease<'a> {
             crate::process::LogMode::TruncateRestricted0600,
         )?;
 
-        // Detached: the VM outlives this CLI invocation. The lease retains
-        // the pid until readiness publishes, while explicit teardown later
-        // rediscovers it from the durable helper record.
+        // The lease owns the child through readiness. Successful publication
+        // hands it to the daemon reaper, while explicit teardown later
+        // rediscovers the exact runtime through the durable helper record.
         self.child = Some(command.spawn().with_context(|| {
             format!(
                 "spawn packaged libkrun helper {}",
@@ -881,10 +891,17 @@ impl<'a> LibkrunLaunchLease<'a> {
             ensure_identity_unchanged(record.as_ref(), expected, "libkrun helper")?;
         }
         if let Some(expected) = record.as_ref() {
-            self.runner.confirm_record(expected)?;
-            ControlSocket::new(self.runner.control_socket())?
-                .request_shutdown(expected)
-                .context("request identity-matched libkrun shutdown")?;
+            if process_alive(expected.pid) {
+                self.runner.confirm_record(expected)?;
+                if let Err(error) = ControlSocket::new(self.runner.control_socket())?
+                    .request_shutdown(expected)
+                    .context("request identity-matched libkrun shutdown")
+                {
+                    if process_alive(expected.pid) {
+                        return Err(error);
+                    }
+                }
+            }
         } else if self.child.is_none() {
             // With no helper identity there is no safe detached action. Do
             // not unlink sockets or disks that a racing helper may own.
@@ -952,7 +969,17 @@ impl<'a> LibkrunLaunchLease<'a> {
                         "libkrun helper identity changed while waiting for shutdown; recovery artifacts were preserved"
                     );
                 },
-                Some(_) => Ok(None),
+                Some(_) if process_alive(expected.pid) => Ok(None),
+                Some(_) => {
+                    match std::fs::remove_file(self.runner.pidfile()) {
+                        Ok(()) => {},
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                        Err(error) => {
+                            return Err(error).context("remove exited libkrun helper record");
+                        },
+                    }
+                    Ok(Some(()))
+                },
             }
         })
         .await?
@@ -1018,11 +1045,11 @@ impl LibkrunRunner {
 
     /// Prove a live, identity-matched helper, matching the host and Docker
     /// drivers' `confirmed`.
-    pub fn confirmed(
+    pub async fn confirmed(
         &self,
         attachment: &ResourceName,
         spec: &AttachmentSpec,
-    ) -> Result<Option<HelperRecord>> {
+    ) -> Result<Option<(HelperRecord, bool)>> {
         let Some(record) = self.read_helper_record()? else {
             anyhow::ensure!(
                 !self.has_operational_state(),
@@ -1035,8 +1062,21 @@ impl LibkrunRunner {
             record.attachment == *attachment && record.spec == *spec,
             "libkrun helper record does not match configured Attachment `{attachment}`"
         );
-        self.confirm_record(&record)?;
-        Ok(Some(record))
+        let mut running = process_alive(record.pid);
+        if running && let Err(error) = self.confirm_record(&record) {
+            let exited = crate::process::poll_until(
+                HELPER_CONTROL_EXIT_GRACE,
+                HELPER_POLL_INTERVAL,
+                || async { Ok((!process_alive(record.pid)).then_some(())) },
+            )
+            .await?
+            .is_some();
+            if !exited {
+                return Err(error);
+            }
+            running = false;
+        }
+        Ok(Some((record, running)))
     }
 
     /// The one teardown entry point for a proven identity, matching the host
@@ -1195,6 +1235,80 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(image, custom);
+    }
+
+    #[tokio::test]
+    async fn exited_detached_helper_record_is_confirmed_stopped_and_cleaned() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("libkrun");
+        std::fs::create_dir_all(&dir).unwrap();
+        let attachment = ResourceName::new("demo").unwrap();
+        let spec = AttachmentSpec::new(
+            omnifs_core::AttachmentProtocol::Fuse,
+            AttachmentRuntime::Libkrun,
+            ATTACHMENT_GUEST_LOCATION.into(),
+            None,
+            Some("guest.raw".into()),
+        )
+        .unwrap();
+        let record = HelperRecord::new(
+            u32::MAX,
+            attachment.clone(),
+            spec.clone(),
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(PID_FILE_NAME),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        let runner = LibkrunRunner::new(dir.clone());
+
+        let (confirmed, running) = runner.confirmed(&attachment, &spec).await.unwrap().unwrap();
+        assert_eq!(confirmed, record);
+        assert!(!running);
+        runner.stop_confirmed(confirmed).await.unwrap();
+        assert!(!dir.join(PID_FILE_NAME).exists());
+    }
+
+    #[tokio::test]
+    async fn abrupt_managed_helper_exit_is_stopped_not_an_identity_conflict() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("libkrun");
+        std::fs::create_dir_all(&dir).unwrap();
+        let attachment = ResourceName::new("main").unwrap();
+        let spec = AttachmentSpec::new(
+            omnifs_core::AttachmentProtocol::Fuse,
+            AttachmentRuntime::Libkrun,
+            ATTACHMENT_GUEST_LOCATION.into(),
+            None,
+            Some("guest.raw".into()),
+        )
+        .unwrap();
+        let child = std::process::Command::new("sleep")
+            .arg("0.1")
+            .spawn()
+            .unwrap();
+        let record = HelperRecord::new(
+            child.id(),
+            attachment.clone(),
+            spec.clone(),
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(PID_FILE_NAME),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        crate::process::reap_managed_child(child);
+        let runner = LibkrunRunner::new(dir);
+
+        let (confirmed, running) = runner.confirmed(&attachment, &spec).await.unwrap().unwrap();
+
+        assert_eq!(confirmed, record);
+        assert!(!running);
     }
 
     #[tokio::test]

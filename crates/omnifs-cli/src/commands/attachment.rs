@@ -558,35 +558,7 @@ pub(crate) fn platform_default() -> Option<(AttachmentProtocol, AttachmentRuntim
 }
 
 pub(crate) fn supports(protocol: AttachmentProtocol, runtime: AttachmentRuntime) -> bool {
-    matches!(
-        (
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            protocol,
-            runtime
-        ),
-        (
-            "linux",
-            _,
-            AttachmentProtocol::Fuse,
-            AttachmentRuntime::Host | AttachmentRuntime::Docker
-        ) | (
-            "linux" | "macos",
-            _,
-            AttachmentProtocol::Nfs,
-            AttachmentRuntime::Host
-        ) | (
-            "macos",
-            _,
-            AttachmentProtocol::Fuse,
-            AttachmentRuntime::Docker
-        ) | (
-            "macos",
-            "aarch64",
-            AttachmentProtocol::Fuse,
-            AttachmentRuntime::Libkrun
-        )
-    )
+    omnifs_core::attachment_pair_supported_on_current_host(protocol, runtime)
 }
 
 fn available_pairs() -> Vec<AttachmentPair> {

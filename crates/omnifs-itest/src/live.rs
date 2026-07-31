@@ -171,7 +171,7 @@ pub fn thin_runner_bin() -> PathBuf {
 /// Product lifecycle uses hidden `omnifs run-fs`; a few protocol conformance
 /// lanes spawn the slim binary to isolate the wire boundary. Their operational
 /// records still live under daemon state so these tests cannot recreate the
-/// retired client-owned filesystem tree.
+/// retired legacy client filesystem tree.
 pub fn thin_host_runner_command(
     id: &str,
     protocol: &str,

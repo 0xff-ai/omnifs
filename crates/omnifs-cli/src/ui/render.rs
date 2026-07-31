@@ -238,7 +238,7 @@ pub(crate) fn sentence(text: &str, caps: Capabilities) -> String {
         .join("\n")
 }
 
-/// A bold section heading word (`Filesystems`, `Mounts`). Plain bold, not the
+/// A bold section heading word (`Attachments`, `Mounts`). Plain bold, not the
 /// blue heading role: this uses plain bold for report sections.
 pub(crate) fn heading(text: &str, caps: Capabilities) -> String {
     style::bold(text, caps.color)
@@ -551,10 +551,10 @@ mod tests {
     #[test]
     fn heading_is_bold_only_when_color_is_on() {
         assert_eq!(
-            heading("Filesystems", caps(120, true)),
-            style::bold("Filesystems", true)
+            heading("Attachments", caps(120, true)),
+            style::bold("Attachments", true)
         );
-        assert_eq!(heading("Filesystems", caps(120, false)), "Filesystems");
+        assert_eq!(heading("Attachments", caps(120, false)), "Attachments");
     }
 
     #[test]

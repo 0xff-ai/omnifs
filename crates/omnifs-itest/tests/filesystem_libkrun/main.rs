@@ -131,8 +131,8 @@ fn command_reachable(program: &str, probe_args: &[&str]) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Resolve the guest image the same way `libkrun_runner::resolve_guest_image`
-/// does for its default case: an explicit `OMNIFS_GUEST_IMAGE` override, else
+/// Resolve the guest image the same way the libkrun runtime driver does for
+/// its default case: an explicit `OMNIFS_GUEST_IMAGE` override, else
 /// `just guest-image`'s default output path resolved against the workspace
 /// root (not the current working directory: a test binary's cwd is its own
 /// crate directory, not the workspace root the CLI assumes when run from a
@@ -236,11 +236,12 @@ impl Fixture {
         }
     }
 
-    /// The libkrun guest's own pid, read from its pidfile if present.
+    /// The libkrun guest's own PID, read from its strict helper record.
     fn libkrun_pid(&self) -> Option<u32> {
-        std::fs::read_to_string(self.libkrun_dir().join("libkrun.pid"))
+        omnifs_libkrun::HelperRecord::read(&self.libkrun_dir().join("libkrun.pid"))
             .ok()
-            .and_then(|contents| contents.trim().parse().ok())
+            .flatten()
+            .map(|record| record.pid)
     }
 
     /// Run a CLI subcommand with the hermetic env, including the guest image
@@ -261,16 +262,29 @@ impl Fixture {
     }
 
     fn wait_for_libkrun_attachment(&self) {
+        self.wait_for_libkrun_attachment_after(None);
+    }
+
+    fn wait_for_replaced_libkrun_attachment(&self, previous_pid: u32) {
+        self.wait_for_libkrun_attachment_after(Some(previous_pid));
+    }
+
+    fn wait_for_libkrun_attachment_after(&self, previous_pid: Option<u32>) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let status = self.filesystem_status();
             let text = String::from_utf8_lossy(&status.stdout);
-            if libkrun_is_ready(&text) {
+            let current_pid = self.libkrun_pid();
+            let replaced = previous_pid
+                .is_none_or(|previous| current_pid.is_some_and(|current| current != previous));
+            if replaced && libkrun_is_ready(&text) {
                 return;
             }
             assert!(
                 Instant::now() < deadline,
-                "libkrun filesystem did not reconnect within 30s\nstdout: {text}\nstderr: {}",
+                "libkrun filesystem did not reconnect with a new exact runtime within 30s\
+                 \nprevious pid: {previous_pid:?}\ncurrent pid: {current_pid:?}\
+                 \nstdout: {text}\nstderr: {}",
                 String::from_utf8_lossy(&status.stderr)
             );
             std::thread::sleep(Duration::from_millis(100));
@@ -414,6 +428,24 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            let status = self.run(&["status", "--output", "json"]);
+            eprintln!(
+                "--- libkrun failure status ---\nstdout: {}\nstderr: {}\n---",
+                String::from_utf8_lossy(&status.stdout),
+                String::from_utf8_lossy(&status.stderr)
+            );
+            for path in [
+                self.home_path().join("daemon-state/logs/daemon.log"),
+                self.libkrun_dir().join("libkrun.pid"),
+                self.libkrun_dir().join("helper.log"),
+                self.libkrun_dir().join("serial.log"),
+            ] {
+                if let Ok(contents) = std::fs::read_to_string(&path) {
+                    eprintln!("--- {} ---\n{contents}\n---", path.display());
+                }
+            }
+        }
         if let Some(pid) = self.libkrun_pid() {
             let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
         }
@@ -643,8 +675,8 @@ fn libkrun_lifecycle_and_matrix() {
     assert_serves(&fixture);
     assert_guest_lockdown(&fixture);
 
-    // Daemon replacement does not own runner lifetime. The live guest keeps
-    // running, then reconnects through the restored vsock target.
+    // Daemon shutdown stops daemon-owned runtimes but preserves their desired
+    // Attachment rows. The replacement daemon launches a fresh guest.
     let old_daemon_pid = fixture.daemon_pid().expect("live daemon pid");
     let stopped = fixture.down();
     assert!(
@@ -676,7 +708,7 @@ fn libkrun_lifecycle_and_matrix() {
     // The daemon supervisor owns restart after an unexpected runtime exit.
     // Wait for its typed status to return to ready before issuing the
     // idempotent transition-era attach command.
-    fixture.wait_for_libkrun_attachment();
+    fixture.wait_for_replaced_libkrun_attachment(killed_pid);
     let recovered = fixture.filesystem_attach();
     fixture.assert_filesystem_attach_ok(&recovered, "recovery after abrupt helper exit");
     assert_ne!(fixture.libkrun_pid(), Some(killed_pid));

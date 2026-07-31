@@ -97,7 +97,7 @@ enum Section {
     Environment,
     Profile,
     Mounts,
-    Filesystems,
+    Attachments,
 }
 
 /// Which specific check a finding reports. A closed enum sitting next to
@@ -548,7 +548,7 @@ fn build_rows(findings: &[Finding]) -> (Vec<Row>, Vec<Row>, Vec<Row>, Vec<Row>) 
             Section::Environment => environment.push(Row::from(finding)),
             Section::Profile => profile.push(Row::from(finding)),
             Section::Mounts => mounts.push(Row::from(finding)),
-            Section::Filesystems => filesystems.push(Row::from(finding)),
+            Section::Attachments => filesystems.push(Row::from(finding)),
         }
     }
     (environment, profile, mounts, filesystems)
@@ -677,7 +677,7 @@ fn render_report(
         ("Environment", &environment),
         ("Profile", &profile),
         ("Mounts", &mounts),
-        ("Filesystems", &filesystems),
+        ("Attachments", &filesystems),
         ("Daemon", &daemon),
     ] {
         out.push_str(&render_group(name, rows, caps));
@@ -834,7 +834,7 @@ impl Doctor {
         Ok(verdict)
     }
 
-    /// Collect a fresh `Doctor` over the same client state and re-diagnose,
+    /// Collect a fresh `Doctor` over the same profile state and re-diagnose,
     /// after a repair pass may have changed what the checklist would find.
     async fn rediagnose_after_repairs(&self) -> anyhow::Result<DoctorResult> {
         let fresh = Doctor {
@@ -922,7 +922,7 @@ impl Doctor {
 
     fn attached(&self, name: &ResourceName, spec: &omnifs_core::AttachmentSpec) -> bool {
         self.inventory
-            .filesystems
+            .attachments
             .iter()
             .any(|filesystem| filesystem.name == *name && filesystem.spec == *spec)
     }
@@ -947,7 +947,7 @@ impl Doctor {
             Ok(paths) => paths,
             Err(error) => {
                 findings.push(Finding::from_probe(
-                    Section::Filesystems,
+                    Section::Attachments,
                     Check::FilesystemState,
                     None,
                     ProbeResult::Err(format!("{error:#}")),
@@ -974,7 +974,7 @@ impl Doctor {
             match candidate {
                 Candidate::ListingFailed { backend, error } => {
                     findings.push(Finding::from_probe(
-                        Section::Filesystems,
+                        Section::Attachments,
                         ownership_check_for(backend),
                         None,
                         ProbeResult::Err(error),
@@ -986,7 +986,7 @@ impl Doctor {
                     error,
                 } => {
                     findings.push(Finding::from_probe(
-                        Section::Filesystems,
+                        Section::Attachments,
                         ownership_check_for(backend),
                         target,
                         ProbeResult::Err(error),
@@ -1005,7 +1005,7 @@ impl Doctor {
                 ) {
                     Ok(finding) => findings.extend(finding),
                     Err(error) => findings.push(Finding::from_probe(
-                        Section::Filesystems,
+                        Section::Attachments,
                         Check::FilesystemState,
                         None,
                         ProbeResult::Err(format!("{error:#}")),
@@ -1065,7 +1065,7 @@ impl Doctor {
                     },
                 );
                 Ok(Some(Finding {
-                    section: Section::Filesystems,
+                    section: Section::Attachments,
                     check: Check::StrayFilesystem,
                     target,
                     severity: Severity::Attention,
@@ -1085,7 +1085,7 @@ impl Doctor {
                         record,
                     });
                 Ok(Some(Finding {
-                    section: Section::Filesystems,
+                    section: Section::Attachments,
                     check: Check::StaleFilesystemState,
                     target,
                     severity: if mount_active || is_attached {
@@ -1118,7 +1118,7 @@ impl Doctor {
         daemon_health: DaemonHealth,
     ) -> Vec<Finding> {
         vec![Finding {
-            section: Section::Filesystems,
+            section: Section::Attachments,
             check: Check::DockerFilesystemOwnership,
             target: Some(owned.filesystem_id),
             severity: Severity::Attention,
@@ -1146,7 +1146,7 @@ impl Doctor {
         match confirmed {
             Ok(Some(record)) if record.attachment != *id => {
                 vec![Finding::from_probe(
-                    Section::Filesystems,
+                    Section::Attachments,
                     Check::LibkrunFilesystemOwnership,
                     Some(id.to_string()),
                     ProbeResult::Err(format!(
@@ -1162,7 +1162,7 @@ impl Doctor {
                 let remediation = (daemon_health == DaemonHealth::Stopped)
                     .then_some(Remediation::StopLibkrunFilesystem { state_dir, record });
                 vec![Finding {
-                    section: Section::Filesystems,
+                    section: Section::Attachments,
                     check: Check::StrayFilesystem,
                     target: Some(id.to_string()),
                     severity: Severity::Attention,
@@ -1175,7 +1175,7 @@ impl Doctor {
             },
             Ok(None) => Vec::new(),
             Err(error) => vec![Finding::from_probe(
-                Section::Filesystems,
+                Section::Attachments,
                 Check::LibkrunFilesystemOwnership,
                 Some(id.to_string()),
                 ProbeResult::Err(error),
@@ -1392,7 +1392,7 @@ mod golden {
         assert!(rendered.contains("Environment"), "{rendered}");
         assert!(rendered.contains("Profile"), "{rendered}");
         assert!(rendered.contains("Mounts"), "{rendered}");
-        assert!(rendered.contains("Filesystems"), "{rendered}");
+        assert!(rendered.contains("Attachments"), "{rendered}");
         assert!(rendered.contains("Daemon"), "{rendered}");
         assert!(
             rendered.trim_end().ends_with("Everything checks out."),

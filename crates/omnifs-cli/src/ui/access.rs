@@ -25,19 +25,19 @@ impl From<&NextAction> for ActionLine {
                 label: "Sign in",
                 command: format!("omnifs mount reauth {mount}"),
             },
-            NextAction::AttachFilesystem { id: _ } => Self {
-                label: "Mount files",
-                command: "omnifs attachment add".to_owned(),
+            NextAction::WaitForAttachment { id: _ } => Self {
+                label: "Follow",
+                command: "omnifs status --follow".to_owned(),
             },
-            NextAction::CreateFilesystem => Self {
-                label: "Create a filesystem",
+            NextAction::CreateAttachment => Self {
+                label: "Create an Attachment",
                 command: "omnifs attachment add".to_owned(),
             },
             NextAction::Browse { path } => Self {
                 label: "Browse",
                 command: format!("ls {}", path.display()),
             },
-            NextAction::EnterFilesystem { id } => Self {
+            NextAction::EnterAttachment { id } => Self {
                 label: "Enter",
                 command: format!("omnifs attachment shell {id}"),
             },
@@ -48,7 +48,9 @@ impl From<&NextAction> for ActionLine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inventory::{AuthState, FilesystemState, FilesystemStatus, ServingState};
+    use crate::inventory::{
+        AttachmentAccessState, AttachmentAccessStatus, AuthState, ServingState,
+    };
     use crate::inventory::{DaemonHealth, Inventory, MountStatus, ProviderPin, ProviderPinState};
     use omnifs_core::{AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceName};
     use std::path::{Path, PathBuf};
@@ -69,17 +71,17 @@ mod tests {
         }
     }
 
-    fn filesystem(
+    fn attachment(
         runtime: AttachmentRuntime,
         location: &str,
-        state: FilesystemState,
-    ) -> FilesystemStatus {
+        state: AttachmentAccessState,
+    ) -> AttachmentAccessStatus {
         let protocol = if runtime == AttachmentRuntime::Host && cfg!(target_os = "macos") {
             AttachmentProtocol::Nfs
         } else {
             AttachmentProtocol::Fuse
         };
-        FilesystemStatus {
+        AttachmentAccessStatus {
             name: ResourceName::new(format!("attachment-{runtime}")).unwrap(),
             spec: AttachmentSpec::new(protocol, runtime, PathBuf::from(location), None, None)
                 .unwrap(),
@@ -94,15 +96,15 @@ mod tests {
         let inventory = Inventory::test(
             DaemonHealth::Running,
             vec![
-                filesystem(
+                attachment(
                     AttachmentRuntime::Libkrun,
                     "/omnifs",
-                    FilesystemState::Attached,
+                    AttachmentAccessState::Attached,
                 ),
-                filesystem(
+                attachment(
                     AttachmentRuntime::Host,
                     "/mnt/omnifs-test-home/omnifs",
-                    FilesystemState::Attached,
+                    AttachmentAccessState::Attached,
                 ),
             ],
             vec![mount("github")],
@@ -116,11 +118,11 @@ mod tests {
     #[test]
     fn typed_actions_render_one_pasteable_command() {
         assert_eq!(
-            ActionLine::from(&NextAction::CreateFilesystem).render(),
-            "Create a filesystem:  `omnifs attachment add`"
+            ActionLine::from(&NextAction::CreateAttachment).render(),
+            "Create an Attachment:  `omnifs attachment add`"
         );
         assert_eq!(
-            ActionLine::from(&NextAction::EnterFilesystem {
+            ActionLine::from(&NextAction::EnterAttachment {
                 id: "guest".parse().unwrap()
             })
             .render(),
@@ -129,13 +131,13 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_filesystem_is_not_treated_as_observed_access() {
+    fn a_failed_attachment_is_not_treated_as_observed_access() {
         let inventory = Inventory::test(
             DaemonHealth::Running,
-            vec![filesystem(
+            vec![attachment(
                 AttachmentRuntime::Host,
                 "/mnt",
-                FilesystemState::Failed,
+                AttachmentAccessState::Failed,
             )],
             vec![mount("github")],
         );

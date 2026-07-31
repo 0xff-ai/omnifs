@@ -6,6 +6,7 @@ use std::process::Command;
 use anyhow::{Context as _, Result, ensure};
 use omnifs_core::{
     ATTACHMENT_GUEST_LOCATION, AttachmentProtocol, AttachmentRuntime, AttachmentSpec, ResourceName,
+    attachment_pair_supported_on_current_host,
 };
 
 use crate::docker::{DockerClient, DockerContainerIdentity, OwnedFilesystemContainer};
@@ -243,7 +244,7 @@ pub enum ConfirmedRuntime {
         omnifs_thin::host_control::RunnerPhase,
     ),
     Docker(DockerContainerIdentity, bool),
-    Libkrun(omnifs_libkrun::HelperRecord),
+    Libkrun(omnifs_libkrun::HelperRecord, bool),
 }
 
 impl ConfirmedRuntime {
@@ -252,7 +253,7 @@ impl ConfirmedRuntime {
         match self {
             Self::Host(record, _) => &record.instance_id,
             Self::Docker(identity, _) => &identity.runtime_instance,
-            Self::Libkrun(record) => &record.instance_id,
+            Self::Libkrun(record, _) => &record.instance_id,
         }
     }
 
@@ -264,8 +265,8 @@ impl ConfirmedRuntime {
     #[must_use]
     pub const fn is_running(&self) -> bool {
         match self {
-            Self::Host(_, _) | Self::Libkrun(_) => true,
-            Self::Docker(_, running) => *running,
+            Self::Host(_, _) => true,
+            Self::Docker(_, running) | Self::Libkrun(_, running) => *running,
         }
     }
 }
@@ -278,6 +279,12 @@ impl RuntimeDriver {
         spec: AttachmentSpec,
         events: RuntimeEventSink,
     ) -> Result<Self> {
+        ensure!(
+            attachment_pair_supported_on_current_host(spec.protocol(), spec.runtime()),
+            "{}/{} is not supported on this daemon host",
+            spec.protocol(),
+            spec.runtime()
+        );
         let runtime_paths = paths.attachment(&attachment);
         let backend = match spec.runtime() {
             AttachmentRuntime::Host => Backend::Host(HostDriver::new_with_control_socket(
@@ -341,47 +348,47 @@ impl RuntimeDriver {
         &self,
         runtime_instance: &str,
     ) -> std::result::Result<Option<ConfirmedRuntime>, RuntimeError> {
-        let result =
-            match &self.backend {
-                Backend::Host(runner) => runner
-                    .confirmed(&self.attachment, &self.spec)
-                    .await
-                    .and_then(|value| {
-                        value
-                            .map(|(record, phase)| {
-                                ensure!(
-                                    record.instance_id == runtime_instance,
-                                    "host runtime instance changed before exact confirmation"
-                                );
-                                Ok(ConfirmedRuntime::Host(record, phase))
-                            })
-                            .transpose()
-                    }),
-                Backend::Docker(client) => client
-                    .confirmed(
-                        self.paths.profile_root(),
-                        &self.attachment,
-                        &self.spec,
-                        runtime_instance,
-                    )
-                    .await
-                    .map(|value| {
-                        value.map(|(identity, running)| ConfirmedRuntime::Docker(identity, running))
-                    }),
-                Backend::Libkrun(runner) => runner
-                    .confirmed(&self.attachment, &self.spec)
-                    .and_then(|record| {
-                        record
-                            .map(|record| {
-                                ensure!(
-                                    record.instance_id == runtime_instance,
-                                    "libkrun runtime instance changed before exact confirmation"
-                                );
-                                Ok(ConfirmedRuntime::Libkrun(record))
-                            })
-                            .transpose()
-                    }),
-            };
+        let result = match &self.backend {
+            Backend::Host(runner) => runner
+                .confirmed(&self.attachment, &self.spec)
+                .await
+                .and_then(|value| {
+                    value
+                        .map(|(record, phase)| {
+                            ensure!(
+                                record.instance_id == runtime_instance,
+                                "host runtime instance changed before exact confirmation"
+                            );
+                            Ok(ConfirmedRuntime::Host(record, phase))
+                        })
+                        .transpose()
+                }),
+            Backend::Docker(client) => client
+                .confirmed(
+                    self.paths.profile_root(),
+                    &self.attachment,
+                    &self.spec,
+                    runtime_instance,
+                )
+                .await
+                .map(|value| {
+                    value.map(|(identity, running)| ConfirmedRuntime::Docker(identity, running))
+                }),
+            Backend::Libkrun(runner) => runner
+                .confirmed(&self.attachment, &self.spec)
+                .await
+                .and_then(|record| {
+                    record
+                        .map(|(record, running)| {
+                            ensure!(
+                                record.instance_id == runtime_instance,
+                                "libkrun runtime instance changed before exact confirmation"
+                            );
+                            Ok(ConfirmedRuntime::Libkrun(record, running))
+                        })
+                        .transpose()
+                }),
+        };
         result.map_err(|source| {
             let error = RuntimeError::new(RuntimeStage::Probe, source);
             self.events.emit(RuntimeEvent::Failed {
@@ -418,7 +425,7 @@ impl RuntimeDriver {
                     )
                     .await
             },
-            (Backend::Libkrun(runner), ConfirmedRuntime::Libkrun(record)) => {
+            (Backend::Libkrun(runner), ConfirmedRuntime::Libkrun(record, _)) => {
                 runner.stop_confirmed(record).await
             },
             _ => Err(anyhow::anyhow!(

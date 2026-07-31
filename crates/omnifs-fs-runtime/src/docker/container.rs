@@ -47,9 +47,10 @@ pub(crate) const fn default_filesystem_image_for(channel: BuildChannel) -> &'sta
 }
 
 /// Resolve the filesystem image through the flag > env > config > default
-/// precedence chain (CLI flag, environment, client config, then default), gated on the
-/// build channel: a release binary defaults to the pinned registry tag, a dev
-/// binary defaults to the local `omnifs-filesystem:dev` tag and never pulls.
+/// precedence chain (explicit value, environment, profile config, then
+/// default), gated on the build channel: a release binary defaults to the
+/// pinned registry tag, while a dev binary defaults to the local
+/// `omnifs-filesystem:dev` tag and never pulls.
 pub fn resolve_filesystem_image(
     image: Option<String>,
     configured: Option<&str>,
@@ -102,7 +103,7 @@ fn hash8(path: &Path) -> String {
 impl DockerTarget {
     /// Build the credential-free filesystem container body: no binds,
     /// `OMNIFS_HOME`, Docker socket, SSH agent, or published ports. Only the
-    /// attach address is injected as env; the resolved filesystem spec is
+    /// attach address is injected as env; the resolved Attachment spec is
     /// passed as flat argv.
     pub(crate) fn build_filesystem_container_body(
         &self,

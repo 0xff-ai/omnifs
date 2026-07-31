@@ -51,7 +51,7 @@ fn resource_help_exposes_only_the_final_public_grammar() {
     }
     assert!(
         !top_help.contains("\n  fs "),
-        "public fs command remains: {top_help}"
+        "retired command remains public: {top_help}"
     );
 
     for (group, expected) in [

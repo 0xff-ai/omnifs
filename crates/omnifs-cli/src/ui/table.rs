@@ -526,7 +526,7 @@ mod tests {
             Column::new("Details", Priority::Detail, WidthPolicy::Auto),
         ];
         let action = Action::fix("omnifs mount reauth github");
-        let mut table = ResourceTable::new("Filesystems", "2 configured", columns);
+        let mut table = ResourceTable::new("Attachments", "2 configured", columns);
         table.push(
             ResourceRow::new(
                 [
@@ -562,7 +562,7 @@ mod tests {
             width: 120,
             color: false,
         });
-        assert!(output.starts_with("Filesystems  2 configured\n"));
+        assert!(output.starts_with("Attachments  2 configured\n"));
         assert!(output.contains("Name"));
         assert!(output.contains("Location"));
         assert!(!output.contains('│'));

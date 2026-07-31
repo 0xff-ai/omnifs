@@ -13,9 +13,9 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 // The daemon may spend ten seconds draining the final serving generation
-// after it acknowledges Shutdown, then still has to join the mutation manager
-// and close durable state. This deadline covers that bounded teardown without
-// reporting a healthy in-progress shutdown as failed.
+// after it acknowledges Shutdown, then still has to stop Attachment
+// supervisors and close durable state. This deadline covers that bounded
+// teardown without reporting a healthy in-progress shutdown as failed.
 const SHUTDOWN_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -62,7 +62,7 @@ impl TeardownOutcome {
                 detached,
                 still_attached,
             } => {
-                let mut value = format!("stopped (pid {pid}, detached {detached} filesystems)");
+                let mut value = format!("stopped (pid {pid}, stopped {detached} Attachments)");
                 if !still_attached.is_empty() {
                     let _ = write!(
                         value,
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].key, "daemon");
         assert_eq!(rows[0].glyph, Glyph::Done);
-        assert_eq!(rows[0].value, "stopped (pid 31114, detached 2 filesystems)");
+        assert_eq!(rows[0].value, "stopped (pid 31114, stopped 2 Attachments)");
     }
 
     /// The "nothing running" branch: `Nothing to stop. The daemon

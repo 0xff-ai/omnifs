@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -91,7 +91,6 @@ pub(crate) fn configure_detached_child(
     Ok(())
 }
 
-#[cfg(test)]
 pub(crate) fn is_alive(pid: u32) -> bool {
     Command::new("kill")
         .arg("-0")
@@ -100,4 +99,42 @@ pub(crate) fn is_alive(pid: u32) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+/// Keep ownership of a launched runtime process until the kernel reports its
+/// exit, then reap it. Dropping `Child` after readiness would leave an exited
+/// daemon child as a zombie until the daemon itself exits.
+pub(crate) fn reap_managed_child(mut child: Child) {
+    tokio::spawn(async move {
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn managed_child_is_reaped_after_exit() {
+        let child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        reap_managed_child(child);
+
+        assert!(
+            poll_until(
+                Duration::from_secs(2),
+                Duration::from_millis(20),
+                || async { Ok((!is_alive(pid)).then_some(())) },
+            )
+            .await
+            .unwrap()
+            .is_some(),
+            "managed child {pid} remained visible after exit"
+        );
+    }
 }

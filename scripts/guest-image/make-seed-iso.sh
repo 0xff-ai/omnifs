@@ -8,6 +8,7 @@
 # regenerates it fresh every time.
 #
 # Usage: make-seed-iso.sh --out PATH --attachment-name NAME --runtime-instance ID --attach-addr HOST:PORT
+#   --libkrun-guest-image REF
 #   [--ready-vsock-port PORT] [--ssh-pubkey KEY]
 set -euo pipefail
 
@@ -17,6 +18,7 @@ out=""
 attach_addr=""
 attachment_name=""
 runtime_instance=""
+libkrun_guest_image=""
 ready_vsock_port="0"
 ssh_pubkey=""
 
@@ -38,6 +40,10 @@ while [[ $# -gt 0 ]]; do
       runtime_instance="$2"
       shift 2
       ;;
+    --libkrun-guest-image)
+      libkrun_guest_image="$2"
+      shift 2
+      ;;
     --ready-vsock-port)
       ready_vsock_port="$2"
       shift 2
@@ -57,6 +63,7 @@ done
 : "${attachment_name:?--attachment-name NAME is required}"
 : "${runtime_instance:?--runtime-instance ID is required}"
 : "${attach_addr:?--attach-addr HOST:PORT is required}"
+: "${libkrun_guest_image:?--libkrun-guest-image REF is required}"
 
 if [[ ! "$runtime_instance" =~ ^[0-9a-f]{32}$ ]]; then
   echo "make-seed-iso.sh: --runtime-instance must be exactly 32 lowercase hex characters" >&2
@@ -85,6 +92,7 @@ cat >"$staging/omnifs-seed.conf" <<EOF
 OMNIFS_ATTACH_ADDR=${attach_addr}
 OMNIFS_ATTACHMENT_NAME=${attachment_name}
 OMNIFS_RUNTIME_INSTANCE=${runtime_instance}
+OMNIFS_LIBKRUN_GUEST_IMAGE=${libkrun_guest_image}
 OMNIFS_READY_VSOCK_PORT=${ready_vsock_port}
 EOF
 if [[ -n "$ssh_pubkey" ]]; then

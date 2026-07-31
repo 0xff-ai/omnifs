@@ -4,6 +4,7 @@ use crate::generation_builder::{
     GenerationDraft, GenerationParts, RevocationActionOutcome,
     finish_resource_credential_revocation,
 };
+use crate::progress::ProgressTargetState;
 use crate::provider_preparer::{ProviderPreparationJob, ProviderPreparerHandle, ProviderPriority};
 use crate::resource_control::ResourceControl;
 use anyhow::Context as _;
@@ -142,7 +143,8 @@ async fn run(
                 if changed.is_err() {
                     break;
                 }
-                reconcile_now = true;
+                let revision = *revisions.borrow_and_update();
+                reconcile_now = revision_requires_reconcile(&runtime.resources, revision);
             },
             changed = actions.changed() => {
                 if changed.is_err() {
@@ -194,6 +196,15 @@ async fn run(
     }
     drain_tasks.abort_all();
     while drain_tasks.join_next().await.is_some() {}
+}
+
+fn revision_requires_reconcile(resources: &ResourceControl, revision: ResourceRevision) -> bool {
+    !matches!(
+        resources
+            .progress()
+            .target_state(ProgressTarget::DesiredRevision(revision)),
+        ProgressTargetState::Ready | ProgressTargetState::Failed
+    )
 }
 
 async fn enqueue_imported_provider(
@@ -987,6 +998,7 @@ fn mark_resources_preparing(resources: &ResourceControl, revision: ResourceRevis
                         ResourcePhase::Preparing
                     },
                 };
+                status.observed_revision = None;
                 status.error_code = None;
                 status.detail = None;
             }
@@ -1335,12 +1347,32 @@ mod tests {
         let (_, current) = resources.progress().snapshot_for(ProgressTarget::Current);
         assert_eq!(current.observed_revision, None);
         assert_eq!(current.resources[0].phase, ResourcePhase::Preparing);
+        assert_eq!(current.resources[0].observed_revision, None);
         assert_eq!(
             resources
                 .progress()
                 .target_state(ProgressTarget::DesiredRevision(ResourceRevision::new(1))),
             crate::progress::ProgressTargetState::Watching
         );
+        state.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unchanged_terminal_revision_wakeup_does_not_rebuild_the_generation() {
+        let mut ready = snapshot(1, Some(1));
+        ready.resources[0].phase = ResourcePhase::Ready;
+        let (_temp, state, resources) = fixture(ready).await;
+
+        assert!(!revision_requires_reconcile(
+            &resources,
+            ResourceRevision::new(1)
+        ));
+
+        mark_resources_preparing(&resources, ResourceRevision::new(1));
+        assert!(revision_requires_reconcile(
+            &resources,
+            ResourceRevision::new(1)
+        ));
         state.shutdown().await.unwrap();
     }
 

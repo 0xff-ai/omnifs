@@ -429,7 +429,7 @@ impl DockerClient {
                     (Some(_), None) => Candidate::Invalid {
                         backend: "docker",
                         target,
-                        error: "client-owned container has no filesystem identity label".to_owned(),
+                        error: "Attachment container has no filesystem identity label".to_owned(),
                     },
                 }
             })
@@ -446,11 +446,12 @@ impl DockerClient {
         expected_spec: &AttachmentSpec,
         runtime_instance: &str,
     ) -> Result<()> {
-        let current = self
+        let Some((current, _)) = self
             .confirmed(expected_home, attachment, expected_spec, runtime_instance)
             .await?
-            .context("the confirmed filesystem container no longer exists")?
-            .0;
+        else {
+            return Ok(());
+        };
         ensure_identity_unchanged(Some(&current), expected, "filesystem container")?;
         self.stop_and_remove_id(&expected.id).await
     }
