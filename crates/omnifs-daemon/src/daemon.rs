@@ -637,13 +637,10 @@ impl Daemon {
         &self,
         definition: &FilesystemDefinition,
     ) -> anyhow::Result<crate::fs_runtime::RuntimeDriver> {
-        let paths = self.context.state_paths();
-        let runtime_paths = crate::fs_runtime::RuntimePaths::daemon_owned(
+        let runtime_paths = crate::fs_runtime::RuntimePaths::from_daemon_state(
             self.context.profile().root().to_path_buf(),
             std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
-            paths.filesystems_runtime(),
-            paths.filesystem_logs(),
-            paths.guest_images_cache(),
+            self.context.state_paths(),
             self.context.process_identity().executable().to_path_buf(),
         );
         crate::fs_runtime::RuntimeDriver::new(

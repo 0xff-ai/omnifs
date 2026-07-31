@@ -60,12 +60,10 @@ fn resolve_filesystem_target(profile: &Profile) -> anyhow::Result<DockerTarget> 
 
 fn daemon_runtime_paths(profile: &Profile) -> anyhow::Result<RuntimePaths> {
     let state = DaemonStatePaths::new(profile.root().join("daemon-state"));
-    Ok(RuntimePaths::daemon_owned(
+    Ok(RuntimePaths::from_daemon_state(
         profile.root().to_path_buf(),
         std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
-        state.filesystems_runtime(),
-        state.filesystem_logs(),
-        state.guest_images_cache(),
+        &state,
         std::env::current_exe().context("resolve the omnifs executable")?,
     ))
 }

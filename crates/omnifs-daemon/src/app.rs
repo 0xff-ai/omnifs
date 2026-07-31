@@ -481,12 +481,10 @@ async fn build_daemon(
             if let Err(error) = daemon.install_reconciler(reconciler) {
                 return Err(close_failed_state(state, error).await);
             }
-            let filesystem_paths = crate::fs_runtime::RuntimePaths::daemon_owned(
+            let filesystem_paths = crate::fs_runtime::RuntimePaths::from_daemon_state(
                 daemon.context.profile().root().to_path_buf(),
                 std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
-                runtime.state_paths.filesystems_runtime(),
-                runtime.state_paths.filesystem_logs(),
-                runtime.state_paths.guest_images_cache(),
+                &runtime.state_paths,
                 daemon.context.process_identity().executable().to_path_buf(),
             );
             let filesystem_endpoints = crate::fs_runtime::AttachEndpoints::new(

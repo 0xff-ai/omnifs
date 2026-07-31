@@ -54,6 +54,26 @@ impl RuntimePaths {
         }
     }
 
+    /// Construct daemon-owned filesystem paths directly from the daemon's own
+    /// state roots. `fs_runtime` must never read `OMNIFS_HOME` itself, so the
+    /// caller resolves `is_default_profile` and supplies every path.
+    #[must_use]
+    pub fn from_daemon_state(
+        profile_root: PathBuf,
+        is_default_profile: bool,
+        state: &omnifs_state::DaemonStatePaths,
+        executable: PathBuf,
+    ) -> Self {
+        Self::daemon_owned(
+            profile_root,
+            is_default_profile,
+            state.filesystems_runtime(),
+            state.filesystem_logs(),
+            state.guest_images_cache(),
+            executable,
+        )
+    }
+
     #[must_use]
     pub fn filesystem(&self, name: &ResourceName) -> FilesystemRuntimePaths {
         let state_dir = self.state_root.join(name.as_str());
