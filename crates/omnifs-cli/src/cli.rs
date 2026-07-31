@@ -1,6 +1,6 @@
 //! CLI type definitions: top-level parser and command enum.
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -59,9 +59,6 @@ pub struct Cli {
 pub enum Commands {
     /// Show resources and follow typed daemon work
     Status(StatusArgs),
-
-    /// Initialize or export declarative resource configuration
-    Config(ConfigArgs),
 
     /// Preview the complete desired resource set from KCL
     Plan {
@@ -137,28 +134,6 @@ pub struct StatusArgs {
     pub action: Option<omnifs_core::ActionId>,
 }
 
-#[derive(Args)]
-pub struct ConfigArgs {
-    #[command(subcommand)]
-    pub command: ConfigCommand,
-}
-
-#[derive(Subcommand)]
-pub enum ConfigCommand {
-    /// Print a minimal declarative resource configuration
-    Init,
-    /// Export the daemon's complete desired resource set
-    Export {
-        #[arg(long, value_enum, default_value_t = ConfigFormat::Kcl)]
-        format: ConfigFormat,
-    },
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum ConfigFormat {
-    Kcl,
-}
-
 impl Cli {
     pub(crate) fn runs_daemon(&self) -> bool {
         if matches!(&self.command, Some(Commands::Daemon)) {
@@ -191,13 +166,6 @@ impl Commands {
     fn labels(&self) -> (Option<&'static str>, &'static str) {
         match self {
             Self::Status(_) => (Some("status"), "status"),
-            Self::Config(args) => (
-                Some("config"),
-                match &args.command {
-                    ConfigCommand::Init => "config.init",
-                    ConfigCommand::Export { .. } => "config.export",
-                },
-            ),
             Self::Plan { .. } => (Some("plan"), "plan"),
             Self::Apply { .. } => (Some("apply"), "apply"),
             Self::Down => (Some("down"), "down"),
@@ -287,12 +255,6 @@ impl Commands {
                 } else {
                     commands::status::run(output).await
                 }
-            },
-            Self::Config(args) => match args.command {
-                ConfigCommand::Init => commands::config::init(&output),
-                ConfigCommand::Export {
-                    format: ConfigFormat::Kcl,
-                } => commands::config::export(output).await,
             },
             Self::Plan { path } => commands::plan::run(path, output).await,
             Self::Apply { path } => commands::apply::run(path, output).await,
