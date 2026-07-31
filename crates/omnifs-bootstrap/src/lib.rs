@@ -1,5 +1,9 @@
 //! Narrow shared bootstrap state for the CLI and daemon.
 
+mod build_channel;
+
+pub use build_channel::{BUILD_CHANNEL, BuildChannel};
+
 use atomic_write_file::OpenOptions as AtomicOpenOptions;
 use atomic_write_file::unix::OpenOptionsExt as _;
 use fs2::FileExt as _;

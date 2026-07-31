@@ -23,7 +23,7 @@ pub use docker::{
 pub use driver::{Candidate, FilesystemRuntimePaths, RuntimePaths, owned_filesystems};
 pub use events::RuntimeEventSink;
 pub use host::HostDriver;
-pub use image::{BUILD_CHANNEL, BuildChannel, ImageRef};
+pub use image::ImageRef;
 pub use libkrun::{LibkrunRunner, resolve_guest_image_reference};
 
 pub(crate) use driver::{AttachEndpoints, ConfirmedRuntime, RuntimeDriver};
@@ -31,6 +31,7 @@ pub(crate) use events::{
     Artifact, ContainerState, ImageState, RuntimeEvent, RuntimeEventReceiver, RuntimeStage,
     RuntimeState,
 };
+pub(crate) use image::{BUILD_CHANNEL, BuildChannel};
 
 /// An operation failure classified by its stable runtime stage.
 #[derive(Debug, thiserror::Error)]
