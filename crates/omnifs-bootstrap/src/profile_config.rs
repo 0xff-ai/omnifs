@@ -5,14 +5,14 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct ProfileConfig {
-    pub(crate) metrics: MetricsConfig,
+pub struct ProfileConfig {
+    pub metrics: MetricsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct MetricsConfig {
-    pub(crate) enabled: bool,
+pub struct MetricsConfig {
+    pub enabled: bool,
 }
 
 impl Default for MetricsConfig {
@@ -21,7 +21,7 @@ impl Default for MetricsConfig {
     }
 }
 
-pub(crate) fn read(root: &Path) -> anyhow::Result<ProfileConfig> {
+pub fn read(root: &Path) -> anyhow::Result<ProfileConfig> {
     let path = root.join("config.toml");
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,

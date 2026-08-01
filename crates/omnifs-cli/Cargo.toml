@@ -44,7 +44,6 @@ thiserror = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = "0.8"
 secrecy = "0.10"
 anstream = "1"
 owo-colors = "4"

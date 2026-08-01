@@ -17,7 +17,7 @@ struct CliRecord<'a> {
 }
 
 fn enabled(profile: &Profile) -> bool {
-    crate::profile_config::read(profile.root()).is_ok_and(|config| {
+    omnifs_bootstrap::profile_config::read(profile.root()).is_ok_and(|config| {
         config.metrics.enabled
             && !matches!(
                 std::env::var("OMNIFS_METRICS")

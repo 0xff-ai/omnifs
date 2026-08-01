@@ -1227,7 +1227,7 @@ impl Doctor {
 
     fn probe_config_file(&self) -> ProbeResult {
         let path = self.profile.root().join("config.toml");
-        match crate::profile_config::read(self.profile.root()) {
+        match omnifs_bootstrap::profile_config::read(self.profile.root()) {
             Ok(_) if path.exists() => ProbeResult::Ok(path.display().to_string()),
             Ok(_) => ProbeResult::Ok(format!("defaults ({} absent)", path.display())),
             Err(error) => ProbeResult::Err(format!("{error:#}")),

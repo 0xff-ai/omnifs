@@ -2,6 +2,8 @@
 
 mod build_channel;
 
+pub mod profile_config;
+
 pub use build_channel::{BUILD_CHANNEL, BuildChannel};
 
 use atomic_write_file::OpenOptions as AtomicOpenOptions;

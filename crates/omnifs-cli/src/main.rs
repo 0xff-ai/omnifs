@@ -18,7 +18,6 @@ mod error;
 mod inventory;
 mod metrics;
 mod process;
-mod profile_config;
 mod provider_catalog;
 mod provider_resolver;
 mod rpc;
