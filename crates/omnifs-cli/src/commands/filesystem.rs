@@ -513,21 +513,9 @@ fn definition_for_pair(
             PathBuf::from(FILESYSTEM_GUEST_LOCATION)
         },
     };
-    let docker_image = (runtime == FilesystemRuntime::Docker)
-        .then(|| omnifs_daemon::fs_runtime::resolve_filesystem_image(None, None))
-        .transpose()?
-        .map(|value| value.to_string());
-    let libkrun_guest_image = (runtime == FilesystemRuntime::Libkrun)
-        .then(|| omnifs_daemon::fs_runtime::resolve_guest_image_reference(None));
     Ok(FilesystemDefinition {
         name,
-        spec: FilesystemSpec::new(
-            protocol,
-            runtime,
-            location,
-            docker_image,
-            libkrun_guest_image,
-        )?,
+        spec: FilesystemSpec::new(protocol, runtime, location, None, None)?,
     })
 }
 
@@ -690,6 +678,42 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.to_string(), "fuse / host is not supported");
+    }
+
+    #[test]
+    fn cli_definitions_leave_runtime_assets_unset() {
+        let daemon_info = daemon_info(
+            &[
+                (FilesystemProtocol::Fuse, FilesystemRuntime::Docker),
+                (FilesystemProtocol::Fuse, FilesystemRuntime::Libkrun),
+            ],
+            None,
+        );
+        let docker = definition_for_pair(
+            &daemon_info,
+            ResourceName::new("docker").unwrap(),
+            FilesystemPair {
+                protocol: FilesystemProtocol::Fuse,
+                runtime: FilesystemRuntime::Docker,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(docker.spec.docker_image(), None);
+        assert_eq!(docker.spec.libkrun_guest_image(), None);
+
+        let libkrun = definition_for_pair(
+            &daemon_info,
+            ResourceName::new("libkrun").unwrap(),
+            FilesystemPair {
+                protocol: FilesystemProtocol::Fuse,
+                runtime: FilesystemRuntime::Libkrun,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(libkrun.spec.docker_image(), None);
+        assert_eq!(libkrun.spec.libkrun_guest_image(), None);
     }
 
     fn daemon_info(

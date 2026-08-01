@@ -351,8 +351,8 @@ mod tests {
                 } else {
                     PathBuf::from(FILESYSTEM_GUEST_LOCATION)
                 },
-                (runtime == FilesystemRuntime::Docker).then(|| "image".to_owned()),
-                (runtime == FilesystemRuntime::Libkrun).then(|| "guest".to_owned()),
+                None,
+                None,
             )
             .unwrap(),
         }
