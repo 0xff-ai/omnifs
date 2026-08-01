@@ -1043,7 +1043,7 @@ fn credential_count(count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs_runtime::DockerContainerIdentity;
+    use crate::fs_runtime::docker::DockerContainerIdentity;
     #[test]
     fn base_findings_retain_legacy_order() {
         assert_eq!(
