@@ -29,7 +29,6 @@ const NETWORK_TIMEOUT: Duration = Duration::from_secs(3);
 const OFFER_TTL: Duration = Duration::from_secs(5 * 60);
 const OFFER_LIMIT: usize = 256;
 const UNKNOWN_REMEDIATION: &str = "remediation id unknown or no longer offered";
-const OWNERSHIP_SCAN_TIMEOUT: Duration = Duration::from_secs(3);
 const BASE_FINDING_ORDER: [DoctorCheckKind; 7] = [
     DoctorCheckKind::Docker,
     DoctorCheckKind::Fuse,
@@ -511,29 +510,13 @@ impl Daemon {
         }
     }
 
-    async fn bounded_owned_filesystems(
-        paths: &RuntimePaths,
-        docker: Option<&DockerClient>,
-    ) -> Vec<Candidate> {
-        match tokio::time::timeout(OWNERSHIP_SCAN_TIMEOUT, owned_filesystems(paths, docker)).await {
-            Ok(candidates) => candidates,
-            Err(_) => vec![Candidate::ListingFailed {
-                backend: "host",
-                error: format!(
-                    "filesystem ownership scan timed out after {}s",
-                    OWNERSHIP_SCAN_TIMEOUT.as_secs()
-                ),
-            }],
-        }
-    }
-
     async fn filesystem_findings(
         &self,
         paths: &RuntimePaths,
         docker: Option<&DockerClient>,
         live: &[omnifs_api::FilesystemDefinition],
     ) -> Result<(Vec<DoctorFinding>, Vec<DoctorRemediation>)> {
-        let candidates = Self::bounded_owned_filesystems(paths, docker).await;
+        let candidates = owned_filesystems(paths, docker).await;
         let mut findings = Vec::new();
         let mut remediations = Vec::new();
         for candidate in candidates {
@@ -1337,11 +1320,6 @@ mod tests {
         assert_eq!(missing.severity, DoctorSeverity::Attention);
         let unset = probe_ssh_agent_state(None, false);
         assert_eq!(unset.severity, DoctorSeverity::Attention);
-    }
-
-    #[test]
-    fn ownership_scan_has_one_three_second_aggregate_budget() {
-        assert_eq!(OWNERSHIP_SCAN_TIMEOUT, Duration::from_secs(3));
     }
 
     #[test]

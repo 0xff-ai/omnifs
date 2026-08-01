@@ -4,11 +4,13 @@ use crate::fs_runtime::driver::LaunchRequest;
 use crate::fs_runtime::identity::{ensure_identity_unchanged, ensure_record_matches};
 use crate::fs_runtime::{Candidate, RuntimeEvent, RuntimeEventSink, RuntimeStage, RuntimeState};
 use anyhow::{Context as _, Result, ensure};
+use futures_util::stream::{self, StreamExt as _};
 use omnifs_core::{FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName};
 use omnifs_mtab::{RunnerClaim, RunnerRecord};
 use omnifs_thin::host_control::{
     RunnerControlClient, RunnerPhase, StopOutcome, control_socket_for,
 };
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
@@ -16,6 +18,7 @@ use std::time::Duration;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
 const STOP_TIMEOUT: Duration = Duration::from_secs(6);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const OWNERSHIP_PROBE_CONCURRENCY: usize = 8;
 
 pub(crate) fn probe(protocol: FilesystemProtocol) -> Result<()> {
     if protocol == FilesystemProtocol::Fuse && !Path::new("/dev/fuse").exists() {
@@ -462,6 +465,7 @@ async fn wait_for_cleanup(
 
 pub(crate) async fn owned(state_root: &Path) -> Result<Vec<Candidate>> {
     let mut candidates = Vec::new();
+    let mut readable = Vec::new();
     let entries = match std::fs::read_dir(state_root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
@@ -491,23 +495,121 @@ pub(crate) async fn owned(state_root: &Path) -> Result<Vec<Candidate>> {
                 continue;
             },
         };
-        let confirmed = RunnerControlClient::new(&record)
-            .ping()
-            .await
-            .map(|state| state.phase)
-            .map_err(|error| error.to_string());
-        candidates.push(Candidate::Host {
-            state_dir,
-            record,
-            confirmed,
-        });
+        readable.push((state_dir, record));
     }
+    candidates.extend(
+        confirm_records(readable, |record| async move {
+            RunnerControlClient::new(&record)
+                .ping()
+                .await
+                .map(|state| state.phase)
+                .map_err(|error| error.to_string())
+        })
+        .await,
+    );
     Ok(candidates)
+}
+
+async fn confirm_records<F, Fut>(records: Vec<(PathBuf, RunnerRecord)>, probe: F) -> Vec<Candidate>
+where
+    F: Fn(RunnerRecord) -> Fut + Clone,
+    Fut: Future<Output = Result<RunnerPhase, String>>,
+{
+    stream::iter(records)
+        .map(|(state_dir, record)| {
+            let probe = probe.clone();
+            async move {
+                let confirmed = probe(record.clone()).await;
+                Candidate::Host {
+                    state_dir,
+                    record,
+                    confirmed,
+                }
+            }
+        })
+        .buffered(OWNERSHIP_PROBE_CONCURRENCY)
+        .collect()
+        .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    fn record(name: &str) -> RunnerRecord {
+        let state_dir = PathBuf::from(format!("/tmp/omnifs-host-probe-{name}"));
+        RunnerRecord {
+            version: RunnerRecord::VERSION,
+            instance_id: "0123456789abcdef0123456789abcdef".to_owned(),
+            pid: 42,
+            process_group: 42,
+            filesystem: ResourceName::new(name).unwrap(),
+            spec: FilesystemSpec::new(
+                FilesystemProtocol::Nfs,
+                FilesystemRuntime::Host,
+                PathBuf::from(format!("/mnt/{name}")),
+                None,
+                None,
+            )
+            .unwrap(),
+            control_socket: state_dir.join("control.sock"),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_probe_results_keep_each_host_candidate() {
+        let barrier = Arc::new(Barrier::new(3));
+        let records = ["confirmed", "dead", "later"]
+            .into_iter()
+            .map(|name| (PathBuf::from(format!("/tmp/{name}")), record(name)))
+            .collect();
+        let probe_barrier = Arc::clone(&barrier);
+        let candidates = tokio::time::timeout(
+            Duration::from_secs(1),
+            confirm_records(records, move |record| {
+                let barrier = Arc::clone(&probe_barrier);
+                async move {
+                    barrier.wait().await;
+                    if record.filesystem.as_str() == "dead" {
+                        Err("runner control is unavailable".to_owned())
+                    } else {
+                        Ok(RunnerPhase::Mounted)
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("host probes did not run concurrently");
+
+        assert_eq!(candidates.len(), 3);
+        assert!(candidates.iter().any(|candidate| matches!(
+            candidate,
+            Candidate::Host {
+                record,
+                confirmed: Ok(RunnerPhase::Mounted),
+                ..
+            } if record.filesystem.as_str() == "confirmed"
+        )));
+        assert!(candidates.iter().any(|candidate| matches!(
+            candidate,
+            Candidate::Host {
+                record,
+                confirmed: Err(error),
+                ..
+            } if record.filesystem.as_str() == "dead" && error == "runner control is unavailable"
+        )));
+        assert!(candidates.iter().any(|candidate| matches!(
+            candidate,
+            Candidate::Host {
+                record,
+                confirmed: Ok(RunnerPhase::Mounted),
+                ..
+            } if record.filesystem.as_str() == "later"
+        )));
+    }
+
     #[tokio::test]
     async fn busy_stop_waits_for_runner_cleanup() {
         let temp = tempfile::tempdir().unwrap();

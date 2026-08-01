@@ -563,6 +563,61 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn ownership_scan_keeps_host_errors_and_later_backend_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths(temp.path());
+        for name in ["host-dead", "host-later"] {
+            let state_dir = paths.state_root().join(name);
+            std::fs::create_dir_all(&state_dir).unwrap();
+            let record = omnifs_mtab::RunnerRecord {
+                version: omnifs_mtab::RunnerRecord::VERSION,
+                instance_id: "0123456789abcdef0123456789abcdef".to_owned(),
+                pid: 42,
+                process_group: 42,
+                filesystem: ResourceName::new(name).unwrap(),
+                spec: spec(
+                    FilesystemRuntime::Host,
+                    FilesystemProtocol::Nfs,
+                    &format!("/mnt/{name}"),
+                ),
+                control_socket: state_dir.join("missing-control.sock"),
+            };
+            std::fs::write(
+                state_dir.join("runner.json"),
+                serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(paths.state_root().join("libkrun-later/libkrun")).unwrap();
+
+        let candidates = owned_filesystems(&paths, None).await;
+        assert!(candidates.iter().any(|candidate| matches!(
+            candidate,
+            Candidate::Host {
+                record,
+                confirmed: Err(_),
+                ..
+            } if record.filesystem.as_str() == "host-dead"
+        )));
+        assert!(candidates.iter().any(|candidate| matches!(
+            candidate,
+            Candidate::Host {
+                record,
+                confirmed: Err(_),
+                ..
+            } if record.filesystem.as_str() == "host-later"
+        )));
+        assert!(candidates.iter().any(|candidate| matches!(
+            candidate,
+            Candidate::Libkrun {
+                filesystem,
+                confirmed: Ok(None),
+                ..
+            } if filesystem.as_str() == "libkrun-later"
+        )));
+    }
+
     #[test]
     fn daemon_owned_paths_stay_under_filesystem_state() {
         let root = Path::new("/tmp/omnifs-daemon");
