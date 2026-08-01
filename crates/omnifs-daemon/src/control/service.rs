@@ -214,6 +214,31 @@ impl wire::control_server::Control for GrpcControlService {
         }))
     }
 
+    async fn run_doctor(
+        &self,
+        _request: Request<wire::Empty>,
+    ) -> Result<Response<wire::RunDoctorResponse>, Status> {
+        let daemon = self.daemon()?;
+        let report = daemon.run_doctor().await.map_err(grpc_internal)?;
+        Ok(Response::new(grpc::to_run_doctor_response(&report)))
+    }
+
+    async fn apply_doctor_repairs(
+        &self,
+        request: Request<wire::ApplyDoctorRepairsRequest>,
+    ) -> Result<Response<wire::ApplyDoctorRepairsResponse>, Status> {
+        let daemon = self.daemon()?;
+        let ids =
+            grpc::apply_doctor_repairs_request(&request.into_inner()).map_err(grpc_invalid)?;
+        let outcomes = daemon
+            .apply_doctor_repairs(ids)
+            .await
+            .map_err(grpc_internal)?;
+        Ok(Response::new(grpc::to_apply_doctor_repairs_response(
+            &outcomes,
+        )))
+    }
+
     async fn repair_state(
         &self,
         request: Request<wire::RepairStateRequest>,

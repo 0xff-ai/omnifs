@@ -3,7 +3,11 @@
 use super::*;
 use crate::daemon::DaemonParts;
 use hyper_util::rt::TokioIo;
-use omnifs_api::ProviderImportDisposition;
+use omnifs_api::{
+    FilesystemDefinition, NormalizedResourceSet, ProviderImportDisposition, ResourceDefinition,
+};
+use omnifs_core::{FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName};
+use omnifs_state::{FilesystemObservation, FilesystemPhase, ResourceApplyRequest};
 use tokio_stream::StreamExt as _;
 use tonic::transport::Endpoint;
 use tower::service_fn;
@@ -199,6 +203,108 @@ async fn test_daemon_with_limits(
     }
 }
 
+fn doctor_filesystem_spec(name: &str) -> FilesystemSpec {
+    let protocol = if cfg!(target_os = "linux") {
+        FilesystemProtocol::Fuse
+    } else {
+        FilesystemProtocol::Nfs
+    };
+    FilesystemSpec::new(
+        protocol,
+        FilesystemRuntime::Host,
+        format!("/tmp/omnifs-control-doctor-{name}").into(),
+        None,
+        None,
+    )
+    .unwrap()
+}
+
+fn doctor_filesystem_set(names: &[&str]) -> NormalizedResourceSet {
+    NormalizedResourceSet::new(
+        names
+            .iter()
+            .map(|&name| {
+                ResourceDefinition::Filesystem(FilesystemDefinition {
+                    name: ResourceName::new(name).unwrap(),
+                    spec: doctor_filesystem_spec(name),
+                })
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+async fn apply_doctor_filesystems(runtime: &TestRuntime, names: &[&str], mutation: u8) {
+    let desired = doctor_filesystem_set(names);
+    let snapshot = runtime.daemon.state.resource_snapshot().await.unwrap();
+    runtime
+        .daemon
+        .state
+        .apply_resources(ResourceApplyRequest {
+            mutation_id: omnifs_core::MutationId::from_bytes([mutation; 16]),
+            base_revision: snapshot.revision,
+            expected_desired_digest: desired.digest(),
+            desired,
+            credential_secrets: Vec::new(),
+        })
+        .await
+        .unwrap();
+}
+
+async fn mark_doctor_filesystem_starting(runtime: &TestRuntime, name: &str) {
+    let name = ResourceName::new(name).unwrap();
+    let instance = runtime
+        .daemon
+        .state
+        .filesystem_instance(&name)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut observation = FilesystemObservation::from_instance(&instance);
+    observation.phase = FilesystemPhase::Starting;
+    runtime
+        .daemon
+        .state
+        .write_filesystem_observation(observation)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+fn seed_doctor_host_record(runtime: &TestRuntime, name: &str) -> omnifs_mtab::RunnerRecord {
+    let filesystem = ResourceName::new(name).unwrap();
+    let state_dir = runtime
+        .daemon
+        .context
+        .state_paths()
+        .filesystem_runtime(&filesystem);
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let record = omnifs_mtab::RunnerRecord {
+        version: omnifs_mtab::RunnerRecord::VERSION,
+        instance_id: "0123456789abcdef0123456789abcdef".to_owned(),
+        pid: 42,
+        process_group: 42,
+        filesystem,
+        spec: doctor_filesystem_spec(name),
+        control_socket: state_dir.join("missing-control.sock"),
+    };
+    std::fs::write(
+        state_dir.join("runner.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    record
+}
+
+fn seeded_doctor_host_record_path(runtime: &TestRuntime, name: &str) -> std::path::PathBuf {
+    runtime
+        .daemon
+        .context
+        .state_paths()
+        .filesystem_runtime(&ResourceName::new(name).unwrap())
+        .join("runner.json")
+}
+
 #[tokio::test]
 #[allow(unsafe_code)]
 async fn tonic_reports_starting_state_and_invalid_requests() {
@@ -236,6 +342,13 @@ async fn tonic_reports_starting_state_and_invalid_requests() {
     assert_eq!(status.code(), tonic::Code::FailedPrecondition);
     let resources = c.get_resources(wire::Empty {}).await.unwrap_err();
     assert_eq!(error_code(&resources), ControlErrorCode::NotReady);
+    let doctor = c.run_doctor(wire::Empty {}).await.unwrap_err();
+    assert_eq!(error_code(&doctor), ControlErrorCode::NotReady);
+    let repairs = c
+        .apply_doctor_repairs(wire::ApplyDoctorRepairsRequest { ids: Vec::new() })
+        .await
+        .unwrap_err();
+    assert_eq!(error_code(&repairs), ControlErrorCode::NotReady);
     control.set_recovery(DaemonRecovery {
         phase: DaemonPhase::RecoveryRequired,
         durable_revision: None,
@@ -245,6 +358,13 @@ async fn tonic_reports_starting_state_and_invalid_requests() {
     });
     let resources = c.get_resources(wire::Empty {}).await.unwrap_err();
     assert_eq!(error_code(&resources), ControlErrorCode::RecoveryRequired);
+    let doctor = c.run_doctor(wire::Empty {}).await.unwrap_err();
+    assert_eq!(error_code(&doctor), ControlErrorCode::RecoveryRequired);
+    let repairs = c
+        .apply_doctor_repairs(wire::ApplyDoctorRepairsRequest { ids: Vec::new() })
+        .await
+        .unwrap_err();
+    assert_eq!(error_code(&repairs), ControlErrorCode::RecoveryRequired);
     let invalid = c
         .repair_state(wire::RepairStateRequest::default())
         .await
@@ -252,6 +372,216 @@ async fn tonic_reports_starting_state_and_invalid_requests() {
     assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
     let _ = shutdown.send(true);
     task.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(unsafe_code)]
+async fn tonic_doctor_round_trips_on_ready_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::ENV_LOCK.lock().await;
+    let home = std::fs::canonicalize(dir.path()).unwrap();
+    unsafe {
+        std::env::set_var("OMNIFS_HOME", &home);
+    }
+    let runtime = test_daemon(&dir).await;
+    let mut c = client(&home.join("control.sock")).await;
+    let response = c.run_doctor(wire::Empty {}).await.unwrap().into_inner();
+    let report = grpc::run_doctor_response(&response).unwrap();
+    assert!(!report.findings.is_empty());
+    assert!(report.remediations.is_empty());
+
+    let response = c
+        .apply_doctor_repairs(wire::ApplyDoctorRepairsRequest { ids: Vec::new() })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        grpc::apply_doctor_repairs_response(&response)
+            .unwrap()
+            .is_empty()
+    );
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(unsafe_code)]
+async fn tonic_doctor_does_not_offer_repairs_for_owned_filesystem_states() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::ENV_LOCK.lock().await;
+    let home = std::fs::canonicalize(dir.path()).unwrap();
+    unsafe {
+        std::env::set_var("OMNIFS_HOME", &home);
+    }
+    let runtime = test_daemon(&dir).await;
+    let names = ["owned-desired", "owned-starting", "owned-deleting"];
+    for name in names {
+        seed_doctor_host_record(&runtime, name);
+    }
+    apply_doctor_filesystems(&runtime, &names, 0x71).await;
+    mark_doctor_filesystem_starting(&runtime, "owned-starting").await;
+    apply_doctor_filesystems(&runtime, &["owned-desired", "owned-starting"], 0x72).await;
+
+    assert_eq!(
+        runtime
+            .daemon
+            .state
+            .filesystem_instance(&ResourceName::new("owned-desired").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .phase,
+        FilesystemPhase::Pending
+    );
+    assert_eq!(
+        runtime
+            .daemon
+            .state
+            .filesystem_instance(&ResourceName::new("owned-starting").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .phase,
+        FilesystemPhase::Starting
+    );
+    assert_eq!(
+        runtime
+            .daemon
+            .state
+            .filesystem_instance(&ResourceName::new("owned-deleting").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .phase,
+        FilesystemPhase::Deleting
+    );
+
+    let mut client = client(&home.join("control.sock")).await;
+    let response = client
+        .run_doctor(wire::Empty {})
+        .await
+        .unwrap()
+        .into_inner();
+    let report = grpc::run_doctor_response(&response).unwrap();
+    assert!(report.remediations.is_empty());
+    for name in names {
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| {
+                finding
+                    .target
+                    .as_deref()
+                    .is_some_and(|target| target.contains(name))
+            })
+            .unwrap_or_else(|| panic!("missing doctor finding for {name}"));
+        assert_eq!(finding.fix, None);
+        assert_eq!(finding.remediation_id, None);
+    }
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(unsafe_code)]
+async fn tonic_apply_doctor_repairs_rechecks_desired_and_observed_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::ENV_LOCK.lock().await;
+    let home = std::fs::canonicalize(dir.path()).unwrap();
+    unsafe {
+        std::env::set_var("OMNIFS_HOME", &home);
+    }
+    let runtime = test_daemon(&dir).await;
+    let desired_record = seed_doctor_host_record(&runtime, "race-desired");
+    let observed_record = seed_doctor_host_record(&runtime, "race-observed");
+
+    let mut client = client(&home.join("control.sock")).await;
+    let response = client
+        .run_doctor(wire::Empty {})
+        .await
+        .unwrap()
+        .into_inner();
+    let report = grpc::run_doctor_response(&response).unwrap();
+    let desired_offer = report
+        .remediations
+        .iter()
+        .find(|offer| offer.command_line.contains("race-desired"))
+        .cloned()
+        .expect("doctor did not offer cleanup for race-desired");
+    let observed_offer = report
+        .remediations
+        .iter()
+        .find(|offer| offer.command_line.contains("race-observed"))
+        .cloned()
+        .expect("doctor did not offer cleanup for race-observed");
+    assert_eq!(report.remediations.len(), 2);
+
+    apply_doctor_filesystems(&runtime, &["race-desired"], 0x81).await;
+    apply_doctor_filesystems(&runtime, &["race-desired", "race-observed"], 0x82).await;
+    apply_doctor_filesystems(&runtime, &["race-desired"], 0x83).await;
+    assert_eq!(
+        runtime
+            .daemon
+            .state
+            .filesystem_instance(&ResourceName::new("race-observed").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .phase,
+        FilesystemPhase::Deleting
+    );
+
+    let response = client
+        .apply_doctor_repairs(wire::ApplyDoctorRepairsRequest {
+            ids: vec![desired_offer.id.clone(), observed_offer.id.clone()],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let outcomes = grpc::apply_doctor_repairs_response(&response).unwrap();
+    assert_eq!(outcomes.len(), 2);
+    let desired_outcome = outcomes
+        .iter()
+        .find(|outcome| outcome.id == desired_offer.id)
+        .unwrap();
+    assert_eq!(
+        desired_outcome.state,
+        omnifs_api::DoctorRepairState::Skipped
+    );
+    assert_eq!(
+        desired_outcome.error.as_deref(),
+        Some("filesystem became desired since diagnosis")
+    );
+    let observed_outcome = outcomes
+        .iter()
+        .find(|outcome| outcome.id == observed_offer.id)
+        .unwrap();
+    assert_eq!(
+        observed_outcome.state,
+        omnifs_api::DoctorRepairState::Skipped
+    );
+    assert_eq!(
+        observed_outcome.error.as_deref(),
+        Some("filesystem became observed since diagnosis")
+    );
+
+    assert_eq!(
+        omnifs_mtab::RunnerRecord::read(
+            seeded_doctor_host_record_path(&runtime, "race-desired")
+                .parent()
+                .unwrap()
+        )
+        .unwrap(),
+        Some(desired_record)
+    );
+    assert_eq!(
+        omnifs_mtab::RunnerRecord::read(
+            seeded_doctor_host_record_path(&runtime, "race-observed")
+                .parent()
+                .unwrap()
+        )
+        .unwrap(),
+        Some(observed_record)
+    );
+    runtime.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,7 +1,7 @@
 //! Daemon-owned diagnostics and exact runtime repair offers.
 //!
 //! The daemon is the only process that can see its complete runtime state and
-//! SQLite desired state at once.  This module produces the full doctor report
+//! `SQLite` desired state at once.  This module produces the full doctor report
 //! and keeps short-lived, opaque repair offers so a client can request an
 //! exact repair without sending runtime details back over RPC.
 
@@ -20,13 +20,13 @@ use std::time::{Duration, Instant};
 
 use crate::daemon::Daemon;
 use crate::fs_runtime::{
-    Candidate, DockerClient, DockerContainerIdentity, DockerTarget, HostDriver, ImageInspection,
-    LibkrunRunner, OwnedFilesystemContainer, RuntimeEventSink, RuntimePaths, owned_filesystems,
+    Candidate, DockerClient, DockerTarget, HostDriver, ImageInspection, LibkrunRunner,
+    OwnedFilesystemContainer, RuntimeEventSink, RuntimePaths, owned_filesystems,
 };
 
 const DOCKER_PING_TIMEOUT: Duration = Duration::from_secs(3);
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(3);
-const OFFER_TTL: Duration = Duration::from_secs(5 * 60);
+const OFFER_TTL: Duration = Duration::from_mins(5);
 const OFFER_LIMIT: usize = 256;
 const UNKNOWN_REMEDIATION: &str = "remediation id unknown or no longer offered";
 const BASE_FINDING_ORDER: [DoctorCheckKind; 7] = [
@@ -195,7 +195,7 @@ impl Daemon {
         let mut filesystem_findings = self
             .filesystem_findings(&paths, docker.as_ref(), &live)
             .await?;
-        remediations.extend(filesystem_findings.1.drain(..));
+        remediations.append(&mut filesystem_findings.1);
         findings.extend(filesystem_findings.0);
 
         Ok(RunDoctorReport {
@@ -614,7 +614,7 @@ impl Daemon {
                         target: finding,
                         severity: DoctorSeverity::Attention,
                         message: host_stray_message(
-                            phase,
+                            &phase,
                             self.control_status().health.overall_state(),
                         ),
                         fix: remediation.as_ref().map(|value| value.command_line.clone()),
@@ -875,7 +875,7 @@ fn legacy_health_label(health: HealthState) -> &'static str {
 }
 
 fn host_stray_message(
-    phase: omnifs_thin::host_control::RunnerPhase,
+    phase: &omnifs_thin::host_control::RunnerPhase,
     health: HealthState,
 ) -> String {
     format!(
@@ -892,9 +892,7 @@ fn libkrun_stray_message(health: HealthState) -> String {
 }
 
 fn mount_auth_finding(mount: &omnifs_api::MountRecord) -> Option<(DoctorSeverity, String)> {
-    if mount.definition.auth.is_none() {
-        return None;
-    }
+    mount.definition.auth.as_ref()?;
     match (mount.auth_health, &mount.health) {
         (Some(CredentialHealth::Expired), _) => {
             Some((DoctorSeverity::Attention, "token expired".to_owned()))
@@ -1045,222 +1043,7 @@ fn credential_count(count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_api::{FilesystemDefinition, NormalizedResourceSet, ResourceDefinition};
-    use omnifs_core::{
-        FilesystemProtocol, FilesystemRuntime, FilesystemSpec, MutationId, ResourceName,
-    };
-    use omnifs_state::{
-        DaemonStatePaths, FilesystemObservation, FilesystemPhase, ResourceApplyRequest,
-        StateStoreOptions,
-    };
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    fn resource_name(value: &str) -> ResourceName {
-        ResourceName::new(value).unwrap()
-    }
-
-    fn filesystem_spec(name: &str) -> FilesystemSpec {
-        let protocol = if cfg!(target_os = "linux") {
-            FilesystemProtocol::Fuse
-        } else {
-            FilesystemProtocol::Nfs
-        };
-        FilesystemSpec::new(
-            protocol,
-            FilesystemRuntime::Host,
-            format!("/tmp/omnifs-doctor-{name}").into(),
-            None,
-            None,
-        )
-        .unwrap()
-    }
-
-    fn filesystem_set(names: &[&str]) -> NormalizedResourceSet {
-        NormalizedResourceSet::new(
-            names
-                .iter()
-                .map(|name| {
-                    ResourceDefinition::Filesystem(FilesystemDefinition {
-                        name: resource_name(name),
-                        spec: filesystem_spec(name),
-                    })
-                })
-                .collect(),
-        )
-        .unwrap()
-    }
-
-    async fn apply_desired(state: &StateStore, desired: NormalizedResourceSet, mutation: u8) {
-        let snapshot = state.resource_snapshot().await.unwrap();
-        state
-            .apply_resources(ResourceApplyRequest {
-                mutation_id: MutationId::from_bytes([mutation; 16]),
-                base_revision: snapshot.revision,
-                expected_desired_digest: desired.digest(),
-                desired,
-                credential_secrets: Vec::new(),
-            })
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn state_store_ownership_covers_pending_starting_and_deleting_instances() {
-        let temp = tempfile::tempdir().unwrap();
-        let state = StateStore::open(
-            DaemonStatePaths::new(temp.path().join("daemon-state")),
-            StateStoreOptions::default(),
-        )
-        .await
-        .unwrap();
-        apply_desired(
-            &state,
-            filesystem_set(&["desired", "pending", "starting", "deleting"]),
-            0x61,
-        )
-        .await;
-
-        let pending = state
-            .filesystem_instance(&resource_name("pending"))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(pending.phase, FilesystemPhase::Pending);
-
-        let starting_name = resource_name("starting");
-        let starting = state
-            .filesystem_instance(&starting_name)
-            .await
-            .unwrap()
-            .unwrap();
-        let mut starting_observation = FilesystemObservation::from_instance(&starting);
-        starting_observation.phase = FilesystemPhase::Starting;
-        assert!(
-            state
-                .write_filesystem_observation(starting_observation)
-                .await
-                .unwrap()
-                .is_some()
-        );
-
-        apply_desired(
-            &state,
-            filesystem_set(&["desired", "pending", "starting"]),
-            0x62,
-        )
-        .await;
-        let deleting_name = resource_name("deleting");
-        let deleting = state
-            .filesystem_instance(&deleting_name)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(deleting.phase, FilesystemPhase::Deleting);
-        assert!(deleting.deleting);
-
-        assert_eq!(
-            filesystem_ownership(&state, &resource_name("desired"))
-                .await
-                .unwrap(),
-            Some(FilesystemOwnership::Desired)
-        );
-        assert_eq!(
-            filesystem_ownership(&state, &resource_name("pending"))
-                .await
-                .unwrap(),
-            Some(FilesystemOwnership::Desired)
-        );
-        assert_eq!(
-            filesystem_ownership(&state, &starting_name).await.unwrap(),
-            Some(FilesystemOwnership::Desired)
-        );
-        assert_eq!(
-            filesystem_ownership(&state, &deleting_name).await.unwrap(),
-            Some(FilesystemOwnership::Observed)
-        );
-        state.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn apply_recheck_skips_state_inserted_after_offer_claim() {
-        let temp = tempfile::tempdir().unwrap();
-        let state = StateStore::open(
-            DaemonStatePaths::new(temp.path().join("daemon-state")),
-            StateStoreOptions::default(),
-        )
-        .await
-        .unwrap();
-        let doctor = DoctorState::new();
-
-        let desired_name = resource_name("desired-after-claim");
-        let desired_offer = doctor
-            .mint(
-                "omnifs fs rm desired-after-claim".to_owned(),
-                DoctorExecutor::Daemon,
-                DoctorRepair::ClientMountReauth,
-            )
-            .await
-            .unwrap();
-        assert!(
-            doctor
-                .claim(std::slice::from_ref(&desired_offer.id))
-                .await
-                .first()
-                .and_then(|(_, offer)| offer.as_ref())
-                .is_some()
-        );
-        apply_desired(&state, filesystem_set(&["desired-after-claim"]), 0x63).await;
-        let effects = Arc::new(AtomicUsize::new(0));
-        let desired_effects = Arc::clone(&effects);
-        let result = apply_with_ownership_gate(&state, &desired_name, || async move {
-            desired_effects.fetch_add(1, Ordering::SeqCst);
-            Ok(RepairResult::Applied)
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            result,
-            RepairResult::Skipped("filesystem became desired since diagnosis".to_owned())
-        );
-        assert_eq!(effects.load(Ordering::SeqCst), 0);
-
-        let observed_name = resource_name("observed-after-claim");
-        let observed_offer = doctor
-            .mint(
-                "omnifs fs rm observed-after-claim".to_owned(),
-                DoctorExecutor::Daemon,
-                DoctorRepair::ClientMountReauth,
-            )
-            .await
-            .unwrap();
-        assert!(
-            doctor
-                .claim(std::slice::from_ref(&observed_offer.id))
-                .await
-                .first()
-                .and_then(|(_, offer)| offer.as_ref())
-                .is_some()
-        );
-        apply_desired(&state, filesystem_set(&["observed-after-claim"]), 0x64).await;
-        apply_desired(&state, NormalizedResourceSet::empty(), 0x65).await;
-        let observed_effects = Arc::clone(&effects);
-        let result = apply_with_ownership_gate(&state, &observed_name, || async move {
-            observed_effects.fetch_add(1, Ordering::SeqCst);
-            Ok(RepairResult::Applied)
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            result,
-            RepairResult::Skipped("filesystem became observed since diagnosis".to_owned())
-        );
-        assert_eq!(effects.load(Ordering::SeqCst), 0);
-        state.shutdown().await.unwrap();
-    }
-
+    use crate::fs_runtime::DockerContainerIdentity;
     #[test]
     fn base_findings_retain_legacy_order() {
         assert_eq!(
@@ -1300,7 +1083,7 @@ mod tests {
                     .contains(&format!("daemon health is {expected}"))
             );
             assert!(
-                host_stray_message(omnifs_thin::host_control::RunnerPhase::Mounted, health)
+                host_stray_message(&omnifs_thin::host_control::RunnerPhase::Mounted, health,)
                     .contains(&format!("daemon health is {expected}"))
             );
             assert!(
@@ -1343,7 +1126,7 @@ mod tests {
                 command_line: "omnifs doctor".to_owned(),
                 executor: DoctorExecutor::Daemon,
                 repair: DoctorRepair::ClientMountReauth,
-                expires_at: Instant::now() - Duration::from_secs(1),
+                expires_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
             },
         );
         let expired = state.claim(&["expired".to_owned()]).await;
