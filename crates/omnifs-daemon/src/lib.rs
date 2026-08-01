@@ -12,7 +12,7 @@ mod credential_document;
 mod daemon;
 mod doctor;
 mod filesystem_supervisor;
-pub mod fs_runtime;
+mod fs_runtime;
 mod generation_builder;
 mod log_stream;
 mod logging;
