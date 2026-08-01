@@ -5,12 +5,14 @@ use bytes::Bytes;
 use hyper_util::rt::TokioIo;
 use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
-    ActionReceipt, ApplyReceipt, ApplyResourcesRequest, CONTROL_LOG_TAIL_MAX_LINES,
-    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES,
-    CredentialKey, CredentialReceipt, CredentialStatus, DaemonInventory, FilesystemAccess,
-    FilesystemStatus, GetFilesystemAccessRequest, ProgressEvent, ProgressTarget,
-    ProviderImportReceipt, ProviderMetadata, ResourceDeclarations, ResourcePlan, ResourceSnapshot,
-    RestartFilesystemRequest, RevokeCredentialRequest, SetCredentialMaterialRequest,
+    ActionReceipt, ApplyReceipt, ApplyResourcesRequest, CONTROL_DOCTOR_TIMEOUT_SECS,
+    CONTROL_LOG_TAIL_MAX_LINES, CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS,
+    CONTROL_STREAM_PAYLOAD_MAX_BYTES, CredentialKey, CredentialReceipt, CredentialStatus,
+    DaemonInfo, DaemonInventory, DoctorRepairOutcome, FilesystemAccess, FilesystemStatus,
+    GetFilesystemAccessRequest, ProgressEvent, ProgressTarget, ProviderImportReceipt,
+    ProviderMetadata, ResourceDeclarations, ResourcePlan, ResourceSnapshot,
+    RestartFilesystemRequest, RevokeCredentialRequest, RunDoctorReport,
+    SetCredentialMaterialRequest,
 };
 use omnifs_bootstrap::Profile;
 use omnifs_core::{ProviderId, ResourceName};
@@ -25,6 +27,8 @@ use crate::error::{ExitCode, WithExitCode, WithHint};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(CONTROL_SHUTDOWN_TIMEOUT_SECS);
+#[allow(dead_code)]
+const DOCTOR_TIMEOUT: Duration = Duration::from_secs(CONTROL_DOCTOR_TIMEOUT_SECS);
 const PROVIDER_IMPORT_TIMEOUT: Duration = Duration::from_mins(3);
 
 fn unary<T>(message: T, timeout: Duration) -> Request<T> {
@@ -111,6 +115,35 @@ impl RpcClient {
         let response = bounded_unary!(self, get_inventory, wire::Empty {}).into_inner();
         grpc::daemon_inventory(response.inventory.as_ref().context("missing inventory")?)
             .map_err(Into::into)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn daemon_info(&self) -> anyhow::Result<DaemonInfo> {
+        let response = bounded_unary!(self, get_daemon_info, wire::Empty {}).into_inner();
+        grpc::daemon_info(response.info.as_ref().context("missing daemon info")?)
+            .map_err(Into::into)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn run_doctor(&self) -> anyhow::Result<RunDoctorReport> {
+        let response =
+            bounded_unary!(self, run_doctor, wire::Empty {}, DOCTOR_TIMEOUT).into_inner();
+        grpc::run_doctor_response(&response).map_err(Into::into)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn apply_doctor_repairs(
+        &self,
+        ids: &[String],
+    ) -> anyhow::Result<Vec<DoctorRepairOutcome>> {
+        let response = bounded_unary!(
+            self,
+            apply_doctor_repairs,
+            grpc::to_apply_doctor_repairs_request(ids),
+            DOCTOR_TIMEOUT
+        )
+        .into_inner();
+        grpc::apply_doctor_repairs_response(&response).map_err(Into::into)
     }
 
     pub(crate) async fn ready(&self) -> anyhow::Result<()> {
@@ -564,6 +597,60 @@ mod tests {
             assert_eq!(exit_code(&error), ExitCode::DaemonUnavailable);
             assert_eq!(crate::error::hints(&error), vec!["omnifs logs".to_owned()]);
         }
+    }
+
+    #[test]
+    fn doctor_timeout_sets_the_thirty_second_grpc_deadline() {
+        let request = unary(wire::Empty {}, DOCTOR_TIMEOUT);
+        assert_eq!(
+            request
+                .metadata()
+                .get("grpc-timeout")
+                .expect("doctor request has a deadline")
+                .to_str()
+                .expect("grpc timeout metadata is ASCII"),
+            "30000000u"
+        );
+    }
+
+    #[test]
+    fn apply_doctor_repair_request_forwards_ids() {
+        let ids = vec!["repair-1".to_owned(), "repair-2".to_owned()];
+        let wire = grpc::to_apply_doctor_repairs_request(&ids);
+        assert_eq!(grpc::apply_doctor_repairs_request(&wire).unwrap(), ids);
+    }
+
+    #[test]
+    fn doctor_response_conversion_rejects_unspecified_values() {
+        let response = wire::RunDoctorResponse {
+            findings: vec![wire::DoctorFinding {
+                section: wire::DoctorSection::Unspecified as i32,
+                check: wire::DoctorCheckKind::Docker as i32,
+                target: None,
+                severity: wire::DoctorSeverity::Positive as i32,
+                message: "invalid".to_owned(),
+                fix: None,
+                remediation_id: None,
+            }],
+            remediations: Vec::new(),
+        };
+        assert_eq!(
+            grpc::run_doctor_response(&response),
+            Err(grpc::FromGrpcError::Unspecified("doctor section"))
+        );
+
+        let response = wire::ApplyDoctorRepairsResponse {
+            outcomes: vec![wire::DoctorRepairOutcome {
+                id: "repair-1".to_owned(),
+                command_line: "omnifs doctor --yes".to_owned(),
+                state: wire::DoctorRepairState::Unspecified as i32,
+                error: None,
+            }],
+        };
+        assert_eq!(
+            grpc::apply_doctor_repairs_response(&response),
+            Err(grpc::FromGrpcError::Unspecified("doctor repair state"))
+        );
     }
 
     #[test]
