@@ -16,17 +16,18 @@ use crate::{
     CredentialDefinition, CredentialHealth, CredentialKey, CredentialKind, CredentialMaterial,
     CredentialMaterialSidecar, CredentialProgress, CredentialProgressStage, CredentialReceipt,
     CredentialStatus, CredentialStatusKind, CredentialSubmission, DaemonHealth, DaemonInfo,
-    DaemonInventory, DaemonPhase, DaemonRecovery, DaemonStatus, FilesystemAccess,
-    FilesystemCommand, FilesystemDefinition, FilesystemPhase, FilesystemProgress,
-    FilesystemProgressStage, FilesystemStatus, GetFilesystemAccessRequest, HealthReport,
-    HealthState, MountCredential, MountDefinition, MountHealth, MountLimits, MountRecord,
-    MountResourceDefinition, NormalizedResourceSet, ProgressEvent, ProgressEventKind,
+    DaemonInventory, DaemonPhase, DaemonRecovery, DaemonStatus, DoctorCheckKind, DoctorExecutor,
+    DoctorFinding, DoctorRemediation, DoctorRepairOutcome, DoctorRepairState, DoctorSection,
+    DoctorSeverity, FilesystemAccess, FilesystemCommand, FilesystemDefinition, FilesystemPhase,
+    FilesystemProgress, FilesystemProgressStage, FilesystemStatus, GetFilesystemAccessRequest,
+    HealthReport, HealthState, MountCredential, MountDefinition, MountHealth, MountLimits,
+    MountRecord, MountResourceDefinition, NormalizedResourceSet, ProgressEvent, ProgressEventKind,
     ProgressSnapshot, ProgressTarget, ProviderDefinition, ProviderImportDisposition,
     ProviderImportReceipt, ProviderMetadata, ProviderPreparationProgress, ProviderPreparationStage,
     ProviderReference, RecoveryId, RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt,
     ResourceChange, ResourceChangeAction, ResourceDeclarations, ResourceDefinition, ResourceLimits,
     ResourcePhase, ResourcePlan, ResourceSnapshot, ResourceStatus, RestartFilesystemRequest,
-    RevokeCredentialRequest, SecretBytes, ServingProgress, ServingProgressStage,
+    RevokeCredentialRequest, RunDoctorReport, SecretBytes, ServingProgress, ServingProgressStage,
     SetCredentialMaterialRequest,
 };
 use omnifs_core::{
@@ -306,6 +307,260 @@ pub fn to_daemon_recovery(v: &DaemonRecovery) -> wire::DaemonRecovery {
         serving_revision: v.serving_revision.map(ResourceRevision::get),
         store_health: Some(to_health_report(&v.store_health)),
         repair: v.repair.as_ref().map(to_recovery_offer),
+    }
+}
+
+fn doctor_section(v: wire::DoctorSection) -> Result<DoctorSection, FromGrpcError> {
+    match v {
+        wire::DoctorSection::Environment => Ok(DoctorSection::Environment),
+        wire::DoctorSection::Profile => Ok(DoctorSection::Profile),
+        wire::DoctorSection::Mounts => Ok(DoctorSection::Mounts),
+        wire::DoctorSection::Filesystems => Ok(DoctorSection::Filesystems),
+        wire::DoctorSection::Unspecified => Err(FromGrpcError::Unspecified("doctor section")),
+    }
+}
+
+fn to_doctor_section(v: DoctorSection) -> i32 {
+    match v {
+        DoctorSection::Environment => wire::DoctorSection::Environment as i32,
+        DoctorSection::Profile => wire::DoctorSection::Profile as i32,
+        DoctorSection::Mounts => wire::DoctorSection::Mounts as i32,
+        DoctorSection::Filesystems => wire::DoctorSection::Filesystems as i32,
+    }
+}
+
+fn doctor_check_kind(v: wire::DoctorCheckKind) -> Result<DoctorCheckKind, FromGrpcError> {
+    match v {
+        wire::DoctorCheckKind::Docker => Ok(DoctorCheckKind::Docker),
+        wire::DoctorCheckKind::Fuse => Ok(DoctorCheckKind::Fuse),
+        wire::DoctorCheckKind::Image => Ok(DoctorCheckKind::Image),
+        wire::DoctorCheckKind::Network => Ok(DoctorCheckKind::Network),
+        wire::DoctorCheckKind::SshAgent => Ok(DoctorCheckKind::SshAgent),
+        wire::DoctorCheckKind::Config => Ok(DoctorCheckKind::Config),
+        wire::DoctorCheckKind::CredentialStore => Ok(DoctorCheckKind::CredentialStore),
+        wire::DoctorCheckKind::Credentials => Ok(DoctorCheckKind::Credentials),
+        wire::DoctorCheckKind::FilesystemState => Ok(DoctorCheckKind::FilesystemState),
+        wire::DoctorCheckKind::StrayFilesystem => Ok(DoctorCheckKind::StrayFilesystem),
+        wire::DoctorCheckKind::StaleFilesystemState => Ok(DoctorCheckKind::StaleFilesystemState),
+        wire::DoctorCheckKind::DockerFilesystemOwnership => {
+            Ok(DoctorCheckKind::DockerFilesystemOwnership)
+        },
+        wire::DoctorCheckKind::LibkrunFilesystemOwnership => {
+            Ok(DoctorCheckKind::LibkrunFilesystemOwnership)
+        },
+        wire::DoctorCheckKind::Unspecified => Err(FromGrpcError::Unspecified("doctor check kind")),
+    }
+}
+
+fn to_doctor_check_kind(v: DoctorCheckKind) -> i32 {
+    match v {
+        DoctorCheckKind::Docker => wire::DoctorCheckKind::Docker as i32,
+        DoctorCheckKind::Fuse => wire::DoctorCheckKind::Fuse as i32,
+        DoctorCheckKind::Image => wire::DoctorCheckKind::Image as i32,
+        DoctorCheckKind::Network => wire::DoctorCheckKind::Network as i32,
+        DoctorCheckKind::SshAgent => wire::DoctorCheckKind::SshAgent as i32,
+        DoctorCheckKind::Config => wire::DoctorCheckKind::Config as i32,
+        DoctorCheckKind::CredentialStore => wire::DoctorCheckKind::CredentialStore as i32,
+        DoctorCheckKind::Credentials => wire::DoctorCheckKind::Credentials as i32,
+        DoctorCheckKind::FilesystemState => wire::DoctorCheckKind::FilesystemState as i32,
+        DoctorCheckKind::StrayFilesystem => wire::DoctorCheckKind::StrayFilesystem as i32,
+        DoctorCheckKind::StaleFilesystemState => wire::DoctorCheckKind::StaleFilesystemState as i32,
+        DoctorCheckKind::DockerFilesystemOwnership => {
+            wire::DoctorCheckKind::DockerFilesystemOwnership as i32
+        },
+        DoctorCheckKind::LibkrunFilesystemOwnership => {
+            wire::DoctorCheckKind::LibkrunFilesystemOwnership as i32
+        },
+    }
+}
+
+fn doctor_severity(v: wire::DoctorSeverity) -> Result<DoctorSeverity, FromGrpcError> {
+    match v {
+        wire::DoctorSeverity::Positive => Ok(DoctorSeverity::Positive),
+        wire::DoctorSeverity::Neutral => Ok(DoctorSeverity::Neutral),
+        wire::DoctorSeverity::Attention => Ok(DoctorSeverity::Attention),
+        wire::DoctorSeverity::Failure => Ok(DoctorSeverity::Failure),
+        wire::DoctorSeverity::Unspecified => Err(FromGrpcError::Unspecified("doctor severity")),
+    }
+}
+
+fn to_doctor_severity(v: DoctorSeverity) -> i32 {
+    match v {
+        DoctorSeverity::Positive => wire::DoctorSeverity::Positive as i32,
+        DoctorSeverity::Neutral => wire::DoctorSeverity::Neutral as i32,
+        DoctorSeverity::Attention => wire::DoctorSeverity::Attention as i32,
+        DoctorSeverity::Failure => wire::DoctorSeverity::Failure as i32,
+    }
+}
+
+fn doctor_executor(v: &wire::DoctorRemediation) -> Result<DoctorExecutor, FromGrpcError> {
+    match wire::DoctorExecutor::try_from(v.executor)
+        .map_err(|_| FromGrpcError::Invalid("doctor executor"))?
+    {
+        wire::DoctorExecutor::Daemon => {
+            if v.mount_reauth_target.is_some() {
+                return Err(FromGrpcError::Invalid("doctor remediation mount target"));
+            }
+            Ok(DoctorExecutor::Daemon)
+        },
+        wire::DoctorExecutor::ClientMountReauth => {
+            let mount = v
+                .mount_reauth_target
+                .clone()
+                .ok_or(FromGrpcError::Invalid("doctor remediation mount target"))?;
+            Ok(DoctorExecutor::ClientMountReauth { mount })
+        },
+        wire::DoctorExecutor::Unspecified => Err(FromGrpcError::Unspecified("doctor executor")),
+    }
+}
+
+fn to_doctor_executor(v: &DoctorExecutor) -> (i32, Option<String>) {
+    match v {
+        DoctorExecutor::Daemon => (wire::DoctorExecutor::Daemon as i32, None),
+        DoctorExecutor::ClientMountReauth { mount } => (
+            wire::DoctorExecutor::ClientMountReauth as i32,
+            Some(mount.clone()),
+        ),
+    }
+}
+
+fn doctor_finding(v: &wire::DoctorFinding) -> Result<DoctorFinding, FromGrpcError> {
+    Ok(DoctorFinding {
+        section: doctor_section(
+            wire::DoctorSection::try_from(v.section)
+                .map_err(|_| FromGrpcError::Invalid("doctor section"))?,
+        )?,
+        check: doctor_check_kind(
+            wire::DoctorCheckKind::try_from(v.check)
+                .map_err(|_| FromGrpcError::Invalid("doctor check kind"))?,
+        )?,
+        target: v.target.clone(),
+        severity: doctor_severity(
+            wire::DoctorSeverity::try_from(v.severity)
+                .map_err(|_| FromGrpcError::Invalid("doctor severity"))?,
+        )?,
+        message: v.message.clone(),
+        fix: v.fix.clone(),
+        remediation_id: v.remediation_id.clone(),
+    })
+}
+
+fn to_doctor_finding(v: &DoctorFinding) -> wire::DoctorFinding {
+    wire::DoctorFinding {
+        section: to_doctor_section(v.section),
+        check: to_doctor_check_kind(v.check),
+        target: v.target.clone(),
+        severity: to_doctor_severity(v.severity),
+        message: v.message.clone(),
+        fix: v.fix.clone(),
+        remediation_id: v.remediation_id.clone(),
+    }
+}
+
+fn doctor_remediation(v: &wire::DoctorRemediation) -> Result<DoctorRemediation, FromGrpcError> {
+    let (executor, mount_reauth_target) = (doctor_executor(v)?, v.mount_reauth_target.clone());
+    let executor = match executor {
+        DoctorExecutor::Daemon => DoctorExecutor::Daemon,
+        DoctorExecutor::ClientMountReauth { mount } => DoctorExecutor::ClientMountReauth { mount },
+    };
+    debug_assert!(matches!(
+        (&executor, mount_reauth_target.as_ref()),
+        (DoctorExecutor::Daemon, None) | (DoctorExecutor::ClientMountReauth { .. }, Some(_))
+    ));
+    Ok(DoctorRemediation {
+        id: v.id.clone(),
+        command_line: v.command_line.clone(),
+        executor,
+    })
+}
+
+fn to_doctor_remediation(v: &DoctorRemediation) -> wire::DoctorRemediation {
+    let (executor, mount_reauth_target) = to_doctor_executor(&v.executor);
+    wire::DoctorRemediation {
+        id: v.id.clone(),
+        command_line: v.command_line.clone(),
+        executor,
+        mount_reauth_target,
+    }
+}
+
+pub fn run_doctor_response(v: &wire::RunDoctorResponse) -> Result<RunDoctorReport, FromGrpcError> {
+    Ok(RunDoctorReport {
+        findings: v
+            .findings
+            .iter()
+            .map(doctor_finding)
+            .collect::<Result<_, _>>()?,
+        remediations: v
+            .remediations
+            .iter()
+            .map(doctor_remediation)
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+pub fn to_run_doctor_response(v: &RunDoctorReport) -> wire::RunDoctorResponse {
+    wire::RunDoctorResponse {
+        findings: v.findings.iter().map(to_doctor_finding).collect(),
+        remediations: v.remediations.iter().map(to_doctor_remediation).collect(),
+    }
+}
+
+pub fn apply_doctor_repairs_request(
+    v: &wire::ApplyDoctorRepairsRequest,
+) -> Result<Vec<String>, FromGrpcError> {
+    Ok(v.ids.clone())
+}
+
+pub fn to_apply_doctor_repairs_request(ids: &[String]) -> wire::ApplyDoctorRepairsRequest {
+    wire::ApplyDoctorRepairsRequest { ids: ids.to_vec() }
+}
+
+fn doctor_repair_outcome(
+    v: &wire::DoctorRepairOutcome,
+) -> Result<DoctorRepairOutcome, FromGrpcError> {
+    let state = match wire::DoctorRepairState::try_from(v.state)
+        .map_err(|_| FromGrpcError::Invalid("doctor repair state"))?
+    {
+        wire::DoctorRepairState::Applied => DoctorRepairState::Applied,
+        wire::DoctorRepairState::Failed => DoctorRepairState::Failed,
+        wire::DoctorRepairState::Skipped => DoctorRepairState::Skipped,
+        wire::DoctorRepairState::Unspecified => {
+            return Err(FromGrpcError::Unspecified("doctor repair state"));
+        },
+    };
+    Ok(DoctorRepairOutcome {
+        id: v.id.clone(),
+        command_line: v.command_line.clone(),
+        state,
+        error: v.error.clone(),
+    })
+}
+
+fn to_doctor_repair_outcome(v: &DoctorRepairOutcome) -> wire::DoctorRepairOutcome {
+    wire::DoctorRepairOutcome {
+        id: v.id.clone(),
+        command_line: v.command_line.clone(),
+        state: match v.state {
+            DoctorRepairState::Applied => wire::DoctorRepairState::Applied as i32,
+            DoctorRepairState::Failed => wire::DoctorRepairState::Failed as i32,
+            DoctorRepairState::Skipped => wire::DoctorRepairState::Skipped as i32,
+        },
+        error: v.error.clone(),
+    }
+}
+
+pub fn apply_doctor_repairs_response(
+    v: &wire::ApplyDoctorRepairsResponse,
+) -> Result<Vec<DoctorRepairOutcome>, FromGrpcError> {
+    v.outcomes.iter().map(doctor_repair_outcome).collect()
+}
+
+pub fn to_apply_doctor_repairs_response(
+    outcomes: &[DoctorRepairOutcome],
+) -> wire::ApplyDoctorRepairsResponse {
+    wire::ApplyDoctorRepairsResponse {
+        outcomes: outcomes.iter().map(to_doctor_repair_outcome).collect(),
     }
 }
 
@@ -2384,6 +2639,176 @@ pub fn to_progress_event(v: &ProgressEvent) -> wire::ProgressEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_report_and_repairs_round_trip_all_variants() {
+        let findings = vec![
+            DoctorFinding {
+                section: DoctorSection::Environment,
+                check: DoctorCheckKind::Docker,
+                target: Some("docker".into()),
+                severity: DoctorSeverity::Positive,
+                message: "docker is available".into(),
+                fix: None,
+                remediation_id: None,
+            },
+            DoctorFinding {
+                section: DoctorSection::Profile,
+                check: DoctorCheckKind::Fuse,
+                target: None,
+                severity: DoctorSeverity::Neutral,
+                message: "fuse support not checked".into(),
+                fix: Some("install fuse".into()),
+                remediation_id: Some("r1".into()),
+            },
+            DoctorFinding {
+                section: DoctorSection::Mounts,
+                check: DoctorCheckKind::Credentials,
+                target: Some("github".into()),
+                severity: DoctorSeverity::Attention,
+                message: "credential expired".into(),
+                fix: Some("omnifs mount reauth github".into()),
+                remediation_id: Some("r2".into()),
+            },
+            DoctorFinding {
+                section: DoctorSection::Filesystems,
+                check: DoctorCheckKind::LibkrunFilesystemOwnership,
+                target: Some("dev".into()),
+                severity: DoctorSeverity::Failure,
+                message: "runtime record is stale".into(),
+                fix: Some("omnifs fs rm dev".into()),
+                remediation_id: Some("r3".into()),
+            },
+        ];
+        let report = RunDoctorReport {
+            findings,
+            remediations: vec![
+                DoctorRemediation {
+                    id: "r1".into(),
+                    command_line: "omnifs doctor --yes".into(),
+                    executor: DoctorExecutor::Daemon,
+                },
+                DoctorRemediation {
+                    id: "r2".into(),
+                    command_line: "omnifs mount reauth github".into(),
+                    executor: DoctorExecutor::ClientMountReauth {
+                        mount: "github".into(),
+                    },
+                },
+            ],
+        };
+        assert_eq!(
+            run_doctor_response(&to_run_doctor_response(&report)).unwrap(),
+            report
+        );
+
+        let outcomes = vec![
+            DoctorRepairOutcome {
+                id: "r1".into(),
+                command_line: "omnifs doctor --yes".into(),
+                state: DoctorRepairState::Applied,
+                error: None,
+            },
+            DoctorRepairOutcome {
+                id: "r2".into(),
+                command_line: "omnifs mount reauth github".into(),
+                state: DoctorRepairState::Failed,
+                error: Some("expired token".into()),
+            },
+            DoctorRepairOutcome {
+                id: "r3".into(),
+                command_line: "omnifs fs rm dev".into(),
+                state: DoctorRepairState::Skipped,
+                error: Some("filesystem became desired since diagnosis".into()),
+            },
+        ];
+        assert_eq!(
+            apply_doctor_repairs_response(&to_apply_doctor_repairs_response(&outcomes)).unwrap(),
+            outcomes
+        );
+        let ids = vec!["r1".into(), "r2".into()];
+        assert_eq!(
+            apply_doctor_repairs_request(&to_apply_doctor_repairs_request(&ids)).unwrap(),
+            ids
+        );
+    }
+
+    #[test]
+    fn doctor_wire_rejects_unknown_unspecified_and_inconsistent_values() {
+        let mut finding = wire::DoctorFinding {
+            section: wire::DoctorSection::Environment as i32,
+            check: wire::DoctorCheckKind::Docker as i32,
+            target: None,
+            severity: wire::DoctorSeverity::Positive as i32,
+            message: "ok".into(),
+            fix: None,
+            remediation_id: None,
+        };
+        finding.section = wire::DoctorSection::Unspecified as i32;
+        assert_eq!(
+            doctor_finding(&finding),
+            Err(FromGrpcError::Unspecified("doctor section"))
+        );
+        finding.section = 99;
+        assert_eq!(
+            doctor_finding(&finding),
+            Err(FromGrpcError::Invalid("doctor section"))
+        );
+        finding.section = wire::DoctorSection::Environment as i32;
+        finding.check = wire::DoctorCheckKind::Unspecified as i32;
+        assert_eq!(
+            doctor_finding(&finding),
+            Err(FromGrpcError::Unspecified("doctor check kind"))
+        );
+        finding.check = wire::DoctorCheckKind::Docker as i32;
+        finding.severity = 99;
+        assert_eq!(
+            doctor_finding(&finding),
+            Err(FromGrpcError::Invalid("doctor severity"))
+        );
+
+        let mut remediation = wire::DoctorRemediation {
+            id: "r1".into(),
+            command_line: "omnifs doctor --yes".into(),
+            executor: wire::DoctorExecutor::Daemon as i32,
+            mount_reauth_target: None,
+        };
+        assert!(doctor_remediation(&remediation).is_ok());
+        remediation.mount_reauth_target = Some("github".into());
+        assert_eq!(
+            doctor_remediation(&remediation),
+            Err(FromGrpcError::Invalid("doctor remediation mount target"))
+        );
+        remediation.executor = wire::DoctorExecutor::ClientMountReauth as i32;
+        remediation.mount_reauth_target = None;
+        assert_eq!(
+            doctor_remediation(&remediation),
+            Err(FromGrpcError::Invalid("doctor remediation mount target"))
+        );
+        remediation.mount_reauth_target = Some("github".into());
+        assert!(doctor_remediation(&remediation).is_ok());
+        remediation.executor = wire::DoctorExecutor::Unspecified as i32;
+        assert_eq!(
+            doctor_remediation(&remediation),
+            Err(FromGrpcError::Unspecified("doctor executor"))
+        );
+        remediation.executor = 99;
+        assert_eq!(
+            doctor_remediation(&remediation),
+            Err(FromGrpcError::Invalid("doctor executor"))
+        );
+
+        let outcome = wire::DoctorRepairOutcome {
+            id: "r1".into(),
+            command_line: "omnifs doctor --yes".into(),
+            state: wire::DoctorRepairState::Unspecified as i32,
+            error: None,
+        };
+        assert_eq!(
+            doctor_repair_outcome(&outcome),
+            Err(FromGrpcError::Unspecified("doctor repair state"))
+        );
+    }
 
     #[test]
     fn secret_domain_debug_is_redacted() {

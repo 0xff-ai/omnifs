@@ -9,6 +9,8 @@ service Control {
   rpc GetDaemonInfo(Empty) returns (DaemonInfoResponse);
   rpc GetRecoveryState(Empty) returns (RecoveryResponse);
   rpc RepairState(RepairStateRequest) returns (RepairStateResponse);
+  rpc RunDoctor(Empty) returns (RunDoctorResponse);
+  rpc ApplyDoctorRepairs(ApplyDoctorRepairsRequest) returns (ApplyDoctorRepairsResponse);
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
   rpc ListProviders(Empty) returns (ListProvidersResponse);
   rpc GetProviderMetadata(GetProviderMetadataRequest) returns (GetProviderMetadataResponse);
@@ -42,6 +44,33 @@ message RepairStateRequest {
   RepairAction action = 3;
 }
 message RepairStateResponse { RepairReceipt receipt = 1; }
+message RunDoctorResponse {
+  repeated DoctorFinding findings = 1;
+  repeated DoctorRemediation remediations = 2;
+}
+message DoctorFinding {
+  DoctorSection section = 1;
+  DoctorCheckKind check = 2;
+  optional string target = 3;
+  DoctorSeverity severity = 4;
+  string message = 5;
+  optional string fix = 6;
+  optional string remediation_id = 7;
+}
+message DoctorRemediation {
+  string id = 1;
+  string command_line = 2;
+  DoctorExecutor executor = 3;
+  optional string mount_reauth_target = 4;
+}
+message ApplyDoctorRepairsRequest { repeated string ids = 1; }
+message ApplyDoctorRepairsResponse { repeated DoctorRepairOutcome outcomes = 1; }
+message DoctorRepairOutcome {
+  string id = 1;
+  string command_line = 2;
+  DoctorRepairState state = 3;
+  optional string error = 4;
+}
 message ShutdownRequest { bool stop_filesystems = 1; }
 message ShutdownResponse { uint32 stopped = 1; repeated string still_running = 2; }
 
@@ -375,7 +404,14 @@ message CredentialClientOverrides { optional string client_id = 1; optional byte
 message StringList { repeated string values = 1; }
 message CredentialStatus { CredentialKey key = 1; bytes provider = 2; CredentialKind kind = 3; repeated string scopes = 4; bytes auth_fingerprint = 5; uint64 version = 6; uint64 generation = 7; CredentialStatusKind status = 8; uint64 action_generation = 10; }
 
-message DaemonInfo { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional bytes attach_unix = 5; optional string attach_tcp = 6; }
+message DaemonInfo {
+  string version = 1;
+  uint32 pid = 2;
+  string instance_id = 3;
+  bytes executable = 4;
+  optional bytes attach_unix = 5;
+  optional string attach_tcp = 6;
+}
 message DaemonStatus { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional string attach_tcp = 5; repeated FilesystemResource filesystems = 6; repeated MountInfo mounts = 7; DaemonHealth health = 8; }
 message DaemonInventory { DaemonInfo info = 1; DaemonPhase phase = 2; optional uint64 durable_revision = 3; optional uint64 serving_revision = 4; DaemonHealth health = 5; repeated MountRecord mounts = 6; repeated CredentialStatus credentials = 7; repeated FilesystemResource filesystems = 8; }
 message DaemonRecovery { DaemonPhase phase = 1; optional uint64 durable_revision = 2; optional uint64 serving_revision = 3; HealthReport store_health = 4; RecoveryOffer repair = 5; }
@@ -391,6 +427,47 @@ enum CredentialKind { CREDENTIAL_KIND_UNSPECIFIED = 0; CREDENTIAL_STATIC_TOKEN =
 enum CredentialStatusKind { CREDENTIAL_STATUS_KIND_UNSPECIFIED = 0; CREDENTIAL_ACTIVE = 1; CREDENTIAL_BLOCKED = 2; CREDENTIAL_PENDING_REPUBLISH = 3; CREDENTIAL_REVOCATION_PENDING = 4; CREDENTIAL_REVOCATION_UNKNOWN = 5; CREDENTIAL_DELETED = 6; }
 enum RepairAction { REPAIR_ACTION_UNSPECIFIED = 0; REPAIR_RECREATE_CONTROL_STORE = 1; }
 enum RepairDisposition { REPAIR_DISPOSITION_UNSPECIFIED = 0; REPAIR_FRESH_STORE_CREATED = 1; REPAIR_CORRUPT_STORE_ARCHIVED = 2; }
+enum DoctorSection {
+  DOCTOR_SECTION_UNSPECIFIED = 0;
+  DOCTOR_SECTION_ENVIRONMENT = 1;
+  DOCTOR_SECTION_PROFILE = 2;
+  DOCTOR_SECTION_MOUNTS = 3;
+  DOCTOR_SECTION_FILESYSTEMS = 4;
+}
+enum DoctorCheckKind {
+  DOCTOR_CHECK_KIND_UNSPECIFIED = 0;
+  DOCTOR_CHECK_KIND_DOCKER = 1;
+  DOCTOR_CHECK_KIND_FUSE = 2;
+  DOCTOR_CHECK_KIND_IMAGE = 3;
+  DOCTOR_CHECK_KIND_NETWORK = 4;
+  DOCTOR_CHECK_KIND_SSH_AGENT = 5;
+  DOCTOR_CHECK_KIND_CONFIG = 6;
+  DOCTOR_CHECK_KIND_CREDENTIAL_STORE = 7;
+  DOCTOR_CHECK_KIND_CREDENTIALS = 8;
+  DOCTOR_CHECK_KIND_FILESYSTEM_STATE = 9;
+  DOCTOR_CHECK_KIND_STRAY_FILESYSTEM = 10;
+  DOCTOR_CHECK_KIND_STALE_FILESYSTEM_STATE = 11;
+  DOCTOR_CHECK_KIND_DOCKER_FILESYSTEM_OWNERSHIP = 12;
+  DOCTOR_CHECK_KIND_LIBKRUN_FILESYSTEM_OWNERSHIP = 13;
+}
+enum DoctorSeverity {
+  DOCTOR_SEVERITY_UNSPECIFIED = 0;
+  DOCTOR_SEVERITY_POSITIVE = 1;
+  DOCTOR_SEVERITY_NEUTRAL = 2;
+  DOCTOR_SEVERITY_ATTENTION = 3;
+  DOCTOR_SEVERITY_FAILURE = 4;
+}
+enum DoctorExecutor {
+  DOCTOR_EXECUTOR_UNSPECIFIED = 0;
+  DOCTOR_EXECUTOR_DAEMON = 1;
+  DOCTOR_EXECUTOR_CLIENT_MOUNT_REAUTH = 2;
+}
+enum DoctorRepairState {
+  DOCTOR_REPAIR_STATE_UNSPECIFIED = 0;
+  DOCTOR_REPAIR_STATE_APPLIED = 1;
+  DOCTOR_REPAIR_STATE_FAILED = 2;
+  DOCTOR_REPAIR_STATE_SKIPPED = 3;
+}
 enum FsProtocol { FS_PROTOCOL_UNSPECIFIED = 0; FS_FUSE = 1; FS_NFS = 2; }
 enum FsRuntime { FS_RUNTIME_UNSPECIFIED = 0; FS_HOST = 1; FS_DOCKER = 2; FS_LIBKRUN = 3; }
 enum ResourceKind { RESOURCE_KIND_UNSPECIFIED = 0; RESOURCE_PROVIDER = 1; RESOURCE_CREDENTIAL = 2; RESOURCE_MOUNT = 3; RESOURCE_FILESYSTEM = 4; }

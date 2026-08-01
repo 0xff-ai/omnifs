@@ -19,6 +19,8 @@ pub const CONTROL_REQUEST_TIMEOUT_SECS: u64 = 5;
 pub const CONTROL_SHUTDOWN_DRAIN_SECS: u64 = 10;
 /// Deadline for shutdown, which includes the daemon's bounded filesystem drain.
 pub const CONTROL_SHUTDOWN_TIMEOUT_SECS: u64 = 15;
+/// Deadline for one complete daemon doctor report or repair batch.
+pub const CONTROL_DOCTOR_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlError {

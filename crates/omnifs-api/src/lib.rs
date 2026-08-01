@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 mod control;
 mod credential;
+mod doctor;
 mod filesystem;
 mod mount;
 mod progress;
@@ -16,16 +17,20 @@ mod resource;
 pub mod grpc;
 
 pub use control::{
-    ActionKind, ActionPhase, ActionReceipt, CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MESSAGE_MAX_BYTES,
-    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_RESOURCE_MAX_COUNT, CONTROL_SHUTDOWN_DRAIN_SECS,
-    CONTROL_SHUTDOWN_TIMEOUT_SECS, CONTROL_STREAM_ITEM_MAX_BYTES, CONTROL_STREAM_PAYLOAD_MAX_BYTES,
-    ControlError, ControlErrorCode, CredentialReceipt, ProviderImportDisposition,
-    ProviderImportReceipt, ProviderReference, RevokeCredentialRequest,
-    SetCredentialMaterialRequest,
+    ActionKind, ActionPhase, ActionReceipt, CONTROL_DOCTOR_TIMEOUT_SECS,
+    CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MESSAGE_MAX_BYTES, CONTROL_REQUEST_TIMEOUT_SECS,
+    CONTROL_RESOURCE_MAX_COUNT, CONTROL_SHUTDOWN_DRAIN_SECS, CONTROL_SHUTDOWN_TIMEOUT_SECS,
+    CONTROL_STREAM_ITEM_MAX_BYTES, CONTROL_STREAM_PAYLOAD_MAX_BYTES, ControlError,
+    ControlErrorCode, CredentialReceipt, ProviderImportDisposition, ProviderImportReceipt,
+    ProviderReference, RevokeCredentialRequest, SetCredentialMaterialRequest,
 };
 pub use credential::{
     CredentialClientOverrides, CredentialKey, CredentialKind, CredentialMaterial, CredentialStatus,
     CredentialStatusKind, CredentialSubmission, SecretBytes,
+};
+pub use doctor::{
+    DoctorCheckKind, DoctorExecutor, DoctorFinding, DoctorRemediation, DoctorRepairOutcome,
+    DoctorRepairState, DoctorSection, DoctorSeverity, RunDoctorReport,
 };
 pub use filesystem::{
     FilesystemAccess, FilesystemCommand, FilesystemDefinition, FilesystemPhase, FilesystemStatus,
