@@ -4746,6 +4746,7 @@ dependencies = [
  "omnifs-vfs",
  "postcard",
  "prost",
+ "reqwest 0.13.4",
  "secrecy",
  "serde",
  "serde_json",

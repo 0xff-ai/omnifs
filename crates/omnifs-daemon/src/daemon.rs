@@ -65,6 +65,7 @@ pub(crate) struct Daemon {
     pub(crate) vfs: Arc<omnifs_vfs::VfsServer>,
     pub(crate) bound_tcp: OnceLock<omnifs_vfs::Endpoint>,
     pub(crate) shutdown_tx: tokio::sync::watch::Sender<bool>,
+    pub(crate) doctor: crate::doctor::DoctorState,
 }
 
 pub(crate) struct DaemonParts {
@@ -102,6 +103,7 @@ impl Daemon {
             vfs,
             bound_tcp: OnceLock::new(),
             shutdown_tx,
+            doctor: crate::doctor::DoctorState::new(),
         }
     }
 
@@ -659,7 +661,7 @@ impl Daemon {
         )
     }
 
-    fn live_filesystems(&self) -> Vec<FilesystemDefinition> {
+    pub(crate) fn live_filesystems(&self) -> Vec<FilesystemDefinition> {
         self.vfs
             .sessions()
             .into_iter()

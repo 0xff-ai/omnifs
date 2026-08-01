@@ -10,6 +10,7 @@ mod control;
 mod credential_codec;
 mod credential_document;
 mod daemon;
+mod doctor;
 mod filesystem_supervisor;
 pub mod fs_runtime;
 mod generation_builder;

@@ -92,6 +92,40 @@ impl DaemonContext {
         attach_unix: Option<PathBuf>,
         attach_tcp: Option<SocketAddr>,
     ) -> DaemonInfo {
+        let supported_filesystem_pairs = [
+            omnifs_core::FilesystemProtocol::Fuse,
+            omnifs_core::FilesystemProtocol::Nfs,
+        ]
+        .into_iter()
+        .flat_map(|protocol| {
+            [
+                omnifs_core::FilesystemRuntime::Host,
+                omnifs_core::FilesystemRuntime::Docker,
+                omnifs_core::FilesystemRuntime::Libkrun,
+            ]
+            .into_iter()
+            .filter(move |runtime| {
+                omnifs_core::filesystem_pair_supported_on_current_host(protocol, *runtime)
+            })
+            .map(move |runtime| (protocol, runtime))
+        })
+        .collect();
+        let platform_default_filesystem_pair = match (std::env::consts::OS, std::env::consts::ARCH)
+        {
+            ("linux", _) => Some((
+                omnifs_core::FilesystemProtocol::Fuse,
+                omnifs_core::FilesystemRuntime::Host,
+            )),
+            ("macos", "aarch64") => Some((
+                omnifs_core::FilesystemProtocol::Fuse,
+                omnifs_core::FilesystemRuntime::Libkrun,
+            )),
+            ("macos", _) => Some((
+                omnifs_core::FilesystemProtocol::Nfs,
+                omnifs_core::FilesystemRuntime::Host,
+            )),
+            _ => None,
+        };
         DaemonInfo {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             pid: self.process.pid(),
@@ -99,6 +133,8 @@ impl DaemonContext {
             executable: self.process.executable().to_path_buf(),
             attach_unix,
             attach_tcp,
+            supported_filesystem_pairs,
+            platform_default_filesystem_pair,
         }
     }
 
@@ -185,5 +221,25 @@ mod tests {
         drop(listener);
         assert!(target.exists(), "symlink target must not be removed");
         assert!(path.exists());
+    }
+
+    #[test]
+    fn daemon_info_advertises_supported_pairs_and_default_policy() {
+        let temp = TempDir::new().unwrap();
+        let info = context(temp.path()).daemon_info(None, None);
+        assert!(!info.supported_filesystem_pairs.is_empty());
+        assert!(
+            info.supported_filesystem_pairs
+                .iter()
+                .all(|(protocol, runtime)| {
+                    omnifs_core::filesystem_pair_supported_on_current_host(*protocol, *runtime)
+                })
+        );
+        if let Some((protocol, runtime)) = info.platform_default_filesystem_pair {
+            assert!(
+                info.supported_filesystem_pairs
+                    .contains(&(protocol, runtime))
+            );
+        }
     }
 }
