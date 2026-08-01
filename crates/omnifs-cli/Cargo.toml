@@ -21,10 +21,7 @@ omnifs-state = { workspace = true }
 omnifs-api = { workspace = true }
 omnifs-kcl = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
-omnifs-nfs = { workspace = true }
 omnifs-thin = { workspace = true }
-omnifs-mtab = { workspace = true }
-omnifs-libkrun = { workspace = true }
 omnifs-auth = { workspace = true }
 tonic = { workspace = true }
 tower = { workspace = true }
