@@ -1,4 +1,8 @@
 //! CLI grammar, output, and exit-code contract tests.
+//!
+//! Keep process coverage to representative executable checks. Exact help and
+//! output registers live in `cli_transcripts`; parser details live in the CLI
+//! unit tests.
 
 #![cfg(not(target_os = "wasi"))]
 
@@ -39,7 +43,7 @@ fn help_documents_exit_codes() {
 }
 
 #[test]
-fn resource_help_exposes_only_the_final_public_grammar() {
+fn public_resource_help_lists_the_final_command_groups() {
     let top = Command::new(omnifs_bin())
         .arg("--help")
         .output()
@@ -50,94 +54,14 @@ fn resource_help_exposes_only_the_final_public_grammar() {
         assert!(top_help.contains(command), "missing {command}: {top_help}");
     }
 
-    for (group, expected) in [
-        ("provider", ["add", "ls", "show", "rm"].as_slice()),
-        (
-            "mount",
-            ["add", "update", "reauth", "revoke", "rm", "ls", "show"].as_slice(),
-        ),
-        (
-            "credential",
-            ["login", "set", "ls", "show", "rm", "revoke"].as_slice(),
-        ),
-        (
-            "fs",
-            ["add", "ls", "show", "rm", "restart", "shell"].as_slice(),
-        ),
-    ] {
-        let output = Command::new(omnifs_bin())
-            .args([group, "--help"])
-            .output()
-            .unwrap_or_else(|error| panic!("spawn omnifs {group} --help: {error}"));
-        assert!(output.status.success(), "{group}: {output:?}");
-        let help = String::from_utf8_lossy(&output.stdout);
-        for command in expected {
-            assert!(help.contains(command), "missing {group} {command}: {help}");
-        }
-        for retired in ["attach", "detach", "create", "enable", "disable"] {
-            assert!(
-                !help
-                    .lines()
-                    .any(|line| line.trim_start().starts_with(retired)),
-                "retired {group} {retired}: {help}"
-            );
-        }
-    }
-
-    let mount_add = Command::new(omnifs_bin())
-        .args(["mount", "add", "--help"])
+    let output = Command::new(omnifs_bin())
+        .args(["mount", "--help"])
         .output()
-        .expect("spawn omnifs mount add --help");
-    assert!(mount_add.status.success());
-    let mount_help = String::from_utf8_lossy(&mount_add.stdout);
-    for retired in [
-        "--name",
-        "--provider",
-        "--config",
-        "--token",
-        "--account",
-        "--memory",
-    ] {
-        assert!(
-            !mount_help.contains(retired),
-            "flag-heavy authoring option {retired} remains: {mount_help}"
-        );
-    }
-
-    let credential_set = Command::new(omnifs_bin())
-        .args(["credential", "set", "--help"])
-        .output()
-        .expect("spawn omnifs credential set --help");
-    assert!(credential_set.status.success());
-    let credential_help = String::from_utf8_lossy(&credential_set.stdout);
-    assert!(credential_help.contains("<NAME>"), "{credential_help}");
-    assert!(credential_help.contains("--from-env"), "{credential_help}");
-    assert!(!credential_help.contains("--token"), "{credential_help}");
-
-    let shell = Command::new(omnifs_bin())
-        .args(["fs", "shell", "--help"])
-        .output()
-        .expect("spawn omnifs fs shell --help");
-    assert!(shell.status.success());
-    let shell_help = String::from_utf8_lossy(&shell.stdout);
-    for argument in ["<NAME>", "[COMMAND]"] {
-        assert!(
-            shell_help.contains(argument),
-            "missing {argument}: {shell_help}"
-        );
-    }
-    for retired in [
-        "--name",
-        "--protocol",
-        "--runtime",
-        "--mount",
-        "--command",
-        "--shell",
-    ] {
-        assert!(
-            !shell_help.contains(retired),
-            "retired {retired} in {shell_help}"
-        );
+        .expect("spawn omnifs mount --help");
+    assert!(output.status.success(), "{output:?}");
+    let help = String::from_utf8_lossy(&output.stdout);
+    for command in ["add", "update", "reauth", "revoke", "rm", "ls", "show"] {
+        assert!(help.contains(command), "missing mount {command}: {help}");
     }
 }
 
@@ -182,32 +106,7 @@ fn status_follow_requires_one_unambiguous_typed_target() {
 }
 
 #[test]
-fn interactive_mutation_refusal_points_automation_to_kcl() {
-    let fixture = Fixture::new();
-    for args in [
-        ["provider", "add"].as_slice(),
-        ["mount", "add"].as_slice(),
-        ["fs", "add"].as_slice(),
-        ["credential", "login"].as_slice(),
-    ] {
-        let output = fixture.run(args);
-        assert_eq!(exit_code(&output), 4, "{args:?}: {output:?}");
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let combined = combined.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
-            combined
-                .contains("Use omnifs plan <file> and omnifs apply <file> --yes for automation."),
-            "{args:?}: {combined}"
-        );
-    }
-}
-
-#[test]
-fn removed_top_level_commands_are_usage_errors() {
+fn representative_removed_commands_are_usage_errors() {
     let fixture = Fixture::new();
     for (args, needle) in [
         (
@@ -215,44 +114,10 @@ fn removed_top_level_commands_are_usage_errors() {
             "unrecognized subcommand 'init'",
         ),
         (
-            ["snapshot", "test"].as_slice(),
-            "unrecognized subcommand 'snapshot'",
-        ),
-        (
-            ["mount", "snapshot", "test"].as_slice(),
-            "unrecognized subcommand 'snapshot'",
-        ),
-        (
-            ["filesystem", "ls"].as_slice(),
-            "unrecognized subcommand 'filesystem'",
-        ),
-        (
-            ["mounts", "ls"].as_slice(),
-            "unrecognized subcommand 'mounts'",
-        ),
-        (
-            ["providers", "ls"].as_slice(),
-            "unrecognized subcommand 'providers'",
-        ),
-        (
-            ["up", "--no-filesystem"].as_slice(),
-            "unrecognized subcommand 'up'",
-        ),
-        (["down", "--force"].as_slice(), "--force"),
-        (
             ["fs", "attach", "main"].as_slice(),
             "unrecognized subcommand 'attach'",
         ),
-        (
-            ["fs", "detach", "main"].as_slice(),
-            "unrecognized subcommand 'detach'",
-        ),
-        (
-            ["shell", "--mount", "/tmp/omnifs"].as_slice(),
-            "unrecognized subcommand 'shell'",
-        ),
         (["status", "--json"].as_slice(), "--json"),
-        (["status", "--progress", "json"].as_slice(), "--progress"),
     ] {
         let output = fixture.run(args);
         assert_eq!(exit_code(&output), 2, "{args:?}: {output:?}");

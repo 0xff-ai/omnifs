@@ -184,10 +184,6 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/host-build
-      # Providers are built by the `components` job and downloaded as the
-      # omnifs-wasm artifact below, so the itest harness must not rebuild them
-      # (this runner has no wasm32-wasip2 toolchain or WASI SDK).
-      OMNIFS_ITEST_SKIP_PROVIDER_BUILD: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -324,10 +320,6 @@ jobs:
         (github.event.pull_request.user.login == 'raulk' ||
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: *linux_runner
-    env:
-      # Providers come from the components job's omnifs-wasm artifact; the itest
-      # harness must not rebuild them (no wasm toolchain on this runner).
-      OMNIFS_ITEST_SKIP_PROVIDER_BUILD: "1"
     steps:
       - uses: actions/checkout@v6
 
@@ -1074,7 +1066,6 @@ jobs:
          contains(github.event.pull_request.labels.*.name, 'ci-full')))
     runs-on: *linux_runner
     env:
-      OMNIFS_ITEST_SKIP_PROVIDER_BUILD: "1"
       OMNIFS_FILESYSTEM_IMAGE: "omnifs-filesystem:ci"
     steps:
       - uses: actions/checkout@v6

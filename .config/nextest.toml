@@ -1,5 +1,12 @@
 nextest-version = { required = "0.9.132" }
 
+[profile.fast]
+inherits = "default"
+default-filter = "kind(lib) | kind(bin)"
+fail-fast = true
+status-level = "fail"
+final-status-level = "fail"
+
 [profile.ci]
 slow-timeout = { period = "30s" }
 status-level = "slow"

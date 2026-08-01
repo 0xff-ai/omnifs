@@ -4849,6 +4849,7 @@ version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "fs2",
  "hickory-proto",
  "hyper-util",
  "omnifs-api",

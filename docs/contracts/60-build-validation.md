@@ -15,9 +15,11 @@ docs checks, runtime smoke paths, or validation guidance.
 
 Provider recipes install the pinned wasi-sdk. `just build providers` emits
 metadata-bearing components and `target/omnifs-provider-store`, a
-content-addressed store plus `index.json` consumed by `just dev`. Prebuild
-before host tests and set `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` to avoid
-contention; `just test host` does this.
+content-addressed store plus `index.json` consumed by `just dev`. Host test
+helpers reuse the built components and only invoke `just build providers` when
+the requested artifact is missing. A target-directory lock serializes the
+first build when several test binaries start together, so callers do not need
+an environment switch.
 
 Host fixtures isolate runtime state but share the explicit compiled-component
 cache from `wasm_cache_dir`. CI caches that selected directory under its host
@@ -87,9 +89,11 @@ real traversal and file tools for path changes.
 
 Use repository gates, not ad hoc workspace commands. Host gates exclude WASM
 provider crates; provider gates target them. `just check` is the pre-push or
-handoff aggregate. Iterate with `just check host` and `just test host`; use
-`just check providers`, `just build providers`, and `just validate providers`
-for WASM.
+handoff aggregate. For quick local feedback, `just test fast` runs the
+library and binary-target tests through the `nextest` fast profile. It does
+not cover integration or live targets. Iterate with `just check host` and
+`just test host`; use `just check providers`, `just build providers`, and
+`just validate providers` for WASM.
 
 Control-plane tests cover fast apply, compare-and-swap, durable receipts,
 bounded progress and resync, cold-cache preparation with the shared engine, and
@@ -192,7 +196,8 @@ paths. It is local-only and does not block CI.
 - Treat Rust type-checking as enough for `Router::compile` behavior.
 - Ignore runtime logs when the mount returns `Input/output error`.
 - Treat a local aggregate command as the source of truth when CI runs the lanes directly.
-- Run host tests that rebuild providers in parallel without prebuilding providers when contention matters.
+- Keep provider artifacts in the shared target sidecar; do not replace them
+  with per-test temporary builds.
 - Treat `just docs-check` as code-symbol validation.
 - Reintroduce a second copy of the filesystem apt block; edit `filesystem-base` instead.
 - Add a fourth `/omnifs` literal instead of updating its three owners together.

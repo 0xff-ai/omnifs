@@ -1445,42 +1445,39 @@ mod tests {
     }
 
     #[test]
-    fn seed_audit_rejects_an_extra_file() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(SEED_CONF_NAME),
-            "OMNIFS_ATTACH_ADDR=vsock:1024\n",
-        )
-        .unwrap();
-        std::fs::write(dir.path().join("extra.txt"), "surprise").unwrap();
-        let err = audit_seed_staging(dir.path()).unwrap_err();
-        assert!(err.contains("exactly one file"));
-    }
+    fn seed_audit_rejects_invalid_staging() {
+        let cases = [
+            (
+                "extra file",
+                "OMNIFS_ATTACH_ADDR=vsock:1024\n",
+                Some(("extra.txt", "surprise")),
+                "exactly one file",
+            ),
+            (
+                "unexpected key",
+                "OMNIFS_ATTACH_ADDR=vsock:1024\n\
+                 OMNIFS_READY_VSOCK_PORT=1025\n\
+                 OMNIFS_SSH_PUBKEY=ssh-ed25519 AAAA test\n\
+                 OMNIFS_HOME=/root/.omnifs\n",
+                None,
+                "OMNIFS_HOME",
+            ),
+            (
+                "missing key",
+                "OMNIFS_ATTACH_ADDR=vsock:1024\n",
+                None,
+                "missing required key",
+            ),
+        ];
 
-    #[test]
-    fn seed_audit_rejects_an_unexpected_key() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(SEED_CONF_NAME),
-            "OMNIFS_ATTACH_ADDR=vsock:1024\n\
-             OMNIFS_READY_VSOCK_PORT=1025\n\
-             OMNIFS_SSH_PUBKEY=ssh-ed25519 AAAA test\n\
-             OMNIFS_HOME=/root/.omnifs\n",
-        )
-        .unwrap();
-        let err = audit_seed_staging(dir.path()).unwrap_err();
-        assert!(err.contains("OMNIFS_HOME"));
-    }
-
-    #[test]
-    fn seed_audit_rejects_a_missing_key() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(SEED_CONF_NAME),
-            "OMNIFS_ATTACH_ADDR=vsock:1024\n",
-        )
-        .unwrap();
-        let err = audit_seed_staging(dir.path()).unwrap_err();
-        assert!(err.contains("missing required key"));
+        for (case, seed, extra_file, expected) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(SEED_CONF_NAME), seed).unwrap();
+            if let Some((name, contents)) = extra_file {
+                std::fs::write(dir.path().join(name), contents).unwrap();
+            }
+            let err = audit_seed_staging(dir.path()).unwrap_err();
+            assert!(err.contains(expected), "{case}: {err}");
+        }
     }
 }

@@ -449,42 +449,58 @@ mod tests {
     }
 
     #[test]
-    fn lockdown_rejects_any_mount() {
-        let err = assert_locked_down(&[MountPoint::default()], &[]).unwrap_err();
-        assert!(err.contains("mount"));
-    }
+    fn lockdown_matrix() {
+        let cases = [
+            (
+                "mount",
+                vec![MountPoint::default()],
+                Vec::new(),
+                Some("mount"),
+            ),
+            (
+                "allowed",
+                Vec::new(),
+                vec![
+                    "PATH=/usr/bin".to_string(),
+                    "HOME=/root".to_string(),
+                    format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:1"),
+                ],
+                None,
+            ),
+            (
+                "unexpected env",
+                Vec::new(),
+                vec!["OMNIFS_HOME=/root/.omnifs".to_string()],
+                Some("OMNIFS_HOME"),
+            ),
+            (
+                "missing attach address",
+                Vec::new(),
+                vec!["PATH=/usr/bin".to_string()],
+                Some(OMNIFS_ATTACH_ADDR_ENV),
+            ),
+            (
+                "duplicate attach address",
+                Vec::new(),
+                vec![
+                    format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:1"),
+                    format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:2"),
+                ],
+                Some("duplicate"),
+            ),
+        ];
 
-    #[test]
-    fn lockdown_allows_only_attach_vars_and_image_defaults() {
-        assert_locked_down(
-            &[],
-            &[
-                "PATH=/usr/bin".to_string(),
-                "HOME=/root".to_string(),
-                format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:1"),
-            ],
-        )
-        .expect("the exact allowed set must pass");
-    }
-
-    #[test]
-    fn lockdown_rejects_an_unexpected_env_var() {
-        let err = assert_locked_down(&[], &["OMNIFS_HOME=/root/.omnifs".to_string()]).unwrap_err();
-        assert!(err.contains("OMNIFS_HOME"));
-    }
-
-    #[test]
-    fn lockdown_requires_one_attach_address() {
-        let missing = assert_locked_down(&[], &["PATH=/usr/bin".to_string()]).unwrap_err();
-        assert!(missing.contains(OMNIFS_ATTACH_ADDR_ENV));
-        let duplicate = assert_locked_down(
-            &[],
-            &[
-                format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:1"),
-                format!("{OMNIFS_ATTACH_ADDR_ENV}=host.docker.internal:2"),
-            ],
-        )
-        .unwrap_err();
-        assert!(duplicate.contains("duplicate"));
+        for (case, mounts, env, expected_error) in cases {
+            match (assert_locked_down(&mounts, &env), expected_error) {
+                (Ok(()), None) => {},
+                (Err(error), Some(needle)) => {
+                    assert!(error.contains(needle), "{case}: {error}");
+                },
+                (Ok(()), Some(needle)) => {
+                    panic!("{case}: expected an error containing {needle}");
+                },
+                (Err(error), None) => panic!("{case}: unexpected error: {error}"),
+            }
+        }
     }
 }

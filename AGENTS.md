@@ -131,7 +131,8 @@ Run the narrowest meaningful check while iterating. Before a push or handoff,
 run `just check`. Detailed gates and live-lane requirements live in
 `docs/contracts/60-build-validation.md`.
 
-- Host or CLI sanity: `cargo fmt` and focused `cargo nextest run`.
+- Host or CLI sanity: `cargo fmt` and focused `cargo nextest run`; use
+  `just test fast` for the default quick host lane.
 - Documentation changes: `just docs-check`.
 - Provider manifest changes: `just schema`.
 - Mount, runtime, provider, clone, or traversal changes require the relevant
@@ -149,8 +150,8 @@ run `just check`. Detailed gates and live-lane requirements live in
   coexist. Cargo feature unification makes feature-alternate modules unsafe.
 - After WIT changes, stale generated bindings may require
   `cargo clean -p omnifs-wit` or a clean build.
-- Some engine integration tests build providers. Prebuild them and set
-  `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1`, or use `just test host`.
+- Host integration tests reuse the built provider sidecars and serialize an
+  automatic build only when an artifact is missing.
 - Integration fixtures share only the explicit compiled Wasmtime cache.
   Runtime state remains private to each fixture.
 - Provider metadata lives in one custom WASM section. Missing metadata usually
