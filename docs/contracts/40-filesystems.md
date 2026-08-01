@@ -109,17 +109,19 @@ absence are proved.
 
 ### Runtime driver ownership
 
-Lifecycle drivers probe and stop only exact runtime identity. Doctor alone
-searches runtime roots. Destructive repair holds the profile spawn lock, proves
-the daemon stopped, targets exact identity, and requires confirmation that
-`--yes` cannot bypass.
+Lifecycle drivers probe and stop only exact runtime identity. The live daemon's
+Doctor alone searches runtime roots and offers a destructive repair only when
+both desired and observed Filesystem states are absent at diagnosis. Apply
+rechecks both states before the effect, and the runtime driver reconfirms exact
+identity immediately before it acts.
 
-`omnifs-fs-runtime` owns mechanics, not desired state. Callers supply the
-Filesystem, daemon paths, endpoints, and event sink. The crate does not resolve
-profiles, read `OMNIFS_HOME`, prompt, render, or depend on CLI or daemon crates.
-Runtime events are closed factual variants with non-blocking delivery. One
-keyed task owns each Filesystem; no lock spans a runtime await. The runtime set
-stays closed until a real fourth implementation exists.
+The private `crates/omnifs-daemon/src/fs_runtime` module owns runtime mechanics,
+not desired state; `crates/omnifs-daemon/src/doctor.rs` owns diagnosis and
+opaque repair offers. The daemon supplies the Filesystem, daemon paths,
+endpoints, and event sink. Runtime events are closed factual variants with
+non-blocking delivery. One keyed task owns each Filesystem; no lock spans a
+runtime await. The runtime set stays closed until a real fourth implementation
+exists.
 
 Libkrun uses the same thin binary and VFS protocol as Docker, replacing TCP with
 one explicit virtio-vsock device. Three fixed ports carry guest-initiated
@@ -222,7 +224,8 @@ single-flight remains in `omnifs-auth`. FUSE has no `DELAY` equivalent.
 - `crates/omnifs-vfs/src/server.rs` (`VfsServer`)
 - `crates/omnifs-libkrun/src`
 - `crates/omnifs-daemon/src/filesystem_supervisor.rs`
-- `crates/omnifs-fs-runtime/src/host.rs`, `driver.rs`, `docker`, and `libkrun.rs`
+- `crates/omnifs-daemon/src/fs_runtime`
+- `crates/omnifs-daemon/src/doctor.rs`
 - `crates/omnifs-thin/src/host_control.rs` and `lifecycle.rs`
 - `crates/omnifs-cli/tests/lifecycle_acceptance.rs`
 

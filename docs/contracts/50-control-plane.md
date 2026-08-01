@@ -52,8 +52,13 @@ or Docker-bridge TCP port. TCP has no auth and never binds all interfaces. Both
 listeners must bind for readiness and remain alive.
 
 Process identity is diagnostic. Reachable RPC status and inventory are
-authoritative. Doctor alone cleans stale processes and filesystems, after a
-stopped-daemon check, consent, and fresh exact identity proof.
+authoritative. `doctor` uses the live daemon's `RunDoctor` and
+`ApplyDoctorRepairs` RPCs. The daemon offers a runtime repair only when desired
+and observed Filesystem states are both absent at diagnosis, rechecks that
+absence on apply, and reconfirms exact runtime identity before the effect. If
+the daemon is unreachable, the CLI may only clean the exact stale bootstrap
+identity with its local `CleanStaleInstance` remediation; it never repairs
+runtime state.
 
 ### Command grammar
 
@@ -169,9 +174,15 @@ instance, phase, retry, action generation, and tombstone until teardown proof.
 Host locations are absolute; guests use `/omnifs`.
 
 `FilesystemSupervisor` owns bounded host, Docker, and libkrun lifecycle through
-`omnifs-fs-runtime`. It persists identity before effects, adopts only exact
-runtime and session matches, serializes each Filesystem, and retains restart
-actions across daemon restart. Runners stay out of process and credential-free.
+the daemon's private `fs_runtime` module. It persists identity before effects,
+adopts only exact runtime and session matches, serializes each Filesystem, and
+retains restart actions across daemon restart. Runners stay out of process and
+credential-free.
+
+`RunDoctor` returns findings and opaque remediation IDs. `ApplyDoctorRepairs`
+executes only daemon-owned runtime repairs after the eligibility and identity
+checks above. Mount reauth remains a client remediation because it needs
+interactive credentials.
 
 `VfsServer` owns listeners, readiness, reconnect, pushed stop, and live
 sessions. VFS v11 handshakes carry Filesystem name, exact spec, and runtime
@@ -223,7 +234,9 @@ dev-docker` at `/omnifs`. It uses no interactive porcelain or daemon container.
 - `crates/omnifs-daemon/src/log_stream.rs`
 - `crates/omnifs-daemon/src/resource_control.rs`
 - `crates/omnifs-daemon/src/progress.rs`
+- `crates/omnifs-daemon/src/doctor.rs`
 - `crates/omnifs-daemon/src/filesystem_supervisor.rs`
+- `crates/omnifs-daemon/src/fs_runtime`
 - `crates/omnifs-state/src/lib.rs`
 - `crates/omnifs-state/src/resource.rs`
 - `crates/omnifs-state/src/action.rs`

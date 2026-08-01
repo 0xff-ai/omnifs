@@ -114,13 +114,13 @@ Before the first broad build, test, Git write, or networked command:
 - `omnifs-api`: resource domain and typed local control protocol.
 - `omnifs-bootstrap`: pre-RPC profile, socket, spawn lock, and daemon identity.
 - `omnifs-state`: SQLite desired state, actions, observations, and caches.
-- `omnifs-daemon`: reconciliation, local control, Filesystems, and VFS serving.
+- `omnifs-daemon`: reconciliation, local control, Filesystems, VFS serving,
+  runtime mechanics, and Doctor.
 - `omnifs-engine`: trusted provider runtime and projection semantics.
 - `omnifs-vfs`: namespace facade, wire protocol, reconnect, and sessions.
 - `omnifs-fuse`, `omnifs-nfs`, `omnifs-mtab`: OS protocol adapters and mount
   mechanics.
-- `omnifs-fs-runtime`, `omnifs-libkrun`, `omnifs-thin`: out-of-process
-  filesystem lifecycle.
+- `omnifs-libkrun`, `omnifs-thin`: out-of-process filesystem helpers.
 - `omnifs-cli`, `omnifs-inspector`: user commands, output, and inspection.
 - `omnifs-sdk`, `omnifs-wit`, `providers/`: provider authoring and components.
 - `omnifs-itest`: host, provider, filesystem, and live conformance tests.

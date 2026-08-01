@@ -235,9 +235,9 @@ paths. It is local-only and does not block CI.
 - `scripts/guest-image/build.sh`
 - `scripts/guest-image/mkosi/mkosi.profiles/dev/mkosi.conf`
 - `scripts/guest-image/mkosi/mkosi.profiles/release/mkosi.conf`
-- `crates/omnifs-fs-runtime/src/libkrun.rs`
+- `crates/omnifs-daemon/src/fs_runtime/libkrun.rs`
 - `crates/omnifs-libkrun/src`
-- `crates/omnifs-fs-runtime/src/guest_image.rs`
+- `crates/omnifs-daemon/src/fs_runtime/guest_image.rs`
 - `CONTRIBUTING.md`
 
 ## Validation

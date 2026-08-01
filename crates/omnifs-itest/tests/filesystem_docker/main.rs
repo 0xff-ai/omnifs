@@ -585,8 +585,8 @@ fn wait_until_serves(container: &str, timeout: Duration) {
 // (f) No-credentials structural contract
 // ===========================================================================
 
-/// The fail-closed contract in `omnifs_fs_runtime::docker` enforces at launch
-/// time,
+/// The daemon's private `fs_runtime::docker` module enforces the fail-closed
+/// contract at launch time,
 /// re-checked here from the outside with plain `docker inspect`/`docker exec`:
 /// no mounts of any kind, an env set of exactly the two attach vars plus the
 /// image's own defaults, and no guest home or credentials file anywhere in the
