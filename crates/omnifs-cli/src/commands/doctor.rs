@@ -880,11 +880,14 @@ async fn daemon_repair_outcomes(
 #[derive(Debug, Default)]
 struct NormalizedDoctorOutcomes {
     requested: BTreeMap<String, DoctorRepairOutcome>,
-    anomalies: Vec<DoctorRepairOutcome>,
 }
 
-fn outcome_error(existing: Option<String>, message: &str) -> String {
-    existing.map_or_else(|| message.to_owned(), |error| format!("{message}: {error}"))
+fn protocol_error(existing: Option<String>, anomalies: &[String]) -> Option<String> {
+    if anomalies.is_empty() {
+        return existing;
+    }
+    let message = anomalies.join("; ");
+    Some(existing.map_or(message.clone(), |error| format!("{message}: {error}")))
 }
 
 fn normalize_doctor_outcomes(
@@ -896,45 +899,59 @@ fn normalize_doctor_outcomes(
         .iter()
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
-    let mut normalized = NormalizedDoctorOutcomes::default();
-    for mut outcome in raw_outcomes {
+    let mut normalized_by_id = BTreeMap::new();
+    let mut duplicate_ids = std::collections::BTreeSet::new();
+    let mut unknown_ids = std::collections::BTreeSet::new();
+    for outcome in raw_outcomes {
         if !requested.contains(&outcome.id) {
-            outcome.state = DoctorRepairState::Failed;
-            outcome.error = Some(outcome_error(
-                outcome.error.take(),
-                &format!("unknown daemon repair outcome id `{}`", outcome.id),
-            ));
-            normalized.anomalies.push(outcome);
-        } else if normalized.requested.contains_key(&outcome.id) {
-            outcome.state = DoctorRepairState::Failed;
-            outcome.error = Some(outcome_error(
-                outcome.error.take(),
-                &format!("duplicate daemon repair outcome id `{}`", outcome.id),
-            ));
-            normalized.anomalies.push(outcome);
+            unknown_ids.insert(outcome.id);
+        } else if normalized_by_id.contains_key(&outcome.id) {
+            duplicate_ids.insert(outcome.id);
         } else {
-            normalized.requested.insert(outcome.id.clone(), outcome);
+            normalized_by_id.insert(outcome.id.clone(), outcome);
         }
     }
+    let unknown_anomaly = if unknown_ids.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "unknown daemon repair outcome id(s): {}",
+            unknown_ids
+                .iter()
+                .map(|id| format!("`{id}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    };
+    let mut normalized = NormalizedDoctorOutcomes::default();
     for id in requested_ids {
-        if !normalized.requested.contains_key(id) {
-            normalized.requested.insert(
-                id.clone(),
-                DoctorRepairOutcome {
-                    id: id.clone(),
-                    command_line: daemon_command(remediations, id),
-                    state: DoctorRepairState::Failed,
-                    error: Some(format!("missing daemon repair outcome id `{id}`")),
-                },
-            );
+        let missing = !normalized_by_id.contains_key(id);
+        let mut outcome = normalized_by_id
+            .remove(id)
+            .unwrap_or_else(|| DoctorRepairOutcome {
+                id: id.clone(),
+                command_line: daemon_command(remediations, id),
+                state: DoctorRepairState::Failed,
+                error: None,
+            });
+        outcome.id.clone_from(id);
+        outcome.command_line = daemon_command(remediations, id);
+        let mut anomalies = Vec::new();
+        if let Some(unknown_anomaly) = &unknown_anomaly {
+            anomalies.push(unknown_anomaly.clone());
         }
+        if duplicate_ids.contains(id) {
+            anomalies.push(format!("duplicate daemon repair outcome id `{id}`"));
+        }
+        if missing {
+            anomalies.push(format!("missing daemon repair outcome id `{id}`"));
+        }
+        if !anomalies.is_empty() {
+            outcome.state = DoctorRepairState::Failed;
+            outcome.error = protocol_error(outcome.error.take(), &anomalies);
+        }
+        normalized.requested.insert(id.clone(), outcome);
     }
-    normalized.anomalies.sort_by(|left, right| {
-        left.id
-            .cmp(&right.id)
-            .then_with(|| left.command_line.cmp(&right.command_line))
-            .then_with(|| left.error.cmp(&right.error))
-    });
     normalized
 }
 
@@ -973,9 +990,9 @@ fn route_repairs(
     structured: bool,
     remediations: &[Remediation],
     requested_ids: &[String],
-    outcomes: NormalizedDoctorOutcomes,
+    outcomes: &NormalizedDoctorOutcomes,
 ) -> (RepairSummary, Vec<Repair>) {
-    let mut repairs = Vec::with_capacity(remediations.len() + outcomes.anomalies.len());
+    let mut repairs = Vec::with_capacity(remediations.len());
     for remediation in remediations {
         let repair = match remediation {
             Remediation::DaemonExecuted { id, .. } => {
@@ -993,7 +1010,6 @@ fn route_repairs(
         };
         repairs.push(repair);
     }
-    repairs.extend(outcomes.anomalies.into_iter().map(repair_from_outcome));
     let summary = RepairSummary {
         attempted: requested_ids.len()
             + remediations
@@ -1057,7 +1073,7 @@ async fn offer_fix(
     let (daemon_ids, daemon_outcomes) = daemon_repair_outcomes(rpc, &remediations).await;
     let outcomes = normalize_doctor_outcomes(&daemon_ids, daemon_outcomes, &remediations);
     let (summary, repairs) =
-        route_repairs(profile, structured, &remediations, &daemon_ids, outcomes);
+        route_repairs(profile, structured, &remediations, &daemon_ids, &outcomes);
     for (_remediation, mut ledger_row, repair) in remediations
         .iter()
         .zip(ledger_rows)
@@ -1065,20 +1081,6 @@ async fn offer_fix(
         .map(|((remediation, ledger_row), repair)| (remediation, ledger_row, repair))
     {
         if !structured {
-            if repair.state == RepairState::Failed {
-                ledger_row.glyph = Glyph::Fail;
-                let error = repair.error.as_deref().unwrap_or("repair failed");
-                ledger_row.value = format!("{}: {error}", ledger_row.value);
-            }
-            output.report(format!(
-                "{}\n",
-                render::ledger_row_line(&ledger_row, key_width, caps)
-            ));
-        }
-    }
-    if !structured {
-        for repair in repairs.iter().skip(remediations.len()) {
-            let mut ledger_row = LedgerRow::new(Glyph::Done, "fix", repair.command_line.clone());
             if repair.state == RepairState::Failed {
                 ledger_row.glyph = Glyph::Fail;
                 let error = repair.error.as_deref().unwrap_or("repair failed");
@@ -1483,7 +1485,7 @@ mod golden {
     }
 
     #[test]
-    fn doctor_outcomes_report_missing_duplicate_and_unknown_ids() {
+    fn doctor_outcomes_report_missing_id_as_one_failed_requested_row() {
         let remediations = vec![
             daemon_remediation("first", "omnifs fs rm first"),
             daemon_remediation("second", "omnifs fs rm second"),
@@ -1491,19 +1493,26 @@ mod golden {
         let requested = vec!["first".to_owned(), "second".to_owned()];
         let normalized = normalize_doctor_outcomes(
             &requested,
-            vec![
-                outcome("first", "omnifs fs rm first", DoctorRepairState::Applied),
-                outcome("first", "omnifs fs rm first", DoctorRepairState::Skipped),
-                outcome(
-                    "unknown",
-                    "omnifs fs rm unknown",
-                    DoctorRepairState::Applied,
-                ),
-            ],
+            vec![outcome(
+                "first",
+                "omnifs fs rm first",
+                DoctorRepairState::Applied,
+            )],
             &remediations,
         );
         assert_eq!(normalized.requested.len(), 2);
-        assert_eq!(normalized.anomalies.len(), 2);
+        assert_eq!(
+            normalized.requested["first"].command_line,
+            "omnifs fs rm first"
+        );
+        assert_eq!(
+            normalized.requested["second"].command_line,
+            "omnifs fs rm second"
+        );
+        assert_eq!(
+            normalized.requested["first"].state,
+            DoctorRepairState::Applied
+        );
         assert!(matches!(
             normalized.requested["second"].state,
             DoctorRepairState::Failed
@@ -1515,24 +1524,10 @@ mod golden {
                 .unwrap()
                 .contains("missing")
         );
-        assert!(
-            normalized.anomalies.iter().any(|outcome| outcome
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("duplicate"))
-        );
-        assert!(
-            normalized.anomalies.iter().any(|outcome| outcome
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("unknown"))
-        );
     }
 
     #[test]
-    fn protocol_anomalies_become_failed_repairs_and_count_as_failures() {
+    fn doctor_outcomes_report_duplicate_id_as_one_failed_requested_row() {
         let remediations = vec![
             daemon_remediation("first", "omnifs fs rm first"),
             daemon_remediation("second", "omnifs fs rm second"),
@@ -1543,6 +1538,36 @@ mod golden {
             vec![
                 outcome("first", "omnifs fs rm first", DoctorRepairState::Applied),
                 outcome("first", "omnifs fs rm first", DoctorRepairState::Applied),
+                outcome("second", "wrong command", DoctorRepairState::Skipped),
+            ],
+            &remediations,
+        );
+        let root = TempDir::new().unwrap();
+        let profile = Profile::under_root(root.path());
+        let (summary, repairs) =
+            route_repairs(&profile, true, &remediations, &requested, &normalized);
+        assert_eq!(summary.attempted, 2);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(repairs.len(), 2);
+        assert_eq!(repairs[0].command_line, "omnifs fs rm first");
+        assert_eq!(repairs[0].state, RepairState::Failed);
+        assert!(repairs[0].error.as_deref().unwrap().contains("duplicate"));
+        assert_eq!(repairs[1].command_line, "omnifs fs rm second");
+        assert_eq!(repairs[1].state, RepairState::Skipped);
+    }
+
+    #[test]
+    fn doctor_outcomes_report_unknown_id_as_failed_requested_batch() {
+        let remediations = vec![
+            daemon_remediation("first", "omnifs fs rm first"),
+            daemon_remediation("second", "omnifs fs rm second"),
+        ];
+        let requested = vec!["first".to_owned(), "second".to_owned()];
+        let normalized = normalize_doctor_outcomes(
+            &requested,
+            vec![
+                outcome("first", "wrong first", DoctorRepairState::Applied),
+                outcome("second", "wrong second", DoctorRepairState::Skipped),
                 outcome(
                     "unknown",
                     "omnifs fs rm unknown",
@@ -1554,14 +1579,22 @@ mod golden {
         let root = TempDir::new().unwrap();
         let profile = Profile::under_root(root.path());
         let (summary, repairs) =
-            route_repairs(&profile, true, &remediations, &requested, normalized);
+            route_repairs(&profile, true, &remediations, &requested, &normalized);
         assert_eq!(summary.attempted, 2);
-        assert_eq!(summary.failed, 3);
-        assert_eq!(repairs.len(), 4);
-        assert_eq!(repairs[0].state, RepairState::Applied);
-        assert!(repairs[1].error.as_deref().unwrap().contains("missing"));
-        assert!(repairs[2].error.as_deref().unwrap().contains("duplicate"));
-        assert!(repairs[3].error.as_deref().unwrap().contains("unknown"));
+        assert_eq!(summary.failed, 2);
+        assert_eq!(repairs.len(), 2);
+        assert!(
+            repairs
+                .iter()
+                .all(|repair| repair.state == RepairState::Failed)
+        );
+        assert!(
+            repairs
+                .iter()
+                .all(|repair| repair.error.as_deref().unwrap().contains("unknown"))
+        );
+        assert_eq!(repairs[0].command_line, "omnifs fs rm first");
+        assert_eq!(repairs[1].command_line, "omnifs fs rm second");
     }
 
     #[test]
@@ -1586,7 +1619,7 @@ mod golden {
             &remediations,
         );
         let (summary, repairs) =
-            route_repairs(&profile, true, &remediations, &requested, normalized);
+            route_repairs(&profile, true, &remediations, &requested, &normalized);
         assert_eq!(summary.attempted, 1);
         assert_eq!(summary.failed, 0);
         assert_eq!(repairs.len(), 2);
