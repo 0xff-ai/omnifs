@@ -166,11 +166,12 @@ compresses with `zstd -19`, and pushes one
 build and check but do not push. Release retags that single-arch artifact and
 attests provenance. `oras` remains CI-only.
 
-Release defaults to `ghcr.io/0xff-ai/omnifs-guest:<version>` and downloads on
-first use with `reqwest`, anonymous GHCR auth, accepted current or legacy
-manifest media types, and SHA-256 verification before caching. Dev never
-downloads and requires `target/guest-image/omnifs-guest.raw`, naming
-`just guest-image` when absent.
+Omnifs defaults to `ghcr.io/0xff-ai/omnifs-guest:<version>` and downloads on
+first use with `oci-client` and anonymous GHCR auth. The client verifies the
+layer SHA-256 digest and byte count before the daemon publishes the cache file.
+Dev and release use the same versioned artifact so the guest and bundled VFS
+wire stay matched. An explicit registry-less override remains a local file and
+names `just guest-image` when absent.
 
 ### Libkrun conformance lane (local-only, never CI)
 

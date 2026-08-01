@@ -10,14 +10,17 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use anyhow::{Context as _, Result};
+use oci_client::manifest::{OciDescriptor, OciImageManifest};
 use oci_client::secrets::RegistryAuth;
 use oci_client::{Client, Reference};
 use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 
 use crate::fs_runtime::{Artifact, ImageRef, RuntimeEvent, RuntimeEventSink};
 
-/// Ensure the release-channel guest image is present as a decompressed local
-/// `.raw` file and return that immutable base path.
+const GUEST_IMAGE_MEDIA_TYPE: &str = "application/vnd.omnifs.guest-image.v1+zstd";
+
+/// Ensure the versioned guest image is present as a decompressed local `.raw`
+/// file and return that immutable base path.
 pub(crate) async fn ensure_guest_image(
     image: &ImageRef,
     images_dir: &Path,
@@ -73,12 +76,7 @@ async fn download(
             .pull_image_manifest(reference, &RegistryAuth::Anonymous)
             .await
             .context("pull guest image manifest")?;
-        let [layer] = manifest.layers.as_slice() else {
-            anyhow::bail!(
-                "guest image manifest has {} layers; expected exactly one layer",
-                manifest.layers.len()
-            );
-        };
+        let layer = guest_image_layer(&manifest)?;
         let total = u64::try_from(layer.size).context("guest image layer size is negative")?;
         let file = tokio::fs::File::create(&tmp_path)
             .await
@@ -133,6 +131,26 @@ async fn download(
             Err(error)
         },
     }
+}
+
+fn guest_image_layer(manifest: &OciImageManifest) -> Result<&OciDescriptor> {
+    anyhow::ensure!(
+        manifest.artifact_type.as_deref() == Some(GUEST_IMAGE_MEDIA_TYPE),
+        "guest image artifact type is {:?}; expected {GUEST_IMAGE_MEDIA_TYPE}",
+        manifest.artifact_type
+    );
+    let [layer] = manifest.layers.as_slice() else {
+        anyhow::bail!(
+            "guest image manifest has {} layers; expected exactly one layer",
+            manifest.layers.len()
+        );
+    };
+    anyhow::ensure!(
+        layer.media_type == GUEST_IMAGE_MEDIA_TYPE,
+        "guest image layer media type is `{}`; expected {GUEST_IMAGE_MEDIA_TYPE}",
+        layer.media_type
+    );
+    Ok(layer)
 }
 
 struct ProgressWriter {
@@ -215,6 +233,7 @@ fn part_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oci_client::manifest::OciImageManifest;
 
     #[test]
     fn guest_image_reference_preserves_registry_and_tag() {
@@ -224,5 +243,38 @@ mod tests {
         assert_eq!(reference.registry(), "ghcr.io");
         assert_eq!(reference.repository(), "0xff-ai/omnifs-guest");
         assert_eq!(reference.tag(), Some("0.5.0"));
+    }
+
+    #[test]
+    fn guest_image_manifest_requires_one_typed_layer() {
+        let manifest: OciImageManifest = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "artifactType": GUEST_IMAGE_MEDIA_TYPE,
+            "config": {
+                "mediaType": "application/vnd.oci.empty.v1+json",
+                "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+                "size": 2
+            },
+            "layers": [{
+                "mediaType": GUEST_IMAGE_MEDIA_TYPE,
+                "digest": "sha256:14bbb7515b69b272faae7e72d670eb35759aa4c361fd8a3c4c80f9b20f4e16c5",
+                "size": 42
+            }]
+        }))
+        .unwrap();
+        assert_eq!(guest_image_layer(&manifest).unwrap().size, 42);
+
+        let mut wrong_artifact_type = manifest.clone();
+        wrong_artifact_type.artifact_type = Some("application/octet-stream".to_owned());
+        assert!(guest_image_layer(&wrong_artifact_type).is_err());
+
+        let mut wrong_type = manifest.clone();
+        wrong_type.layers[0].media_type = "application/octet-stream".to_owned();
+        assert!(guest_image_layer(&wrong_type).is_err());
+
+        let mut extra_layer = manifest;
+        extra_layer.layers.push(extra_layer.layers[0].clone());
+        assert!(guest_image_layer(&extra_layer).is_err());
     }
 }

@@ -3,9 +3,8 @@
 //! resolvers both need this fact without depending on each other.
 
 /// Whether this binary was produced by the release packaging lane
-/// (`OMNIFS_RELEASE` set at compile time) or a local/dev build. Release
-/// binaries default to the registry image for their version; dev binaries
-/// default to the locally built dev image and never pull.
+/// (`OMNIFS_RELEASE` set at compile time) or a local/dev build. Runtime
+/// artifact resolvers use this only where their defaults differ by channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildChannel {
     Release,

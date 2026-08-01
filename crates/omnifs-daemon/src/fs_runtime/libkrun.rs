@@ -55,8 +55,7 @@ use crate::fs_runtime::driver::{LaunchRequest, err_after_rollback};
 use crate::fs_runtime::identity::ensure_identity_unchanged;
 use crate::fs_runtime::process::is_alive as process_alive;
 use crate::fs_runtime::{
-    BUILD_CHANNEL, BuildChannel, Candidate, ImageRef, RuntimeEvent, RuntimeEventSink, RuntimeStage,
-    RuntimeState,
+    Candidate, ImageRef, RuntimeEvent, RuntimeEventSink, RuntimeStage, RuntimeState,
 };
 
 const SSH_KEY_NAME: &str = "id_ed25519";
@@ -111,16 +110,10 @@ fn emit_stage(
 const SSH_GUEST_TARGET: &str = "root@omnifs-guest";
 
 const ENV_GUEST_IMAGE: &str = "OMNIFS_GUEST_IMAGE";
-/// The `just guest-image` recipe's default output path
-/// (`scripts/guest-image/build.sh`'s `OUT_DIR` default), resolved relative to
-/// the current working directory. A repo-root-relative default matches every
-/// other dev-only default in this crate (e.g. `omnifs-filesystem:dev`) rather
-/// than trying to locate the repo from an installed binary.
-const DEFAULT_GUEST_IMAGE: &str = "target/guest-image/omnifs-guest.raw";
-/// Release channel default: the pinned ghcr OCI artifact tag the
+/// Default guest image: the pinned ghcr OCI artifact tag the
 /// guest-image-arm64 CI job publishes and `release`'s `promote` job retags
-/// to this version (mirrors `FILESYSTEM_RELEASE_IMAGE`'s version pinning).
-const GUEST_RELEASE_IMAGE: &str =
+/// to this version.
+const DEFAULT_GUEST_IMAGE: &str =
     concat!("ghcr.io/0xff-ai/omnifs-guest:", env!("CARGO_PKG_VERSION"));
 
 const SEED_VOLUME_LABEL: &str = "OMNIFS-SEED";
@@ -155,16 +148,6 @@ fn check_uds_path_length(path: &Path) -> Result<()> {
         path.display()
     );
     Ok(())
-}
-
-/// The default guest image setting for each build channel: a local path for
-/// dev, the pinned ghcr tag for release. Mirrors
-/// `default_filesystem_image_for`.
-pub const fn default_guest_image_for(channel: BuildChannel) -> &'static str {
-    match channel {
-        BuildChannel::Release => GUEST_RELEASE_IMAGE,
-        BuildChannel::Dev => DEFAULT_GUEST_IMAGE,
-    }
 }
 
 /// `omnifs filesystem shell`'s libkrun dispatch calls this before building the ssh
@@ -439,25 +422,20 @@ fn audit_seed_staging(staging: &Path) -> Result<(), String> {
 }
 
 /// Resolve the configured guest image into the validated immutable base path
-/// used to materialize a launch-local root disk. Release images remain owned
-/// by the OCI/cache module; this function only chooses the channel-specific
-/// input and validates the result.
+/// used to materialize a launch-local root disk. Registry images remain owned
+/// by the OCI/cache module; this function chooses between one and an explicit
+/// local override, then validates the result.
 async fn resolve_guest_image(
     configured: Option<&str>,
     guest_image_cache: &Path,
     events: RuntimeEventSink,
 ) -> Result<PathBuf> {
-    let resolved = resolve_guest_image_reference(configured);
-    let path = match BUILD_CHANNEL {
-        BuildChannel::Dev => PathBuf::from(resolved),
-        BuildChannel::Release => {
-            crate::fs_runtime::guest_image::ensure_guest_image(
-                &ImageRef::new(resolved)?,
-                guest_image_cache,
-                events,
-            )
+    let image = ImageRef::new(resolve_guest_image_reference(configured))?;
+    let path = if image.has_registry() {
+        crate::fs_runtime::guest_image::ensure_guest_image(&image, guest_image_cache, events)
             .await?
-        },
+    } else {
+        PathBuf::from(image.as_str())
     };
     if !path.is_file() {
         return Err(anyhow::anyhow!(
@@ -479,7 +457,7 @@ pub fn resolve_guest_image_reference(configured: Option<&str>) -> String {
         None,
         ENV_GUEST_IMAGE,
         configured,
-        default_guest_image_for(BUILD_CHANNEL),
+        DEFAULT_GUEST_IMAGE,
     )
 }
 
@@ -1226,10 +1204,6 @@ mod tests {
 
     #[tokio::test]
     async fn guest_image_resolution_precedence() {
-        // Tests run under a dev build (no OMNIFS_RELEASE at compile time), so
-        // the configured path is resolved locally. The release path is
-        // covered by `default_guest_image_for` directly, mirroring the
-        // filesystem image tests.
         let temp = tempfile::tempdir().unwrap();
         let custom = temp.path().join("custom.raw");
         std::fs::write(&custom, b"guest image").unwrap();
@@ -1391,19 +1365,8 @@ mod tests {
     }
 
     #[test]
-    fn dev_channel_defaults_to_local_guest_image_path() {
-        assert_eq!(
-            default_guest_image_for(BuildChannel::Dev),
-            DEFAULT_GUEST_IMAGE
-        );
-    }
-
-    #[test]
-    fn release_channel_defaults_to_pinned_guest_image_registry_tag() {
-        assert!(
-            default_guest_image_for(BuildChannel::Release)
-                .starts_with("ghcr.io/0xff-ai/omnifs-guest:")
-        );
+    fn default_guest_image_is_the_versioned_registry_artifact() {
+        assert!(DEFAULT_GUEST_IMAGE.starts_with("ghcr.io/0xff-ai/omnifs-guest:"));
     }
 
     #[test]
