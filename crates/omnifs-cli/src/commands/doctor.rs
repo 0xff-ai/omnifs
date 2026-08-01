@@ -1751,6 +1751,7 @@ mod golden {
             .unwrap(),
         )
         .unwrap();
+        std::fs::write(profile.control_socket(), b"stale socket").unwrap();
         let degraded = degraded_result(&profile, "synthetic start failure");
         assert!(
             degraded
@@ -1764,12 +1765,9 @@ mod golden {
                 .iter()
                 .any(|finding| finding.message == "daemon process identity is present")
         );
-        assert!(
-            degraded
-                .findings
-                .iter()
-                .any(|finding| finding.message == "daemon control socket is absent")
-        );
+        assert!(degraded.findings.iter().any(|finding| {
+            finding.message == "daemon control socket exists but did not become ready"
+        }));
         assert!(degraded.findings.iter().any(|finding| matches!(
             finding.remediation,
             Some(Remediation::CleanStaleInstance { .. })
@@ -1778,11 +1776,25 @@ mod golden {
             finding.remediation,
             Some(Remediation::DaemonExecuted { .. })
         )));
+        let fixes = remediable_fixes(&degraded.findings);
+        assert_eq!(fixes.len(), 1);
+        assert!(matches!(
+            fixes.first(),
+            Some(Remediation::CleanStaleInstance { .. })
+        ));
         assert_eq!(degraded.verdict(), DoctorVerdict::Failures);
         let output = Output::new(OutputMode::Json, false).with_yes(true);
         let verdict = run_degraded_at(anyhow::anyhow!("synthetic start failure"), &profile, output)
             .await
             .unwrap();
         assert_eq!(verdict, DoctorVerdict::Failures);
+        assert!(
+            !profile.process_identity_path().exists(),
+            "degraded --yes must apply the local stale identity cleanup"
+        );
+        assert!(
+            !profile.control_socket().exists(),
+            "local stale identity cleanup must remove only its stale control path"
+        );
     }
 }

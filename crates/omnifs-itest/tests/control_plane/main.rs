@@ -3,7 +3,8 @@
 //! Proves the fixed Unix-socket control plane and narrow process identity end
 //! to end: each daemon binds its own profile's `control.sock`; the CLI resolves
 //! only that socket, so two daemons never address each other. A `SIGKILL`ed
-//! daemon leaves a stale process identity, which `omnifs doctor` cleans up.
+//! daemon leaves stale bootstrap state; `omnifs doctor` revives that profile
+//! with a fresh daemon without disturbing the other profile.
 //!
 //! Gated on `OMNIFS_ACCEPTANCE_LIVE` (it serves real mounts). Holds the
 //! cross-process NFS serialization lock for the whole test.
@@ -52,6 +53,14 @@ struct Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        // Doctor can start a detached replacement after this fixture's
+        // original child was reaped. Profile-local down owns cleanup for both
+        // that replacement and the ordinary child, including during unwind.
+        let _ = Command::new(omnifs_bin())
+            .args(["down", "--output", "json"])
+            .env("OMNIFS_HOME", self.home.path())
+            .env("RUST_LOG", "warn")
+            .output();
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -68,6 +77,14 @@ impl Daemon {
 
     fn identity_path(&self) -> PathBuf {
         self.home.path().join("process.json")
+    }
+
+    fn identity_json(&self) -> serde_json::Value {
+        let path = self.identity_path();
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("read process identity {}: {error}", path.display()));
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|error| panic!("parse process identity {}: {error}", path.display()))
     }
 
     fn control_socket(&self) -> PathBuf {
@@ -492,11 +509,17 @@ fn two_daemons_two_homes_resolve_through_their_own_sockets() {
     let pid_a = inventory_a["daemon"]["status"]["info"]["pid"]
         .as_u64()
         .expect("A pid");
+    let instance_a = inventory_a["daemon"]["status"]["info"]["instance_id"]
+        .as_str()
+        .expect("A instance id");
     assert_eq!(
         pid_a,
         u64::from(daemon_a.pid()),
         "status A must report A's pid"
     );
+    let identity_a = daemon_a.identity_json();
+    assert_eq!(identity_a["pid"].as_u64(), Some(pid_a));
+    assert_eq!(identity_a["instance_token"].as_str(), Some(instance_a));
     assert!(
         inventory_a["filesystems"]
             .as_array()
@@ -510,10 +533,20 @@ fn two_daemons_two_homes_resolve_through_their_own_sockets() {
     let pid_b = json_b["result"]["inventory"]["daemon"]["status"]["info"]["pid"]
         .as_u64()
         .expect("B pid");
+    let instance_b = json_b["result"]["inventory"]["daemon"]["status"]["info"]["instance_id"]
+        .as_str()
+        .expect("B instance id")
+        .to_owned();
     assert_eq!(
         pid_b,
         u64::from(daemon_b.pid()),
         "status B must report B's pid"
+    );
+    let identity_b = daemon_b.identity_json();
+    assert_eq!(identity_b["pid"].as_u64(), Some(pid_b));
+    assert_eq!(
+        identity_b["instance_token"].as_str(),
+        Some(instance_b.as_str())
     );
     assert!(
         json_b["result"]["inventory"]["filesystems"]
@@ -542,33 +575,83 @@ fn two_daemons_two_homes_resolve_through_their_own_sockets() {
         "a home with no socket must report stopped, never a foreign daemon"
     );
 
-    // After home A's daemon is killed, doctor cleans the stale process
-    // identity without disturbing home B.
+    // After home A's daemon is killed, doctor starts a replacement for that
+    // profile without disturbing home B.
     daemon_a.child.kill().expect("kill daemon A");
     daemon_a.child.wait().expect("reap daemon A");
 
-    // A's stale identity remains beside its now-dead socket. Doctor removes it
-    // only after exact process proof fails.
-    let doctor_dead = run_doctor(daemon_a.home.path());
-    assert!(
-        !daemon_a.identity_path().exists(),
-        "doctor must clean the stale process identity\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&doctor_dead.stdout),
-        String::from_utf8_lossy(&doctor_dead.stderr)
+    // A's stale identity remains beside its now-dead socket, and status names
+    // that exact profile as unreachable before doctor revives it.
+    assert_eq!(
+        daemon_a.identity_json(),
+        identity_a,
+        "SIGKILL must leave daemon A's old process identity"
     );
-
-    // Status is then informational and reports stopped.
+    assert!(
+        !live::control_ready(&daemon_a.control_socket()),
+        "daemon A's control socket must stop responding after SIGKILL"
+    );
     let out_dead = run_status(daemon_a.home.path());
     assert_eq!(
         exit_code(&out_dead),
-        0,
-        "status for the killed home A must still exit 0 (informational)\nstderr: {}",
+        3,
+        "status for killed home A must report daemon unavailable\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out_dead.stdout),
         String::from_utf8_lossy(&out_dead.stderr)
     );
     assert_eq!(
         status_json(&out_dead)["result"]["inventory"]["daemon"]["probe"]["state"],
-        "stopped",
-        "the killed home A must report not_running"
+        "unreachable",
+        "the killed home A must report its stale profile as unreachable"
+    );
+
+    let doctor_dead = run_doctor(daemon_a.home.path());
+    assert!(
+        matches!(exit_code(&doctor_dead), 0 | 5),
+        "doctor must complete after reviving daemon A\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&doctor_dead.stdout),
+        String::from_utf8_lossy(&doctor_dead.stderr)
+    );
+
+    // Doctor's replacement answers on A's socket with a new exact identity.
+    assert!(
+        live::control_ready(&daemon_a.control_socket()),
+        "doctor-spawned daemon A must answer on its profile-local control socket"
+    );
+    let out_revived = run_status(daemon_a.home.path());
+    assert_eq!(
+        exit_code(&out_revived),
+        0,
+        "status for revived home A must exit 0\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out_revived.stdout),
+        String::from_utf8_lossy(&out_revived.stderr)
+    );
+    let revived_json = status_json(&out_revived);
+    assert_eq!(
+        revived_json["result"]["inventory"]["daemon"]["probe"]["state"], "responding",
+        "doctor must leave a responding replacement for home A"
+    );
+    let revived_pid = revived_json["result"]["inventory"]["daemon"]["status"]["info"]["pid"]
+        .as_u64()
+        .expect("revived A pid");
+    let revived_instance =
+        revived_json["result"]["inventory"]["daemon"]["status"]["info"]["instance_id"]
+            .as_str()
+            .expect("revived A instance id");
+    assert_ne!(revived_pid, pid_a, "doctor must replace daemon A's pid");
+    assert_ne!(
+        revived_instance, instance_a,
+        "doctor must replace daemon A's instance"
+    );
+    let revived_identity = daemon_a.identity_json();
+    assert_eq!(revived_identity["pid"].as_u64(), Some(revived_pid));
+    assert_eq!(
+        revived_identity["instance_token"].as_str(),
+        Some(revived_instance)
+    );
+    assert_ne!(
+        revived_identity, identity_a,
+        "process.json must represent doctor-spawned daemon A"
     );
 
     // Home B still answers correctly.
@@ -578,9 +661,23 @@ fn two_daemons_two_homes_resolve_through_their_own_sockets() {
         0,
         "home B must still answer after A is gone"
     );
+    let json_b2 = status_json(&out_b2);
     assert_eq!(
-        status_json(&out_b2)["result"]["inventory"]["daemon"]["status"]["info"]["pid"].as_u64(),
+        json_b2["result"]["inventory"]["daemon"]["probe"]["state"],
+        "responding"
+    );
+    assert_eq!(
+        json_b2["result"]["inventory"]["daemon"]["status"]["info"]["pid"].as_u64(),
         Some(u64::from(daemon_b.pid())),
+    );
+    assert_eq!(
+        json_b2["result"]["inventory"]["daemon"]["status"]["info"]["instance_id"].as_str(),
+        Some(instance_b.as_str())
+    );
+    assert_eq!(
+        daemon_b.identity_json(),
+        identity_b,
+        "doctor for home A must not change home B's process identity"
     );
 
     // A graceful SIGTERM removes home B's process identity.
