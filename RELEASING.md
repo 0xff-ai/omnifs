@@ -91,6 +91,52 @@ For release `X.Y.Z`, the npm package version, the CLI `CARGO_PKG_VERSION` / `omn
 
 `cargo set-version` owns the bump: it sets `[workspace.package].version`, every crate that inherits it, and the workspace path-dependency requirements. Do not bump npm/Cargo versions outside the release PR, and do not change the embedded default image ref without going through a full release.
 
+## Guest image changes
+
+The guest image and the Omnifs version form one release unit. Do not move an
+existing `X.Y.Z` or `vX.Y.Z` guest tag to new bytes. The daemon caches the
+decompressed image by tag and does not poll the registry when that cache entry
+already exists, so replacing a semver tag would leave existing and fresh
+installs on different guest images. Any published guest change requires the
+next Omnifs version.
+
+Before merging a guest change, rebuild the release profile explicitly and run
+both its static and live checks:
+
+```bash
+GUEST_IMAGE_PROFILE=release just guest-image
+scripts/ci/check-guest-image.sh target/guest-image/omnifs-guest.raw release
+just libkrun-conformance
+```
+
+Run the explicit build first because `just libkrun-conformance` reuses an
+existing raw image. The release profile must contain the current arm64
+`omnifs-thin`; guest services and the host VFS wire must stay matched.
+
+Publication and tagging then stay in CI:
+
+1. Merge the conventional-commit PR to `main`. The `guest-image-arm64` CI job
+   builds and checks the release image, compresses it with `zstd -19`, and
+   pushes `ghcr.io/0xff-ai/omnifs-guest:sha-<commit>`.
+2. Merge the standing release PR. `release-pr.yml` bumps the workspace version
+   and creates `vX.Y.Z` on its merge commit.
+3. After CI succeeds for that commit, `release.yml` calls
+   `scripts/ci/promote-guest-image.sh`. The script adds `X.Y.Z` and `vX.Y.Z`
+   to the existing `sha-<commit>` manifest without rebuilding or repushing its
+   blob.
+4. The release workflow attests that promoted manifest. Released binaries use
+   the unprefixed `X.Y.Z` tag through `CARGO_PKG_VERSION`.
+
+Do not publish a local build under a release tag. If the commit-keyed artifact
+is absent or wrong, fix or rerun its CI job, then rerun Release. Verify that all
+three tags resolve to the same digest:
+
+```bash
+oras resolve ghcr.io/0xff-ai/omnifs-guest:sha-<commit>
+oras resolve ghcr.io/0xff-ai/omnifs-guest:X.Y.Z
+oras resolve ghcr.io/0xff-ai/omnifs-guest:vX.Y.Z
+```
+
 ## Step-by-step (maintainer)
 
 ### 1. Land work on `main`
@@ -182,6 +228,9 @@ Gates that must be in place:
 | `scripts/ci/build-linux-zigbuild.sh` | Native Linux CLI build helper for the glibc baseline |
 | `scripts/ci/build-darwin-zigbuild.sh` | Linux-hosted Darwin x64 cross-link helper |
 | `scripts/ci/build-libkrun-runtime.sh` | Native arm64 pinned libkrun payload builder and audit entrypoint |
+| `scripts/guest-image/build.sh` | Local and CI guest disk build entrypoint |
+| `scripts/ci/check-guest-image.sh` | Static guest disk release-policy check |
+| `scripts/ci/promote-guest-image.sh` | Guest `sha-*` manifest → semver GHCR tags |
 | `scripts/ci/sign-darwin-arm64-payload.sh` | Developer ID signing order and Team ID checks |
 | `scripts/ci/wait-for-notarization.sh` | Poll one saved Apple submission until it reaches a terminal status |
 | `scripts/ci/build-filesystem-image.sh` | Filesystem image assembly from a prebuilt CLI binary |
