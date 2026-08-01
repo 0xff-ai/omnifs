@@ -333,32 +333,42 @@ impl From<DoctorSeverity> for Severity {
     }
 }
 
-fn remediations_from_report(report: &RunDoctorReport) -> BTreeMap<String, Remediation> {
-    report
-        .remediations
-        .iter()
-        .map(|remediation| {
-            let local = match &remediation.executor {
-                DoctorExecutor::Daemon => Remediation::DaemonExecuted {
-                    id: remediation.id.clone(),
-                    command_line: remediation.command_line.clone(),
-                },
-                DoctorExecutor::ClientMountReauth { mount } => {
-                    Remediation::MountReauth(mount.clone())
-                },
-            };
-            (remediation.id.clone(), local)
-        })
-        .collect()
+fn remediations_from_report(
+    report: &RunDoctorReport,
+) -> anyhow::Result<BTreeMap<String, Remediation>> {
+    let mut remediations = BTreeMap::new();
+    for remediation in &report.remediations {
+        let local = match &remediation.executor {
+            DoctorExecutor::Daemon => Remediation::DaemonExecuted {
+                id: remediation.id.clone(),
+                command_line: remediation.command_line.clone(),
+            },
+            DoctorExecutor::ClientMountReauth { mount } => Remediation::MountReauth(mount.clone()),
+        };
+        anyhow::ensure!(
+            remediations.insert(remediation.id.clone(), local).is_none(),
+            "doctor report contains duplicate remediation id `{}`",
+            remediation.id
+        );
+    }
+    Ok(remediations)
 }
 
-fn findings_from_report(report: &RunDoctorReport) -> Vec<Finding> {
-    let remediations = remediations_from_report(report);
+fn findings_from_report(report: &RunDoctorReport) -> anyhow::Result<Vec<Finding>> {
+    let remediations = remediations_from_report(report)?;
     report
         .findings
         .iter()
         .cloned()
-        .map(|finding| Finding::from_api(finding, &remediations))
+        .map(|finding| {
+            if let Some(id) = &finding.remediation_id {
+                anyhow::ensure!(
+                    remediations.contains_key(id),
+                    "doctor finding references unknown remediation id `{id}`"
+                );
+            }
+            Ok(Finding::from_api(finding, &remediations))
+        })
         .collect()
 }
 
@@ -583,11 +593,17 @@ fn render_report(
 /// warnings/failures on this run are not all fixable through a known,
 /// doctor-owned remediation.
 fn remediable_fixes(findings: &[Finding]) -> Vec<Remediation> {
-    let mut seen = std::collections::BTreeSet::new();
+    let mut local_seen = std::collections::BTreeSet::new();
+    let mut daemon_seen = std::collections::BTreeSet::new();
     findings
         .iter()
         .filter_map(|finding| finding.remediation.as_ref())
-        .filter(|remediation| seen.insert(remediation.command_line()))
+        .filter(|remediation| match remediation {
+            Remediation::DaemonExecuted { id, .. } => daemon_seen.insert(id.clone()),
+            Remediation::MountReauth(_) | Remediation::CleanStaleInstance { .. } => {
+                local_seen.insert(remediation.command_line())
+            },
+        })
         .cloned()
         .collect()
 }
@@ -611,7 +627,7 @@ async fn diagnose_via_daemon(rpc: &RpcClient) -> anyhow::Result<DoctorResult> {
     let report = rpc.run_doctor().await?;
     Ok(DoctorResult {
         inventory,
-        findings: findings_from_report(&report),
+        findings: findings_from_report(&report)?,
         repairs: Vec::new(),
     })
 }
@@ -789,15 +805,28 @@ fn degraded_bootstrap_findings(profile: &Profile) -> Vec<Finding> {
 }
 
 fn repair_from_outcome(outcome: DoctorRepairOutcome) -> Repair {
-    match outcome.state {
-        DoctorRepairState::Applied => Repair::applied(outcome.command_line),
-        DoctorRepairState::Failed => Repair::failed(
-            outcome.command_line,
-            outcome
-                .error
-                .unwrap_or_else(|| "daemon remediation failed".to_owned()),
-        ),
-        DoctorRepairState::Skipped => Repair::skipped(outcome.command_line),
+    let DoctorRepairOutcome {
+        command_line,
+        state,
+        error,
+        ..
+    } = outcome;
+    match state {
+        DoctorRepairState::Applied => Repair {
+            command_line,
+            state: RepairState::Applied,
+            error,
+        },
+        DoctorRepairState::Failed => Repair {
+            command_line,
+            state: RepairState::Failed,
+            error: Some(error.unwrap_or_else(|| "daemon remediation failed".to_owned())),
+        },
+        DoctorRepairState::Skipped => Repair {
+            command_line,
+            state: RepairState::Skipped,
+            error,
+        },
     }
 }
 
@@ -848,11 +877,71 @@ async fn daemon_repair_outcomes(
     (ids, outcomes)
 }
 
+#[derive(Debug, Default)]
+struct NormalizedDoctorOutcomes {
+    requested: BTreeMap<String, DoctorRepairOutcome>,
+    anomalies: Vec<DoctorRepairOutcome>,
+}
+
+fn outcome_error(existing: Option<String>, message: &str) -> String {
+    existing.map_or_else(|| message.to_owned(), |error| format!("{message}: {error}"))
+}
+
+fn normalize_doctor_outcomes(
+    requested_ids: &[String],
+    raw_outcomes: Vec<DoctorRepairOutcome>,
+    remediations: &[Remediation],
+) -> NormalizedDoctorOutcomes {
+    let requested = requested_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut normalized = NormalizedDoctorOutcomes::default();
+    for mut outcome in raw_outcomes {
+        if !requested.contains(&outcome.id) {
+            outcome.state = DoctorRepairState::Failed;
+            outcome.error = Some(outcome_error(
+                outcome.error.take(),
+                &format!("unknown daemon repair outcome id `{}`", outcome.id),
+            ));
+            normalized.anomalies.push(outcome);
+        } else if normalized.requested.contains_key(&outcome.id) {
+            outcome.state = DoctorRepairState::Failed;
+            outcome.error = Some(outcome_error(
+                outcome.error.take(),
+                &format!("duplicate daemon repair outcome id `{}`", outcome.id),
+            ));
+            normalized.anomalies.push(outcome);
+        } else {
+            normalized.requested.insert(outcome.id.clone(), outcome);
+        }
+    }
+    for id in requested_ids {
+        if !normalized.requested.contains_key(id) {
+            normalized.requested.insert(
+                id.clone(),
+                DoctorRepairOutcome {
+                    id: id.clone(),
+                    command_line: daemon_command(remediations, id),
+                    state: DoctorRepairState::Failed,
+                    error: Some(format!("missing daemon repair outcome id `{id}`")),
+                },
+            );
+        }
+    }
+    normalized.anomalies.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then_with(|| left.command_line.cmp(&right.command_line))
+            .then_with(|| left.error.cmp(&right.error))
+    });
+    normalized
+}
+
 fn apply_local_remediation(
     remediation: Remediation,
     profile: &Profile,
     structured: bool,
-    summary: &mut RepairSummary,
 ) -> Repair {
     match remediation {
         Remediation::MountReauth(name) => {
@@ -860,24 +949,16 @@ fn apply_local_remediation(
             if structured {
                 return Repair::skipped(command_line);
             }
-            summary.attempted += 1;
             match Remediation::MountReauth(name).apply(profile) {
                 Ok(()) => Repair::applied(command_line),
-                Err(error) => {
-                    summary.failed += 1;
-                    Repair::failed(command_line, format!("{error:#}"))
-                },
+                Err(error) => Repair::failed(command_line, format!("{error:#}")),
             }
         },
         remediation @ Remediation::CleanStaleInstance { .. } => {
             let command_line = remediation.command_line();
-            summary.attempted += 1;
             match remediation.apply(profile) {
                 Ok(()) => Repair::applied(command_line),
-                Err(error) => {
-                    summary.failed += 1;
-                    Repair::failed(command_line, format!("{error:#}"))
-                },
+                Err(error) => Repair::failed(command_line, format!("{error:#}")),
             }
         },
         Remediation::DaemonExecuted { .. } => Repair::failed(
@@ -885,6 +966,50 @@ fn apply_local_remediation(
             "daemon remediation was not batched".to_owned(),
         ),
     }
+}
+
+fn route_repairs(
+    profile: &Profile,
+    structured: bool,
+    remediations: &[Remediation],
+    requested_ids: &[String],
+    outcomes: NormalizedDoctorOutcomes,
+) -> (RepairSummary, Vec<Repair>) {
+    let mut repairs = Vec::with_capacity(remediations.len() + outcomes.anomalies.len());
+    for remediation in remediations {
+        let repair = match remediation {
+            Remediation::DaemonExecuted { id, .. } => {
+                outcomes.requested.get(id).cloned().map_or_else(
+                    || {
+                        Repair::failed(
+                            remediation.command_line(),
+                            format!("missing daemon repair outcome id `{id}`"),
+                        )
+                    },
+                    repair_from_outcome,
+                )
+            },
+            _ => apply_local_remediation(remediation.clone(), profile, structured),
+        };
+        repairs.push(repair);
+    }
+    repairs.extend(outcomes.anomalies.into_iter().map(repair_from_outcome));
+    let summary = RepairSummary {
+        attempted: requested_ids.len()
+            + remediations
+                .iter()
+                .filter(|remediation| match remediation {
+                    Remediation::MountReauth(_) => !structured,
+                    Remediation::CleanStaleInstance { .. } => true,
+                    Remediation::DaemonExecuted { .. } => false,
+                })
+                .count(),
+        failed: repairs
+            .iter()
+            .filter(|repair| repair.state == RepairState::Failed)
+            .count(),
+    };
+    (summary, repairs)
 }
 
 /// Show the complete repair set, ask once, then continue through independent
@@ -930,32 +1055,15 @@ async fn offer_fix(
         .collect();
     let key_width = render::ledger_key_width(&ledger_rows);
     let (daemon_ids, daemon_outcomes) = daemon_repair_outcomes(rpc, &remediations).await;
-
-    let mut summary = RepairSummary {
-        attempted: daemon_ids.len(),
-        failed: daemon_outcomes
-            .iter()
-            .filter(|outcome| outcome.state == DoctorRepairState::Failed)
-            .count(),
-    };
-    let mut repairs = Vec::with_capacity(remediations.len());
-    let mut outcomes = daemon_outcomes
-        .into_iter()
-        .map(|outcome| (outcome.id.clone(), outcome))
-        .collect::<BTreeMap<_, _>>();
-    for (remediation, mut ledger_row) in remediations.into_iter().zip(ledger_rows) {
-        let repair = match remediation {
-            Remediation::DaemonExecuted { id, .. } => {
-                let outcome = outcomes.remove(&id).unwrap_or(DoctorRepairOutcome {
-                    id,
-                    command_line: ledger_row.value.clone(),
-                    state: DoctorRepairState::Failed,
-                    error: Some("daemon returned no repair outcome".to_owned()),
-                });
-                repair_from_outcome(outcome)
-            },
-            remediation => apply_local_remediation(remediation, profile, structured, &mut summary),
-        };
+    let outcomes = normalize_doctor_outcomes(&daemon_ids, daemon_outcomes, &remediations);
+    let (summary, repairs) =
+        route_repairs(profile, structured, &remediations, &daemon_ids, outcomes);
+    for (_remediation, mut ledger_row, repair) in remediations
+        .iter()
+        .zip(ledger_rows)
+        .zip(repairs.iter())
+        .map(|((remediation, ledger_row), repair)| (remediation, ledger_row, repair))
+    {
         if !structured {
             if repair.state == RepairState::Failed {
                 ledger_row.glyph = Glyph::Fail;
@@ -967,7 +1075,20 @@ async fn offer_fix(
                 render::ledger_row_line(&ledger_row, key_width, caps)
             ));
         }
-        repairs.push(repair);
+    }
+    if !structured {
+        for repair in repairs.iter().skip(remediations.len()) {
+            let mut ledger_row = LedgerRow::new(Glyph::Done, "fix", repair.command_line.clone());
+            if repair.state == RepairState::Failed {
+                ledger_row.glyph = Glyph::Fail;
+                let error = repair.error.as_deref().unwrap_or("repair failed");
+                ledger_row.value = format!("{}: {error}", ledger_row.value);
+            }
+            output.report(format!(
+                "{}\n",
+                render::ledger_row_line(&ledger_row, key_width, caps)
+            ));
+        }
     }
     Ok((summary, repairs))
 }
@@ -1063,7 +1184,7 @@ mod golden {
             ],
             Vec::new(),
         );
-        findings_from_report(&report)
+        findings_from_report(&report).unwrap()
     }
 
     fn targeted_finding() -> Finding {
@@ -1085,7 +1206,7 @@ mod golden {
                 },
             }],
         );
-        findings_from_report(&report).pop().unwrap()
+        findings_from_report(&report).unwrap().pop().unwrap()
     }
 
     fn daemon_finding() -> Finding {
@@ -1105,7 +1226,26 @@ mod golden {
                 executor: DoctorExecutor::Daemon,
             }],
         );
-        findings_from_report(&report).pop().unwrap()
+        findings_from_report(&report).unwrap().pop().unwrap()
+    }
+
+    fn daemon_remediation(id: &str, command_line: &str) -> Remediation {
+        Remediation::DaemonExecuted {
+            id: id.to_owned(),
+            command_line: command_line.to_owned(),
+        }
+    }
+
+    fn daemon_finding_with_remediation(id: &str, command_line: &str) -> Finding {
+        Finding {
+            section: Section::Filesystems,
+            check: Check::StrayFilesystem,
+            target: Some(id.to_owned()),
+            severity: Severity::Attention,
+            message: "stray filesystem".to_owned(),
+            fix: Some(command_line.to_owned()),
+            remediation: Some(daemon_remediation(id, command_line)),
+        }
     }
 
     fn running_inventory() -> Inventory {
@@ -1188,6 +1328,33 @@ mod golden {
     }
 
     #[test]
+    fn daemon_repairs_dedupe_by_id_not_command_line() {
+        let first = daemon_finding_with_remediation("first", "omnifs fs rm same");
+        let second = daemon_finding_with_remediation("second", "omnifs fs rm same");
+        let fixes = remediable_fixes(&[first, second]);
+        assert_eq!(fixes.len(), 2);
+        assert!(matches!(
+            &fixes[0],
+            Remediation::DaemonExecuted { id, .. } if id == "first"
+        ));
+        assert!(matches!(
+            &fixes[1],
+            Remediation::DaemonExecuted { id, .. } if id == "second"
+        ));
+    }
+
+    #[test]
+    fn duplicate_daemon_finding_with_same_id_is_offered_once() {
+        let finding = daemon_finding_with_remediation("same", "omnifs fs rm same");
+        let fixes = remediable_fixes(&[finding.clone(), finding]);
+        assert_eq!(fixes.len(), 1);
+        assert!(matches!(
+            &fixes[0],
+            Remediation::DaemonExecuted { id, .. } if id == "same"
+        ));
+    }
+
+    #[test]
     fn verdict_combines_inventory_with_maximum_finding_severity() {
         let clean = DoctorResult {
             inventory: Inventory::test(DaemonHealth::Stopped, Vec::new(), Vec::new()),
@@ -1263,6 +1430,25 @@ mod golden {
     }
 
     #[test]
+    fn daemon_outcome_errors_survive_all_local_repair_states() {
+        for state in [
+            DoctorRepairState::Applied,
+            DoctorRepairState::Failed,
+            DoctorRepairState::Skipped,
+        ] {
+            let repair = repair_from_outcome(DoctorRepairOutcome {
+                id: "one".to_owned(),
+                command_line: "omnifs fs rm one".to_owned(),
+                state,
+                error: Some("daemon said why".to_owned()),
+            });
+            assert_eq!(repair.error.as_deref(), Some("daemon said why"));
+            let value = serde_json::to_value(&repair).unwrap();
+            assert_eq!(value["error"], "daemon said why");
+        }
+    }
+
+    #[test]
     fn remediable_fixes_returns_the_actionable_subset() {
         let all_remediable = vec![targeted_finding()];
         assert_eq!(remediable_fixes(&all_remediable).len(), 1);
@@ -1287,6 +1473,132 @@ mod golden {
         assert!(remediable_fixes(&probes()).is_empty());
     }
 
+    fn outcome(id: &str, command_line: &str, state: DoctorRepairState) -> DoctorRepairOutcome {
+        DoctorRepairOutcome {
+            id: id.to_owned(),
+            command_line: command_line.to_owned(),
+            state,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn doctor_outcomes_report_missing_duplicate_and_unknown_ids() {
+        let remediations = vec![
+            daemon_remediation("first", "omnifs fs rm first"),
+            daemon_remediation("second", "omnifs fs rm second"),
+        ];
+        let requested = vec!["first".to_owned(), "second".to_owned()];
+        let normalized = normalize_doctor_outcomes(
+            &requested,
+            vec![
+                outcome("first", "omnifs fs rm first", DoctorRepairState::Applied),
+                outcome("first", "omnifs fs rm first", DoctorRepairState::Skipped),
+                outcome(
+                    "unknown",
+                    "omnifs fs rm unknown",
+                    DoctorRepairState::Applied,
+                ),
+            ],
+            &remediations,
+        );
+        assert_eq!(normalized.requested.len(), 2);
+        assert_eq!(normalized.anomalies.len(), 2);
+        assert!(matches!(
+            normalized.requested["second"].state,
+            DoctorRepairState::Failed
+        ));
+        assert!(
+            normalized.requested["second"]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("missing")
+        );
+        assert!(
+            normalized.anomalies.iter().any(|outcome| outcome
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("duplicate"))
+        );
+        assert!(
+            normalized.anomalies.iter().any(|outcome| outcome
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("unknown"))
+        );
+    }
+
+    #[test]
+    fn protocol_anomalies_become_failed_repairs_and_count_as_failures() {
+        let remediations = vec![
+            daemon_remediation("first", "omnifs fs rm first"),
+            daemon_remediation("second", "omnifs fs rm second"),
+        ];
+        let requested = vec!["first".to_owned(), "second".to_owned()];
+        let normalized = normalize_doctor_outcomes(
+            &requested,
+            vec![
+                outcome("first", "omnifs fs rm first", DoctorRepairState::Applied),
+                outcome("first", "omnifs fs rm first", DoctorRepairState::Applied),
+                outcome(
+                    "unknown",
+                    "omnifs fs rm unknown",
+                    DoctorRepairState::Applied,
+                ),
+            ],
+            &remediations,
+        );
+        let root = TempDir::new().unwrap();
+        let profile = Profile::under_root(root.path());
+        let (summary, repairs) =
+            route_repairs(&profile, true, &remediations, &requested, normalized);
+        assert_eq!(summary.attempted, 2);
+        assert_eq!(summary.failed, 3);
+        assert_eq!(repairs.len(), 4);
+        assert_eq!(repairs[0].state, RepairState::Applied);
+        assert!(repairs[1].error.as_deref().unwrap().contains("missing"));
+        assert!(repairs[2].error.as_deref().unwrap().contains("duplicate"));
+        assert!(repairs[3].error.as_deref().unwrap().contains("unknown"));
+    }
+
+    #[test]
+    fn structured_yes_routes_daemon_outcome_and_skips_mount_reauth() {
+        let root = TempDir::new().unwrap();
+        let profile = Profile::under_root(root.path());
+        let remediations = vec![
+            daemon_remediation("daemon", "omnifs fs rm daemon"),
+            Remediation::MountReauth("github".to_owned()),
+        ];
+        let requested = vec!["daemon".to_owned()];
+        let output = Output::new(OutputMode::Json, false).with_yes(true);
+        assert!(output.is_structured() && output.yes());
+        let normalized = normalize_doctor_outcomes(
+            &requested,
+            vec![DoctorRepairOutcome {
+                id: "daemon".to_owned(),
+                command_line: "omnifs fs rm daemon".to_owned(),
+                state: DoctorRepairState::Applied,
+                error: Some("record retained for audit".to_owned()),
+            }],
+            &remediations,
+        );
+        let (summary, repairs) =
+            route_repairs(&profile, true, &remediations, &requested, normalized);
+        assert_eq!(summary.attempted, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(repairs.len(), 2);
+        assert_eq!(repairs[0].state, RepairState::Applied);
+        assert_eq!(
+            repairs[0].error.as_deref(),
+            Some("record retained for audit")
+        );
+        assert_eq!(repairs[1].state, RepairState::Skipped);
+        assert!(repairs[1].error.is_none());
+    }
+
     #[test]
     fn daemon_report_maps_remediation_executor_and_wire_fields() {
         let finding = daemon_finding();
@@ -1296,6 +1608,68 @@ mod golden {
             finding.remediation,
             Some(Remediation::DaemonExecuted { ref id, .. }) if id == "remove-docker"
         ));
+    }
+
+    #[test]
+    fn doctor_report_rejects_duplicate_remediation_ids() {
+        let report = api_report(
+            Vec::new(),
+            vec![
+                DoctorRemediation {
+                    id: "duplicate".to_owned(),
+                    command_line: "omnifs fs rm one".to_owned(),
+                    executor: DoctorExecutor::Daemon,
+                },
+                DoctorRemediation {
+                    id: "duplicate".to_owned(),
+                    command_line: "omnifs fs rm two".to_owned(),
+                    executor: DoctorExecutor::Daemon,
+                },
+            ],
+        );
+        let error = findings_from_report(&report).unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate remediation id"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn doctor_report_rejects_unknown_finding_remediation_id() {
+        let report = api_report(
+            vec![api_finding(
+                DoctorSection::Filesystems,
+                DoctorCheckKind::StrayFilesystem,
+                Some("orphan"),
+                DoctorSeverity::Attention,
+                "stray filesystem",
+                Some("omnifs fs rm orphan"),
+                Some("missing"),
+            )],
+            Vec::new(),
+        );
+        let error = findings_from_report(&report).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown remediation id"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn doctor_report_allows_report_only_findings() {
+        let report = api_report(
+            vec![api_finding(
+                DoctorSection::Environment,
+                DoctorCheckKind::Network,
+                None,
+                DoctorSeverity::Attention,
+                "network unavailable",
+                None,
+                None,
+            )],
+            Vec::new(),
+        );
+        assert_eq!(findings_from_report(&report).unwrap().len(), 1);
     }
 
     #[test]
@@ -1332,6 +1706,46 @@ mod golden {
     async fn degraded_path_reports_start_error_without_control_client() {
         let root = TempDir::new().unwrap();
         let profile = Profile::under_root(root.path());
+        std::fs::write(
+            profile.process_identity_path(),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "pid": std::process::id(),
+                "instance_token": "stale",
+                "executable": std::env::current_exe().unwrap(),
+                "start_identity": "not-the-current-process"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let degraded = degraded_result(&profile, "synthetic start failure");
+        assert!(
+            degraded
+                .findings
+                .iter()
+                .any(|finding| finding.message.contains("synthetic start failure"))
+        );
+        assert!(
+            degraded
+                .findings
+                .iter()
+                .any(|finding| finding.message == "daemon process identity is present")
+        );
+        assert!(
+            degraded
+                .findings
+                .iter()
+                .any(|finding| finding.message == "daemon control socket is absent")
+        );
+        assert!(degraded.findings.iter().any(|finding| matches!(
+            finding.remediation,
+            Some(Remediation::CleanStaleInstance { .. })
+        )));
+        assert!(degraded.findings.iter().all(|finding| !matches!(
+            finding.remediation,
+            Some(Remediation::DaemonExecuted { .. })
+        )));
+        assert_eq!(degraded.verdict(), DoctorVerdict::Failures);
         let output = Output::new(OutputMode::Json, false).with_yes(true);
         let verdict = run_degraded_at(anyhow::anyhow!("synthetic start failure"), &profile, output)
             .await
