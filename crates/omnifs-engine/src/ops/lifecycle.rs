@@ -1,6 +1,7 @@
 //! Typed provider operation execution and settled terminal publication.
 
 use crate::Runtime;
+use crate::cache::BlobPublicationGuard;
 use crate::clock;
 use crate::effect_apply::EffectApplier;
 use crate::effect_apply::LookupOutcome;
@@ -11,6 +12,82 @@ use omnifs_api::events::InspectorOutcome;
 use omnifs_core::path::{Path, Segment};
 use omnifs_wit::host::types as wit_types;
 use tracing::Instrument;
+
+/// Owns the shared terminal path after a provider operation returns.
+///
+/// Validation runs before any effect lowering, staged blob writes stay owned by
+/// this value until publication, and one fenced projection commit closes the
+/// Inspector span. Operation-specific lowering remains at each caller because
+/// lookup/list hand off subtrees and read/chunk have distinct cache policies.
+struct TerminalTransaction<'a> {
+    runtime: &'a Runtime,
+    span: tracing::Span,
+    captured_epoch: u64,
+    transition: crate::cache::ProjectionTransition,
+}
+
+impl<'a> TerminalTransaction<'a> {
+    fn prepare<T, F>(
+        runtime: &'a Runtime,
+        span: tracing::Span,
+        captured_epoch: u64,
+        blob_guard: BlobPublicationGuard<'a>,
+        wire_result: std::result::Result<T, wit_types::ProviderError>,
+        effects: &wit_types::Effects,
+        validate: F,
+    ) -> Result<(T, Self)>
+    where
+        F: FnOnce(
+            &std::result::Result<T, wit_types::ProviderError>,
+            &wit_types::Effects,
+        ) -> std::result::Result<(), String>,
+    {
+        validate(&wire_result, effects).map_err(EngineError::ProviderProtocol)?;
+        inspect_result(&span, &wire_result);
+        let pending_blobs = blob_guard.take();
+        let wire_result = runtime.provider_result(wire_result)?;
+        let mut transition = EffectApplier::new(&runtime.resources)
+            .lower_effects(effects, clock::now_millis())
+            .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
+        transition.blobs.extend(pending_blobs);
+        Ok((
+            wire_result,
+            Self {
+                runtime,
+                span,
+                captured_epoch,
+                transition,
+            },
+        ))
+    }
+
+    fn transition_mut(&mut self) -> &mut crate::cache::ProjectionTransition {
+        &mut self.transition
+    }
+
+    fn transition(&self) -> &crate::cache::ProjectionTransition {
+        &self.transition
+    }
+
+    fn merge(&mut self, addition: crate::cache::ProjectionTransition) {
+        merge_transition(&mut self.transition, addition);
+    }
+
+    fn finish(
+        self,
+        operation_id: u64,
+        outcome: InspectorOutcome,
+        subtree: Option<u64>,
+    ) -> Result<()> {
+        self.runtime
+            .publish_transition(self.transition, self.captured_epoch)?;
+        inspector::record_outcome(&self.span, outcome);
+        if let Some(tree) = subtree {
+            inspector::record_subtree_handoff(operation_id, tree);
+        }
+        Ok(())
+    }
+}
 
 impl Runtime {
     pub(crate) async fn run_lookup_child(
@@ -38,18 +115,20 @@ impl Runtime {
                     name.as_str().to_string(),
                 )
                 .await?;
-            crate::op_validate::validate_lookup(&wire_result, &effects, |tree| {
-                self.tree_ref(tree).is_some()
-            })
-            .map_err(EngineError::ProviderProtocol)?;
-            inspect_result(&span, &wire_result);
-            let pending_blobs = blob_guard.take();
-            let wire_result = self.provider_result(wire_result)?;
+            let (wire_result, mut terminal) = TerminalTransaction::prepare(
+                self,
+                span.clone(),
+                captured_epoch,
+                blob_guard,
+                wire_result,
+                &effects,
+                |result, effects| {
+                    crate::op_validate::validate_lookup(result, effects, |tree| {
+                        self.tree_ref(tree).is_some()
+                    })
+                },
+            )?;
             let applier = EffectApplier::new(&self.resources);
-            let mut transition = applier
-                .lower_effects(&effects, clock::now_millis())
-                .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
-            transition.blobs.extend(pending_blobs);
             let (result, result_transition) = applier
                 .lower_lookup(
                     parent_path,
@@ -59,12 +138,12 @@ impl Runtime {
                     |tree| self.tree_ref(tree).map(|reference| reference.id),
                 )
                 .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
-            merge_transition(&mut transition, result_transition);
-            self.publish_transition(transition, captured_epoch)?;
-            inspector::record_outcome(&span, InspectorOutcome::Ok);
-            if let LookupOutcome::Subtree(tree) = result {
-                inspector::record_subtree_handoff(id, tree);
-            }
+            terminal.merge(result_transition);
+            let subtree = match result {
+                LookupOutcome::Subtree(tree) => Some(tree),
+                _ => None,
+            };
+            terminal.finish(id, InspectorOutcome::Ok, subtree)?;
             Ok(result)
         }
         .instrument(span.clone())
@@ -92,29 +171,31 @@ impl Runtime {
                 .instance
                 .list_children(id, path.as_str().to_string(), cursor)
                 .await?;
-            crate::op_validate::validate_list(&wire_result, &effects, |tree| {
-                self.tree_ref(tree).is_some()
-            })
-            .map_err(EngineError::ProviderProtocol)?;
-            inspect_result(&span, &wire_result);
-            let pending_blobs = blob_guard.take();
-            let wire_result = self.provider_result(wire_result)?;
+            let (wire_result, mut terminal) = TerminalTransaction::prepare(
+                self,
+                span.clone(),
+                captured_epoch,
+                blob_guard,
+                wire_result,
+                &effects,
+                |result, effects| {
+                    crate::op_validate::validate_list(result, effects, |tree| {
+                        self.tree_ref(tree).is_some()
+                    })
+                },
+            )?;
             let applier = EffectApplier::new(&self.resources);
-            let mut transition = applier
-                .lower_effects(&effects, clock::now_millis())
-                .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
-            transition.blobs.extend(pending_blobs);
             let (result, result_transition) = applier
                 .lower_list(path, wire_result, expected_cursor, |tree| {
                     self.tree_ref(tree).map(|reference| reference.id)
                 })
                 .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
-            merge_transition(&mut transition, result_transition);
-            self.publish_transition(transition, captured_epoch)?;
-            inspector::record_outcome(&span, InspectorOutcome::Ok);
-            if let ListOutcome::Subtree(tree) = result {
-                inspector::record_subtree_handoff(id, tree);
-            }
+            terminal.merge(result_transition);
+            let subtree = match result {
+                ListOutcome::Subtree(tree) => Some(tree),
+                ListOutcome::Entries(_) => None,
+            };
+            terminal.finish(id, InspectorOutcome::Ok, subtree)?;
             Ok(result)
         }
         .instrument(span.clone())
@@ -147,53 +228,59 @@ impl Runtime {
                     cached_canonical,
                 )
                 .await?;
-            crate::op_validate::validate_read(&wire_result, &effects, |tree| {
-                self.tree_ref(tree).is_some()
-            })
-            .map_err(EngineError::ProviderProtocol)?;
-            inspect_result(&span, &wire_result);
-            let pending_blobs = blob_guard.take();
-            let wire_result = self.provider_result(wire_result)?;
+            let (wire_result, mut terminal) = TerminalTransaction::prepare(
+                self,
+                span.clone(),
+                captured_epoch,
+                blob_guard,
+                wire_result,
+                &effects,
+                |result, effects| {
+                    crate::op_validate::validate_read(result, effects, |tree| {
+                        self.tree_ref(tree).is_some()
+                    })
+                },
+            )?;
             let applier = EffectApplier::new(&self.resources);
-            let mut transition = applier
-                .lower_effects(&effects, clock::now_millis())
-                .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
             let result = match wire_result {
                 wit_types::ReadFileOutcome::Found(value) => {
                     let (result, result_transition) = applier
                         .lower_read(
                             path,
                             wit_types::ReadFileOutcome::Found(value),
-                            &transition.objects,
+                            &terminal.transition().objects,
                         )
                         .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
-                    merge_transition(&mut transition, result_transition);
-                    transition.blobs.extend(pending_blobs);
+                    terminal.merge(result_transition);
                     result
                 },
                 wit_types::ReadFileOutcome::NotFound(maybe_id) => {
-                    drop(pending_blobs);
-                    transition.records.push(crate::cache::RecordWrite {
-                        path: path.clone(),
-                        aux: None,
-                        fact: crate::cache::FactPayload::Lookup(
-                            crate::view::LookupPayload::Negative {
-                                id: maybe_id.as_ref().map(|value| {
-                                    crate::object_id::ObjectId::from_wit(value)
-                                        .as_bytes()
-                                        .to_vec()
-                                }),
-                            },
-                        ),
-                    });
-                    transition.freshness.push(crate::cache::Freshness {
-                        path: path.clone(),
-                        expires_at: Some(
-                            clock::now_millis().saturating_add(clock::DYNAMIC_TTL_MILLIS),
-                        ),
-                    });
-                    self.publish_transition(transition, captured_epoch)?;
-                    inspector::record_outcome(&span, InspectorOutcome::NotFound);
+                    terminal
+                        .transition_mut()
+                        .records
+                        .push(crate::cache::RecordWrite {
+                            path: path.clone(),
+                            aux: None,
+                            fact: crate::cache::FactPayload::Lookup(
+                                crate::view::LookupPayload::Negative {
+                                    id: maybe_id.as_ref().map(|value| {
+                                        crate::object_id::ObjectId::from_wit(value)
+                                            .as_bytes()
+                                            .to_vec()
+                                    }),
+                                },
+                            ),
+                        });
+                    terminal
+                        .transition_mut()
+                        .freshness
+                        .push(crate::cache::Freshness {
+                            path: path.clone(),
+                            expires_at: Some(
+                                clock::now_millis().saturating_add(clock::DYNAMIC_TTL_MILLIS),
+                            ),
+                        });
+                    terminal.finish(id, InspectorOutcome::NotFound, None)?;
                     return Err(EngineError::ProviderError(wit_types::ProviderError {
                         kind: wit_types::ErrorKind::NotFound,
                         message: format!("no such file: {path}"),
@@ -202,8 +289,7 @@ impl Runtime {
                     }));
                 },
             };
-            self.publish_transition(transition, captured_epoch)?;
-            inspector::record_outcome(&span, InspectorOutcome::Ok);
+            terminal.finish(id, InspectorOutcome::Ok, None)?;
             Ok(result)
         }
         .instrument(span.clone())
@@ -229,20 +315,22 @@ impl Runtime {
                 .instance
                 .open_file(id, path.as_str().to_string())
                 .await?;
-            crate::op_validate::validate_open(&wire_result, &effects, |tree| {
-                self.tree_ref(tree).is_some()
-            })
-            .map_err(EngineError::ProviderProtocol)?;
-            inspect_result(&span, &wire_result);
-            let pending_blobs = blob_guard.take();
-            let wire_result = self.provider_result(wire_result)?;
+            let (wire_result, mut terminal) = TerminalTransaction::prepare(
+                self,
+                span.clone(),
+                captured_epoch,
+                blob_guard,
+                wire_result,
+                &effects,
+                |result, effects| {
+                    crate::op_validate::validate_open(result, effects, |tree| {
+                        self.tree_ref(tree).is_some()
+                    })
+                },
+            )?;
             let outcome = OpenOutcome::from_wit(wire_result);
             let meta = crate::view::EntryMeta::file(outcome.attrs.clone());
-            let mut transition = EffectApplier::new(&self.resources)
-                .lower_effects(&effects, clock::now_millis())
-                .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
-            transition.blobs.extend(pending_blobs);
-            transition.records.extend([
+            terminal.transition_mut().records.extend([
                 crate::cache::RecordWrite {
                     path: path.clone(),
                     aux: None,
@@ -256,8 +344,7 @@ impl Runtime {
                     fact: crate::cache::FactPayload::Attr(crate::view::AttrPayload { meta }),
                 },
             ]);
-            self.publish_transition(transition, captured_epoch)?;
-            inspector::record_outcome(&span, InspectorOutcome::Ok);
+            terminal.finish(id, InspectorOutcome::Ok, None)?;
             Ok(outcome)
         }
         .instrument(span.clone())
@@ -280,17 +367,19 @@ impl Runtime {
         async {
             let (wire_result, effects) =
                 self.instance.read_chunk(id, handle, offset, length).await?;
-            crate::op_validate::validate_chunk(&wire_result, &effects, length, |tree| {
-                self.tree_ref(tree).is_some()
-            })
-            .map_err(EngineError::ProviderProtocol)?;
-            inspect_result(&span, &wire_result);
-            let pending_blobs = blob_guard.take();
-            let wire_result = self.provider_result(wire_result)?;
-            let mut transition = EffectApplier::new(&self.resources)
-                .lower_effects(&effects, clock::now_millis())
-                .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
-            transition.blobs.extend(pending_blobs);
+            let (wire_result, mut terminal) = TerminalTransaction::prepare(
+                self,
+                span.clone(),
+                captured_epoch,
+                blob_guard,
+                wire_result,
+                &effects,
+                |result, effects| {
+                    crate::op_validate::validate_chunk(result, effects, length, |tree| {
+                        self.tree_ref(tree).is_some()
+                    })
+                },
+            )?;
             let mut outcome = ChunkOutcome::from_wit(wire_result);
             if let (Some(path), Some(attrs)) = (path, attrs)
                 && outcome.eof
@@ -310,7 +399,7 @@ impl Runtime {
                 };
                 if let Some(learned) = learned.clone() {
                     let meta = crate::view::EntryMeta::file(learned.clone());
-                    transition.records.extend([
+                    terminal.transition_mut().records.extend([
                         crate::cache::RecordWrite {
                             path: path.clone(),
                             aux: None,
@@ -329,8 +418,7 @@ impl Runtime {
                     outcome.learned_attrs = Some(learned);
                 }
             }
-            self.publish_transition(transition, captured_epoch)?;
-            inspector::record_outcome(&span, InspectorOutcome::Ok);
+            terminal.finish(id, InspectorOutcome::Ok, None)?;
             Ok(outcome)
         }
         .instrument(span.clone())
@@ -348,20 +436,20 @@ impl Runtime {
         let blob_guard = self.resources.blob_publication(id);
         async {
             let (wire_result, effects) = self.instance.on_event(id, event).await?;
-            crate::op_validate::validate_event(&wire_result, &effects, |tree| {
-                self.tree_ref(tree).is_some()
-            })
-            .map_err(EngineError::ProviderProtocol)?;
-            inspect_result(&span, &wire_result);
-            let pending_blobs = blob_guard.take();
-            self.provider_result(wire_result)?;
-            let transition = EffectApplier::new(&self.resources)
-                .lower_effects(&effects, clock::now_millis())
-                .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
-            let mut transition = transition;
-            transition.blobs.extend(pending_blobs);
-            self.publish_transition(transition, captured_epoch)?;
-            inspector::record_outcome(&span, InspectorOutcome::Ok);
+            let ((), terminal) = TerminalTransaction::prepare(
+                self,
+                span.clone(),
+                captured_epoch,
+                blob_guard,
+                wire_result,
+                &effects,
+                |result, effects| {
+                    crate::op_validate::validate_event(result, effects, |tree| {
+                        self.tree_ref(tree).is_some()
+                    })
+                },
+            )?;
+            terminal.finish(id, InspectorOutcome::Ok, None)?;
             Ok(())
         }
         .instrument(span.clone())

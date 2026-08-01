@@ -3,10 +3,10 @@
 use crate::credential_document::prepare_credential_document;
 use crate::progress::ProgressHub;
 use omnifs_api::{
-    ActionKind, ApplyReceipt, ApplyResourcesRequest, CredentialReceipt, CredentialStatusKind,
-    NormalizedResourceSet, ProgressSnapshot, ProgressTarget, ResourceChangeAction,
-    ResourceDeclarations, ResourceDefinition, ResourceDefinitionError, ResourcePhase, ResourcePlan,
-    ResourceStatus, RestartFilesystemRequest, RevokeCredentialRequest,
+    ActionKind, ActionPhase, ActionReceipt, ApplyReceipt, ApplyResourcesRequest, CredentialReceipt,
+    CredentialStatusKind, NormalizedResourceSet, ProgressSnapshot, ProgressTarget,
+    ResourceChangeAction, ResourceDeclarations, ResourceDefinition, ResourceDefinitionError,
+    ResourcePhase, ResourcePlan, ResourceStatus, RestartFilesystemRequest, RevokeCredentialRequest,
     SetCredentialMaterialRequest, plan,
 };
 use omnifs_core::{
@@ -252,7 +252,7 @@ impl ResourceControl {
                 return Err(ActionWriteError::IdReuse(request.action_id).into());
             }
             return Ok(CredentialReceipt {
-                status: credential_action_status(action.kind, action.phase),
+                status: credential_action_status(CredentialActionKind::SetMaterial, action.phase),
                 action,
             });
         }
@@ -281,7 +281,7 @@ impl ResourceControl {
             .await?;
         self.publish_action(&action);
         Ok(CredentialReceipt {
-            status: credential_action_status(action.kind, action.phase),
+            status: credential_action_status(CredentialActionKind::SetMaterial, action.phase),
             action,
         })
     }
@@ -302,7 +302,7 @@ impl ResourceControl {
             .await?;
         self.publish_action(&action);
         Ok(CredentialReceipt {
-            status: credential_action_status(action.kind, action.phase),
+            status: credential_action_status(CredentialActionKind::Revoke, action.phase),
             action,
         })
     }
@@ -327,6 +327,37 @@ impl ResourceControl {
     pub(crate) fn publish_action(&self, action: &omnifs_api::ActionReceipt) {
         self.progress.record_action_receipt(action.clone());
         self.action_wakeup.send_replace(Some(action.action_id));
+    }
+
+    /// Transition one durable action, then publish its receipt and wake the
+    /// owning reconciler. Typed progress may run between those two steps when
+    /// its event must precede the receipt publication.
+    pub(crate) async fn transition_action(
+        &self,
+        action_id: ActionId,
+        phase: ActionPhase,
+        error_code: Option<String>,
+        detail: Option<String>,
+    ) -> Result<ActionReceipt, ResourceControlError> {
+        self.transition_action_with_progress(action_id, phase, error_code, detail, |_| {})
+            .await
+    }
+
+    pub(crate) async fn transition_action_with_progress(
+        &self,
+        action_id: ActionId,
+        phase: ActionPhase,
+        error_code: Option<String>,
+        detail: Option<String>,
+        publish_progress: impl FnOnce(&ActionReceipt),
+    ) -> Result<ActionReceipt, ResourceControlError> {
+        let action = self
+            .state
+            .transition_action(action_id, phase, error_code, detail)
+            .await?;
+        publish_progress(&action);
+        self.publish_action(&action);
+        Ok(action)
     }
 
     async fn normalize_and_validate(
@@ -557,20 +588,24 @@ impl ResourceControl {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CredentialActionKind {
+    SetMaterial,
+    Revoke,
+}
+
 fn credential_action_status(
-    kind: ActionKind,
-    phase: omnifs_api::ActionPhase,
+    kind: CredentialActionKind,
+    phase: ActionPhase,
 ) -> CredentialStatusKind {
-    use omnifs_api::ActionPhase;
     match (kind, phase) {
-        (ActionKind::SetCredentialMaterial, ActionPhase::Failed)
-        | (ActionKind::RestartFilesystem, _) => CredentialStatusKind::Blocked,
-        (ActionKind::SetCredentialMaterial, _) => CredentialStatusKind::Active,
-        (ActionKind::RevokeCredential, ActionPhase::Ready) => CredentialStatusKind::Deleted,
-        (ActionKind::RevokeCredential, ActionPhase::Failed) => {
+        (CredentialActionKind::SetMaterial, ActionPhase::Failed) => CredentialStatusKind::Blocked,
+        (CredentialActionKind::SetMaterial, _) => CredentialStatusKind::Active,
+        (CredentialActionKind::Revoke, ActionPhase::Ready) => CredentialStatusKind::Deleted,
+        (CredentialActionKind::Revoke, ActionPhase::Failed) => {
             CredentialStatusKind::RevocationUnknown
         },
-        (ActionKind::RevokeCredential, _) => CredentialStatusKind::RevocationPending,
+        (CredentialActionKind::Revoke, _) => CredentialStatusKind::RevocationPending,
     }
 }
 
@@ -1040,23 +1075,23 @@ mod tests {
     #[test]
     fn credential_action_replay_status_matches_the_durable_terminal_receipt() {
         assert_eq!(
-            credential_action_status(ActionKind::SetCredentialMaterial, ActionPhase::Ready),
+            credential_action_status(CredentialActionKind::SetMaterial, ActionPhase::Ready),
             CredentialStatusKind::Active
         );
         assert_eq!(
-            credential_action_status(ActionKind::SetCredentialMaterial, ActionPhase::Failed),
+            credential_action_status(CredentialActionKind::SetMaterial, ActionPhase::Failed),
             CredentialStatusKind::Blocked
         );
         assert_eq!(
-            credential_action_status(ActionKind::RevokeCredential, ActionPhase::Running),
+            credential_action_status(CredentialActionKind::Revoke, ActionPhase::Running),
             CredentialStatusKind::RevocationPending
         );
         assert_eq!(
-            credential_action_status(ActionKind::RevokeCredential, ActionPhase::Ready),
+            credential_action_status(CredentialActionKind::Revoke, ActionPhase::Ready),
             CredentialStatusKind::Deleted
         );
         assert_eq!(
-            credential_action_status(ActionKind::RevokeCredential, ActionPhase::Failed),
+            credential_action_status(CredentialActionKind::Revoke, ActionPhase::Failed),
             CredentialStatusKind::RevocationUnknown
         );
     }
