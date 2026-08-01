@@ -117,7 +117,6 @@ impl RpcClient {
             .map_err(Into::into)
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn daemon_info(&self) -> anyhow::Result<DaemonInfo> {
         let response = bounded_unary!(self, get_daemon_info, wire::Empty {}).into_inner();
         grpc::daemon_info(response.info.as_ref().context("missing daemon info")?)

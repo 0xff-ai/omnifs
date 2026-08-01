@@ -143,7 +143,7 @@ async fn prepare_setup(rpc: &RpcClient, output: &Output) -> Result<PreparedSetup
         crate::ui::consent::resolve_confirm(output.prompt_mode(), question, true, false, output)?
     };
 
-    let recommended = filesystem::recommended_definition()?;
+    let recommended = filesystem::recommended_definition(rpc).await?;
     let add_filesystem = if let Some(definition) = recommended.as_ref() {
         !has_filesystem_pair(&current.resources, definition)
             && crate::ui::consent::resolve_confirm(

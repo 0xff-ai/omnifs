@@ -7,9 +7,9 @@
 use anyhow::{Context as _, Result, anyhow, ensure};
 use clap::{Args, Subcommand};
 use omnifs_api::{
-    ActionReceipt, ApplyReceipt, FilesystemAccess, FilesystemDefinition, FilesystemStatus,
-    GetFilesystemAccessRequest, ProgressSnapshot, ResourceDefinition, ResourcePhase,
-    RestartFilesystemRequest,
+    ActionReceipt, ApplyReceipt, DaemonInfo, FilesystemAccess, FilesystemDefinition,
+    FilesystemStatus, GetFilesystemAccessRequest, ProgressSnapshot, ResourceDefinition,
+    ResourcePhase, RestartFilesystemRequest,
 };
 use omnifs_bootstrap::Profile;
 use omnifs_core::{
@@ -138,7 +138,9 @@ impl FilesystemArgs {
 async fn add(output: Output) -> Result<ExitCode> {
     crate::commands::resource_flow::ensure_interactive_mutation(&output)?;
     daemon_start::start(&output).await?;
-    let pairs = available_pairs();
+    let rpc = RpcClient::resolve()?;
+    let daemon_info = rpc.daemon_info().await?;
+    let pairs = available_pairs(&daemon_info)?;
     ensure!(
         !pairs.is_empty(),
         "this platform has no supported Filesystem runtime"
@@ -163,9 +165,8 @@ async fn add(output: Output) -> Result<ExitCode> {
     } else {
         None
     };
-    let definition = definition_for_pair(name, pair, location)?;
+    let definition = definition_for_pair(&daemon_info, name, pair, location)?;
     output.narrate("The Filesystem stays running while this resource is desired.");
-    let rpc = RpcClient::resolve()?;
     let desired = definition.clone();
     let result = match crate::commands::resource_flow::edit_resources_and_wait(
         &rpc,
@@ -492,12 +493,13 @@ fn finish_result(output: &Output, result: MutationResult) -> Result<ExitCode> {
 }
 
 fn definition_for_pair(
+    daemon_info: &DaemonInfo,
     name: ResourceName,
     pair: FilesystemPair,
     location: Option<PathBuf>,
 ) -> Result<FilesystemDefinition> {
     let FilesystemPair { protocol, runtime } = pair;
-    ensure!(supports(protocol, runtime), "{pair} is not supported");
+    ensure!(supports(daemon_info, pair), "{pair} is not supported");
     let profile_root = Profile::resolve()?.root().to_path_buf();
     let location = match runtime {
         FilesystemRuntime::Host => {
@@ -529,54 +531,46 @@ fn definition_for_pair(
     })
 }
 
-pub(crate) fn platform_default() -> Option<(FilesystemProtocol, FilesystemRuntime)> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", _) => Some((FilesystemProtocol::Fuse, FilesystemRuntime::Host)),
-        ("macos", "aarch64") => Some((FilesystemProtocol::Fuse, FilesystemRuntime::Libkrun)),
-        ("macos", _) => Some((FilesystemProtocol::Nfs, FilesystemRuntime::Host)),
-        _ => None,
+fn platform_default(daemon_info: &DaemonInfo) -> Result<Option<FilesystemPair>> {
+    let default = daemon_info
+        .platform_default_filesystem_pair
+        .map(|(protocol, runtime)| FilesystemPair { protocol, runtime });
+    if let Some(default) = default {
+        ensure!(
+            supports(daemon_info, default),
+            "daemon advertised default Filesystem pair {default}, but it is not in supported_filesystem_pairs"
+        );
     }
+    Ok(default)
 }
 
-pub(crate) fn supports(protocol: FilesystemProtocol, runtime: FilesystemRuntime) -> bool {
-    omnifs_core::filesystem_pair_supported_on_current_host(protocol, runtime)
+fn supports(daemon_info: &DaemonInfo, pair: FilesystemPair) -> bool {
+    daemon_info
+        .supported_filesystem_pairs
+        .iter()
+        .any(|&(protocol, runtime)| (protocol, runtime) == (pair.protocol, pair.runtime))
 }
 
-fn available_pairs() -> Vec<FilesystemPair> {
-    let recommended = platform_default();
-    let mut pairs = [FilesystemProtocol::Fuse, FilesystemProtocol::Nfs]
-        .into_iter()
-        .flat_map(|protocol| {
-            [
-                FilesystemRuntime::Host,
-                FilesystemRuntime::Docker,
-                FilesystemRuntime::Libkrun,
-            ]
-            .into_iter()
-            .filter(move |runtime| supports(protocol, *runtime))
-            .map(move |runtime| FilesystemPair { protocol, runtime })
-        })
+fn available_pairs(daemon_info: &DaemonInfo) -> Result<Vec<FilesystemPair>> {
+    let recommended = platform_default(daemon_info)?;
+    let mut pairs = daemon_info
+        .supported_filesystem_pairs
+        .iter()
+        .map(|&(protocol, runtime)| FilesystemPair { protocol, runtime })
         .collect::<Vec<_>>();
-    pairs.sort_by_key(|pair| {
-        (
-            recommended != Some((pair.protocol, pair.runtime)),
-            pair.protocol,
-            pair.runtime,
-        )
-    });
-    pairs
+    pairs.sort_by_key(|pair| (recommended != Some(*pair), pair.protocol, pair.runtime));
+    Ok(pairs)
 }
 
-pub(crate) fn recommended_definition() -> Result<Option<FilesystemDefinition>> {
-    let Some((protocol, runtime)) = platform_default() else {
+pub(crate) async fn recommended_definition(
+    rpc: &RpcClient,
+) -> Result<Option<FilesystemDefinition>> {
+    let daemon_info = rpc.daemon_info().await?;
+    let Some(pair) = platform_default(&daemon_info)? else {
         return Ok(None);
     };
-    let name = ResourceName::new(format!("{protocol}-{runtime}"))?;
-    Ok(Some(definition_for_pair(
-        name,
-        FilesystemPair { protocol, runtime },
-        None,
-    )?))
+    let name = ResourceName::new(format!("{}-{}", pair.protocol, pair.runtime))?;
+    Ok(Some(definition_for_pair(&daemon_info, name, pair, None)?))
 }
 
 const fn resource_phase(phase: ResourcePhase) -> &'static str {
@@ -637,16 +631,80 @@ mod tests {
 
     #[test]
     fn platform_default_is_supported() {
-        if let Some((protocol, runtime)) = platform_default() {
-            assert!(supports(protocol, runtime));
-        }
+        let daemon_info = daemon_info(
+            &[
+                (FilesystemProtocol::Nfs, FilesystemRuntime::Host),
+                (FilesystemProtocol::Fuse, FilesystemRuntime::Host),
+            ],
+            Some((FilesystemProtocol::Fuse, FilesystemRuntime::Host)),
+        );
+        let default = platform_default(&daemon_info).unwrap().unwrap();
+        assert!(supports(&daemon_info, default));
     }
 
     #[test]
     fn recommended_pair_is_first() {
-        if let Some((protocol, runtime)) = platform_default() {
-            let first = available_pairs().into_iter().next().unwrap();
-            assert_eq!((first.protocol, first.runtime), (protocol, runtime));
+        let daemon_info = daemon_info(
+            &[
+                (FilesystemProtocol::Nfs, FilesystemRuntime::Host),
+                (FilesystemProtocol::Fuse, FilesystemRuntime::Docker),
+                (FilesystemProtocol::Fuse, FilesystemRuntime::Host),
+            ],
+            Some((FilesystemProtocol::Fuse, FilesystemRuntime::Host)),
+        );
+        let first = available_pairs(&daemon_info)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(
+            (first.protocol, first.runtime),
+            (FilesystemProtocol::Fuse, FilesystemRuntime::Host)
+        );
+    }
+
+    #[test]
+    fn advertised_default_must_be_supported() {
+        let daemon_info = daemon_info(
+            &[(FilesystemProtocol::Nfs, FilesystemRuntime::Host)],
+            Some((FilesystemProtocol::Fuse, FilesystemRuntime::Host)),
+        );
+        let error = available_pairs(&daemon_info).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "daemon advertised default Filesystem pair fuse / host, but it is not in supported_filesystem_pairs"
+        );
+    }
+
+    #[test]
+    fn unsupported_pair_keeps_picker_error() {
+        let daemon_info = daemon_info(&[(FilesystemProtocol::Nfs, FilesystemRuntime::Host)], None);
+        let error = definition_for_pair(
+            &daemon_info,
+            ResourceName::new("test").unwrap(),
+            FilesystemPair {
+                protocol: FilesystemProtocol::Fuse,
+                runtime: FilesystemRuntime::Host,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "fuse / host is not supported");
+    }
+
+    fn daemon_info(
+        supported: &[(FilesystemProtocol, FilesystemRuntime)],
+        default: Option<(FilesystemProtocol, FilesystemRuntime)>,
+    ) -> DaemonInfo {
+        DaemonInfo {
+            version: "test".to_owned(),
+            pid: 1,
+            instance_id: "test".to_owned(),
+            executable: "/bin/omnifs".into(),
+            attach_unix: None,
+            attach_tcp: None,
+            supported_filesystem_pairs: supported.to_vec(),
+            platform_default_filesystem_pair: default,
         }
     }
 
