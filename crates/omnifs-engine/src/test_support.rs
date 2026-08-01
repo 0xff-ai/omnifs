@@ -39,8 +39,8 @@ pub fn open_test_host(
 ) -> Result<crate::HostOnline, crate::HostError> {
     crate::HostOnline::open_runtime(crate::HostRuntimeOpen {
         projection: cache_dir.as_ref().to_path_buf(),
-        wasmtime: wasm_cache_dir(),
         clones: clone_dir.as_ref().to_path_buf(),
+        engine: crate::ComponentEngine::new(&wasm_cache_dir())?,
     })
 }
 
@@ -74,7 +74,7 @@ pub mod cache {
 
     pub fn mount(
         caches: &std::sync::Arc<Caches>,
-        name: &omnifs_core::MountName,
+        name: &omnifs_core::ResourceName,
         spec_source: &[u8],
         provider_id: omnifs_core::ProviderId,
     ) -> anyhow::Result<std::sync::Arc<crate::cache::mount::MountResources>> {

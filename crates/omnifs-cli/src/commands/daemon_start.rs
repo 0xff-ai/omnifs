@@ -2,7 +2,7 @@
 
 use anyhow::{Context as _, ensure};
 use omnifs_api::DaemonPhase;
-use omnifs_bootstrap::{Bootstrap, Client};
+use omnifs_bootstrap::Profile;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::net::UnixStream;
@@ -21,7 +21,7 @@ const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// narrates nothing, since there is nothing this command is doing that the
 /// operator does not already know about.
 pub(crate) async fn start(output: &Output) -> anyhow::Result<()> {
-    let endpoint = Bootstrap::<Client>::for_client()?;
+    let endpoint = Profile::resolve()?;
     let _spawn_lock = endpoint
         .acquire_spawn_lock()
         .context("acquire daemon spawn lock")?;
@@ -35,7 +35,7 @@ pub(crate) async fn start(output: &Output) -> anyhow::Result<()> {
     wait_until_ready(&rpc, child.as_mut()).await
 }
 
-async fn control_reachable(endpoint: &Bootstrap<Client>) -> anyhow::Result<bool> {
+async fn control_reachable(endpoint: &Profile) -> anyhow::Result<bool> {
     match UnixStream::connect(endpoint.control_socket()).await {
         Ok(stream) => {
             drop(stream);

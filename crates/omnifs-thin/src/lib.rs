@@ -7,7 +7,9 @@ mod lifecycle;
 pub mod nfs;
 
 use clap::Args;
-use omnifs_core::{ClientOwnerId, fs};
+use omnifs_core::{
+    FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName, RuntimeInstanceId,
+};
 use std::path::PathBuf;
 
 #[derive(Debug, Args)]
@@ -35,21 +37,27 @@ impl HostControlArgs {
 
 #[derive(Debug, Args)]
 pub struct RunFsArgs {
-    /// Stable identity of the CLI installation that owns this filesystem.
+    /// Desired filesystem name.
     #[arg(long)]
-    client_owner: ClientOwnerId,
-    /// Stable configured filesystem name.
-    #[arg(long)]
-    name: fs::Id,
+    name: ResourceName,
     /// OS filesystem protocol to serve.
     #[arg(long)]
-    protocol: fs::Protocol,
+    protocol: FilesystemProtocol,
     /// Runtime identity supplied by the launcher.
     #[arg(long)]
-    runtime: fs::Runtime,
-    /// Mount location resolved in the persisted filesystem spec.
+    runtime: FilesystemRuntime,
+    /// Mount location resolved in the desired Filesystem spec.
     #[arg(long)]
     location: PathBuf,
+    /// Docker image reference retained in the exact desired filesystem spec.
+    #[arg(long)]
+    docker_image: Option<String>,
+    /// Libkrun guest image reference retained in the exact desired filesystem spec.
+    #[arg(long)]
+    libkrun_guest_image: Option<String>,
+    /// Random identity of this launched runtime instance.
+    #[arg(long)]
+    runtime_instance: RuntimeInstanceId,
     /// Directory for local mount and runner state.
     #[arg(long)]
     state_dir: Option<PathBuf>,
@@ -64,10 +72,17 @@ pub struct RunFsArgs {
 }
 
 pub fn run(args: RunFsArgs) -> anyhow::Result<()> {
-    let spec = fs::Spec::new(args.name, args.protocol, args.runtime, args.location)?;
+    let spec = FilesystemSpec::new(
+        args.protocol,
+        args.runtime,
+        args.location,
+        args.docker_image,
+        args.libkrun_guest_image,
+    )?;
     let args = RunnerArgs {
-        client_owner: args.client_owner,
+        filesystem: args.name,
         spec,
+        runtime_instance: args.runtime_instance.into_string(),
         state_dir: args.state_dir,
         attach: args.attach,
         port: args.port,
@@ -75,16 +90,17 @@ pub fn run(args: RunFsArgs) -> anyhow::Result<()> {
     };
     match args.spec.protocol() {
         #[cfg(target_os = "linux")]
-        fs::Protocol::Fuse => fuse::run(args),
+        FilesystemProtocol::Fuse => fuse::run(args),
         #[cfg(not(target_os = "linux"))]
-        fs::Protocol::Fuse => anyhow::bail!("FUSE is not supported on this platform"),
-        fs::Protocol::Nfs => nfs::run(args),
+        FilesystemProtocol::Fuse => anyhow::bail!("FUSE is not supported on this platform"),
+        FilesystemProtocol::Nfs => nfs::run(args),
     }
 }
 
 struct RunnerArgs {
-    client_owner: ClientOwnerId,
-    spec: fs::Spec,
+    filesystem: ResourceName,
+    spec: FilesystemSpec,
+    runtime_instance: String,
     state_dir: Option<PathBuf>,
     attach: Option<PathBuf>,
     port: u16,

@@ -4,9 +4,9 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -27,17 +27,27 @@ fn run_with<A: Api>(api: &A, config: &Config, diagnostic: &File) -> Result<(), E
     api.init_log(diagnostic.as_raw_fd())?;
     let bridge = AttachBridge::bind(&config.attach_bridge_socket, &config.attach_socket)?;
     let mut context = Context::configure(api, config)?;
-    let control = Control::bind(&config.control_socket, &config.spec, &config.instance_id)?;
+    let control = Control::bind(
+        &config.control_socket,
+        &config.filesystem,
+        &config.spec,
+        &config.instance_id,
+    )?;
     let shutdown_fd = context.shutdown_fd()?;
-    let files = PublishedPid::publish(&config.pid_file, &config.spec, &config.instance_id)?;
+    let files = PublishedPid::publish(
+        &config.pid_file,
+        &config.filesystem,
+        &config.spec,
+        &config.instance_id,
+    )?;
     let stop = Arc::new(AtomicBool::new(false));
     let control_thread = control.spawn(shutdown_fd, Arc::clone(&stop));
     let bridge_thread = bridge.spawn(shutdown_fd, Arc::clone(&stop));
 
     let result = context.start();
-    stop.store(true, Ordering::Release);
+    bridge_thread.stop();
     let _ = control_thread.join();
-    let _ = bridge_thread.join();
+    bridge_thread.join();
     drop(files);
     result
 }
@@ -144,6 +154,37 @@ struct AttachBridge {
     listener: UnixListener,
 }
 
+struct AttachBridgeThread {
+    join: thread::JoinHandle<()>,
+    active: Arc<Mutex<Option<ActiveRelay>>>,
+    stop: Arc<AtomicBool>,
+}
+
+struct ActiveRelay {
+    guest: UnixStream,
+    daemon: UnixStream,
+}
+
+impl AttachBridgeThread {
+    fn stop(&self) {
+        use std::net::Shutdown;
+
+        self.stop.store(true, Ordering::Release);
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(active) = active.as_ref() {
+            let _ = active.guest.shutdown(Shutdown::Both);
+            let _ = active.daemon.shutdown(Shutdown::Both);
+        }
+    }
+
+    fn join(self) {
+        let _ = self.join.join();
+    }
+}
+
 impl AttachBridge {
     fn bind(path: &Path, target: &Path) -> Result<Self, Error> {
         let listener = UnixListener::bind(path)
@@ -160,16 +201,20 @@ impl AttachBridge {
         })
     }
 
-    fn spawn(self, shutdown_fd: ShutdownFd, stop: Arc<AtomicBool>) -> thread::JoinHandle<()> {
-        thread::spawn(move || {
-            if let Err(error) = self.serve(&stop) {
+    fn spawn(self, shutdown_fd: ShutdownFd, stop: Arc<AtomicBool>) -> AttachBridgeThread {
+        let active = Arc::new(Mutex::new(None));
+        let thread_active = Arc::clone(&active);
+        let thread_stop = Arc::clone(&stop);
+        let join = thread::spawn(move || {
+            if let Err(error) = self.serve(&thread_stop, &thread_active) {
                 eprintln!("omnifs-libkrun: attach bridge failed: {error}");
                 let _ = shutdown_fd.signal();
             }
-        })
+        });
+        AttachBridgeThread { join, active, stop }
     }
 
-    fn serve(self, stop: &AtomicBool) -> Result<(), Error> {
+    fn serve(self, stop: &AtomicBool, active: &Mutex<Option<ActiveRelay>>) -> Result<(), Error> {
         while !stop.load(Ordering::Acquire) {
             match self.listener.accept() {
                 Ok((guest, _)) => {
@@ -181,7 +226,7 @@ impl AttachBridge {
                         )
                     })?;
                     match UnixStream::connect(&self.target) {
-                        Ok(daemon) => Self::relay(guest, daemon, &self.path)?,
+                        Ok(daemon) => Self::relay(guest, daemon, &self.path, stop, active)?,
                         Err(error)
                             if matches!(
                                 error.kind(),
@@ -217,7 +262,13 @@ impl AttachBridge {
         Ok(())
     }
 
-    fn relay(guest: UnixStream, daemon: UnixStream, path: &Path) -> Result<(), Error> {
+    fn relay(
+        guest: UnixStream,
+        daemon: UnixStream,
+        path: &Path,
+        stop: &AtomicBool,
+        active: &Mutex<Option<ActiveRelay>>,
+    ) -> Result<(), Error> {
         use std::net::Shutdown;
 
         let mut guest_reader = guest
@@ -236,6 +287,23 @@ impl AttachBridge {
             .map_err(|error| Error::io("clone daemon attach bridge shutdown for", path, error))?;
         let mut daemon_writer = daemon;
 
+        {
+            let mut active = active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            *active = Some(ActiveRelay {
+                guest: guest_shutdown.try_clone().map_err(|error| {
+                    Error::io("track guest attach bridge stream for", path, error)
+                })?,
+                daemon: daemon_shutdown.try_clone().map_err(|error| {
+                    Error::io("track daemon attach bridge stream for", path, error)
+                })?,
+            });
+        }
+
         let (done_tx, done_rx) = mpsc::sync_channel(2);
         thread::scope(|scope| {
             let guest_to_daemon = done_tx.clone();
@@ -252,6 +320,9 @@ impl AttachBridge {
             let _ = guest_shutdown.shutdown(Shutdown::Both);
             let _ = daemon_shutdown.shutdown(Shutdown::Both);
         });
+        *active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         Ok(())
     }
 }
@@ -269,7 +340,12 @@ struct Control {
 }
 
 impl Control {
-    fn bind(path: &Path, spec: &omnifs_core::fs::Spec, instance_id: &str) -> Result<Self, Error> {
+    fn bind(
+        path: &Path,
+        filesystem: &omnifs_core::ResourceName,
+        spec: &omnifs_core::FilesystemSpec,
+        instance_id: &str,
+    ) -> Result<Self, Error> {
         let listener = UnixListener::bind(path)
             .map_err(|error| Error::io("bind control socket", path, error))?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -280,7 +356,12 @@ impl Control {
         Ok(Self {
             path: path.to_path_buf(),
             listener,
-            record: HelperRecord::new(std::process::id(), spec.clone(), instance_id)?,
+            record: HelperRecord::new(
+                std::process::id(),
+                filesystem.clone(),
+                spec.clone(),
+                instance_id,
+            )?,
         })
     }
 
@@ -330,27 +411,21 @@ impl Control {
                     }
                     let expected_ping = format!(
                         "ping {} {}\n",
-                        self.record.spec.id(),
-                        self.record.instance_id
+                        self.record.filesystem, self.record.instance_id
                     );
                     let expected_shutdown = format!(
                         "shutdown {} {}\n",
-                        self.record.spec.id(),
-                        self.record.instance_id
+                        self.record.filesystem, self.record.instance_id
                     );
                     let reply = if request == expected_ping {
                         format!(
                             "pong {} {} {}\n",
-                            self.record.pid,
-                            self.record.spec.id(),
-                            self.record.instance_id
+                            self.record.pid, self.record.filesystem, self.record.instance_id
                         )
                     } else if request == expected_shutdown {
                         format!(
                             "ok {} {} {}\n",
-                            self.record.pid,
-                            self.record.spec.id(),
-                            self.record.instance_id
+                            self.record.pid, self.record.filesystem, self.record.instance_id
                         )
                     } else {
                         eprintln!(
@@ -389,12 +464,14 @@ impl Drop for Control {
 
 struct PublishedPid {
     pid_file: PathBuf,
+    record: HelperRecord,
 }
 
 impl PublishedPid {
     fn publish(
         pid_file: &Path,
-        spec: &omnifs_core::fs::Spec,
+        filesystem: &omnifs_core::ResourceName,
+        spec: &omnifs_core::FilesystemSpec,
         instance_id: &str,
     ) -> Result<Self, Error> {
         let mut file = OpenOptions::new()
@@ -403,7 +480,12 @@ impl PublishedPid {
             .mode(0o600)
             .open(pid_file)
             .map_err(|error| Error::io("create helper record", pid_file, error))?;
-        let record = HelperRecord::new(std::process::id(), spec.clone(), instance_id)?;
+        let record = HelperRecord::new(
+            std::process::id(),
+            filesystem.clone(),
+            spec.clone(),
+            instance_id,
+        )?;
         let mut bytes = serde_json::to_vec(&record)
             .map_err(|error| Error::Control(format!("serialize helper record: {error}")))?;
         bytes.push(b'\n');
@@ -413,13 +495,16 @@ impl PublishedPid {
             .map_err(|error| Error::io("sync helper record", pid_file, error))?;
         Ok(Self {
             pid_file: pid_file.to_path_buf(),
+            record,
         })
     }
 }
 
 impl Drop for PublishedPid {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.pid_file);
+        if HelperRecord::read(&self.pid_file).ok().flatten().as_ref() == Some(&self.record) {
+            let _ = std::fs::remove_file(&self.pid_file);
+        }
     }
 }
 
@@ -588,16 +673,19 @@ mod tests {
 
     fn config() -> Config {
         let install = Installation::for_executable("/opt/omnifs/omnifs").unwrap();
-        let spec = omnifs_core::fs::Spec::new(
-            "demo".parse().unwrap(),
-            omnifs_core::fs::Protocol::Fuse,
-            omnifs_core::fs::Runtime::Libkrun,
-            omnifs_core::fs::GUEST_LOCATION.into(),
+        let filesystem = omnifs_core::ResourceName::new("demo").unwrap();
+        let spec = omnifs_core::FilesystemSpec::new(
+            omnifs_core::FilesystemProtocol::Fuse,
+            omnifs_core::FilesystemRuntime::Libkrun,
+            omnifs_core::FILESYSTEM_GUEST_LOCATION.into(),
+            None,
+            Some("guest.raw".into()),
         )
         .unwrap();
         Config::omnifs(
             "/tmp/omnifs/libkrun",
             "/tmp/omnifs/attach.sock",
+            filesystem,
             spec,
             "0123456789abcdef0123456789abcdef",
             &install,
@@ -685,7 +773,9 @@ mod tests {
 
         let stop = Arc::new(AtomicBool::new(false));
         let bridge_stop = Arc::clone(&stop);
-        let bridge_thread = thread::spawn(move || bridge.serve(&bridge_stop));
+        let active = Arc::new(Mutex::new(None));
+        let bridge_active = Arc::clone(&active);
+        let bridge_thread = thread::spawn(move || bridge.serve(&bridge_stop, &bridge_active));
 
         let mut guest = UnixStream::connect(&bridge_path).unwrap();
         let (mut daemon, _) = target.accept().unwrap();
@@ -723,18 +813,51 @@ mod tests {
     }
 
     #[test]
+    fn attach_bridge_stop_interrupts_an_active_relay() {
+        let temp = tempfile::tempdir().unwrap();
+        let target_path = temp.path().join("daemon.sock");
+        let bridge_path = temp.path().join(ATTACH_BRIDGE_SOCKET_NAME);
+        let target = UnixListener::bind(&target_path).unwrap();
+        let bridge = AttachBridge::bind(&bridge_path, &target_path).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (_signal_reader, signal_writer) = UnixStream::pair().unwrap();
+        let bridge_thread = bridge.spawn(
+            ShutdownFd::from_raw(signal_writer.as_raw_fd()),
+            Arc::clone(&stop),
+        );
+
+        let mut guest = UnixStream::connect(&bridge_path).unwrap();
+        let (mut daemon, _) = target.accept().unwrap();
+        guest.write_all(b"active").unwrap();
+        let mut request = [0_u8; 6];
+        daemon.read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"active");
+        guest
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        bridge_thread.stop();
+        bridge_thread.join();
+
+        assert_eq!(guest.read(&mut [0_u8; 1]).unwrap(), 0);
+        assert!(!bridge_path.exists());
+    }
+
+    #[test]
     fn helper_control_proves_identity_before_shutdown() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(crate::CONTROL_SOCKET_NAME);
         let instance = "0123456789abcdef0123456789abcdef";
-        let spec = omnifs_core::fs::Spec::new(
-            "demo".parse().unwrap(),
-            omnifs_core::fs::Protocol::Fuse,
-            omnifs_core::fs::Runtime::Libkrun,
-            omnifs_core::fs::GUEST_LOCATION.into(),
+        let filesystem = omnifs_core::ResourceName::new("demo").unwrap();
+        let spec = omnifs_core::FilesystemSpec::new(
+            omnifs_core::FilesystemProtocol::Fuse,
+            omnifs_core::FilesystemRuntime::Libkrun,
+            omnifs_core::FILESYSTEM_GUEST_LOCATION.into(),
+            None,
+            Some("guest.raw".into()),
         )
         .unwrap();
-        let control = Control::bind(&path, &spec, instance).unwrap();
+        let control = Control::bind(&path, &filesystem, &spec, instance).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let (mut signal_reader, signal_writer) = UnixStream::pair().unwrap();
         let thread = control.spawn(
@@ -742,7 +865,7 @@ mod tests {
             Arc::clone(&stop),
         );
         let client = crate::ControlSocket::new(path).unwrap();
-        let record = client.ping(&spec, instance).unwrap();
+        let record = client.ping(&filesystem, &spec, instance).unwrap();
         assert_eq!(record.pid, std::process::id());
         assert_eq!(record.spec, spec);
         assert_eq!(record.instance_id, instance);
@@ -754,5 +877,39 @@ mod tests {
         stop.store(true, Ordering::Release);
         thread.join().unwrap().unwrap();
         drop(signal_writer);
+    }
+
+    #[test]
+    fn published_pid_drop_never_removes_a_replacement_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(crate::PID_FILE_NAME);
+        let filesystem = omnifs_core::ResourceName::new("demo").unwrap();
+        let spec = omnifs_core::FilesystemSpec::new(
+            omnifs_core::FilesystemProtocol::Fuse,
+            omnifs_core::FilesystemRuntime::Libkrun,
+            omnifs_core::FILESYSTEM_GUEST_LOCATION.into(),
+            None,
+            Some("guest.raw".into()),
+        )
+        .unwrap();
+        let published = PublishedPid::publish(
+            &path,
+            &filesystem,
+            &spec,
+            "0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let replacement = HelperRecord::new(
+            std::process::id(),
+            filesystem,
+            spec,
+            "fedcba9876543210fedcba9876543210",
+        )
+        .unwrap();
+        std::fs::write(&path, serde_json::to_vec(&replacement).unwrap()).unwrap();
+
+        drop(published);
+
+        assert_eq!(HelperRecord::read(&path).unwrap(), Some(replacement));
     }
 }

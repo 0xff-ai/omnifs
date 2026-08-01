@@ -4,7 +4,7 @@ use std::io::Write as _;
 
 use serde::Serialize;
 
-use crate::client_fs_state::ClientFilesystemState;
+use omnifs_bootstrap::Profile;
 
 const METRICS_DIR: &str = "metrics";
 const CLI_FILE: &str = "cli.jsonl";
@@ -16,8 +16,8 @@ struct CliRecord<'a> {
     exit: i32,
 }
 
-fn enabled(state: &ClientFilesystemState) -> bool {
-    state.config().is_ok_and(|config| {
+fn enabled(profile: &Profile) -> bool {
+    omnifs_bootstrap::profile_config::read(profile.root()).is_ok_and(|config| {
         config.metrics.enabled
             && !matches!(
                 std::env::var("OMNIFS_METRICS")
@@ -30,8 +30,8 @@ fn enabled(state: &ClientFilesystemState) -> bool {
     })
 }
 
-fn append(state: &ClientFilesystemState, file: &str, value: &impl Serialize) {
-    let dir = state.profile_root().join(METRICS_DIR);
+fn append(profile: &Profile, file: &str, value: &impl Serialize) {
+    let dir = profile.root().join(METRICS_DIR);
     let result = (|| -> std::io::Result<()> {
         std::fs::create_dir_all(&dir)?;
         #[cfg(unix)]
@@ -59,14 +59,39 @@ fn append(state: &ClientFilesystemState, file: &str, value: &impl Serialize) {
 }
 
 pub(crate) fn record_cli_exit(cmd: &str, exit: i32) {
-    let Ok(state) = ClientFilesystemState::resolve() else {
+    let Ok(profile) = Profile::resolve() else {
         return;
     };
-    if !enabled(&state) {
+    // Metrics need only the profile config and profile-local metrics
+    // directory. A normal CLI invocation must not prepare filesystem state as
+    // a side effect.
+    if !enabled(&profile) {
         return;
     }
     let ts = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
-    append(&state, CLI_FILE, &CliRecord { ts, cmd, exit });
+    append(&profile, CLI_FILE, &CliRecord { ts, cmd, exit });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metrics_write_only_the_profile_metrics_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = Profile::under_root(dir.path());
+        append(
+            &profile,
+            CLI_FILE,
+            &CliRecord {
+                ts: "2026-01-01T00:00:00Z".to_owned(),
+                cmd: "status",
+                exit: 0,
+            },
+        );
+        assert!(dir.path().join("metrics/cli.jsonl").is_file());
+        assert!(!dir.path().join("client").exists());
+    }
 }

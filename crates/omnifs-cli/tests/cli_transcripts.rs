@@ -36,28 +36,36 @@ fn fresh_and_stopped_workspace_transcripts() {
 }
 
 #[test]
-fn filesystem_create_and_list_transcripts() {
+fn final_resource_grammar_transcripts() {
     let fixture = Fixture::new();
-    let mount_point = fixture.home_path().join("mnt");
-    std::fs::create_dir_all(&mount_point).expect("mount point");
-    let mount_point = mount_point.to_string_lossy();
 
-    let create = fixture.run(&[
-        "fs",
-        "create",
-        "--name",
-        "dev",
-        "--protocol",
-        "nfs",
-        "--runtime",
-        "host",
-        "--location",
-        &mount_point,
-    ]);
-    insta::assert_snapshot!("fs_create", fixture.transcript(&create));
-
-    let list = fixture.run(&["fs", "ls"]);
-    insta::assert_snapshot!("fs_list_detached", fixture.transcript(&list));
+    insta::assert_snapshot!(
+        "filesystem_help",
+        fixture.transcript(&fixture.run(&["fs", "--help"]))
+    );
+    insta::assert_snapshot!(
+        "provider_help",
+        fixture.transcript(&fixture.run(&["provider", "--help"]))
+    );
+    insta::assert_snapshot!(
+        "mount_add_help",
+        fixture.transcript(&fixture.run(&["mount", "add", "--help"]))
+    );
+    insta::assert_snapshot!(
+        "credential_set_help",
+        fixture.transcript(&fixture.run(&["credential", "set", "--help"]))
+    );
+    insta::assert_snapshot!(
+        "status_follow_conflict",
+        fixture.transcript(&fixture.run(&[
+            "status",
+            "--follow",
+            "--revision",
+            "7",
+            "--action",
+            "00000000000000000000000000000000",
+        ]))
+    );
 }
 
 #[test]
@@ -66,7 +74,7 @@ fn logs_and_usage_error_transcripts() {
 
     insta::assert_snapshot!("logs_missing", fixture.transcript(&fixture.run(&["logs"])));
     insta::assert_snapshot!(
-        "human_usage_error",
-        fixture.transcript(&fixture.run(&["--output", "json", "fs", "attach"]))
+        "non_interactive_mutation_refusal",
+        fixture.transcript(&fixture.run(&["fs", "add"]))
     );
 }

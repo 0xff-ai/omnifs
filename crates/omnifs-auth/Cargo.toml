@@ -9,6 +9,7 @@ description = "Generic host-side OAuth protocol engine for omnifs."
 readme = "README.md"
 
 [dependencies]
+derive_more = { workspace = true }
 omnifs-core = { workspace = true }
 arc-swap = { workspace = true }
 async_singleflight = { workspace = true }

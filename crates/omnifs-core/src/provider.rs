@@ -1,6 +1,6 @@
-use std::fmt;
 use std::str::FromStr;
 
+use derive_more::{AsRef, Display};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -11,7 +11,8 @@ const KEY_PART_HINT: &str = "letters, digits, dashes, underscores, or dots; 1-12
 /// Provider name slug: the catalog index and UI label, never content identity.
 /// This is the human-facing provider name (e.g. `github`), the slug
 /// credentials are keyed by, distinct from the content [`ProviderId`] hash.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(AsRef, Debug, Display, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[as_ref(str)]
 pub struct ProviderName(String);
 
 impl ProviderName {
@@ -23,18 +24,6 @@ impl ProviderName {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl fmt::Display for ProviderName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl AsRef<str> for ProviderName {
-    fn as_ref(&self) -> &str {
-        self.as_str()
     }
 }
 
@@ -111,7 +100,7 @@ pub fn validate_account(value: &str) -> Result<(), IdError> {
 
 /// Provider-stated version label, taken from the manifest `version` field.
 /// Informational catalog/UI context, never identity.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Display, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderVersion(String);
 
 impl ProviderVersion {
@@ -121,12 +110,6 @@ impl ProviderVersion {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl fmt::Display for ProviderVersion {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
     }
 }
 

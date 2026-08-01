@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::ffi::OsStr;
-use std::fmt;
-use std::ops::Deref;
+
+use derive_more::{AsRef, Deref, Display};
 
 use crate::ContentType;
 
@@ -12,11 +12,15 @@ use crate::ContentType;
 ///
 /// A path is absolute, uses `/` as the only separator, has no trailing slash
 /// except root, has no empty segments, and never contains `.` or `..`.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(AsRef, Clone, Debug, Deref, Display, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[as_ref(str)]
+#[deref(forward)]
 pub struct Path(String);
 
 /// A validated single protocol path segment.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(AsRef, Clone, Debug, Deref, Display, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[as_ref(str)]
+#[deref(forward)]
 pub struct Segment(String);
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -189,29 +193,9 @@ impl Default for Path {
     }
 }
 
-impl Deref for Path {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl AsRef<str> for Path {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
 impl From<Path> for String {
     fn from(path: Path) -> Self {
         path.0
-    }
-}
-
-impl fmt::Display for Path {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
     }
 }
 
@@ -255,26 +239,6 @@ impl Segment {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl Deref for Segment {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl AsRef<str> for Segment {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl fmt::Display for Segment {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
     }
 }
 

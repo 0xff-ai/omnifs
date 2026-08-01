@@ -8,6 +8,7 @@
 use anyhow::{Context as _, anyhow, bail};
 use omnifs_api::ProviderMetadata;
 use omnifs_core::{ProviderId, ProviderMeta, ProviderName, ProviderRef, ProviderVersion};
+use omnifs_kcl::{AuthoringResource, EvaluatedConfig, ProviderSource, resolve_local_source};
 use omnifs_provider::ProviderManifest;
 use std::collections::BTreeMap;
 use std::fs;
@@ -57,6 +58,17 @@ impl<'a> ProviderResolver<'a> {
         bail!(
             "provider selector `{selector}` is not an existing WASM path, embedded provider name, or lowercase digest prefix"
         )
+    }
+
+    /// Resolve only a local Wasm path.
+    ///
+    /// Interactive provider authoring calls this after the operator chose the
+    /// local-file branch so a missing path can never fall through to an
+    /// embedded name or retained digest selector.
+    pub(crate) async fn resolve_local(&self, path: &Path) -> anyhow::Result<ResolvedProvider> {
+        let metadata = fs::symlink_metadata(path)
+            .with_context(|| format!("stat local provider {}", path.display()))?;
+        self.resolve_path(path, &metadata).await
     }
 
     async fn resolve_path(
@@ -254,6 +266,55 @@ fn is_digest_prefix(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Resolve KCL provider selectors to daemon-retained content identities.
+pub(crate) async fn resolve_kcl_sources(
+    evaluated: &EvaluatedConfig,
+    rpc: &RpcClient,
+) -> anyhow::Result<BTreeMap<omnifs_core::ResourceName, ProviderId>> {
+    let config_dir = evaluated
+        .source
+        .parent()
+        .context("KCL source has no parent directory")?;
+    let mut resolved = BTreeMap::new();
+    for resource in &evaluated.config.resources {
+        let AuthoringResource::Provider(provider) = resource else {
+            continue;
+        };
+        let digest = match &provider.source {
+            ProviderSource::Embedded { embedded } => {
+                rpc.import_embedded_provider(embedded.to_string())
+                    .await?
+                    .provider
+                    .id
+            },
+            ProviderSource::Digest { digest } => {
+                anyhow::ensure!(
+                    rpc.provider_metadata(*digest).await?.is_some(),
+                    "provider artifact {digest} is not retained"
+                );
+                *digest
+            },
+            ProviderSource::Local { local } => {
+                let (path, bytes) = resolve_local_source(local, config_dir).await?;
+                let digest = local.expected_digest;
+                let file_name = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .context("local provider filename is not valid UTF-8")?
+                    .to_owned();
+                let receipt = rpc.import_provider(file_name, &bytes).await?;
+                anyhow::ensure!(
+                    receipt.provider.id == digest,
+                    "provider import digest mismatch"
+                );
+                digest
+            },
+        };
+        resolved.insert(provider.name.clone(), digest);
+    }
+    Ok(resolved)
 }
 
 #[cfg(test)]

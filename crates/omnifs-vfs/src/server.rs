@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::{NamespaceEpoch, NamespaceLease, ServingNamespace};
-use omnifs_core::{ClientOwnerId, fs};
+use omnifs_core::{FilesystemSpec, ResourceName};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -31,7 +31,8 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::frame::{
-    Frame, KIND_CONTROL, KIND_EVENT, KIND_REQUEST, KIND_RESPONSE, read_frame, write_frame,
+    Frame, KIND_CONTROL, KIND_EVENT, KIND_HEARTBEAT, KIND_REQUEST, KIND_RESPONSE, read_frame,
+    write_frame,
 };
 use crate::{Handshake, PROTOCOL, ServerControl, WireError, WireReply, WireRequest, WireResponse};
 
@@ -52,6 +53,14 @@ pub enum Endpoint {
 pub enum ListenerEvent {
     /// A required endpoint stopped and is no longer live.
     Exited { endpoint: Endpoint },
+}
+
+/// One live VFS session, keyed by its desired filesystem name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Session {
+    pub filesystem: ResourceName,
+    pub spec: FilesystemSpec,
+    pub runtime_instance: String,
 }
 
 impl Endpoint {
@@ -79,104 +88,145 @@ struct VfsState {
     startup_gate: Option<watch::Sender<bool>>,
 }
 
-struct AttachmentEntry {
-    spec: fs::Spec,
+struct SessionEntry {
+    spec: FilesystemSpec,
+    runtime_instance: String,
     connections: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct AttachmentKey {
-    owner: ClientOwnerId,
-    filesystem: fs::Id,
+struct SessionKey(ResourceName);
+
+struct SessionConnection {
+    key: SessionKey,
+    control: watch::Sender<SessionControl>,
 }
 
-struct AttachedConnection {
-    key: AttachmentKey,
-    control: watch::Sender<bool>,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionControl {
+    Running,
+    Stop,
+    Close,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AttachmentPhase {
+enum SessionRegistryPhase {
     Running,
     Draining,
     ShuttingDown,
 }
 
-struct AttachmentState {
-    next_attachment_id: u64,
-    connections: BTreeMap<u64, AttachedConnection>,
-    entries: BTreeMap<AttachmentKey, AttachmentEntry>,
-    phase: AttachmentPhase,
+struct SessionState {
+    next_session_id: u64,
+    connections: BTreeMap<u64, SessionConnection>,
+    entries: BTreeMap<SessionKey, SessionEntry>,
+    replacements: BTreeMap<SessionKey, Session>,
+    stop_fences: BTreeMap<SessionKey, Session>,
+    phase: SessionRegistryPhase,
 }
 
-struct Attachments {
-    state: Mutex<AttachmentState>,
+struct Sessions {
+    state: Mutex<SessionState>,
     changed: watch::Sender<usize>,
 }
 
-impl Attachments {
+impl Sessions {
     fn new() -> Arc<Self> {
         let (changed, _) = watch::channel(0);
         Arc::new(Self {
-            state: Mutex::new(AttachmentState {
-                next_attachment_id: 1,
+            state: Mutex::new(SessionState {
+                next_session_id: 1,
                 connections: BTreeMap::new(),
                 entries: BTreeMap::new(),
-                phase: AttachmentPhase::Running,
+                replacements: BTreeMap::new(),
+                stop_fences: BTreeMap::new(),
+                phase: SessionRegistryPhase::Running,
             }),
             changed,
         })
     }
 
-    fn attached(
+    fn connected(
         &self,
-        owner: ClientOwnerId,
-        spec: &fs::Spec,
-        control: watch::Sender<bool>,
+        filesystem: ResourceName,
+        spec: &FilesystemSpec,
+        runtime_instance: &str,
+        control: watch::Sender<SessionControl>,
     ) -> Result<u64, String> {
-        let key = AttachmentKey {
-            owner,
-            filesystem: spec.id().clone(),
-        };
+        let key = SessionKey(filesystem);
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.phase != AttachmentPhase::Running {
-            return Err(
-                "daemon is draining and is not accepting filesystem attachments".to_owned(),
-            );
+        if state.phase != SessionRegistryPhase::Running {
+            return Err("daemon is draining and is not accepting VFS sessions".to_owned());
         }
-        if let Some(existing) = state.entries.get(&key)
-            && existing.spec != *spec
-        {
-            return Err(format!(
-                "filesystem `{}` for client owner `{}` is already attached with different resolved fields",
-                key.filesystem, key.owner
-            ));
+        let requested = Session {
+            filesystem: key.0.clone(),
+            spec: spec.clone(),
+            runtime_instance: runtime_instance.to_owned(),
+        };
+        if let Some(stopping) = state.stop_fences.get(&key) {
+            return Err(if stopping == &requested {
+                format!("filesystem `{}` is stopping its exact VFS session", key.0)
+            } else {
+                format!(
+                    "filesystem `{}` has a stop fence for a different exact VFS session",
+                    key.0
+                )
+            });
         }
-        let id = state.next_attachment_id;
-        state.next_attachment_id += 1;
+        if let Some(existing) = state.entries.get(&key) {
+            if existing.spec != *spec {
+                return Err(format!(
+                    "filesystem `{}` already has a VFS session with a different exact spec",
+                    key.0
+                ));
+            }
+            if existing.runtime_instance != runtime_instance {
+                return Err(format!(
+                    "filesystem `{}` already has a VFS session for a different runtime instance; supervisor replacement approval is required",
+                    key.0
+                ));
+            }
+        } else if let Some(approved) = state.replacements.get(&key) {
+            if approved != &requested {
+                return Err(format!(
+                    "filesystem `{}` has a supervisor-approved replacement for a different exact runtime identity",
+                    key.0
+                ));
+            }
+            state.replacements.remove(&key);
+        }
+        let id = state.next_session_id;
+        state.next_session_id += 1;
         state.connections.insert(
             id,
-            AttachedConnection {
+            SessionConnection {
                 key: key.clone(),
                 control,
             },
         );
         state
             .entries
-            .entry(key)
+            .entry(key.clone())
             .and_modify(|entry| entry.connections += 1)
-            .or_insert(AttachmentEntry {
+            .or_insert(SessionEntry {
                 spec: spec.clone(),
+                runtime_instance: runtime_instance.to_owned(),
                 connections: 1,
             });
         Self::publish_locked(&mut state, &self.changed);
+        tracing::debug!(
+            filesystem = %key.0,
+            runtime_instance,
+            connections = state.entries.get(&key).map_or(0, |entry| entry.connections),
+            "wire: VFS session connected"
+        );
         Ok(id)
     }
 
-    fn detached(&self, id: u64) {
+    fn disconnected(&self, id: u64) {
         let mut state = self
             .state
             .lock()
@@ -193,17 +243,170 @@ impl Attachments {
             state.entries.remove(&key);
         }
         Self::publish_locked(&mut state, &self.changed);
+        tracing::debug!(
+            filesystem = %key.0,
+            connections = state.entries.get(&key).map_or(0, |entry| entry.connections),
+            "wire: VFS session disconnected"
+        );
     }
 
-    fn snapshot(&self) -> Vec<fs::Spec> {
+    fn begin_replacement(&self, previous: &Session, replacement: &Session) -> Result<(), String> {
+        if previous.filesystem != replacement.filesystem || previous.spec != replacement.spec {
+            return Err(
+                "VFS session replacement must retain the filesystem name and exact spec".to_owned(),
+            );
+        }
+        if previous.runtime_instance == replacement.runtime_instance {
+            return Err("VFS session replacement requires a new runtime instance".to_owned());
+        }
+        let key = SessionKey(previous.filesystem.clone());
+        let controls = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(current) = state.entries.get(&key) else {
+                return Err(format!(
+                    "filesystem `{}` has no live VFS session to replace",
+                    previous.filesystem
+                ));
+            };
+            if current.spec != previous.spec
+                || current.runtime_instance != previous.runtime_instance
+            {
+                return Err(format!(
+                    "filesystem `{}` changed before VFS session replacement was approved",
+                    previous.filesystem
+                ));
+            }
+            state.replacements.insert(key.clone(), replacement.clone());
+            state
+                .connections
+                .values()
+                .filter(|connection| connection.key == key)
+                .map(|connection| connection.control.clone())
+                .collect::<Vec<_>>()
+        };
+        for control in controls {
+            control.send_replace(SessionControl::Stop);
+        }
+        Ok(())
+    }
+
+    fn close_stopped(&self, expected: &Session) -> Result<(), String> {
+        let key = SessionKey(expected.filesystem.clone());
+        let controls = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(current) = state.entries.get(&key) else {
+                return Ok(());
+            };
+            if current.spec != expected.spec
+                || current.runtime_instance != expected.runtime_instance
+            {
+                return Err(format!(
+                    "filesystem `{}` changed before its stopped VFS session was closed",
+                    expected.filesystem
+                ));
+            }
+            if state.stop_fences.get(&key) != Some(expected) {
+                return Err(format!(
+                    "filesystem `{}` has no matching exact stop fence",
+                    expected.filesystem
+                ));
+            }
+            state
+                .connections
+                .values()
+                .filter(|connection| connection.key == key)
+                .map(|connection| connection.control.clone())
+                .collect::<Vec<_>>()
+        };
+        for control in controls {
+            control.send_replace(SessionControl::Close);
+        }
+        Ok(())
+    }
+
+    fn begin_stop(&self, expected: &Session) -> Result<(), String> {
+        let key = SessionKey(expected.filesystem.clone());
+        let controls = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(stopping) = state.stop_fences.get(&key) {
+                if stopping == expected {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "filesystem `{}` already has a stop fence for a different exact VFS session",
+                    expected.filesystem
+                ));
+            }
+            if let Some(current) = state.entries.get(&key)
+                && (current.spec != expected.spec
+                    || current.runtime_instance != expected.runtime_instance)
+            {
+                return Err(format!(
+                    "filesystem `{}` changed before its exact VFS session stop began",
+                    expected.filesystem
+                ));
+            }
+            state.stop_fences.insert(key.clone(), expected.clone());
+            state
+                .connections
+                .values()
+                .filter(|connection| connection.key == key)
+                .map(|connection| connection.control.clone())
+                .collect::<Vec<_>>()
+        };
+        for control in controls {
+            control.send_replace(SessionControl::Stop);
+        }
+        Ok(())
+    }
+
+    fn finish_stop(&self, expected: &Session) -> Result<(), String> {
+        let key = SessionKey(expected.filesystem.clone());
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(current) = state.entries.get(&key) {
+            return Err(format!(
+                "filesystem `{}` still has a live VFS session for runtime instance `{}`",
+                expected.filesystem, current.runtime_instance
+            ));
+        }
+        match state.stop_fences.get(&key) {
+            Some(stopping) if stopping == expected => {
+                state.stop_fences.remove(&key);
+                Ok(())
+            },
+            Some(_) => Err(format!(
+                "filesystem `{}` has a stop fence for a different exact VFS session",
+                expected.filesystem
+            )),
+            None => Ok(()),
+        }
+    }
+
+    fn snapshot(&self) -> Vec<Session> {
         let state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state
             .entries
-            .values()
-            .map(|entry| entry.spec.clone())
+            .iter()
+            .map(|(key, entry)| Session {
+                filesystem: key.0.clone(),
+                spec: entry.spec.clone(),
+                runtime_instance: entry.runtime_instance.clone(),
+            })
             .collect()
     }
 
@@ -213,10 +416,10 @@ impl Attachments {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.phase == AttachmentPhase::ShuttingDown {
+            if state.phase == SessionRegistryPhase::ShuttingDown {
                 return;
             }
-            state.phase = AttachmentPhase::Draining;
+            state.phase = SessionRegistryPhase::Draining;
             Self::publish_locked(&mut state, &self.changed);
             state
                 .connections
@@ -225,11 +428,11 @@ impl Attachments {
                 .collect::<Vec<_>>()
         };
         for control in controls {
-            control.send_replace(true);
+            control.send_replace(SessionControl::Stop);
         }
     }
 
-    async fn drain(&self, timeout: Duration) -> Vec<fs::Spec> {
+    async fn drain(&self, timeout: Duration) -> Vec<Session> {
         let deadline = Instant::now() + timeout;
         let mut changed = self.changed.subscribe();
         loop {
@@ -253,13 +456,17 @@ impl Attachments {
         }
     }
 
-    fn identities(&self) -> Vec<fs::Spec> {
+    fn identities(&self) -> Vec<Session> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entries
-            .values()
-            .map(|entry| entry.spec.clone())
+            .iter()
+            .map(|(key, entry)| Session {
+                filesystem: key.0.clone(),
+                spec: entry.spec.clone(),
+                runtime_instance: entry.runtime_instance.clone(),
+            })
             .collect()
     }
 
@@ -268,20 +475,20 @@ impl Attachments {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.phase = AttachmentPhase::ShuttingDown;
+        state.phase = SessionRegistryPhase::ShuttingDown;
         Self::publish_locked(&mut state, &self.changed);
     }
 
-    fn publish_locked(state: &mut AttachmentState, changed: &watch::Sender<usize>) {
+    fn publish_locked(state: &mut SessionState, changed: &watch::Sender<usize>) {
         changed.send_replace(state.connections.len());
     }
 }
 
-/// Owns the namespace attach listeners, their connection tasks, live attachment
+/// Owns the namespace attach listeners, their connection tasks, live session
 /// snapshot, readiness, and shutdown.
 pub struct VfsServer {
     namespace: Arc<dyn ServingNamespace>,
-    attachments: Arc<Attachments>,
+    sessions: Arc<Sessions>,
     state: Mutex<VfsState>,
     connection_tx: mpsc::Sender<Connection>,
     connection_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -291,7 +498,7 @@ pub struct VfsServer {
 }
 
 impl VfsServer {
-    /// Construct one invocation-scoped listener and attachment owner.
+    /// Construct one invocation-scoped listener and session owner.
     #[must_use]
     pub fn new(namespace: Arc<dyn ServingNamespace>) -> Arc<Self> {
         let (connection_tx, mut connection_rx) = mpsc::channel(CONNECTION_QUEUE_CAPACITY);
@@ -299,7 +506,7 @@ impl VfsServer {
         let (event_tx, _) = broadcast::channel(16);
         let server = Arc::new(Self {
             namespace,
-            attachments: Attachments::new(),
+            sessions: Sessions::new(),
             state: Mutex::new(VfsState {
                 listeners: BTreeMap::new(),
                 ready: false,
@@ -384,20 +591,77 @@ impl VfsServer {
     }
 
     #[must_use]
-    /// Return the current deduplicated live attachment rows.
-    pub fn attachments(&self) -> Vec<fs::Spec> {
-        self.attachments.snapshot()
+    /// Return the current deduplicated live VFS sessions without waiting.
+    pub fn sessions(&self) -> Vec<Session> {
+        self.sessions.snapshot()
     }
 
-    /// Stop admitting attachments and push a stop command to every live
+    /// Subscribe to session-registry changes. Receivers only carry a monotonic
+    /// notification value; callers read [`Self::sessions`] for a snapshot.
+    pub fn session_changes(&self) -> watch::Receiver<usize> {
+        self.sessions.changed.subscribe()
+    }
+
+    /// Wait for an exact session identity. A caller can use this after a
+    /// supervisor-approved launch without polling or racing registration.
+    pub async fn wait_for_session(&self, expected: &Session, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut changed = self.session_changes();
+        loop {
+            if self.sessions().iter().any(|actual| actual == expected) {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero()
+                || tokio::time::timeout(remaining, changed.changed())
+                    .await
+                    .is_err()
+            {
+                return false;
+            }
+        }
+    }
+
+    /// Approve one supervisor-owned replacement. The server sends `Stop` to
+    /// the exact old runtime and admits the exact new runtime only after the
+    /// old session disconnects. No other instance can take the name during
+    /// that fence.
+    pub fn begin_session_replacement(
+        &self,
+        previous: &Session,
+        replacement: &Session,
+    ) -> Result<(), String> {
+        self.sessions.begin_replacement(previous, replacement)
+    }
+
+    /// Stop one exact live session and reject every reconnect for that
+    /// filesystem until its runtime owner completes the stop fence.
+    pub fn begin_session_stop(&self, expected: &Session) -> Result<(), String> {
+        self.sessions.begin_stop(expected)
+    }
+
+    /// Close the server side of one exact session after its runtime owner has
+    /// proved that runtime gone. This releases connections that cannot report
+    /// their own detach, while the stop fence still rejects reconnects.
+    pub fn close_stopped_session(&self, expected: &Session) -> Result<(), String> {
+        self.sessions.close_stopped(expected)
+    }
+
+    /// Release one exact stop fence after both the VFS session and its runtime
+    /// identity are gone.
+    pub fn finish_session_stop(&self, expected: &Session) -> Result<(), String> {
+        self.sessions.finish_stop(expected)
+    }
+
+    /// Stop admitting sessions and push a stop command to every live
     /// connection.
-    pub fn stop_filesystems(&self) {
-        self.attachments.stop_filesystems();
+    pub fn stop_sessions(&self) {
+        self.sessions.stop_filesystems();
     }
 
-    /// Wait until every attachment has detached or `timeout` expires.
-    pub async fn drain_attachments(&self, timeout: Duration) -> Vec<fs::Spec> {
-        self.attachments.drain(timeout).await
+    /// Wait until every session has disconnected or `timeout` expires.
+    pub async fn drain_sessions(&self, timeout: Duration) -> Vec<Session> {
+        self.sessions.drain(timeout).await
     }
 
     #[must_use]
@@ -471,7 +735,7 @@ impl VfsServer {
 
     /// Stop listeners and connection tasks, then remove owned UDS paths.
     pub async fn shutdown(&self) {
-        self.attachments.shut_down();
+        self.sessions.shut_down();
         let (tasks, paths, connection_task, reaper_task) = {
             let mut state = self
                 .state
@@ -560,7 +824,7 @@ impl VfsServer {
         let task_identity = Arc::clone(&identity);
         let (start_tx, start_rx) = tokio::sync::oneshot::channel();
         let namespace = Arc::clone(&self.namespace);
-        let attachments = Arc::clone(&self.attachments);
+        let sessions = Arc::clone(&self.sessions);
         let connection_tx = self.connection_tx.clone();
         let exit_tx = self.exit_tx.clone();
         let task = tokio::spawn(async move {
@@ -577,7 +841,7 @@ impl VfsServer {
                     return;
                 }
             }
-            accept_loop(listener, namespace, attachments, connection_tx).await;
+            accept_loop(listener, namespace, sessions, connection_tx).await;
             let _ = exit_tx.send((endpoint_for_task, task_identity)).await;
         });
         let mut state = self
@@ -633,7 +897,7 @@ fn unlink_socket(path: &Path) {
 async fn accept_loop(
     listener: Listener,
     namespace: Arc<dyn ServingNamespace>,
-    attachments: Arc<Attachments>,
+    sessions: Arc<Sessions>,
     connection_tx: mpsc::Sender<Connection>,
 ) {
     match listener {
@@ -641,13 +905,13 @@ async fn accept_loop(
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let namespace = Arc::clone(&namespace);
-                    let attachments = Arc::clone(&attachments);
+                    let sessions = Arc::clone(&sessions);
                     if connection_tx
                         .send(Box::pin(async move {
                             if let Err(error) = serve_connection_with_registry(
                                 namespace,
                                 stream,
-                                Some(attachments),
+                                Some(sessions),
                             )
                             .await
                             {
@@ -670,13 +934,13 @@ async fn accept_loop(
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let namespace = Arc::clone(&namespace);
-                    let attachments = Arc::clone(&attachments);
+                    let sessions = Arc::clone(&sessions);
                     if connection_tx
                         .send(Box::pin(async move {
                             if let Err(error) = serve_connection_with_registry(
                                 namespace,
                                 stream,
-                                Some(attachments),
+                                Some(sessions),
                             )
                             .await
                             {
@@ -768,7 +1032,7 @@ where
 async fn serve_connection_with_registry<S>(
     namespace: Arc<dyn ServingNamespace>,
     stream: S,
-    attachments: Option<Arc<Attachments>>,
+    sessions: Option<Arc<Sessions>>,
 ) -> Result<(), WireError>
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
@@ -776,19 +1040,24 @@ where
     let (mut reader, mut writer) = tokio::io::split(stream);
 
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<Frame>(OUTBOUND_QUEUE_CAPACITY);
-    let (control_tx, mut control_rx) = watch::channel(false);
+    let (control_tx, mut control_rx) = watch::channel(SessionControl::Running);
+    let close_rx = control_tx.subscribe();
     let hello = read_hello(&mut reader, &mut writer).await?;
     let mut events = namespace.subscribe();
-    let attach_guard = if let Some(attachments) = attachments {
-        let id =
-            match attachments.attached(hello.client_owner, &hello.filesystem, control_tx.clone()) {
-                Ok(id) => id,
-                Err(reason) => {
-                    send_rejected(&mut writer, reason.clone()).await?;
-                    return Err(WireError::Rejected(reason));
-                },
-            };
-        Some(AttachGuard { attachments, id })
+    let session_guard = if let Some(sessions) = sessions {
+        let id = match sessions.connected(
+            hello.filesystem,
+            &hello.spec,
+            &hello.runtime_instance,
+            control_tx.clone(),
+        ) {
+            Ok(id) => id,
+            Err(reason) => {
+                send_rejected(&mut writer, reason.clone()).await?;
+                return Err(WireError::Rejected(reason));
+            },
+        };
+        Some(SessionGuard { sessions, id })
     } else {
         None
     };
@@ -807,12 +1076,16 @@ where
                     if changed.is_err() {
                         return;
                     }
-                    if !*control_rx.borrow_and_update() {
-                        continue;
-                    }
-                    let Ok(body) = postcard::to_allocvec(&ServerControl::Stop) else { return; };
-                    if write_frame(&mut writer, &Frame::new(0, KIND_CONTROL, body)).await.is_err() {
-                        return;
+                    let control = *control_rx.borrow_and_update();
+                    match control {
+                        SessionControl::Running => {},
+                        SessionControl::Stop => {
+                            let Ok(body) = postcard::to_allocvec(&ServerControl::Stop) else { return; };
+                            if write_frame(&mut writer, &Frame::new(0, KIND_CONTROL, body)).await.is_err() {
+                                return;
+                            }
+                        },
+                        SessionControl::Close => return,
                     }
                 }
                 frame = outbound_rx.recv() => {
@@ -837,23 +1110,38 @@ where
         }
     });
 
-    let read_result = read_loop(&mut reader, &namespace, &outbound_tx).await;
+    let read_result = tokio::select! {
+        result = read_loop(&mut reader, &namespace, &outbound_tx) => result,
+        () = wait_for_session_close(close_rx) => Ok(()),
+    };
 
-    // The attachment registry also holds an outbound sender. Abort the writer
+    // The session registry also holds an outbound sender. Abort the writer
     // before dropping the guard so disconnect cannot form a sender/guard
-    // lifetime cycle that leaves the attachment registered forever.
+    // lifetime cycle that leaves the session registered forever.
     drop(outbound_tx);
     writer_task.abort();
     let _ = writer_task.await;
-    drop(attach_guard);
+    drop(session_guard);
     read_result
 }
 
+async fn wait_for_session_close(mut control: watch::Receiver<SessionControl>) {
+    loop {
+        if *control.borrow_and_update() == SessionControl::Close {
+            return;
+        }
+        if control.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 /// Read the client's `Hello` and check the protocol. The caller performs
-/// attachment admission before sending `Welcome`.
+/// session admission before sending `Welcome`.
 struct AttachHello {
-    client_owner: ClientOwnerId,
-    filesystem: fs::Spec,
+    filesystem: ResourceName,
+    spec: FilesystemSpec,
+    runtime_instance: String,
 }
 
 async fn read_hello<R, W>(reader: &mut R, writer: &mut W) -> Result<AttachHello, WireError>
@@ -870,8 +1158,9 @@ where
     let hello: Handshake = postcard::from_bytes(&frame.body)?;
     let Handshake::Hello {
         protocol,
-        client_owner,
         filesystem,
+        spec,
+        runtime_instance,
     } = hello
     else {
         return Err(WireError::HandshakeUnexpected { expected: "hello" });
@@ -884,9 +1173,18 @@ where
         send_rejected(writer, error.to_string()).await?;
         return Err(error);
     }
+    let runtime_instance = match omnifs_core::RuntimeInstanceId::new(runtime_instance) {
+        Ok(runtime_instance) => runtime_instance.into_string(),
+        Err(error) => {
+            let error = WireError::Protocol(error.to_string());
+            send_rejected(writer, error.to_string()).await?;
+            return Err(error);
+        },
+    };
     Ok(AttachHello {
-        client_owner,
         filesystem,
+        spec,
+        runtime_instance,
     })
 }
 
@@ -903,14 +1201,14 @@ where
     Ok(())
 }
 
-struct AttachGuard {
-    attachments: Arc<Attachments>,
+struct SessionGuard {
+    sessions: Arc<Sessions>,
     id: u64,
 }
 
-impl Drop for AttachGuard {
+impl Drop for SessionGuard {
     fn drop(&mut self) {
-        self.attachments.detached(self.id);
+        self.sessions.disconnected(self.id);
     }
 }
 
@@ -948,6 +1246,10 @@ where
         let Some(frame) = read_frame(reader).await? else {
             return Ok(());
         };
+        if frame.kind == KIND_HEARTBEAT {
+            let _ = outbound_tx.try_send(Frame::new(0, KIND_HEARTBEAT, Vec::new()));
+            continue;
+        }
         if frame.kind != KIND_REQUEST {
             return Err(WireError::Protocol(format!(
                 "client sent a non-request frame of kind {}",

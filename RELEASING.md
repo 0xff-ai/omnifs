@@ -84,8 +84,8 @@ The bin shim at `npm/omnifs/bin/omnifs.js` and its `scripts/resolve-binary.js` h
 For release `X.Y.Z`, the npm package version, the CLI `CARGO_PKG_VERSION` / `omnifs --version`, and the default filesystem and guest tags all share the **same unprefixed semver** (`0.3.0`, not `v0.3.0`):
 
 - npm: `@0xff-ai/omnifs@X.Y.Z` and matching `@0xff-ai/omnifs-cli-*` optional dependencies
-- CLI default filesystem: `ghcr.io/0xff-ai/omnifs-filesystem:X.Y.Z` (`crates/omnifs-cli/src/fs_container.rs`)
-- CLI default guest: `ghcr.io/0xff-ai/omnifs-guest:X.Y.Z` (`crates/omnifs-cli/src/libkrun_runner.rs`)
+- Docker Filesystem default: `ghcr.io/0xff-ai/omnifs-filesystem:X.Y.Z` (`crates/omnifs-daemon/src/fs_runtime/docker/container.rs`)
+- libkrun Filesystem default: `ghcr.io/0xff-ai/omnifs-guest:X.Y.Z` (`crates/omnifs-daemon/src/fs_runtime/libkrun.rs`)
 - Git tag / GitHub Release name: `vX.Y.Z` (the `v` prefix is used only here)
 - Both GHCR promotions publish `X.Y.Z` and `vX.Y.Z`; the CLI defaults use the unprefixed tags
 

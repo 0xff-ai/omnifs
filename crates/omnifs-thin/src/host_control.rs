@@ -103,6 +103,7 @@ impl HostControl {
         let control_socket = record.control_socket.clone();
         if let Some(parent) = control_socket.parent() {
             std::fs::create_dir_all(parent)?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
         }
         let listener = UnixListener::bind(&control_socket)?;
         std::fs::set_permissions(&control_socket, std::fs::Permissions::from_mode(0o600))?;
@@ -347,14 +348,18 @@ async fn read_reply_line(
     Ok(serde_json::from_slice(&line)?)
 }
 
-pub fn control_socket_for(state_dir: &Path, instance_id: &str) -> PathBuf {
-    state_dir.join(format!("control-{instance_id}.sock"))
+pub fn control_socket_for(state_dir: &Path, _instance_id: &str) -> PathBuf {
+    // One runner claim owns this state directory at a time, while the control
+    // protocol still fences every request with the exact runtime instance.
+    // Keeping the filename fixed avoids exceeding the short Unix-domain socket
+    // path limit for otherwise valid profile roots.
+    state_dir.join("control.sock")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omnifs_core::fs;
+    use omnifs_core::{FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName};
 
     #[tokio::test]
     async fn ping_and_stop_require_and_echo_the_exact_instance() {
@@ -380,11 +385,13 @@ mod tests {
             instance_id: instance.to_owned(),
             pid: 42,
             process_group: 42,
-            spec: fs::Spec::new(
-                fs::Id::new("main").unwrap(),
-                fs::Protocol::Nfs,
-                fs::Runtime::Host,
+            filesystem: ResourceName::new("main").unwrap(),
+            spec: FilesystemSpec::new(
+                FilesystemProtocol::Nfs,
+                FilesystemRuntime::Host,
                 PathBuf::from("/mnt/omnifs"),
+                None,
+                None,
             )
             .unwrap(),
             control_socket: socket,

@@ -58,6 +58,7 @@ docker run --rm --privileged \
   --output-directory /out \
   --extra-tree "/mnt/bin:/usr/local/bin" \
   --profile "$profile" \
+  --force \
   build
 
 echo "== done: $out_dir/omnifs-guest.raw =="

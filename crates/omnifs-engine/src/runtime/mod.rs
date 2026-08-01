@@ -16,7 +16,7 @@ use crate::invalidation::InvalidationState;
 use crate::tree_refs::TreeRefs;
 use omnifs_auth::{AuthBinding, CredentialHealth};
 use omnifs_core::path::Path;
-use omnifs_core::{MountName, ProviderId, ProviderRef};
+use omnifs_core::{ProviderId, ProviderRef, ResourceName};
 use omnifs_provider::{ConfigMetadata, ProviderManifest};
 use omnifs_wit::host::types as wit_types;
 
@@ -70,7 +70,7 @@ pub struct Runtime {
 /// Validated state-neutral input for one provider runtime.
 #[derive(Clone)]
 pub struct RuntimeMountConfig {
-    pub name: MountName,
+    pub name: ResourceName,
     pub provider: ProviderRef,
     pub config: serde_json::Value,
     pub max_fetch_blob_bytes: Option<u64>,

@@ -115,7 +115,7 @@ there, cold reflects the upstream fetch and warm reflects the host cache.
 ### Host-native mount
 
 ```bash
-# Copy the attached host location from `target/debug/omnifs fs ls`.
+# Copy the host location from `target/debug/omnifs fs ls`.
 MOUNT=/absolute/path
 bun benchmarks/latency/run.ts \
   --target "$MOUNT" \
@@ -128,14 +128,13 @@ bun benchmarks/latency/run.ts \
 `cold_first_ms` is only a true first touch if nothing read the path before the
 timed spawn. Two things guarantee that:
 
-1. **Stop the daemon and reattach the filesystem.** Run
-   `target/debug/omnifs down`, then
-   `target/debug/omnifs fs attach --name <id>` with the same `OMNIFS_HOME`.
-   Wait for readiness with `target/debug/omnifs status` rather than reading the
-   mount. The durable cache under `<profile>/daemon-state/cache` persists, so
-   this gives *fresh-process cold* (in-memory/session state reset, first
-   provider callout), not *upstream-cold*. To drop durable cache too, remove
-   that directory while the daemon is down.
+1. **Restart the daemon with the Filesystem still desired.** Run
+   `target/debug/omnifs down`, then `target/debug/omnifs status` with the same
+   `OMNIFS_HOME`; status starts the daemon and waits for readiness without
+   reading the mount. The durable cache under `<profile>/daemon-state/cache`
+   persists, so this gives *fresh-process cold* (in-memory/session state reset,
+   first provider callout), not *upstream-cold*. To drop durable cache too,
+   remove that directory while the daemon is down.
 2. **Pin `--subdir`, `--file`, and `--grep-literal`.** With all three set, the
    suite reads no tree bytes before timing (it only `stat`s the three paths to
    validate them, which is the `getattr` any `ls`/`cat` does anyway). Without

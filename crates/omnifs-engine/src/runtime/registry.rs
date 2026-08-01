@@ -9,7 +9,7 @@ use crate::runtime::host::HostOnline;
 use crate::tree_refs::TreeRefs;
 use crate::{BuildError, Runtime, RuntimeMountConfig};
 use omnifs_auth::AuthBinding;
-use omnifs_core::{CredentialGeneration, MountName, ProviderId};
+use omnifs_core::{CredentialGeneration, ProviderId, ResourceName};
 use omnifs_provider::ProviderManifest;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use tracing::{debug, warn};
 /// One selected mount revision. Cache-only entries deliberately have no
 /// provider runtime and never fabricate provider handles.
 pub struct MountEntry {
-    name: MountName,
+    name: ResourceName,
     config: RuntimeMountConfig,
     availability: MountAvailability,
     resources: Arc<MountResources>,
@@ -217,7 +217,7 @@ impl MountTable {
         &self,
     ) -> impl Iterator<
         Item = (
-            &MountName,
+            &ResourceName,
             &RuntimeMountConfig,
             MountAvailability,
             Option<Arc<Runtime>>,
@@ -469,7 +469,7 @@ mod tests {
         DirCursor, EngineNamespace, Namespace, NsError, PreparedGeneration, RuntimeMountConfig,
         ServingCell,
     };
-    use omnifs_core::{CredentialGeneration, MountName, ProviderId};
+    use omnifs_core::{CredentialGeneration, ProviderId, ResourceName};
     use omnifs_provider::{Artifact, ProviderManifest};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -508,7 +508,7 @@ mod tests {
             .expect("parse provider artifact");
         MountBuildInput {
             config: RuntimeMountConfig {
-                name: MountName::new(name).expect("mount name"),
+                name: ResourceName::new(name).expect("mount name"),
                 provider: artifact.reference(),
                 config,
                 max_fetch_blob_bytes: None,

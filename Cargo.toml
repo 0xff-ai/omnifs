@@ -42,6 +42,8 @@ omnifs-thin = { version = "0.2.1", path = "crates/omnifs-thin", default-features
 omnifs-sdk = { version = "0.2.1", path = "crates/omnifs-sdk" }
 omnifs-sdk-macros = { version = "0.2.1", path = "crates/omnifs-sdk-macros" }
 omnifs-wit = { version = "0.2.1", path = "crates/omnifs-wit" }
+omnifs-kcl = { version = "0.2.1", path = "crates/omnifs-kcl" }
+kcl-lang = { package = "kcl-api", git = "https://github.com/kcl-lang/kcl.git", rev = "fc38d5ab5eb26d2b2169d183c646d3385eb30c4f" }
 wasmtime = { version = "46.0.1", default-features = false, features = ["async", "cache", "component-model", "component-model-async", "cranelift", "runtime"] }
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.14.2", features = ["transport"] }
@@ -56,12 +58,14 @@ blake3 = "1"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+derive_more = { version = "2.1", default-features = false, features = ["as_ref", "deref", "display"] }
 unicode-width = "0.2"
 schemars = "1"
 jsonschema = { version = "0.46", default-features = false }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 tracing = "0.1"
 bollard = "0.20.0"
+futures-util = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 clap = { version = "4", features = ["derive", "wrap_help"] }
@@ -89,6 +93,7 @@ sha2 = "0.10"
 fs2 = "0.4"
 atomic-write-file = "0.3"
 oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
+oci-client = "=0.17.0"
 webbrowser = "1"
 arc-swap = "1"
 async_singleflight = "0.6"

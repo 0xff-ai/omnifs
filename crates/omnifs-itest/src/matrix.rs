@@ -171,7 +171,7 @@ pub enum Exec {
         root: String,
         scratch: String,
     },
-    /// `omnifs fs shell --name itest-libkrun -- <cmd>` into a libkrun
+    /// `omnifs fs shell itest-libkrun -- <cmd>` into a libkrun
     /// guest through ssh over the vsock-to-unix bridge. `root` and `scratch`
     /// are guest paths, matching `DockerExec`'s shape. `omnifs_bin` and
     /// `home` select which workspace's libkrun guest to reach, so no
@@ -234,7 +234,7 @@ impl Exec {
                 omnifs_bin, home, ..
             } => {
                 let mut cmd = Command::new(omnifs_bin);
-                cmd.args(["fs", "shell", "--name", "itest-libkrun", "--", "env"])
+                cmd.args(["fs", "shell", "itest-libkrun", "--", "env"])
                     .arg(format!("ROOT={root}"))
                     .arg(format!("SCRATCH={scratch}"))
                     .args(["sh", "-c", script])
@@ -900,7 +900,7 @@ pub const LINUX_NFS_LOOPBACK: Column = Column {
     ],
 };
 
-/// The Docker-hosted FUSE filesystem (`omnifs fs attach --name itest-docker`): a separate,
+/// The Docker-hosted FUSE filesystem (the desired `itest-docker` Filesystem): a separate,
 /// credential-free container attached to a host-native daemon's
 /// shared namespace over TCP, running kernel FUSE inside the container. This
 /// filesystem ships its own minimal `debian:trixie-slim` image (`Dockerfile`'s
@@ -913,9 +913,9 @@ pub const FUSE_DOCKER_FILESYSTEM: Column = Column {
     expectations: &[GREP_R_PAGINATION_CONTROLS],
 };
 
-/// The libkrun guest FUSE filesystem (`omnifs fs attach --name itest-libkrun`),
+/// The libkrun guest FUSE filesystem (the desired `itest-libkrun` Filesystem),
 /// a libkrun microVM on Apple Silicon macOS, reached over ssh-over-vsock via
-/// the real `omnifs fs shell --name itest-libkrun -- <cmd>` CLI path
+/// the real `omnifs fs shell itest-libkrun -- <cmd>` CLI path
 /// (`crates/omnifs-itest/tests/filesystem_libkrun`). LOCAL-ONLY: GitHub-hosted
 /// macOS runners cannot nest virtualization, so this column never runs in CI
 /// (see `docs/contracts/60-build-validation.md`).

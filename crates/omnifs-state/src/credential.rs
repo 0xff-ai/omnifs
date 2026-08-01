@@ -3,7 +3,7 @@
 use anyhow::Context as _;
 use omnifs_auth::{AuthKind, CredentialId};
 use omnifs_core::{
-    AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MutationId, ProviderId,
+    ActionId, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, ProviderId,
 };
 use sqlx::FromRow;
 use sqlx::sqlite::SqliteRow;
@@ -128,9 +128,9 @@ pub struct CredentialSummary {
     pub auth_fingerprint: AuthRuntimeFingerprint,
     pub version: CredentialVersion,
     pub generation: CredentialGeneration,
+    /// Monotonic precondition for durable credential actions.
+    pub action_generation: u64,
     pub state: CredentialState,
-    /// Provenance: the batch that last wrote this row.
-    pub last_mutation_id: MutationId,
 }
 
 /// The three credential SELECT shapes. Each states its own column list once;
@@ -140,7 +140,7 @@ macro_rules! credential_summaries_query {
     ($tail:literal) => {
         concat!(
             "SELECT provider_name, scheme, account, provider_digest, kind, \
-             auth_fingerprint, version, generation, status, last_mutation_id \
+             auth_fingerprint, version, generation, action_generation, status \
              FROM credentials ",
             $tail
         )
@@ -152,25 +152,13 @@ macro_rules! stored_credentials_query {
     ($tail:literal) => {
         concat!(
             "SELECT provider_name, scheme, account, provider_digest, kind, material, \
-             auth_fingerprint, version, generation, status, last_mutation_id \
+             auth_fingerprint, version, generation, action_generation, status \
              FROM credentials ",
             $tail
         )
     };
 }
 pub(crate) use stored_credentials_query;
-
-macro_rules! pending_revocations_query {
-    ($tail:literal) => {
-        concat!(
-            "SELECT provider_name, scheme, account, provider_digest, kind, material, \
-             auth_fingerprint, version, generation, status, last_mutation_id, revocation_intent \
-             FROM credentials ",
-            $tail
-        )
-    };
-}
-pub(crate) use pending_revocations_query;
 
 impl CredentialSummary {
     fn decode_row(row: &SqliteRow) -> anyhow::Result<Self> {
@@ -186,8 +174,8 @@ impl CredentialSummary {
             auth_fingerprint: AuthRuntimeFingerprint::from_digest(row.digest("auth_fingerprint")?),
             version: CredentialVersion::new(row.counter("version")?),
             generation: CredentialGeneration::new(row.counter("generation")?),
+            action_generation: row.unsigned("action_generation")?,
             state: CredentialState::from_str(&row.text("status")?)?,
-            last_mutation_id: row.mutation_id("last_mutation_id")?,
         })
     }
 }
@@ -219,33 +207,6 @@ impl FromRow<'_, SqliteRow> for StoredCredential {
     }
 }
 
-#[derive(Debug)]
-pub struct PendingCredentialRevocation {
-    pub credential: StoredCredential,
-    pub mutation: MutationId,
-}
-
-impl PendingCredentialRevocation {
-    fn decode_row(row: &SqliteRow) -> anyhow::Result<Self> {
-        let intent = row.optional_bytes("revocation_intent")?;
-        Ok(Self {
-            credential: StoredCredential::decode_row(row)?,
-            mutation: crate::row::decode_mutation_id(
-                intent
-                    .as_deref()
-                    .context("pending credential revocation has no intent")?,
-            )
-            .context("decode pending credential revocation intent")?,
-        })
-    }
-}
-
-impl FromRow<'_, SqliteRow> for PendingCredentialRevocation {
-    fn from_row(row: &SqliteRow) -> sqlx::Result<Self> {
-        Self::decode_row(row).map_err(decode_error)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialRevocationFinish {
     Deleted,
@@ -268,7 +229,6 @@ impl Db<'_> {
     pub(crate) async fn submit_credential_row(
         &mut self,
         document: CredentialDocument,
-        mutation_id: MutationId,
     ) -> Result<CredentialMutationOutcome, CredentialWriteError> {
         self.verify_credential_provider(&document).await?;
         let current = self.credential_summary(&document.id).await?;
@@ -281,14 +241,13 @@ impl Db<'_> {
             "INSERT INTO credentials(\
                  provider_name, provider_digest, scheme, account, kind, material, \
                  auth_fingerprint, version, generation, status, revocation_intent, \
-                 last_mutation_id, updated_at\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', NULL, ?10, unixepoch()) \
+                 updated_at\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', NULL, unixepoch()) \
              ON CONFLICT(provider_name, scheme, account) DO UPDATE SET \
                  provider_digest = excluded.provider_digest, kind = excluded.kind, \
                  material = excluded.material, auth_fingerprint = excluded.auth_fingerprint, \
                  version = excluded.version, generation = excluded.generation, \
                  status = excluded.status, revocation_intent = NULL, \
-                 last_mutation_id = excluded.last_mutation_id, \
                  updated_at = excluded.updated_at",
         )
         .bind(document.id.provider_name())
@@ -300,7 +259,6 @@ impl Db<'_> {
         .bind(document.auth_fingerprint.as_bytes().as_slice())
         .bind(sql_int(version.get(), "credential version")?)
         .bind(sql_int(generation.get(), "credential generation")?)
-        .bind(mutation_id.as_bytes().as_slice())
         .execute(self.raw())
         .await
         .context("write credential")?;
@@ -312,59 +270,19 @@ impl Db<'_> {
                 auth_fingerprint: document.auth_fingerprint,
                 version,
                 generation,
+                action_generation: current
+                    .as_ref()
+                    .map_or(0, |summary| summary.action_generation),
                 state: CredentialState::Active,
-                last_mutation_id: mutation_id,
             },
             scopes,
-        ))
-    }
-
-    pub(crate) async fn delete_credential_row(
-        &mut self,
-        id: CredentialId,
-        mutation_id: MutationId,
-    ) -> Result<CredentialMutationOutcome, CredentialWriteError> {
-        let current = self.require_credential_exists(&id).await?;
-        let version = current
-            .version
-            .next()
-            .context("credential version exhausted")?;
-        let generation = current
-            .generation
-            .next()
-            .context("credential generation exhausted")?;
-        sqlx::query(
-            "UPDATE credentials SET material = X'', version = ?4, generation = ?5, \
-             status = 'deleted', revocation_intent = NULL, last_mutation_id = ?6, \
-             updated_at = unixepoch() \
-             WHERE provider_name = ?1 AND scheme = ?2 AND account = ?3",
-        )
-        .bind(id.provider_name())
-        .bind(id.scheme())
-        .bind(id.account())
-        .bind(sql_int(version.get(), "credential version")?)
-        .bind(sql_int(generation.get(), "credential generation")?)
-        .bind(mutation_id.as_bytes().as_slice())
-        .execute(self.raw())
-        .await
-        .context("delete credential")?;
-        Ok(outcome(
-            &CredentialSummary {
-                id,
-                version,
-                generation,
-                state: CredentialState::Deleted,
-                last_mutation_id: mutation_id,
-                ..current
-            },
-            Vec::new(),
         ))
     }
 
     pub(crate) async fn begin_credential_revocation_row(
         &mut self,
         id: CredentialId,
-        mutation_id: MutationId,
+        action_id: ActionId,
         scopes: Vec<String>,
     ) -> Result<CredentialMutationOutcome, CredentialWriteError> {
         let current = self.require_credential_exists(&id).await?;
@@ -392,7 +310,7 @@ impl Db<'_> {
             .context("credential generation exhausted")?;
         sqlx::query(
             "UPDATE credentials SET version = ?4, generation = ?5, \
-             status = 'revocation-pending', revocation_intent = ?6, last_mutation_id = ?7, \
+             status = 'revocation-pending', revocation_intent = ?6, \
              updated_at = unixepoch() \
              WHERE provider_name = ?1 AND scheme = ?2 AND account = ?3",
         )
@@ -401,8 +319,7 @@ impl Db<'_> {
         .bind(id.account())
         .bind(sql_int(version.get(), "credential version")?)
         .bind(sql_int(generation.get(), "credential generation")?)
-        .bind(mutation_id.as_bytes().as_slice())
-        .bind(mutation_id.as_bytes().as_slice())
+        .bind(action_id.as_bytes().as_slice())
         .execute(self.raw())
         .await
         .context("begin credential revocation")?;
@@ -412,7 +329,6 @@ impl Db<'_> {
                 version,
                 generation,
                 state: CredentialState::RevocationPending,
-                last_mutation_id: mutation_id,
                 ..current
             },
             scopes,
@@ -420,18 +336,16 @@ impl Db<'_> {
     }
 
     /// Complete a revocation an out-of-band provider call finished, matching
-    /// it against the batch id recorded when the revocation began. This runs
-    /// outside `apply_batch`, so it does not restamp `last_mutation_id`: the
-    /// row keeps the provenance of the batch that started the revocation.
+    /// it against the durable action id recorded when revocation began.
     pub(crate) async fn write_credential_revocation_finish(
         &mut self,
         id: CredentialId,
-        mutation_id: MutationId,
+        action_id: ActionId,
         finish_kind: CredentialRevocationFinish,
         scopes: Vec<String>,
     ) -> Result<CredentialMutationOutcome, CredentialWriteError> {
         self.transact("credential revocation", async move |db| {
-            db.finish_credential_revocation_row(id, mutation_id, finish_kind, scopes)
+            db.finish_credential_revocation_row(id, action_id, finish_kind, scopes)
                 .await
         })
         .await
@@ -440,7 +354,7 @@ impl Db<'_> {
     async fn finish_credential_revocation_row(
         &mut self,
         id: CredentialId,
-        mutation_id: MutationId,
+        action_id: ActionId,
         finish_kind: CredentialRevocationFinish,
         scopes: Vec<String>,
     ) -> Result<CredentialMutationOutcome, CredentialWriteError> {
@@ -468,11 +382,12 @@ impl Db<'_> {
         .await
         .context("load credential revocation intent")?;
         let intent = intent.context("credential revocation intent is missing")?;
-        let stored = crate::row::decode_mutation_id(&intent)
-            .context("decode credential revocation intent")?;
-        if stored != mutation_id {
+        let stored = <[u8; 16]>::try_from(intent.as_slice())
+            .map(ActionId::from_bytes)
+            .context("decode credential revocation action id")?;
+        if stored != action_id {
             return Err(anyhow::anyhow!(
-                "credential revocation intent does not match caller-supplied mutation id"
+                "credential revocation action id does not match caller-supplied action id"
             )
             .into());
         }
@@ -588,8 +503,8 @@ impl Db<'_> {
             auth_fingerprint: document.auth_fingerprint,
             version,
             generation,
+            action_generation: current.action_generation,
             state: status,
-            last_mutation_id: current.last_mutation_id,
         }))
     }
 
@@ -663,9 +578,8 @@ impl Db<'_> {
 
     /// Load one credential and prove it is at the version the caller expects.
     ///
-    /// Used only by the background refresh/activation path, which races the
-    /// lease-serialized batch writers rather than being serialized by them;
-    /// it keeps real compare-and-swap semantics.
+    /// Used only by the background refresh/activation path. It keeps real
+    /// compare-and-swap semantics against concurrently updated credentials.
     async fn require_credential(
         &mut self,
         id: &CredentialId,
@@ -684,10 +598,8 @@ impl Db<'_> {
         Ok(current)
     }
 
-    /// Load one credential and prove it exists. Batch ops reach the row only
-    /// through the single mutation lease, so a plain existence probe (backed
-    /// by the table's primary key) is enough; there is no concurrent writer
-    /// left to race for a compare-and-swap to guard against.
+    /// Load one credential and prove it exists. The caller's durable action
+    /// runs through the state writer, so a plain primary-key lookup is enough.
     async fn require_credential_exists(
         &mut self,
         id: &CredentialId,
@@ -719,9 +631,9 @@ impl Db<'_> {
     }
 }
 
-/// The version and generation a submit lands on. Submit is an unconditional
-/// upsert (the lease already excludes concurrent writers), so this never
-/// fails on the shape of `current`; only counter exhaustion can error.
+/// The version and generation a credential update lands on. The durable
+/// resource apply is an unconditional upsert, so only counter exhaustion can
+/// error.
 ///
 /// The durable write decides this inside its transaction, and the daemon has to
 /// decide the same thing earlier to build the candidate serving generation. One
@@ -759,7 +671,6 @@ fn outcome(summary: &CredentialSummary, scopes: Vec<String>) -> CredentialMutati
         version: summary.version,
         generation: summary.generation,
         state: summary.state,
-        last_mutation_id: summary.last_mutation_id,
     }
 }
 

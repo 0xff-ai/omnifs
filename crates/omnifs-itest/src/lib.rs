@@ -1,6 +1,7 @@
 pub mod live;
 pub mod matrix;
 
+use fs2::FileExt as _;
 use omnifs_core::ProviderRef;
 use omnifs_core::path::{Path, Segment};
 use omnifs_engine::test_support::TestOp;
@@ -14,6 +15,7 @@ use omnifs_wit::host::types::{
     ReadFileOutcome, ReadFileResult,
 };
 use serde::Serialize;
+use std::fs::OpenOptions;
 use std::path::{Path as StdPath, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
@@ -229,8 +231,8 @@ pub fn provider_artifact_dir() -> PathBuf {
 }
 
 pub fn provider_wasm_path(provider_name: &str) -> PathBuf {
-    ensure_providers_built();
     let path = provider_artifact_dir().join(provider_name);
+    ensure_provider_artifact(&path);
     assert!(
         path.exists(),
         "{provider_name} not found at {path} after building providers.",
@@ -239,20 +241,18 @@ pub fn provider_wasm_path(provider_name: &str) -> PathBuf {
     path
 }
 
-/// Build (or refresh) the provider WASM the harness loads.
+/// Build the provider WASM the harness loads when the requested artifact is
+/// absent.
 ///
 /// The harness loads providers as prebuilt `wasm32-wasip2` components from the
-/// shared target dir. Running tests against a stale build silently exercises
-/// old provider logic (a pagination change that never took effect, say), which
-/// surfaces as a confusing test failure unrelated to the edit in hand. Rather
-/// than require a manual `just build providers`, refresh the components on
-/// demand.
+/// shared target dir. The provider build command owns source-to-WASM
+/// invalidation. Test processes only enter it when the requested artifact is
+/// absent, so a host test run reuses the sidecar components produced by the
+/// provider job.
 ///
 /// This runs at test *runtime*, after cargo's build phase has released the
-/// target-dir lock, so the build it triggers can write into the same
-/// `target/wasm32-wasip2/release` that the test binary loads from (cache reused,
-/// no second build tree) without deadlocking against the build that produced
-/// this test binary.
+/// target-dir lock. A filesystem lock serializes test binaries that all start
+/// on a fresh checkout; the first one builds and the rest reuse its artifacts.
 ///
 /// It delegates to `just build providers` rather than invoking cargo directly:
 /// that recipe is the single source of truth for the build, including the WASI
@@ -261,15 +261,38 @@ pub fn provider_wasm_path(provider_name: &str) -> PathBuf {
 /// globs, target, and profile. Cargo decides staleness, so an up-to-date tree
 /// makes this a sub-second no-op.
 ///
-/// Set `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1` to skip it (e.g. CI, which builds
-/// the provider wasm in a separate job and hands it to the test job as an
-/// artifact, with no wasm toolchain on the test runner).
-fn ensure_providers_built() {
+fn ensure_provider_artifact(path: &StdPath) {
     static BUILT: OnceLock<()> = OnceLock::new();
+    if path.is_file() || BUILT.get().is_some() {
+        return;
+    }
+
     BUILT.get_or_init(|| {
-        if std::env::var_os("OMNIFS_ITEST_SKIP_PROVIDER_BUILD").is_some() {
+        let target = provider_artifact_dir();
+        std::fs::create_dir_all(&target).unwrap_or_else(|error| {
+            panic!(
+                "create provider artifact directory {}: {error}",
+                target.display()
+            )
+        });
+        let lock_path = target.join(".omnifs-provider-build.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap_or_else(|error| {
+                panic!("open provider build lock {}: {error}", lock_path.display())
+            });
+        lock.lock_exclusive()
+            .unwrap_or_else(|error| panic!("lock provider build {}: {error}", lock_path.display()));
+
+        if path.is_file() {
+            let _ = fs2::FileExt::unlock(&lock);
             return;
         }
+
         let status = Command::new("just")
             .args(["build", "providers"])
             .current_dir(workspace_root())
@@ -279,6 +302,7 @@ fn ensure_providers_built() {
             status.success(),
             "`just build providers` failed; run it directly to see the error",
         );
+        let _ = fs2::FileExt::unlock(&lock);
     });
 }
 
@@ -328,7 +352,7 @@ pub fn mount_input_from_json(config_json: &str) -> Result<MountBuildInput, Build
         .get("mount")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| BuildError::InvalidConfig("test config has no string `mount`".into()))?;
-    let name = omnifs_core::MountName::new(mount.to_owned())
+    let name = omnifs_core::ResourceName::new(mount.to_owned())
         .map_err(|error| BuildError::InvalidConfig(format!("invalid mount `{mount}`: {error}")))?;
 
     let (reference, bytes, manifest) = pin_provider(provider_file)?;

@@ -12,27 +12,16 @@
 mod auth;
 mod capability;
 mod cli;
-mod client_dir;
-mod client_fs_state;
-mod client_state;
 mod commands;
 mod daemon_teardown;
-mod docker;
 mod error;
-mod filesystem_driver;
-mod guest_image_pull;
-mod host_fs;
-mod image;
 mod inventory;
-mod libkrun_runner;
 mod metrics;
-mod mutation;
 mod process;
 mod provider_catalog;
 mod provider_resolver;
 mod rpc;
 mod status;
-mod token_source;
 mod ui;
 
 use clap::Parser;
@@ -88,12 +77,7 @@ async fn cli_main(cli: Cli) {
         .runs_daemon()
         .then(omnifs_engine::init_global_from_env)
         .flatten();
-    if cli.runs_daemon() {
-        if let Err(error) = omnifs_daemon::init_tracing(inspector.as_ref()) {
-            ui::eprint_raw(&format!("Error: initialize daemon logging: {error:#}\n"));
-            std::process::exit(ExitCode::GenericFailure.code());
-        }
-    } else {
+    if !cli.runs_daemon() {
         init_tracing(cli.verbose, inspector.as_ref());
     }
     let command_path = cli.command_path();

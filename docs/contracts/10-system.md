@@ -5,15 +5,19 @@ Owns: trust boundaries, byte boundaries, provider authority, auth, credentials, 
 
 ## Read when
 
-Read this before touching host/provider trust, callout authority, capabilities, auth metadata, credential storage, OAuth plumbing, sandbox docs, or any claim about what the host or provider may know.
+Read this before changing trust, callout authority, capabilities, auth,
+credentials, OAuth, sandbox claims, or the host/provider knowledge boundary.
 
 ## Rules
 
 ### Trust boundary
 
-The host owns trust. Providers are untrusted WASM components. Filesystems expose one trusted host tree to the OS. Upstreams are external systems whose bytes and metadata must be treated as provider input.
+The host owns trust; providers are untrusted WASM; upstream bytes and metadata
+are provider input. Filesystems expose one trusted host tree to the OS.
 
-Keep credential storage, credential injection, callout execution, cache storage, namespace state, and I/O in the host. Keep provider meaning in the provider: path meaning, object identity, canonical assembly, render, versioning, preload, and revalidation.
+The host owns credentials, callouts, storage, namespace state, and I/O.
+Providers own path meaning, object identity, canonical assembly, rendering,
+versioning, preload, and revalidation.
 
 Host-owned blob and projection identities come only from validated mount-scoped
 request facts. Providers may request a remote, reference, or HTTP payload, but
@@ -24,38 +28,63 @@ them only through typed local RPC.
 
 ### Byte boundary
 
-The host operates on paths, bytes, content types, file attributes, cache metadata, capability outcomes, and effects. Object meaning stays provider-side.
-
-Lower provider output into neutral host/tree types before filesystem adaptation. Keep canonical bytes opaque to the host. Do not decode canonical object payloads host-side to make projection decisions.
+The host operates on paths, bytes, content types, attrs, cache metadata,
+capability outcomes, and effects. Lower provider output into neutral tree types
+before filesystem adaptation; never decode canonical objects for host policy.
 
 ### Provider authority gates
 
-New provider authority is a gated decision. Gate new callout families, new preopens, process effects, socket effects, broader network authority, and auth or transport changes. Describe the security model change and add enforcement-boundary tests in the same change.
+New callout families, preopens, process or socket effects, broader network
+authority, and auth or transport changes are gated. Describe the security
+change and test the enforcement boundary.
 
-Async host imports do not reduce this gate. A provider may suspend on a host import, but the host still owns execution, auth injection, capability checks, timeout behavior, and error mapping. Adding or widening an import is an authority change even when the SDK call site looks like ordinary async Rust.
+Async imports do not reduce the gate. The host still owns execution, auth,
+capabilities, timeouts, and errors while a provider suspends. Adding or widening
+an import changes authority even when its SDK call looks like ordinary Rust.
 
-Provider manifest `capabilities` declare authority needs only: domains, git repos, unix sockets, and preopened paths. Scalar resource ceilings such as memory and blob byte budgets are manifest `limits` and mount-spec `limits`; they must not be described as provider authority or callout grants.
+Manifest `capabilities` declare domain, Git, Unix-socket, and preopen needs.
+Scalar ceilings such as memory and blob bytes belong in manifest and mount-spec
+`limits`, not authority grants.
 
-Dynamic domain needs resolve from a provider config field named `domains`, whose string array becomes the mount's concrete HTTP allowlist at startup. Do not use a wildcard domain grant to stand in for this per-mount enumeration.
+Dynamic domain needs resolve from a `domains` config string array into the
+mount's startup HTTP allowlist. A wildcard cannot replace this enumeration.
 
 ### Auth and credentials
 
-Credentials live host-side in daemon-owned SQLite state. Startup resolves each
-mount auth declaration into one mount-owned binding before namespace publication;
-that binding loads the store entry, refreshes OAuth credentials during use, and
-injects them after a callout crosses the WASM boundary.
+Credential resources are non-secret desired state; secret material is stored
+separately and changes only through a typed durable action. Before namespace
+publication, startup resolves each mount auth declaration into a binding that
+loads, refreshes, and injects material after a callout crosses WASM.
 
-Credential material stays out of WIT payloads. It may cross the daemon control boundary only in request-side protobuf messages on the local Unix socket; it never crosses filesystem attach/TCP or appears in responses, status, inventory, logs, Debug, or Inspector output. Route provider auth declarations through provider metadata and mount auth/config resolution. Keep human auth UX in `omnifs-cli`.
+Credential material stays out of WIT. It may cross control only in request-side
+protobuf on the local Unix socket, never attach/TCP, responses, status,
+inventory, logs, Debug, or Inspector. Provider metadata and mount resolution
+own auth declarations; `omnifs-cli` owns human UX.
 
-OAuth client ids in provider declarations are public application identifiers, not secrets. User access tokens, refresh tokens, and client secrets remain sensitive host-side values. `omnifs mount add` owns first-run OAuth mount generation; `omnifs mount reauth <mount>` owns repair and re-authentication; both submit the collected credential as one op in a lease-scoped mutation batch to the daemon. Credentials live only in the daemon credential store: a mount's auth declares identity (scheme, account) and never a sourcing mechanism, so there is no read-from-env or read-from-file path at serve time.
+OAuth client IDs are public application identifiers. Access tokens, refresh
+tokens, and client secrets remain sensitive. Login, set, refresh, and revoke
+use client IDs and generation preconditions. The daemon retains at most one
+non-terminal action per Credential across restart and never hashes or persists
+submitted bytes for dedupe. The first accepted ID wins; new material needs a
+new ID.
 
-Credential values must never appear in CLI output, errors, tracing, metrics, or structured envelopes. Source identifiers such as environment-variable names may appear when they make an error actionable.
+Mount auth declares Credential, scheme, and account, never a serve-time source.
+Deletion and revoke drain every generation that can use the material before
+completion; revoke leaves the desired slot empty.
+
+Credential values never enter output, errors, tracing, metrics, or structured
+envelopes. Source names may appear when they make an error actionable.
 
 ### Filesystem attach authority
 
-The Docker-hosted filesystem receives no credentials or host filesystem mounts. Its only host authority is the Omnifs VFS wire protocol over a local TCP attach. Docker Desktop reaches a loopback listener through its host forwarder; native Linux reaches a listener bound specifically to the address assigned to the default `docker0` bridge. The daemon validates that interface assignment rather than trusting a caller-supplied address. Do not bind the attach listener on every host interface or give the filesystem host networking merely to cross the container boundary.
+Docker filesystems receive no credentials or host mounts. Their only host
+authority is VFS over local TCP: Docker Desktop uses its host forwarder; native
+Linux uses the validated default `docker0` address. Never trust a caller address,
+bind all interfaces, or grant host networking for attach.
 
-The libkrun filesystem guest also receives no credentials or network device. Its only host authority is the three fixed vsock paths for attach, readiness, and keyed ssh. The trusted, signed `omnifs-libkrun` helper owns Hypervisor.framework and libkrun calls; the guest and provider WASM never gain that host authority.
+The libkrun guest has no credentials or network device. Its only host authority
+is fixed vsock attach, readiness, and keyed SSH. The trusted signed helper alone
+owns Hypervisor.framework and libkrun calls.
 
 ## Must not
 
@@ -63,7 +92,9 @@ The libkrun filesystem guest also receives no credentials or network device. Its
 - Claim the sandbox prevents all exfiltration. Allowed network destinations can still be abused by a hostile provider.
 - Add provider authority as a side effect of a convenience change.
 - Hide a new capability behind a macro argument, manifest field, or config field that is not enforced.
-- Transmit credentials through filesystem attach/TCP or expose them in daemon responses, status, inventory, logs, Debug, or Inspector output. Request-side submission on the local Unix control socket is the only allowed crossing.
+- Transmit credentials through attach/TCP or expose them in responses, status,
+  inventory, logs, Debug, or Inspector. Only request-side local control may
+  carry them.
 - Let providers read the credential store directly.
 - Build a provider-specific credential bypass in host runtime code.
 - Treat WIT async imports as provider-owned I/O.
@@ -77,13 +108,15 @@ The libkrun filesystem guest also receives no credentials or network device. Its
 - `crates/omnifs-auth`
 - `crates/omnifs-state/src/credential.rs`
 - `crates/omnifs-provider/src/manifest.rs`
-- `crates/omnifs-cli/src/commands/mount/`
 - `crates/omnifs-daemon/src/generation_builder.rs`
 - `crates/omnifs-cli/src/commands/mount/`
 - `providers/*/README.md`
 
 ## Validation
 
-- For authority or callout changes, run `just build providers` and host tests that initialize providers.
-- For auth changes, test status/readiness output, credential resolution, and the callout path that receives injected auth.
-- For WIT or cache boundary changes, add a WIT-boundary or host integration test that asserts lowered bytes, attrs, and effects without provider-specific host decoding.
+- Authority or callout changes: build providers and run host initialization
+  tests.
+- Auth changes: test status/readiness, credential resolution, and injected
+  callouts.
+- WIT or cache boundaries: test lowered bytes, attrs, and effects without
+  provider-specific host decoding.

@@ -1,53 +1,76 @@
 # Auth boundary
 
 Status: current-architecture
-Scope: why auth is host-owned and provider-agnostic, and where provider-specific OAuth facts belong. Binding rules live in `docs/contracts/10-system.md` and provider README files.
+Scope: why auth is host-owned and provider-agnostic, and where provider-specific
+OAuth facts belong.
 
-Providers are sandboxed WASM components. They cannot read the credential store, open the system browser, or attach stored tokens themselves. External access travels through host-mediated callouts.
+Read when: changing credential storage, OAuth flows, auth callouts, provider
+endpoint metadata, or capability enforcement.
+
+Binding contracts: `docs/contracts/10-system.md` and
+`docs/contracts/50-control-plane.md`. Provider READMEs document vendor-specific
+setup facts; they do not bind host behavior.
+
+Providers cannot read the credential store, open a browser, or attach stored
+tokens. External access uses host-mediated callouts.
 
 ## Principle
 
 The host implements protocols, not vendors.
 
-The host can know OAuth authorization code with PKCE, OAuth device flow, static token injection, credential storage, refresh, retry, and capability enforcement. It must not know that a specific provider's authorization endpoint, scope shape, or API host belongs to GitHub, Linear, Slack, or another vendor.
-
-Vendor knowledge lives in provider metadata and provider docs. A new service should require a provider change, not a host table entry, unless the service needs a new protocol family.
+The host implements OAuth code with PKCE, device flow, static token injection,
+storage, refresh, retry, and capability enforcement. Provider metadata and docs
+own vendor endpoints, scopes, and API hosts. A new service changes the provider,
+not a host vendor table, unless it needs a new protocol family.
 
 ## Credential ownership
 
-Providers never hold stored tokens. The daemon stores credentials in its SQLite state under the active profile, prepares auth material for host-run callouts, and injects headers only after the callout crosses the WASM boundary. The CLI owns OAuth and static-token UX, collected before any mutation lease is acquired, then submits the credential as one op inside a lease-scoped mutation batch over local RPC (often alongside the mount op that needs it).
+A Credential resource contains only name, provider, scheme, and account. The
+daemon stores material separately, while the CLI owns OAuth and static-token UX
+and submits secrets through a durable action on the local control socket. The
+daemon injects headers only after a callout crosses the WASM boundary.
 
-The provider receives responses or callout-denied errors, not raw credential store access.
+Actions use a client ID and generation precondition. The first accepted ID owns
+the submitted bytes; retries neither hash nor persist them for dedupe. New
+material needs a new ID. Delete and revoke drain serving generations before
+removing material; revoke leaves the desired slot empty.
 
-Credential file protection is a local desktop trust boundary. It protects against accidental exposure and provider sandbox escape, not compromise of the Unix user or host process.
+File protection covers accidental exposure and provider escape, not compromise
+of the Unix user or trusted host process.
 
 ## Auth metadata
 
-Provider metadata declares auth schemes, injection domains, header shape, flow type, scopes, and setup guidance. Metadata is generated from `#[omnifs_sdk::provider]` annotations and emitted by the provider macro as `omnifs.provider-metadata.v1` in the compiled Wasm.
+Provider metadata declares schemes, injection domains, header shape, flow,
+scopes, and setup guidance. The provider macro emits it as
+`omnifs.provider-metadata.v1` in Wasm.
 
-The daemon extracts that metadata and binds each mount's credential while building the startup namespace, before publishing any runtime. Each mount owns its injection facts and loaded entry, while a shared credential service owns only durable storage, OAuth transport, and refresh single-flight. Generic auth behavior remains provider-agnostic, and it does not branch on provider names.
+Before runtime publication, the daemon binds each mount's credential and
+injection facts. The shared credential service owns storage, OAuth transport,
+and refresh single-flight; generic auth never branches on provider name.
 
-Provider-specific OAuth details belong next to the provider, usually in `providers/<name>/README.md`, when they help a user understand setup or scope consequences.
+Provider OAuth details that explain setup or scope belong in
+`providers/<name>/README.md`.
 
 ## Grants and needs
 
-Provider metadata declares needs. The resolved mount spec carries grants. The host materializes the mount only when the grants satisfy required needs.
-
-The resolved spec is the runtime grant authority. It determines allowed domains, auth schemes, preopened host resources, socket access, and other host-mediated authority.
-
-Over-grant detection is not enforced. Do not claim the manifest alone bounds authority; the host enforces the resolved spec.
+Metadata declares needs; the resolved mount spec carries grants and is the
+runtime authority for domains, auth schemes, preopens, sockets, and other host
+effects. Required needs gate mount materialization. Over-grant detection is not
+enforced, so the manifest alone does not bound authority.
 
 ## Token injection
 
-Tokens are injected only for allowed destinations and configured schemes. A provider that asks the host to fetch outside its granted domain set should receive a denied callout, not a credential-bearing request.
-
-Refresh and retry are host protocol behavior. Providers should model permission failures through provider errors or upstream response handling, not by owning refresh tokens.
+The host injects tokens only for allowed destinations and configured schemes;
+other requests are denied without credentials. Refresh and retry remain host
+protocol behavior.
 
 ## Runtime trust boundary
 
-The CLI and host-native daemon are trusted local control-plane code. Provider WASM is untrusted. A filesystem runner is deliberately credential-free, whatever its driver: it receives only the authority to attach through the daemon's Omnifs VFS wire protocol. The CLI cannot read daemon SQLite tables; the daemon cannot read client filesystem config.
-
-Do not design credential boundaries around hiding `OMNIFS_HOME` from the trusted daemon, which owns that state. Do prevent provider WASM and optional filesystem guests from reading secrets or escalating host resources.
+The CLI and host-native daemon are trusted; provider WASM is not. Every
+filesystem runner is credential-free and attaches only through VFS. The CLI
+cannot read daemon SQLite, and the daemon does not consume client-owned desired
+state. `OMNIFS_HOME` need not be hidden from its daemon owner; providers and
+filesystem guests have no secret or host-resource access.
 
 ## Rejected shapes
 

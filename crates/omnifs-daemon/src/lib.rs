@@ -4,14 +4,23 @@
 //! subcommand. This crate owns daemon startup, serving, and control handling.
 
 mod app;
+mod auth_fingerprint;
 mod context;
 mod control;
+mod credential_codec;
+mod credential_document;
 mod daemon;
+mod doctor;
+mod filesystem_supervisor;
+mod fs_runtime;
 mod generation_builder;
 mod log_stream;
 mod logging;
-mod manager;
+mod progress;
 mod provider_bundle;
+mod provider_preparer;
+mod resource_control;
+mod serving_reconciler;
 
 pub use app::run;
 
@@ -35,7 +44,6 @@ pub(crate) fn first_error(
     }
     first
 }
-pub use logging::init as init_tracing;
 
 #[cfg(test)]
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

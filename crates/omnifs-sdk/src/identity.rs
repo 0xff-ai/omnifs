@@ -7,9 +7,9 @@
 //! filter) are wrapped in [`Facet`] so they stay out of identity.
 
 use std::fmt;
-use std::ops::Deref;
 
 use crate::object::ObjectKind;
+use derive_more::Deref;
 use omnifs_wit::provider::types as wit;
 
 /// The identity-contributing captures of a key, in declaration order.
@@ -97,16 +97,8 @@ impl From<&LogicalId> for wit::LogicalId {
 /// (e.g. `/{paper}/@latest` and `/{paper}/v3` both load the paper once).
 /// When the facet's type exposes a finite [`crate::captures::PathSegment::choices`]
 /// set, the SDK also expands view leaves across every choice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deref, PartialEq, Eq)]
 pub struct Facet<T>(pub T);
-
-impl<T> Deref for Facet<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 
 #[cfg(test)]
 mod tests {

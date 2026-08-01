@@ -9,18 +9,24 @@ service Control {
   rpc GetDaemonInfo(Empty) returns (DaemonInfoResponse);
   rpc GetRecoveryState(Empty) returns (RecoveryResponse);
   rpc RepairState(RepairStateRequest) returns (RepairStateResponse);
+  rpc RunDoctor(Empty) returns (RunDoctorResponse);
+  rpc ApplyDoctorRepairs(ApplyDoctorRepairsRequest) returns (ApplyDoctorRepairsResponse);
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
   rpc ListProviders(Empty) returns (ListProvidersResponse);
   rpc GetProviderMetadata(GetProviderMetadataRequest) returns (GetProviderMetadataResponse);
   rpc ImportProvider(stream ImportProviderRequest) returns (ImportProviderResponse);
   rpc ImportEmbeddedProvider(ImportEmbeddedProviderRequest) returns (ImportProviderResponse);
-  rpc BeginMutation(BeginMutationRequest) returns (BeginMutationResponse);
-  rpc ApplyMutation(ApplyMutationRequest) returns (ApplyMutationResponse);
-  rpc DropMutation(DropMutationRequest) returns (DropMutationResponse);
-  rpc ListMounts(Empty) returns (ListMountsResponse);
-  rpc GetMount(GetMountRequest) returns (GetMountResponse);
   rpc ListCredentials(Empty) returns (ListCredentialsResponse);
   rpc GetCredentialStatus(GetCredentialStatusRequest) returns (GetCredentialStatusResponse);
+  rpc GetResources(Empty) returns (GetResourcesResponse);
+  rpc PlanResources(PlanResourcesRequest) returns (PlanResourcesResponse);
+  rpc ApplyResources(ApplyResourcesRequest) returns (ApplyResourcesResponse);
+  rpc SetCredentialMaterial(SetCredentialMaterialRequest) returns (SetCredentialMaterialResponse);
+  rpc RevokeCredential(RevokeCredentialRequest) returns (RevokeCredentialResponse);
+  rpc GetFilesystemStatus(GetFilesystemStatusRequest) returns (GetFilesystemStatusResponse);
+  rpc RestartFilesystem(RestartFilesystemRequest) returns (RestartFilesystemResponse);
+  rpc GetFilesystemAccess(GetFilesystemAccessRequest) returns (GetFilesystemAccessResponse);
+  rpc WatchProgress(WatchProgressRequest) returns (stream ProgressEvent);
   rpc SubscribeInspector(InspectorRequest) returns (stream InspectorStreamItem);
   rpc StreamLogs(StreamLogsRequest) returns (stream LogStreamItem);
 }
@@ -38,8 +44,35 @@ message RepairStateRequest {
   RepairAction action = 3;
 }
 message RepairStateResponse { RepairReceipt receipt = 1; }
+message RunDoctorResponse {
+  repeated DoctorFinding findings = 1;
+  repeated DoctorRemediation remediations = 2;
+}
+message DoctorFinding {
+  DoctorSection section = 1;
+  DoctorCheckKind check = 2;
+  optional string target = 3;
+  DoctorSeverity severity = 4;
+  string message = 5;
+  optional string fix = 6;
+  optional string remediation_id = 7;
+}
+message DoctorRemediation {
+  string id = 1;
+  string command_line = 2;
+  DoctorExecutor executor = 3;
+  optional string mount_reauth_target = 4;
+}
+message ApplyDoctorRepairsRequest { repeated string ids = 1; }
+message ApplyDoctorRepairsResponse { repeated DoctorRepairOutcome outcomes = 1; }
+message DoctorRepairOutcome {
+  string id = 1;
+  string command_line = 2;
+  DoctorRepairState state = 3;
+  optional string error = 4;
+}
 message ShutdownRequest { bool stop_filesystems = 1; }
-message ShutdownResponse { uint32 detached = 1; repeated string still_attached = 2; }
+message ShutdownResponse { uint32 stopped = 1; repeated string still_running = 2; }
 
 message ListProvidersResponse { repeated ProviderEntry providers = 1; }
 message GetProviderMetadataRequest { bytes provider_id = 1; }
@@ -59,46 +92,266 @@ message ProviderUploadStart {
 message ImportProviderResponse { ProviderImportReceipt receipt = 1; }
 message ImportEmbeddedProviderRequest { string name = 1; }
 
-message BeginMutationRequest { bytes mutation_id = 1; }
-message BeginMutationResponse { uint64 lease_deadline_unix_ms = 1; }
-message DropMutationRequest { bytes mutation_id = 1; }
-message DropMutationResponse {}
-
-message ApplyMutationRequest { bytes mutation_id = 1; repeated MutationOp ops = 2; }
-message MutationOp {
-  oneof op {
-    CreateMountOp create_mount = 1;
-    UpdateMountOp update_mount = 2;
-    RemoveMountOp remove_mount = 3;
-    SubmitCredentialOp submit_credential = 4;
-    DeleteCredentialOp delete_credential = 5;
-    RevokeCredentialOp revoke_credential = 6;
-  }
-}
-message CreateMountOp { MountDefinition definition = 1; }
-message UpdateMountOp { string name = 1; MountPatch patch = 2; }
-message RemoveMountOp { string name = 1; }
-message SubmitCredentialOp { CredentialSubmission submission = 1; }
-message DeleteCredentialOp { CredentialKey key = 1; }
-message RevokeCredentialOp { CredentialKey key = 1; }
-
-message ApplyMutationResponse { repeated MutationOpResult results = 1; ServingOutcome serving = 2; }
-message MutationOpResult {
-  oneof result {
-    MountOpResult mount = 1;
-    CredentialStatus credential = 2;
-  }
-}
-message MountOpResult { string name = 1; optional bytes version = 2; uint64 revision = 3; }
-message ServingOutcome { bool serving = 1; optional string recovery_detail = 2; }
-
-message ListMountsResponse { repeated MountRecord mounts = 1; }
-message GetMountRequest { string name = 1; }
-message GetMountResponse { MountRecord mount = 1; }
-
 message ListCredentialsResponse { repeated CredentialStatus credentials = 1; }
 message GetCredentialStatusRequest { CredentialKey key = 1; }
 message GetCredentialStatusResponse { CredentialStatus status = 1; }
+
+message GetResourcesResponse { ResourceSnapshot snapshot = 1; }
+message PlanResourcesRequest { ResourceDeclarations declarations = 1; }
+message PlanResourcesResponse { ResourcePlan plan = 1; }
+message ApplyResourcesRequest {
+  bytes mutation_id = 1;
+  uint64 base_revision = 2;
+  bytes expected_desired_digest = 3;
+  ResourceDeclarations declarations = 4;
+  repeated CredentialMaterialSidecar credential_material = 5;
+}
+message ApplyResourcesResponse { ApplyReceipt receipt = 1; }
+message SetCredentialMaterialRequest {
+  bytes action_id = 1;
+  uint64 base_action_generation = 2;
+  string credential_name = 3;
+  CredentialMaterial material = 4;
+  CredentialClientOverrides overrides = 5;
+}
+message SetCredentialMaterialResponse { CredentialReceipt receipt = 1; }
+message RevokeCredentialRequest {
+  bytes action_id = 1;
+  uint64 base_action_generation = 2;
+  string credential_name = 3;
+}
+message RevokeCredentialResponse { CredentialReceipt receipt = 1; }
+message GetFilesystemStatusRequest { string filesystem_name = 1; }
+message GetFilesystemStatusResponse { optional FilesystemStatus status = 1; }
+message RestartFilesystemRequest {
+  bytes action_id = 1;
+  uint64 base_action_generation = 2;
+  string filesystem_name = 3;
+}
+message RestartFilesystemResponse { ActionReceipt receipt = 1; }
+message GetFilesystemAccessRequest {
+  string filesystem_name = 1;
+  bool interactive = 2;
+  optional string shell = 3;
+  repeated string command = 4;
+}
+message GetFilesystemAccessResponse { FilesystemAccess access = 1; }
+message WatchProgressRequest {
+  oneof target {
+    uint64 desired_revision = 1;
+    bytes action_id = 2;
+    Empty current = 3;
+  }
+}
+
+message ResourceSnapshot {
+  uint64 revision = 1;
+  bytes desired_digest = 2;
+  repeated ResourceDefinition resources = 3;
+  repeated ResourceStatus resources_status = 4;
+  optional uint64 serving_revision = 5;
+  repeated ProviderPreparationProgress providers = 6;
+  optional ServingProgress serving = 7;
+}
+message ResourceDeclarations {
+  string api_version = 1;
+  repeated ResourceDefinition resources = 2;
+}
+message ResourceDefinition {
+  oneof definition {
+    ProviderResource provider = 1;
+    CredentialResource credential = 2;
+    MountResource mount = 3;
+    FilesystemResource filesystem = 4;
+  }
+}
+message ProviderResource { string name = 1; bytes artifact = 2; }
+message CredentialResource {
+  string name = 1;
+  string provider = 2;
+  string scheme = 3;
+  string account = 4;
+}
+message MountResource {
+  string name = 1;
+  string provider = 2;
+  optional string credential = 3;
+  bytes config = 4;
+  ResourceLimits limits = 5;
+}
+message ResourceLimits {
+  optional uint32 max_memory_mb = 1;
+  optional uint64 max_fetch_blob_bytes = 2;
+}
+message FilesystemResource {
+  string name = 1;
+  FilesystemSpec spec = 2;
+}
+message FilesystemSpec {
+  FsProtocol protocol = 1;
+  FsRuntime runtime = 2;
+  bytes location = 3;
+  optional string docker_image = 4;
+  optional string libkrun_guest_image = 5;
+}
+message FilesystemStatus {
+  FilesystemResource definition = 1;
+  uint64 desired_revision = 2;
+  bytes desired_version = 3;
+  optional bytes observed_version = 4;
+  FilesystemPhase phase = 5;
+  optional string runtime_instance = 6;
+  uint64 action_generation = 7;
+  optional string error_code = 8;
+  optional string detail = 9;
+  optional uint64 retry_at_unix_ms = 10;
+  bool deleting = 11;
+}
+message FilesystemAccess {
+  oneof value {
+    bytes host_path = 1;
+    FilesystemCommand command = 2;
+  }
+}
+message FilesystemCommand {
+  bytes program = 1;
+  repeated bytes args = 2;
+  optional bytes current_dir = 3;
+}
+message ResourceKey { ResourceKind kind = 1; string name = 2; }
+message ResourceStatus {
+  ResourceKey key = 1;
+  uint64 desired_revision = 2;
+  optional uint64 observed_revision = 3;
+  ResourcePhase phase = 4;
+  optional string error_code = 5;
+  optional string detail = 6;
+}
+message ResourceChange {
+  ResourceKey key = 1;
+  ResourceChangeAction action = 2;
+  bool destructive = 3;
+  bool secret_impact = 4;
+}
+message ResourcePlan {
+  uint64 base_revision = 1;
+  bytes desired_digest = 2;
+  repeated ResourceChange changes = 3;
+}
+message CredentialMaterialSidecar {
+  string credential_name = 1;
+  CredentialMaterial material = 2;
+  CredentialClientOverrides overrides = 3;
+}
+message ApplyReceipt {
+  bytes mutation_id = 1;
+  uint64 revision = 2;
+  bytes desired_digest = 3;
+  uint32 created = 4;
+  uint32 updated = 5;
+  uint32 deleted = 6;
+  bool changed = 7;
+}
+message ActionReceipt {
+  bytes action_id = 1;
+  ActionKind kind = 2;
+  ResourceKey target = 3;
+  uint64 action_generation = 4;
+  ActionPhase phase = 5;
+  optional string error_code = 6;
+  optional string detail = 7;
+}
+message CredentialReceipt {
+  ActionReceipt action = 1;
+  CredentialStatusKind status = 2;
+}
+message ProgressSnapshot {
+  uint64 desired_revision = 1;
+  optional uint64 observed_revision = 2;
+  repeated ResourceStatus resources = 3;
+  repeated ActionReceipt actions = 4;
+  repeated ProviderPreparationProgress providers = 5;
+  optional ServingProgress serving = 6;
+  repeated CredentialProgress credentials = 7;
+  repeated FilesystemProgress filesystems = 8;
+}
+message ProgressEvent {
+  string daemon_instance_id = 1;
+  uint64 sequence = 2;
+  WatchProgressRequest target = 3;
+  oneof event {
+    ProgressSnapshot snapshot = 4;
+    ProviderPreparationProgress provider_preparation = 5;
+    ServingProgress serving_progress = 6;
+    CredentialProgress credential_progress = 7;
+    FilesystemProgress filesystem_progress = 8;
+    RevisionReady revision_ready = 9;
+    RevisionFailed revision_failed = 10;
+    RevisionSuperseded revision_superseded = 11;
+    ActionCompleted action_completed = 12;
+    ActionFailed action_failed = 13;
+    ProgressSnapshot resync = 14;
+  }
+}
+message ProviderPreparationProgress {
+  bytes digest = 1;
+  string catalog_name = 2;
+  repeated string resource_names = 3;
+  ProviderPreparationStage stage = 4;
+  uint64 completed_bytes = 5;
+  optional uint64 total_bytes = 6;
+  optional string error_code = 7;
+  optional string detail = 8;
+  uint32 queued_digests = 9;
+  uint32 active_digests = 10;
+  uint32 retry_count = 11;
+  optional uint32 queue_position = 12;
+  uint32 completed_digests = 13;
+}
+message ServingProgress {
+  uint64 revision = 1;
+  ServingProgressStage stage = 2;
+  uint32 completed = 3;
+  uint32 total = 4;
+  optional string error_code = 5;
+  optional string detail = 6;
+  uint32 queued_generations = 7;
+  uint32 retry_count = 8;
+  optional uint64 next_retry_unix_ms = 9;
+}
+message CredentialProgress {
+  ResourceKey key = 1;
+  CredentialProgressStage stage = 2;
+  optional string error_code = 3;
+  optional string detail = 4;
+}
+message FilesystemProgress {
+  ResourceKey key = 1;
+  FilesystemProgressStage stage = 2;
+  optional string error_code = 3;
+  optional string detail = 4;
+  uint32 retry_count = 5;
+  optional uint64 next_retry_unix_ms = 6;
+  uint64 desired_revision = 7;
+  FsRuntime runtime = 8;
+  uint64 completed_bytes = 9;
+  optional uint64 total_bytes = 10;
+  uint32 queued_filesystems = 11;
+  uint32 active_filesystems = 12;
+}
+message RevisionReady { uint64 revision = 1; }
+message RevisionFailed {
+  uint64 revision = 1;
+  string error_code = 2;
+  string detail = 3;
+}
+message RevisionSuperseded { uint64 revision = 1; uint64 replaced_by = 2; }
+message ActionCompleted { ActionReceipt receipt = 1; }
+message ActionFailed {
+  ActionReceipt receipt = 1;
+  string error_code = 2;
+  string detail = 3;
+}
 
 message InspectorRequest {}
 message InspectorStreamItem {
@@ -128,11 +381,7 @@ message ProviderImportReceipt { ProviderReference provider = 1; ProviderImportDi
 message MountDefinition { string name = 1; bytes provider = 2; MountCredential auth = 3; MountLimits limits = 4; bytes config = 5; }
 message MountCredential { string scheme = 1; string account_label = 2; }
 message MountLimits { optional uint32 max_memory_mb = 1; optional uint64 max_fetch_blob_bytes = 2; }
-message MountPatch { optional bytes provider = 1; MountCredentialPatch auth = 2; MountLimitsPatch limits = 3; BytesPatch config = 4; }
-message MountCredentialPatch { oneof value { Empty keep = 1; MountCredential set = 2; Empty clear = 3; } }
-message MountLimitsPatch { oneof value { Empty keep = 1; MountLimits set = 2; Empty clear = 3; } }
-message BytesPatch { oneof value { Empty keep = 1; bytes set = 2; Empty clear = 3; } }
-message MountRecord { MountDefinition definition = 1; ProviderReference provider = 2; bytes version = 3; uint64 revision = 4; MountHealth health = 5; optional CredentialHealth auth_health = 6; bytes last_mutation_id = 7; }
+message MountRecord { MountDefinition definition = 1; ProviderReference provider = 2; bytes version = 3; uint64 revision = 4; MountHealth health = 5; optional CredentialHealth auth_health = 6; }
 message MountHealth {
   oneof value { Empty active = 1; Empty auth_required = 2; string provider_unavailable = 3; string failed = 4; }
 }
@@ -153,20 +402,26 @@ message OAuthMaterial {
 }
 message CredentialClientOverrides { optional string client_id = 1; optional bytes client_secret = 2; optional string redirect_uri = 3; optional StringList scopes = 4; }
 message StringList { repeated string values = 1; }
-message CredentialStatus { CredentialKey key = 1; bytes provider = 2; CredentialKind kind = 3; repeated string scopes = 4; bytes auth_fingerprint = 5; uint64 version = 6; uint64 generation = 7; CredentialStatusKind status = 8; bytes last_mutation_id = 9; }
+message CredentialStatus { CredentialKey key = 1; bytes provider = 2; CredentialKind kind = 3; repeated string scopes = 4; bytes auth_fingerprint = 5; uint64 version = 6; uint64 generation = 7; CredentialStatusKind status = 8; uint64 action_generation = 10; }
 
-message DaemonInfo { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional bytes attach_unix = 5; optional string attach_tcp = 6; }
-message DaemonStatus { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional string attach_tcp = 5; repeated FilesystemSpec filesystems = 6; repeated MountInfo mounts = 7; DaemonHealth health = 8; optional ActiveMutation active_mutation = 9; }
-message ActiveMutation { bytes mutation_id = 1; uint64 lease_deadline_unix_ms = 2; }
-message DaemonInventory { DaemonInfo info = 1; DaemonPhase phase = 2; optional uint64 durable_revision = 3; optional uint64 serving_revision = 4; DaemonHealth health = 5; repeated MountRecord mounts = 6; repeated CredentialStatus credentials = 7; repeated FilesystemSpec attachments = 8; optional ActiveMutation active_mutation = 9; }
-message DaemonRecovery { DaemonPhase phase = 1; optional uint64 durable_revision = 2; optional uint64 serving_revision = 3; optional bytes failed_mutation = 4; HealthReport store_health = 5; RecoveryOffer repair = 6; }
+message DaemonInfo {
+  string version = 1;
+  uint32 pid = 2;
+  string instance_id = 3;
+  bytes executable = 4;
+  optional bytes attach_unix = 5;
+  optional string attach_tcp = 6;
+  repeated FsPair supported_filesystem_pairs = 7;
+  optional FsPair platform_default_filesystem_pair = 8;
+}
+message DaemonStatus { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional string attach_tcp = 5; repeated FilesystemResource filesystems = 6; repeated MountInfo mounts = 7; DaemonHealth health = 8; }
+message DaemonInventory { DaemonInfo info = 1; DaemonPhase phase = 2; optional uint64 durable_revision = 3; optional uint64 serving_revision = 4; DaemonHealth health = 5; repeated MountRecord mounts = 6; repeated CredentialStatus credentials = 7; repeated FilesystemResource filesystems = 8; }
+message DaemonRecovery { DaemonPhase phase = 1; optional uint64 durable_revision = 2; optional uint64 serving_revision = 3; HealthReport store_health = 4; RecoveryOffer repair = 5; }
 message RecoveryOffer { bytes id = 1; repeated RepairAction actions = 2; }
 message RepairReceipt { string instance_id = 1; bytes recovery_id = 2; RepairAction action = 3; RepairDisposition disposition = 4; }
 message HealthReport { HealthState state = 1; string message = 2; }
 message DaemonHealth { HealthReport control = 1; HealthReport filesystems = 2; HealthReport mounts = 3; }
 message MountInfo { string mount = 1; string provider_name = 2; string provider_id = 3; optional CredentialHealth auth_health = 4; }
-message FilesystemSpec { string id = 1; FsProtocol protocol = 2; FsRuntime runtime = 3; bytes location = 4; }
-
 enum DaemonPhase { DAEMON_PHASE_UNSPECIFIED = 0; DAEMON_STARTING = 1; DAEMON_READY = 2; DAEMON_RECOVERY_REQUIRED = 3; }
 enum HealthState { HEALTH_STATE_UNSPECIFIED = 0; HEALTH_STARTING = 1; HEALTH_HEALTHY = 2; HEALTH_DEGRADED = 3; HEALTH_UNHEALTHY = 4; }
 enum CredentialHealth { CREDENTIAL_HEALTH_UNSPECIFIED = 0; CREDENTIAL_READY = 1; CREDENTIAL_EXPIRING_SOON = 2; CREDENTIAL_EXPIRED = 3; CREDENTIAL_REFRESH_FAILED = 4; CREDENTIAL_NEEDS_CONSENT = 5; CREDENTIAL_MISSING = 6; CREDENTIAL_STATIC_UNVALIDATED = 7; }
@@ -174,8 +429,60 @@ enum CredentialKind { CREDENTIAL_KIND_UNSPECIFIED = 0; CREDENTIAL_STATIC_TOKEN =
 enum CredentialStatusKind { CREDENTIAL_STATUS_KIND_UNSPECIFIED = 0; CREDENTIAL_ACTIVE = 1; CREDENTIAL_BLOCKED = 2; CREDENTIAL_PENDING_REPUBLISH = 3; CREDENTIAL_REVOCATION_PENDING = 4; CREDENTIAL_REVOCATION_UNKNOWN = 5; CREDENTIAL_DELETED = 6; }
 enum RepairAction { REPAIR_ACTION_UNSPECIFIED = 0; REPAIR_RECREATE_CONTROL_STORE = 1; }
 enum RepairDisposition { REPAIR_DISPOSITION_UNSPECIFIED = 0; REPAIR_FRESH_STORE_CREATED = 1; REPAIR_CORRUPT_STORE_ARCHIVED = 2; }
+enum DoctorSection {
+  DOCTOR_SECTION_UNSPECIFIED = 0;
+  DOCTOR_SECTION_ENVIRONMENT = 1;
+  DOCTOR_SECTION_PROFILE = 2;
+  DOCTOR_SECTION_MOUNTS = 3;
+  DOCTOR_SECTION_FILESYSTEMS = 4;
+}
+enum DoctorCheckKind {
+  DOCTOR_CHECK_KIND_UNSPECIFIED = 0;
+  DOCTOR_CHECK_KIND_DOCKER = 1;
+  DOCTOR_CHECK_KIND_FUSE = 2;
+  DOCTOR_CHECK_KIND_IMAGE = 3;
+  DOCTOR_CHECK_KIND_NETWORK = 4;
+  DOCTOR_CHECK_KIND_SSH_AGENT = 5;
+  DOCTOR_CHECK_KIND_CONFIG = 6;
+  DOCTOR_CHECK_KIND_CREDENTIAL_STORE = 7;
+  DOCTOR_CHECK_KIND_CREDENTIALS = 8;
+  DOCTOR_CHECK_KIND_FILESYSTEM_STATE = 9;
+  DOCTOR_CHECK_KIND_STRAY_FILESYSTEM = 10;
+  DOCTOR_CHECK_KIND_STALE_FILESYSTEM_STATE = 11;
+  DOCTOR_CHECK_KIND_DOCKER_FILESYSTEM_OWNERSHIP = 12;
+  DOCTOR_CHECK_KIND_LIBKRUN_FILESYSTEM_OWNERSHIP = 13;
+}
+enum DoctorSeverity {
+  DOCTOR_SEVERITY_UNSPECIFIED = 0;
+  DOCTOR_SEVERITY_POSITIVE = 1;
+  DOCTOR_SEVERITY_NEUTRAL = 2;
+  DOCTOR_SEVERITY_ATTENTION = 3;
+  DOCTOR_SEVERITY_FAILURE = 4;
+}
+enum DoctorExecutor {
+  DOCTOR_EXECUTOR_UNSPECIFIED = 0;
+  DOCTOR_EXECUTOR_DAEMON = 1;
+  DOCTOR_EXECUTOR_CLIENT_MOUNT_REAUTH = 2;
+}
+enum DoctorRepairState {
+  DOCTOR_REPAIR_STATE_UNSPECIFIED = 0;
+  DOCTOR_REPAIR_STATE_APPLIED = 1;
+  DOCTOR_REPAIR_STATE_FAILED = 2;
+  DOCTOR_REPAIR_STATE_SKIPPED = 3;
+}
 enum FsProtocol { FS_PROTOCOL_UNSPECIFIED = 0; FS_FUSE = 1; FS_NFS = 2; }
 enum FsRuntime { FS_RUNTIME_UNSPECIFIED = 0; FS_HOST = 1; FS_DOCKER = 2; FS_LIBKRUN = 3; }
+message FsPair { FsProtocol protocol = 1; FsRuntime runtime = 2; }
+enum ResourceKind { RESOURCE_KIND_UNSPECIFIED = 0; RESOURCE_PROVIDER = 1; RESOURCE_CREDENTIAL = 2; RESOURCE_MOUNT = 3; RESOURCE_FILESYSTEM = 4; }
+enum ResourcePhase { RESOURCE_PHASE_UNSPECIFIED = 0; RESOURCE_PENDING = 1; RESOURCE_PREPARING = 2; RESOURCE_READY = 3; RESOURCE_RETRYING = 4; RESOURCE_FAILED = 5; RESOURCE_BLOCKED = 6; RESOURCE_DELETING = 7; }
+enum ResourceChangeAction { RESOURCE_CHANGE_ACTION_UNSPECIFIED = 0; RESOURCE_CREATE = 1; RESOURCE_UPDATE = 2; RESOURCE_DELETE = 3; RESOURCE_UNCHANGED = 4; }
+enum ActionKind { ACTION_KIND_UNSPECIFIED = 0; ACTION_SET_CREDENTIAL_MATERIAL = 1; ACTION_REVOKE_CREDENTIAL = 2; ACTION_RESTART_FILESYSTEM = 3; }
+enum ActionPhase { ACTION_PHASE_UNSPECIFIED = 0; ACTION_ACCEPTED = 1; ACTION_RUNNING = 2; ACTION_RETRYING = 3; ACTION_READY = 4; ACTION_FAILED = 5; }
+enum ProviderPreparationStage { PROVIDER_PREPARATION_STAGE_UNSPECIFIED = 0; PROVIDER_PREPARATION_QUEUED = 1; PROVIDER_PREPARATION_COMPILING = 2; PROVIDER_PREPARATION_READY = 3; PROVIDER_PREPARATION_FAILED = 4; PROVIDER_PREPARATION_RETRYING = 5; }
+enum ServingProgressStage { SERVING_PROGRESS_STAGE_UNSPECIFIED = 0; SERVING_QUEUED = 1; SERVING_BUILDING = 2; SERVING_DRAINING = 3; SERVING_READY = 4; SERVING_FAILED = 5; SERVING_WAITING_PROVIDERS = 6; SERVING_PROVIDERS_READY = 7; SERVING_BUILT = 8; SERVING_PUBLISHING = 9; SERVING_RETRYING = 10; SERVING_SUPERSEDED = 11; SERVING_DEGRADED = 12; }
+enum CredentialProgressStage { CREDENTIAL_PROGRESS_STAGE_UNSPECIFIED = 0; CREDENTIAL_PROGRESS_REFRESHING = 1; CREDENTIAL_PROGRESS_REVOKING = 2; CREDENTIAL_PROGRESS_READY = 3; CREDENTIAL_PROGRESS_FAILED = 4; }
+enum FilesystemProgressStage { FILESYSTEM_PROGRESS_STAGE_UNSPECIFIED = 0; FILESYSTEM_QUEUED = 1; FILESYSTEM_STARTING = 2; FILESYSTEM_STOPPING = 3; FILESYSTEM_READY = 4; FILESYSTEM_FAILED = 5; FILESYSTEM_WAITING_FOR_NAMESPACE = 6; FILESYSTEM_PULLING_IMAGE = 7; FILESYSTEM_MATERIALIZING = 8; FILESYSTEM_MOUNTING = 9; FILESYSTEM_RETRYING = 10; FILESYSTEM_DELETING = 11; }
+enum FilesystemPhase { FILESYSTEM_RUNTIME_UNSPECIFIED = 0; FILESYSTEM_RUNTIME_PENDING = 1; FILESYSTEM_RUNTIME_WAITING_FOR_NAMESPACE = 2; FILESYSTEM_RUNTIME_STARTING = 3; FILESYSTEM_RUNTIME_READY = 4; FILESYSTEM_RUNTIME_STOPPING = 5; FILESYSTEM_RUNTIME_RETRYING = 6; FILESYSTEM_RUNTIME_FAILED = 7; FILESYSTEM_RUNTIME_DELETING = 8; }
 enum ErrorCode {
   ERROR_CODE_UNSPECIFIED = 0;
   reserved 1, 2, 3;
@@ -183,12 +490,18 @@ enum ErrorCode {
   NOT_READY = 5;
   ERROR_RECOVERY_REQUIRED = 6;
   INVALID_REQUEST = 7;
-  MUTATION_IN_PROGRESS = 8;
-  LEASE_EXPIRED = 9;
-  LEASE_NOT_HELD = 10;
   NOT_FOUND = 11;
   ALREADY_EXISTS = 12;
   CONFLICT = 13;
   INTERNAL = 14;
+  UNSUPPORTED_API_VERSION = 15;
+  INVALID_RESOURCE = 16;
+  STALE_BASE_REVISION = 17;
+  DESIRED_DIGEST_MISMATCH = 18;
+  MUTATION_ID_REUSE_MISMATCH = 19;
+  MISSING_PROVIDER_ARTIFACT = 20;
+  PLAN_TOO_LARGE = 21;
+  ACTION_UNAVAILABLE = 22;
+  ACTION_ID_REUSE_MISMATCH = 23;
 }
 message ErrorDetail { ErrorCode code = 1; string message = 2; }

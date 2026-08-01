@@ -52,7 +52,7 @@ fn dual_filesystem_serves_one_namespace() {
         return;
     };
 
-    // Live status, not durable daemon metadata, owns live attachments.
+    // Live status, not durable daemon metadata, owns live filesystems.
     let status = daemon.status();
     assert_eq!(
         status.filesystems.len(),

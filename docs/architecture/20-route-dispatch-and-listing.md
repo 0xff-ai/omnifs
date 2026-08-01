@@ -1,9 +1,17 @@
 # Route dispatch and listing
 
 Status: current-architecture
-Scope: why SDK route dispatch separates lookup, listing, read, and open while keeping one precedence model. Binding rules live in `docs/contracts/20-provider-sdk.md` and `docs/contracts/30-projection-tree.md`.
+Scope: why SDK route dispatch separates lookup, listing, read, and open while
+keeping one precedence model.
 
-`omnifs` is navigated incrementally. A shell may `cd`, `ls`, `stat`, and then read. The dispatcher must answer whether a concrete path is owned, whether it is enumerable, and whether absence from a prior listing is authoritative.
+Read when: changing route registration, capture matching, implicit
+directories, lookup, listing, pagination, or listing exhaustiveness.
+
+Binding contracts: `docs/contracts/20-provider-sdk.md` and
+`docs/contracts/30-projection-tree.md`.
+
+Filesystem traversal is incremental. The dispatcher decides path ownership,
+enumerability, and whether an absent listing entry proves absence.
 
 ## Route precedence
 
@@ -14,61 +22,67 @@ Route matching follows a most-specific-wins model:
 3. prefix captures beat bare captures
 4. longer patterns break ties
 
-Ambiguous routes that could match the same concrete path with the same precedence must fail when the registration builder is compiled. `Router::compile` consumes the mutable builder exactly once, freezes aliases that were mounted as additional builder faces, resolves collections into the immutable route graph, and returns the only runtime-dispatchable form, `CompiledRouter`. A route tree that cannot compile is an invalid provider component and is never published by provider initialization.
+`Router::compile` consumes the mutable builder, freezes mounted aliases,
+resolves collections, rejects equal-precedence ambiguity, and returns the only
+runtime form, `CompiledRouter`. Initialization never publishes an invalid
+route tree.
 
 ## Capture validation
 
-Capture parsers participate in match candidacy. A candidate route whose captures fail to parse does not own the path, and dispatch falls through to the next candidate.
+Capture parsers participate in candidacy. A parse failure rejects that
+candidate and dispatch falls through.
 
-`#[path_captures]` fields are required by default. `Option<T>` fields are optional descriptors: their segment may be absent when the same key type is reused by a related route, while a present segment still goes through `T`'s parser.
+`#[path_captures]` fields are required by default. An `Option<T>` segment may
+be absent when related routes reuse the key type; when present, it still uses
+`T`'s parser.
 
-This is what lets providers model adjacent typed paths without read-time hacks. For example, one route can accept an IP-shaped segment while a sibling route rejects it and accepts a domain-shaped segment.
+This supports adjacent typed paths, such as IP and domain captures, without
+read-time branching.
 
 ## Lookup and listing authority
 
-`lookup(parent, name)` is the authoritative name oracle for a specific child.
+`lookup(parent, name)` is authoritative for one child. `readdir(parent)` lists
+what was knowable at that time and may be partial. Absence from a partial
+listing is not `NotFound`.
 
-`readdir(parent)` is an enumeration of what the provider chose or was able to list at that time. It may be non-exhaustive.
-
-Absence from a non-exhaustive listing is not ENOENT. A valid child can be reachable by lookup even if it did not appear in a previous directory listing.
-
-The converse holds too: presence in an already-served listing must never regress to ENOENT. A host pagination control (`@next`/`@all`) a consumer resolved from an earlier listing snapshot keeps resolving, and its read stays a no-op, even after the feed exhausts and a fresh listing stops naming the control.
+An entry already served by a listing cannot regress to `NotFound`. A resolved
+pagination control (`@next` or `@all`) remains a no-op even after a fresh
+listing stops naming it.
 
 ## Exhaustive listings
 
-A listing is exhaustive only when every child name currently knowable by that route surface was enumerated.
-
-A hard cap without a resume cursor is non-exhaustive. A real resume cursor can be exposed through host pagination controls. Fake cursors and exhaustive claims over truncated data are bugs.
-
-Auto-derived literal directories can be exhaustive only when no dynamic capture sibling exists at the next depth.
+A listing is exhaustive only when it enumerates every currently knowable child.
+A cap without a real resume cursor is partial. A literal-only route directory
+is complete only when no next-depth capture can own more names.
 
 ## Auto-navigable directories
 
-Literal route prefixes are auto-navigable. If a provider registers `/categories/{category}/papers`, then `/categories` can exist as a navigation directory without a stub handler.
+Literal prefixes are auto-navigable. Registering
+`/categories/{category}/papers` creates `/categories` without a stub handler.
 
-Capture prefixes are not auto-navigable by themselves. A capture segment ranges over an unbounded keyspace, and only the provider's handler can decide which concrete names exist.
+Capture prefixes are not auto-navigable: only the provider can enumerate their
+unbounded keyspace.
 
-This distinction avoids forcing provider authors to write empty literal scaffolding while still keeping dynamic namespaces honest.
+This removes empty literal scaffolding while keeping dynamic namespaces honest.
 
 ## Static and dynamic children
 
-A directory listing merges literal route-table siblings with provider-enumerated children. Capture siblings contribute resolvability, not enumerable names.
-
-Do not duplicate static sibling merge logic across list and lookup paths. The route dispatcher owns it once.
+A directory merges literal route siblings with provider-enumerated children.
+Captures add resolvability, not names. The dispatcher owns this merge for both
+list and lookup.
 
 ## Negative results
 
-Negative lookup is authoritative only when no route candidate, explicit child, dynamic capture sibling, or parent handler can own the child.
-
-Negative cache policy must be shared by the tree or host layer. Filesystems should not add local dotfile exceptions, lookup suppression lists, or provider-specific negative heuristics.
+Negative lookup is authoritative only when no route, explicit child, capture,
+or parent handler can own the name. Shared tree policy owns negative caching;
+filesystems add no exceptions or suppression rules.
 
 ## Provider authoring guidance
 
-Use explicit directory handlers where children are capture-routed. That handler is the source of truth for concrete child names and lookup verdicts.
-
-Do not write stub handlers for literal-only navigation nodes. Let the router synthesize those.
-
-Use captures to model parsed domain values. Do not pass raw strings inward after a parse boundary when a typed capture can reject bad segments.
+- Use an explicit directory handler for capture-routed children; it owns names
+  and lookup verdicts.
+- Let the router synthesize literal-only navigation nodes.
+- Use typed captures to reject bad segments at the parse boundary.
 
 ## Rejected shapes
 

@@ -4,7 +4,7 @@
 //! from outside the guest, so once its mount is live it dials host vsock on a
 //! well-known port and writes a single `ready\n` line; the invocation-scoped
 //! Libkrun launch lease accepts that beacon before publishing launch success
-//! (`crates/omnifs-cli/src/libkrun_runner.rs`). Non-fatal end to end: the FUSE
+//! (`crates/omnifs-daemon/src/fs_runtime/libkrun.rs`). Non-fatal end to end: the FUSE
 //! mount is served either way, so a timed-out wait or a failed dial only logs
 //! a warning.
 

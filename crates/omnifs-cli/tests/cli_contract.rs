@@ -1,4 +1,8 @@
 //! CLI grammar, output, and exit-code contract tests.
+//!
+//! Keep process coverage to representative executable checks. Exact help and
+//! output registers live in `cli_transcripts`; parser details live in the CLI
+//! unit tests.
 
 #![cfg(not(target_os = "wasi"))]
 
@@ -39,175 +43,70 @@ fn help_documents_exit_codes() {
 }
 
 #[test]
-fn fs_help_uses_named_instance_lifecycle_commands() {
-    let fs = Command::new(omnifs_bin())
-        .args(["fs", "--help"])
+fn public_resource_help_lists_the_final_command_groups() {
+    let top = Command::new(omnifs_bin())
+        .arg("--help")
         .output()
-        .expect("spawn omnifs fs --help");
-    assert!(fs.status.success());
-    let fs_help = String::from_utf8_lossy(&fs.stdout);
-    for command in ["create", "rm", "attach", "detach", "restart", "shell", "ls"] {
-        assert!(fs_help.contains(command), "missing {command}: {fs_help}");
-    }
-    for retired in ["enable", "disable", "delete"] {
-        assert!(!fs_help.contains(retired), "retired {retired} in {fs_help}");
+        .expect("spawn omnifs --help");
+    assert!(top.status.success());
+    let top_help = String::from_utf8_lossy(&top.stdout);
+    for command in ["provider", "mount", "credential", "fs"] {
+        assert!(top_help.contains(command), "missing {command}: {top_help}");
     }
 
-    let create = Command::new(omnifs_bin())
-        .args(["fs", "create", "--help"])
+    let output = Command::new(omnifs_bin())
+        .args(["mount", "--help"])
         .output()
-        .expect("spawn omnifs fs create --help");
-    assert!(create.status.success());
-    let create_help = String::from_utf8_lossy(&create.stdout);
-    for flag in ["--name", "--protocol", "--runtime", "--location"] {
-        assert!(create_help.contains(flag), "missing {flag}: {create_help}");
+        .expect("spawn omnifs mount --help");
+    assert!(output.status.success(), "{output:?}");
+    let help = String::from_utf8_lossy(&output.stdout);
+    for command in ["add", "update", "reauth", "revoke", "rm", "ls", "show"] {
+        assert!(help.contains(command), "missing mount {command}: {help}");
+    }
+}
+
+#[test]
+fn status_follow_requires_one_unambiguous_typed_target() {
+    let fixture = Fixture::new();
+    for args in [
+        ["status", "--revision", "7"].as_slice(),
+        ["status", "--action", "00000000000000000000000000000000"].as_slice(),
+        [
+            "status",
+            "--follow",
+            "--revision",
+            "7",
+            "--action",
+            "00000000000000000000000000000000",
+        ]
+        .as_slice(),
+    ] {
+        let output = fixture.run(args);
+        assert_eq!(exit_code(&output), 2, "{args:?}: {output:?}");
     }
 
-    let shell = Command::new(omnifs_bin())
-        .args(["fs", "shell", "--help"])
-        .output()
-        .expect("spawn omnifs fs shell --help");
-    assert!(shell.status.success());
-    let shell_help = String::from_utf8_lossy(&shell.stdout);
-    for flag in ["--name", "--shell", "[COMMAND]"] {
-        assert!(shell_help.contains(flag), "missing {flag}: {shell_help}");
-    }
-    for retired in ["--protocol", "--runtime", "--mount", "--command"] {
-        assert!(
-            !shell_help.contains(retired),
-            "retired {retired} in {shell_help}"
+    for args in [
+        ["status", "--follow"].as_slice(),
+        ["status", "--follow", "--revision", "7"].as_slice(),
+        [
+            "status",
+            "--follow",
+            "--action",
+            "00000000000000000000000000000000",
+        ]
+        .as_slice(),
+    ] {
+        let output = fixture.run(args);
+        assert_ne!(
+            exit_code(&output),
+            2,
+            "valid follow grammar was rejected: {args:?}: {output:?}"
         );
     }
-
-    let fixture = Fixture::new();
-    let missing_args = fixture.run(&["fs", "attach"]);
-    assert_eq!(exit_code(&missing_args), 2, "{missing_args:?}");
-
-    let positional = fixture.run(&["fs", "attach", "main"]);
-    assert_eq!(exit_code(&positional), 2, "{positional:?}");
-    let stderr = String::from_utf8_lossy(&positional.stderr);
-    assert!(stderr.contains("unexpected argument 'main'"), "{stderr}");
 }
 
 #[test]
-fn fs_create_persists_one_resolved_spec_without_starting_a_runtime() {
-    let fixture = Fixture::new();
-    let location = fixture.home_path().join("named-host-mount");
-    let args = vec![
-        "fs".to_owned(),
-        "create".to_owned(),
-        "--name".to_owned(),
-        "main".to_owned(),
-        "--protocol".to_owned(),
-        "nfs".to_owned(),
-        "--runtime".to_owned(),
-        "host".to_owned(),
-        "--location".to_owned(),
-        location.display().to_string(),
-        "--output".to_owned(),
-        "json".to_owned(),
-    ];
-    let created = fixture.run_owned(&args);
-    assert_eq!(exit_code(&created), 0, "{created:?}");
-
-    let spec_path = fixture
-        .home_path()
-        .join("client/filesystems/specs/main.json");
-    let bytes = std::fs::read(&spec_path).expect("persisted filesystem spec");
-    let spec: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(
-        spec,
-        serde_json::json!({
-            "id": "main",
-            "protocol": "nfs",
-            "runtime": "host",
-            "location": location,
-        })
-    );
-    assert!(
-        !fixture
-            .home_path()
-            .join("client/filesystems/state/main/runner.json")
-            .exists(),
-        "create must not launch a host runner"
-    );
-
-    let listed = fixture.run(&["fs", "ls", "--output", "json"]);
-    assert_eq!(exit_code(&listed), 0, "{listed:?}");
-    let listed = stdout_json(&listed);
-    assert_eq!(listed["result"]["filesystems"][0]["id"], "main");
-    assert_eq!(listed["result"]["filesystems"][0]["state"], "detached");
-
-    let duplicate = fixture.run_owned(&args);
-    assert_ne!(exit_code(&duplicate), 0, "{duplicate:?}");
-    assert!(
-        String::from_utf8_lossy(&duplicate.stdout).contains("already exists"),
-        "{duplicate:?}"
-    );
-    assert_eq!(std::fs::read(&spec_path).unwrap(), bytes);
-}
-
-#[test]
-fn fs_create_freezes_host_defaults_and_rejects_guest_locations() {
-    let fixture = Fixture::new();
-    let host = fixture.run(&[
-        "fs",
-        "create",
-        "--name",
-        "host-default",
-        "--protocol",
-        "nfs",
-        "--runtime",
-        "host",
-        "--output",
-        "json",
-    ]);
-    assert_eq!(exit_code(&host), 0, "{host:?}");
-    let host_spec: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(
-            fixture
-                .home_path()
-                .join("client/filesystems/specs/host-default.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        host_spec["location"],
-        fixture
-            .home_path()
-            .join("client/filesystems/mounts/host-default")
-            .display()
-            .to_string()
-    );
-
-    let guest = fixture.run(&[
-        "fs",
-        "create",
-        "--name",
-        "guest",
-        "--protocol",
-        "fuse",
-        "--runtime",
-        "docker",
-        "--location",
-        "/tmp/not-owned-by-docker",
-    ]);
-    assert_ne!(exit_code(&guest), 0, "{guest:?}");
-    assert!(
-        String::from_utf8_lossy(&guest.stderr).contains("--location is not allowed"),
-        "{guest:?}"
-    );
-    assert!(
-        !fixture
-            .home_path()
-            .join("client/filesystems/specs/guest.json")
-            .exists()
-    );
-}
-
-#[test]
-fn removed_top_level_commands_are_usage_errors() {
+fn representative_removed_commands_are_usage_errors() {
     let fixture = Fixture::new();
     for (args, needle) in [
         (
@@ -215,40 +114,10 @@ fn removed_top_level_commands_are_usage_errors() {
             "unrecognized subcommand 'init'",
         ),
         (
-            ["snapshot", "test"].as_slice(),
-            "unrecognized subcommand 'snapshot'",
-        ),
-        (
-            ["mount", "snapshot", "test"].as_slice(),
-            "unrecognized subcommand 'snapshot'",
-        ),
-        (
-            ["filesystem", "ls"].as_slice(),
-            "unrecognized subcommand 'filesystem'",
-        ),
-        (
-            ["mounts", "ls"].as_slice(),
-            "unrecognized subcommand 'mounts'",
-        ),
-        (
-            ["providers", "ls"].as_slice(),
-            "unrecognized subcommand 'providers'",
-        ),
-        (
-            ["up", "--no-filesystem"].as_slice(),
-            "unrecognized subcommand 'up'",
-        ),
-        (["down", "--force"].as_slice(), "--force"),
-        (
-            ["fs", "enable"].as_slice(),
-            "unrecognized subcommand 'enable'",
-        ),
-        (
-            ["shell", "--mount", "/tmp/omnifs"].as_slice(),
-            "unrecognized subcommand 'shell'",
+            ["fs", "attach", "main"].as_slice(),
+            "unrecognized subcommand 'attach'",
         ),
         (["status", "--json"].as_slice(), "--json"),
-        (["status", "--progress", "json"].as_slice(), "--progress"),
     ] {
         let output = fixture.run(args);
         assert_eq!(exit_code(&output), 2, "{args:?}: {output:?}");
@@ -331,10 +200,14 @@ fn json_commands_emit_expected_shapes() {
     assert_eq!(status_json["schema_version"], 1);
     assert_eq!(status_json["command"], "status");
     assert!(status_json["verdict"].is_string());
-    assert!(status_json["result"]["mounts"].as_array().is_some());
-    assert_eq!(status_json["result"]["filesystems"], serde_json::json!([]));
-    assert!(status_json["result"]["home"].is_string());
-    assert!(status_json["result"]["daemon"].is_object());
+    for key in ["providers", "credentials", "mounts", "filesystems"] {
+        assert!(
+            status_json["result"][key].as_array().is_some(),
+            "missing plural resource array {key}: {status_json}"
+        );
+    }
+    assert!(status_json["result"]["inventory"]["home"].is_string());
+    assert!(status_json["result"]["inventory"]["daemon"].is_object());
 
     let version = fixture.run(&["version", "--output", "json"]);
     assert_eq!(exit_code(&version), 0);

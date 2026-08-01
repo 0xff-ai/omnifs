@@ -1,8 +1,7 @@
 //! Commands construct typed values while this module owns every byte that
 //! reaches the terminal: the closed vocabulary ([`style`]), human-only
-//! responsive [`table`]s, report rows, direct [`progress`] handles, and
-//! [`prompt`]s built on crossterm. Stream discipline is
-//! owned here, not by commands:
+//! responsive [`table`]s, report rows, and [`prompt`]s built on crossterm.
+//! Stream discipline is owned here, not by commands:
 //! reports go to stdout, while narration, prompts, and progress go to stderr.
 //!
 //! Output owns the invocation presentation lifecycle. Commands retain typed
@@ -14,11 +13,9 @@
 
 pub(crate) mod access;
 pub(crate) mod consent;
-pub(crate) mod live;
 pub(crate) mod output;
 pub(crate) mod prompt;
 pub(crate) mod render;
-pub(crate) mod splash;
 pub(crate) mod style;
 pub(crate) mod table;
 

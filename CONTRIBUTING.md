@@ -4,20 +4,20 @@ Reference for the contributor workflow, build and validation commands, runtime d
 
 ## Getting started
 
-The primary contributor workflow is `just dev`, which runs `scripts/dev.ts`. The script builds providers and the native CLI, starts a host daemon, ensures the `dev-host` and `dev-docker` filesystem specs, attaches them, and opens a shell inside `dev-docker` at `/omnifs`.
+The primary contributor workflow is `just dev`, which runs `scripts/dev.ts`. The script builds providers and the native CLI, starts a host daemon, renders KCL desired resources, applies them with `target/debug/omnifs apply <file> --yes`, waits for the terminal revision, and opens a Filesystem shell inside `dev-docker` at `/omnifs`.
 
 ```bash
-just dev            # build providers and the CLI, start the native daemon, attach the filesystem, open /omnifs
+just dev            # build providers and the CLI, apply dev resources, wait for ready, open /omnifs
 target/debug/omnifs status                     # host-native: runs directly, no docker exec needed
-target/debug/omnifs fs shell --name dev-docker -- pwd # run one command at /omnifs in the guest
+target/debug/omnifs fs shell dev-docker -- pwd # run one command at /omnifs in the guest
 FILESYSTEM=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
 docker exec -it -w /omnifs "$FILESYSTEM" /bin/sh # reattach to the browsing shell
-target/debug/omnifs fs detach --name dev-docker # stop the Docker runner
-target/debug/omnifs fs detach --name dev-host   # stop the host filesystem process
+target/debug/omnifs fs rm dev-docker # request Docker runner teardown
+target/debug/omnifs fs rm dev-host   # request host filesystem teardown
 target/debug/omnifs down                       # stop the daemon
 ```
 
-`scripts/dev.ts` is contributor-only and requires a source checkout. It resolves a dedicated profile at `~/.omnifs-dev`, compiles the CLI with the provider-store bundle embedded, invokes `mount add` over local RPC so selected artifacts are retained by the daemon, writes host credentials through the normal CLI path, and pins `[filesystem].docker_image` in `~/.omnifs-dev/config.toml` at an image tagged `omnifs-filesystem:<short-sha>-dev`. The daemon itself is host-native, not containerized: no home bind mount, no daemon container. Dev auth uses host tokens: set `GITHUB_TOKEN` or `LINEAR_API_KEY`, or allow the script to read `gh auth token` for GitHub when prompted. Authenticated mounts without a token are skipped rather than started broken.
+`scripts/dev.ts` is contributor-only and requires a source checkout. It resolves a dedicated profile at `~/.omnifs-dev`, compiles the CLI with the provider-store bundle embedded, renders a temporary or profile-local KCL desired config, sets host credentials through `target/debug/omnifs credential set --from-env`, and invokes `target/debug/omnifs apply <file> --yes`. It waits for the terminal revision before shell access and pins `[filesystem].docker_image` in `~/.omnifs-dev/config.toml` at an image tagged `omnifs-filesystem:<short-sha>-dev`. The daemon itself is host-native, not containerized: no home bind mount, no daemon container. Dev auth uses host tokens: set `GITHUB_TOKEN` or `LINEAR_API_KEY`, or allow the script to read `gh auth token` for GitHub when prompted. Authenticated mounts without a token are skipped rather than started broken.
 
 A locally built `omnifs` binary targets the `omnifs-filesystem:dev` image by default and never pulls; produce that image with `just dev --build-only`, which builds providers, the CLI, and the filesystem image, tags it `omnifs-filesystem:dev`, and exits without starting a session.
 
@@ -53,7 +53,7 @@ For mount, provider, clone, traversal, or runtime behavior changes, do not stop 
 ```bash
 just dev -y
 target/debug/omnifs status
-target/debug/omnifs --output json status | jq '.result | {filesystems, mounts, providers}'
+target/debug/omnifs --output json status | jq '.result | {filesystems, mounts, providers, credentials}'
 FILESYSTEM=$(docker ps --filter label=ai.0xff.omnifs.home="$HOME/.omnifs-dev" --format '{{.Names}}')
 docker exec "$FILESYSTEM" sh -c 'ls /omnifs/github/0xff-ai/omnifs/issues/open'
 tail -n 80 ~/.omnifs-dev/daemon-state/logs/daemon.log
@@ -69,7 +69,7 @@ For provider path-surface changes, test the whole shell traversal, not only the 
 - `docker logs "$FILESYSTEM"` shows the filesystem container's own stdout/stderr; it only ever runs `omnifs-thin --protocol fuse`, so a mount-serving failure is almost always in the daemon log instead.
 - Clone failures should surface in the daemon log with `git clone` stderr.
 - FUSE `access(...)` warnings are expected noise unless they correlate with a real failure.
-- Use `omnifs status` directly (host-native, no `docker exec` needed) for fast mount/config/provider/cache triage.
+- Use `target/debug/omnifs status` directly (host-native, no `docker exec` needed) for fast mount/config/provider/cache triage.
 - Use `target/debug/omnifs inspect` for the live TUI, or add `--plain` when capturing the typed activity as lines.
 - The filesystem container is credential-free and carries no `OMNIFS_HOME`: `docker exec` into it only ever sees `/omnifs`, never host paths or credentials.
 

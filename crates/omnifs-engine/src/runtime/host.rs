@@ -11,8 +11,8 @@ use crate::runtime::wasm::ComponentEngine;
 /// stores. Durable generation inputs carry both values explicitly.
 pub struct HostRuntimeOpen {
     pub projection: PathBuf,
-    pub wasmtime: PathBuf,
     pub clones: PathBuf,
+    pub engine: ComponentEngine,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -36,10 +36,9 @@ impl HostOnline {
     pub fn open_runtime(open: HostRuntimeOpen) -> Result<Self, HostError> {
         let HostRuntimeOpen {
             projection,
-            wasmtime,
             clones,
+            engine,
         } = open;
-        let engine = ComponentEngine::new(Some(&wasmtime))?;
         let caches = Caches::open(&projection).map_err(HostError::Cache)?;
         let cloner = Arc::new(GitCloner::new(&clones).map_err(HostError::Cloner)?);
         Ok(Self {

@@ -37,11 +37,9 @@ cleanup() {
     tail -n 200 "$OMNIFS_HOME/cache/daemon.log" >&2 || true
   fi
   local filesystem
-  "$OMNIFS_CLI" fs detach --name dev-docker >/dev/null 2>&1 || true
+  "$OMNIFS_CLI" down >/dev/null 2>&1 || true
   filesystem="$(docker ps --filter "label=ai.0xff.omnifs.home=$OMNIFS_HOME" --format '{{.Names}}' 2>/dev/null || true)"
   [[ -n "$filesystem" ]] && docker rm -f "$filesystem" >/dev/null 2>&1
-  "$OMNIFS_CLI" fs detach --name dev-host >/dev/null 2>&1 || true
-  "$OMNIFS_CLI" down >/dev/null 2>&1 || true
   rm -rf "$OMNIFS_HOME"
 }
 trap cleanup EXIT
@@ -68,10 +66,11 @@ read_first_open_issue_title() {
 
 echo "== host mount read (native daemon) =="
 status_json="$("$OMNIFS_CLI" status --output json)"
-mount_point="$(jq -er \
-  '.result.filesystems[] | select(.id == "dev-host" and .runtime == "host") | .location' \
-  <<<"$status_json" | head -n 1)"
-test -n "$mount_point" && test "$mount_point" != "null"
+jq -e \
+  '.result.filesystems[] | select(.name == "dev-host" and .phase == "ready")' \
+  >/dev/null <<<"$status_json"
+mount_point="$OMNIFS_HOME/mnt"
+test -d "$mount_point"
 read_first_open_issue_title "$mount_point/github"
 
 echo "== filesystem container read (docker exec) =="

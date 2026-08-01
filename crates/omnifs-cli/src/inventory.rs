@@ -8,25 +8,24 @@ use anyhow::Result;
 #[cfg(test)]
 use omnifs_api::DaemonPhase;
 use omnifs_api::{CredentialHealth, DaemonInventory, HealthState, MountHealth, MountRecord};
-use omnifs_core::MountRevision;
-use omnifs_core::fs;
+use omnifs_core::ResourceRevision;
+#[cfg(test)]
+use omnifs_core::{FILESYSTEM_GUEST_LOCATION, FilesystemProtocol};
+use omnifs_core::{FilesystemRuntime, FilesystemSpec, ResourceName};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
-use crate::client_fs_state::ClientFilesystemState;
 use crate::ui::output::ResultVerdict;
-use omnifs_bootstrap::{Bootstrap, Client};
+use omnifs_bootstrap::Profile;
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Inventory {
     pub(crate) home: PathBuf,
-    pub(crate) durable_revision: Option<MountRevision>,
-    pub(crate) serving_revision: Option<MountRevision>,
-    /// The daemon's single mutation lease, when a batch currently holds it.
-    pub(crate) active_mutation: Option<omnifs_api::ActiveMutation>,
+    pub(crate) durable_revision: Option<ResourceRevision>,
+    pub(crate) serving_revision: Option<ResourceRevision>,
     pub(crate) daemon: DaemonFacts,
-    pub(crate) filesystems: Vec<FilesystemStatus>,
+    pub(crate) filesystems: Vec<FilesystemAccessStatus>,
     pub(crate) mounts: Vec<MountStatus>,
 }
 
@@ -126,6 +125,8 @@ impl DaemonFacts {
                     executable: "/bin/omnifs".into(),
                     attach_unix: None,
                     attach_tcp: None,
+                    supported_filesystem_pairs: Vec::new(),
+                    platform_default_filesystem_pair: None,
                 },
                 phase: DaemonPhase::Ready,
                 durable_revision: None,
@@ -137,8 +138,7 @@ impl DaemonFacts {
                 ),
                 mounts: Vec::new(),
                 credentials: Vec::new(),
-                attachments: Vec::new(),
-                active_mutation: None,
+                filesystems: Vec::new(),
             }),
         };
         Self { status, probe }
@@ -187,21 +187,22 @@ pub(crate) enum Severity {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct FilesystemStatus {
+pub(crate) struct FilesystemAccessStatus {
+    pub(crate) name: ResourceName,
     #[serde(flatten)]
-    pub(crate) spec: fs::Spec,
-    pub(crate) state: FilesystemState,
+    pub(crate) spec: FilesystemSpec,
+    pub(crate) state: FilesystemAccessState,
     pub(crate) mount_count: usize,
     pub(crate) fix: Option<String>,
 }
 
-impl PartialOrd for FilesystemStatus {
+impl PartialOrd for FilesystemAccessStatus {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for FilesystemStatus {
+impl Ord for FilesystemAccessStatus {
     fn cmp(&self, other: &Self) -> Ordering {
         self.spec
             .runtime()
@@ -218,18 +219,18 @@ impl Ord for FilesystemStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum FilesystemState {
-    Attached,
-    Detached,
+pub(crate) enum FilesystemAccessState {
+    Ready,
+    Stopped,
     Unknown,
     Failed,
 }
 
-impl FilesystemState {
+impl FilesystemAccessState {
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Attached => "attached",
-            Self::Detached => "detached",
+            Self::Ready => "ready",
+            Self::Stopped => "stopped",
             Self::Unknown => "unknown",
             Self::Failed => "failed",
         }
@@ -237,8 +238,8 @@ impl FilesystemState {
 
     pub(crate) const fn severity(self) -> Severity {
         match self {
-            Self::Attached => Severity::Positive,
-            Self::Detached => Severity::Neutral,
+            Self::Ready => Severity::Positive,
+            Self::Stopped => Severity::Neutral,
             Self::Unknown => Severity::Attention,
             Self::Failed => Severity::Failure,
         }
@@ -247,7 +248,7 @@ impl FilesystemState {
     pub(crate) const fn fix(self) -> Option<&'static str> {
         match self {
             Self::Failed => Some("omnifs logs"),
-            Self::Attached | Self::Detached | Self::Unknown => None,
+            Self::Ready | Self::Stopped | Self::Unknown => None,
         }
     }
 
@@ -256,7 +257,7 @@ impl FilesystemState {
     /// `status`'s filesystem count, and each mount's `access_count` all filter
     /// through it.
     pub(crate) const fn provides_access(self) -> bool {
-        matches!(self, Self::Attached)
+        matches!(self, Self::Ready)
     }
 }
 
@@ -527,81 +528,73 @@ impl ServingState {
 pub(crate) enum ActionTarget {
     Profile,
     Mount(String),
-    Filesystem(fs::Id),
+    Filesystem(ResourceName),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NextAction {
     Doctor { target: ActionTarget },
     Reauthenticate { mount: String },
-    AttachFilesystem { id: fs::Id },
+    WaitForFilesystem { id: ResourceName },
     CreateFilesystem,
     Browse { path: PathBuf },
-    EnterFilesystem { id: fs::Id },
+    EnterFilesystem { id: ResourceName },
 }
 
 impl Inventory {
     pub(crate) async fn collect_rpc() -> Result<Self> {
-        let endpoint = Bootstrap::<Client>::for_client()?;
-        let configured_filesystems = ClientFilesystemState::resolve()?.registry().list()?;
+        let endpoint = Profile::resolve()?;
         let rpc = crate::rpc::RpcClient::resolve()?;
-        let (daemon, mounts, daemon_status, daemon_known, active_mutation) =
-            match rpc.inventory().await {
-                Ok(inventory) => {
-                    let mounts = MountStatus::all_observed(&inventory);
-                    let active_mutation = inventory.active_mutation;
-                    let daemon = DaemonFacts {
-                        status: Some(inventory.clone()),
-                        probe: DaemonProbe::Responding,
-                    };
-                    (daemon, mounts, Some(inventory), true, active_mutation)
-                },
-                Err(error) => {
-                    let probe = match endpoint.read_process_identity() {
-                        Ok(Some(_)) => DaemonProbe::Unreachable {
-                            message: format!("{error:#}"),
-                        },
-                        Ok(None) => DaemonProbe::Stopped,
-                        Err(identity_error) => DaemonProbe::Unreachable {
-                            message: format!(
-                                "{error:#}; cannot read process identity: {identity_error}"
-                            ),
-                        },
-                    };
-                    let daemon_known = probe == DaemonProbe::Stopped;
-                    (
-                        DaemonFacts {
-                            status: None,
-                            probe,
-                        },
-                        Vec::new(),
-                        None,
-                        daemon_known,
-                        None,
-                    )
-                },
-            };
+        let (daemon, mounts, daemon_status, daemon_known) = match rpc.inventory().await {
+            Ok(inventory) => {
+                let mounts = MountStatus::all_observed(&inventory);
+                let daemon = DaemonFacts {
+                    status: Some(inventory.clone()),
+                    probe: DaemonProbe::Responding,
+                };
+                (daemon, mounts, Some(inventory), true)
+            },
+            Err(error) => {
+                let probe = match endpoint.read_process_identity() {
+                    Ok(Some(_)) => DaemonProbe::Unreachable {
+                        message: format!("{error:#}"),
+                    },
+                    Ok(None) => DaemonProbe::Stopped,
+                    Err(identity_error) => DaemonProbe::Unreachable {
+                        message: format!(
+                            "{error:#}; cannot read process identity: {identity_error}"
+                        ),
+                    },
+                };
+                let daemon_known = probe == DaemonProbe::Stopped;
+                (
+                    DaemonFacts {
+                        status: None,
+                        probe,
+                    },
+                    Vec::new(),
+                    None,
+                    daemon_known,
+                )
+            },
+        };
         let mount_count = mounts.len();
-        let filesystems = filesystem_statuses(
-            &configured_filesystems,
-            daemon_status.as_ref(),
-            daemon_known,
-            mount_count,
-        );
+        let filesystems = daemon_status.as_ref().map_or_else(Vec::new, |status| {
+            filesystem_access_statuses(&status.filesystems, Some(status), daemon_known, mount_count)
+        });
         let mut inventory = Self {
-            home: endpoint.bootstrap_dir().to_path_buf(),
+            home: endpoint.root().to_path_buf(),
             durable_revision: daemon_status
                 .as_ref()
                 .and_then(|status| status.durable_revision),
             serving_revision: daemon_status
                 .as_ref()
                 .and_then(|status| status.serving_revision),
-            active_mutation,
             daemon,
             filesystems,
             mounts,
         };
-        let access_count = inventory.attached_filesystem_count();
+        let access_count = inventory.ready_filesystem_count();
         for mount in &mut inventory.mounts {
             mount.access_count = access_count;
         }
@@ -609,7 +602,7 @@ impl Inventory {
     }
 
     /// Filesystem rows that provide live access, in inventory order.
-    pub(crate) fn attached_filesystems(&self) -> impl Iterator<Item = &FilesystemStatus> {
+    pub(crate) fn ready_filesystems(&self) -> impl Iterator<Item = &FilesystemAccessStatus> {
         self.filesystems
             .iter()
             .filter(|filesystem| filesystem.state.provides_access())
@@ -619,14 +612,14 @@ impl Inventory {
     /// `collect_rpc` uses to seed every mount's `access_count`, so counting
     /// again from a rendered `Inventory` can never drift from what was
     /// recorded at collection time.
-    pub(crate) fn attached_filesystem_count(&self) -> usize {
-        self.attached_filesystems().count()
+    pub(crate) fn ready_filesystem_count(&self) -> usize {
+        self.ready_filesystems().count()
     }
 
     /// The first attached host filesystem's location, if any.
     pub(crate) fn primary_host_location(&self) -> Option<&Path> {
-        self.attached_filesystems()
-            .find(|filesystem| filesystem.spec.runtime() == fs::Runtime::Host)
+        self.ready_filesystems()
+            .find(|filesystem| filesystem.spec.runtime() == FilesystemRuntime::Host)
             .map(|filesystem| filesystem.spec.location())
     }
 
@@ -670,11 +663,11 @@ impl Inventory {
         if let Some(filesystem) = self.filesystems.iter().find(|filesystem| {
             matches!(
                 filesystem.state,
-                FilesystemState::Unknown | FilesystemState::Failed
+                FilesystemAccessState::Unknown | FilesystemAccessState::Failed
             )
         }) {
             return Some(NextAction::Doctor {
-                target: ActionTarget::Filesystem(filesystem.spec.id().clone()),
+                target: ActionTarget::Filesystem(filesystem.name.clone()),
             });
         }
         if let Some(mount) = self
@@ -689,10 +682,10 @@ impl Inventory {
         if let Some(filesystem) = self
             .filesystems
             .iter()
-            .find(|filesystem| filesystem.state == FilesystemState::Detached)
+            .find(|filesystem| filesystem.state == FilesystemAccessState::Stopped)
         {
-            return Some(NextAction::AttachFilesystem {
-                id: filesystem.spec.id().clone(),
+            return Some(NextAction::WaitForFilesystem {
+                id: filesystem.name.clone(),
             });
         }
         if self.filesystems.is_empty() && !self.mounts.is_empty() {
@@ -704,7 +697,8 @@ impl Inventory {
             .find(|mount| mount.serving == ServingState::Live)
             .or_else(|| self.mounts.first());
         if let Some(filesystem) = self.filesystems.iter().find(|filesystem| {
-            filesystem.state.provides_access() && filesystem.spec.runtime() == fs::Runtime::Host
+            filesystem.state.provides_access()
+                && filesystem.spec.runtime() == FilesystemRuntime::Host
         }) {
             let path = first_mount.map_or_else(
                 || filesystem.spec.location().to_path_buf(),
@@ -720,24 +714,24 @@ impl Inventory {
         self.filesystems
             .iter()
             .find(|filesystem| {
-                filesystem.state.provides_access() && filesystem.spec.runtime() != fs::Runtime::Host
+                filesystem.state.provides_access()
+                    && filesystem.spec.runtime() != FilesystemRuntime::Host
             })
             .map(|filesystem| NextAction::EnterFilesystem {
-                id: filesystem.spec.id().clone(),
+                id: filesystem.name.clone(),
             })
     }
 
     #[cfg(test)]
     pub(crate) fn test(
         state: DaemonHealth,
-        filesystems: Vec<FilesystemStatus>,
+        filesystems: Vec<FilesystemAccessStatus>,
         mounts: Vec<MountStatus>,
     ) -> Self {
         Self {
             home: PathBuf::from("/tmp/omnifs"),
             durable_revision: None,
             serving_revision: None,
-            active_mutation: None,
             daemon: DaemonFacts::test(state),
             filesystems,
             mounts,
@@ -745,39 +739,41 @@ impl Inventory {
     }
 }
 
-/// Build canonical filesystem rows from the daemon's live attachments.
-pub(crate) fn filesystem_statuses(
-    configured: &[fs::Spec],
+/// Build canonical filesystem rows from the daemon's live filesystems.
+pub(crate) fn filesystem_access_statuses(
+    configured: &[omnifs_api::FilesystemDefinition],
     daemon: Option<&DaemonInventory>,
     daemon_known: bool,
     mount_count: usize,
-) -> Vec<FilesystemStatus> {
+) -> Vec<FilesystemAccessStatus> {
     let mut rows = configured
         .iter()
-        .map(|spec| {
+        .map(|definition| {
+            let spec = &definition.spec;
             let observed = daemon.and_then(|status| {
                 status
-                    .attachments
+                    .filesystems
                     .iter()
-                    .find(|observed| observed.id() == spec.id())
+                    .find(|observed| observed.name == definition.name)
             });
-            let attached = observed == Some(spec);
+            let attached = observed.is_some_and(|observed| observed.spec == *spec);
             let identity_conflict = observed.is_some() && !attached;
             let state = if !daemon_known {
-                FilesystemState::Unknown
+                FilesystemAccessState::Unknown
             } else if identity_conflict
                 || attached
                     && daemon.is_some_and(|status| {
                         status.health.overall_state() == HealthState::Unhealthy
                     })
             {
-                FilesystemState::Failed
+                FilesystemAccessState::Failed
             } else if attached {
-                FilesystemState::Attached
+                FilesystemAccessState::Ready
             } else {
-                FilesystemState::Detached
+                FilesystemAccessState::Stopped
             };
-            FilesystemStatus {
+            FilesystemAccessStatus {
+                name: definition.name.clone(),
                 spec: spec.clone(),
                 state,
                 mount_count,
@@ -793,14 +789,23 @@ pub(crate) fn filesystem_statuses(
     if let Some(daemon) = daemon {
         rows.extend(
             daemon
-                .attachments
+                .filesystems
                 .iter()
-                .filter(|observed| !configured.iter().any(|spec| spec.id() == observed.id()))
-                .map(|observed| FilesystemStatus {
-                    spec: observed.clone(),
-                    state: FilesystemState::Failed,
+                .filter(|observed| {
+                    !configured
+                        .iter()
+                        .any(|definition| definition.name == observed.name)
+                })
+                .map(|observed| FilesystemAccessStatus {
+                    name: observed.name.clone(),
+                    spec: observed.spec.clone(),
+                    state: if daemon.health.overall_state() == HealthState::Unhealthy {
+                        FilesystemAccessState::Failed
+                    } else {
+                        FilesystemAccessState::Ready
+                    },
                     mount_count,
-                    fix: Some("omnifs doctor".to_owned()),
+                    fix: None,
                 }),
         );
     }
@@ -874,6 +879,8 @@ mod tests {
                     executable: "/bin/omnifs".into(),
                     attach_unix: None,
                     attach_tcp: None,
+                    supported_filesystem_pairs: Vec::new(),
+                    platform_default_filesystem_pair: None,
                 },
                 phase: DaemonPhase::Ready,
                 durable_revision: None,
@@ -885,8 +892,7 @@ mod tests {
                 ),
                 mounts: Vec::new(),
                 credentials: Vec::new(),
-                attachments: Vec::new(),
-                active_mutation: None,
+                filesystems: Vec::new(),
             };
             assert_eq!(DaemonFacts::from(Ok(Some(status))).health(), expected);
         }
@@ -894,48 +900,64 @@ mod tests {
 
     #[test]
     fn daemon_down_inventory_has_no_filesystem_rows() {
-        let rows = filesystem_statuses(&[], None, true, 1);
+        let rows = filesystem_access_statuses(&[], None, true, 1);
         assert!(rows.is_empty());
     }
 
     #[test]
-    fn daemon_down_inventory_retains_configured_detached_filesystems() {
-        let spec = fs::Spec::new(
-            fs::Id::new("local").unwrap(),
-            fs::Protocol::Nfs,
-            fs::Runtime::Host,
+    fn daemon_down_inventory_retains_configured_stopped_filesystems() {
+        let spec = FilesystemSpec::new(
+            FilesystemProtocol::Nfs,
+            FilesystemRuntime::Host,
             PathBuf::from("/mnt/local"),
+            None,
+            None,
         )
         .unwrap();
-        let rows = filesystem_statuses(&[spec], None, true, 1);
+        let definition = omnifs_api::FilesystemDefinition {
+            name: "local".parse().unwrap(),
+            spec,
+        };
+        let rows = filesystem_access_statuses(&[definition], None, true, 1);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].spec.id().as_str(), "local");
-        assert_eq!(rows[0].state, FilesystemState::Detached);
+        assert_eq!(rows[0].name.as_str(), "local");
+        assert_eq!(rows[0].state, FilesystemAccessState::Stopped);
     }
 
     #[test]
-    fn configured_identity_conflict_is_failed_not_hidden_as_detached() {
-        let spec = fs::Spec::new(
-            fs::Id::new("local").unwrap(),
-            fs::Protocol::Nfs,
-            fs::Runtime::Host,
+    fn configured_identity_conflict_is_failed_not_hidden_as_stopped() {
+        let spec = FilesystemSpec::new(
+            FilesystemProtocol::Nfs,
+            FilesystemRuntime::Host,
             PathBuf::from("/mnt/local"),
+            None,
+            None,
         )
         .unwrap();
         let mut daemon = DaemonFacts::test(DaemonHealth::Running).status.unwrap();
-        daemon.attachments.push(
-            fs::Spec::new(
-                spec.id().clone(),
-                fs::Protocol::Fuse,
-                fs::Runtime::Docker,
-                PathBuf::from(fs::GUEST_LOCATION),
+        daemon.filesystems.push(omnifs_api::FilesystemDefinition {
+            name: "local".parse().unwrap(),
+            spec: FilesystemSpec::new(
+                FilesystemProtocol::Fuse,
+                FilesystemRuntime::Docker,
+                PathBuf::from(FILESYSTEM_GUEST_LOCATION),
+                Some("image".to_owned()),
+                None,
             )
             .unwrap(),
-        );
+        });
 
-        let rows = filesystem_statuses(&[spec], Some(&daemon), true, 1);
+        let rows = filesystem_access_statuses(
+            &[omnifs_api::FilesystemDefinition {
+                name: "local".parse().unwrap(),
+                spec,
+            }],
+            Some(&daemon),
+            true,
+            1,
+        );
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].state, FilesystemState::Failed);
+        assert_eq!(rows[0].state, FilesystemAccessState::Failed);
         assert_eq!(rows[0].fix.as_deref(), Some("omnifs doctor"));
     }
 
@@ -970,17 +992,18 @@ mod tests {
         assert_eq!(expired.verdict(), ResultVerdict::Degraded);
         let mut unmanaged = base.clone();
         unmanaged.daemon = DaemonFacts::test(DaemonHealth::Running);
-        unmanaged.filesystems.push(FilesystemStatus {
-            spec: fs::Spec::new(
-                "test".parse().unwrap(),
-                fs::Protocol::Fuse,
-                fs::Runtime::Host,
-                "/mnt".into(),
-            )
-            .unwrap(),
-            state: FilesystemState::Failed,
+        let protocol = if cfg!(target_os = "linux") {
+            FilesystemProtocol::Fuse
+        } else {
+            FilesystemProtocol::Nfs
+        };
+        unmanaged.filesystems.push(FilesystemAccessStatus {
+            name: "test".parse().unwrap(),
+            spec: FilesystemSpec::new(protocol, FilesystemRuntime::Host, "/mnt".into(), None, None)
+                .unwrap(),
+            state: FilesystemAccessState::Failed,
             mount_count: 1,
-            fix: Some("omnifs fs detach --name test".into()),
+            fix: Some("omnifs fs rm test".into()),
         });
         assert_eq!(unmanaged.verdict(), ResultVerdict::Degraded);
         let mut unreachable = base;
@@ -1003,15 +1026,17 @@ mod tests {
             serving: ServingState::Live,
             access_count: 1,
         };
-        let filesystem = FilesystemStatus {
-            spec: fs::Spec::new(
-                "host".parse().unwrap(),
-                fs::Protocol::Nfs,
-                fs::Runtime::Host,
+        let filesystem = FilesystemAccessStatus {
+            name: "host".parse().unwrap(),
+            spec: FilesystemSpec::new(
+                FilesystemProtocol::Nfs,
+                FilesystemRuntime::Host,
                 "/mnt/omnifs".into(),
+                None,
+                None,
             )
             .unwrap(),
-            state: FilesystemState::Attached,
+            state: FilesystemAccessState::Ready,
             mount_count: 1,
             fix: None,
         };
@@ -1028,11 +1053,11 @@ mod tests {
             })
         );
 
-        let mut detached = healthy.clone();
-        detached.filesystems[0].state = FilesystemState::Detached;
+        let mut stopped = healthy.clone();
+        stopped.filesystems[0].state = FilesystemAccessState::Stopped;
         assert_eq!(
-            detached.next_action(),
-            Some(NextAction::AttachFilesystem {
+            stopped.next_action(),
+            Some(NextAction::WaitForFilesystem {
                 id: "host".parse().unwrap()
             })
         );
@@ -1055,7 +1080,7 @@ mod tests {
         );
 
         let mut broken = auth;
-        broken.filesystems[0].state = FilesystemState::Failed;
+        broken.filesystems[0].state = FilesystemAccessState::Failed;
         assert_eq!(
             broken.next_action(),
             Some(NextAction::Doctor {

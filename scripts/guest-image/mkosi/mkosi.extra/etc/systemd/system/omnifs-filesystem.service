@@ -5,15 +5,16 @@ After=omnifs-seed-mount.service systemd-modules-load.service
 
 [Service]
 Type=exec
-# The seed conf is EnvironmentFile-shaped (KEY=VALUE lines): OMNIFS_FS_ID,
-# OMNIFS_ATTACH_ADDR, and OMNIFS_READY_VSOCK_PORT.
+# The seed conf is EnvironmentFile-shaped (KEY=VALUE lines):
+# OMNIFS_FILESYSTEM_NAME, OMNIFS_RUNTIME_INSTANCE,
+# OMNIFS_LIBKRUN_GUEST_IMAGE, OMNIFS_ATTACH_ADDR, and OMNIFS_READY_VSOCK_PORT.
 # The runner dials host vsock on that port and writes `ready\n` once the FUSE
 # mount is serving (crates/omnifs-vfs/src/beacon.rs); the host launch lease
 # accepts that beacon before publishing the launch. No leading '-':
 # a missing or unreadable file fails this unit's start with a clear journal
 # message instead of running the filesystem with no attach target.
 EnvironmentFile=/mnt/seed/omnifs-seed.conf
-ExecStart=/usr/local/bin/omnifs-thin --client-owner ${OMNIFS_CLIENT_OWNER} --name ${OMNIFS_FS_ID} --protocol fuse --runtime libkrun --location /omnifs
+ExecStart=/usr/local/bin/omnifs-thin --name ${OMNIFS_FILESYSTEM_NAME} --runtime-instance ${OMNIFS_RUNTIME_INSTANCE} --protocol fuse --runtime libkrun --location /omnifs --libkrun-guest-image ${OMNIFS_LIBKRUN_GUEST_IMAGE}
 ExecStopPost=/usr/bin/systemctl --no-block poweroff
 StandardOutput=journal+console
 StandardError=journal+console

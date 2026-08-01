@@ -16,7 +16,7 @@ use omnifs_state::{
 };
 
 use super::CredentialRuntime;
-use super::credential_codec::encode_refreshed_payload;
+use crate::credential_codec::encode_refreshed_payload;
 
 pub(super) struct StateRefreshSink {
     state: Arc<StateStore>,

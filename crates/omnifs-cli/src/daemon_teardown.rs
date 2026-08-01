@@ -8,14 +8,14 @@ use crate::inventory::{DaemonHealth, Inventory};
 use crate::ui::consent::Outcome;
 use crate::ui::output::Output;
 use crate::ui::render::{self, LedgerRow};
-use omnifs_bootstrap::{Bootstrap, Client, Instance};
+use omnifs_bootstrap::{DaemonIdentity, Profile};
 use std::fmt::Write as _;
 use std::time::Duration;
 
 // The daemon may spend ten seconds draining the final serving generation
-// after it acknowledges Shutdown, then still has to join the mutation manager
-// and close durable state. This deadline covers that bounded teardown without
-// reporting a healthy in-progress shutdown as failed.
+// after it acknowledges Shutdown, then still has to stop Filesystem
+// supervisors and close durable state. This deadline covers that bounded
+// teardown without reporting a healthy in-progress shutdown as failed.
 const SHUTDOWN_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -25,8 +25,8 @@ const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 pub(crate) enum TeardownOutcome {
     DaemonStopped {
         pid: u32,
-        detached: usize,
-        still_attached: Vec<String>,
+        stopped: usize,
+        still_running: Vec<String>,
     },
     DaemonAlreadyStopped,
     DaemonShutdownFailed {
@@ -59,15 +59,15 @@ impl TeardownOutcome {
         match self {
             Self::DaemonStopped {
                 pid,
-                detached,
-                still_attached,
+                stopped,
+                still_running,
             } => {
-                let mut value = format!("stopped (pid {pid}, detached {detached} filesystems)");
-                if !still_attached.is_empty() {
+                let mut value = format!("stopped (pid {pid}, stopped {stopped} Filesystems)");
+                if !still_running.is_empty() {
                     let _ = write!(
                         value,
-                        "; still attached: {} (run `omnifs doctor`)",
-                        still_attached.join(", ")
+                        "; still running: {} (run `omnifs doctor`)",
+                        still_running.join(", ")
                     );
                 }
                 Outcome::done(self.id(), value)
@@ -100,15 +100,15 @@ impl TeardownOutcome {
 
 pub(crate) struct DaemonTeardown {
     rpc: crate::rpc::RpcClient,
-    endpoint: Bootstrap<Client>,
-    initial_identity: Option<Instance>,
+    endpoint: Profile,
+    initial_identity: Option<DaemonIdentity>,
     initial: Option<Inventory>,
 }
 
 impl DaemonTeardown {
-    pub(crate) fn with_inventory(endpoint: Bootstrap<Client>, inventory: Inventory) -> Self {
+    pub(crate) fn with_inventory(endpoint: Profile, inventory: Inventory) -> Self {
         Self {
-            rpc: crate::rpc::RpcClient::from_endpoint(endpoint.clone()),
+            rpc: crate::rpc::RpcClient::from_endpoint(endpoint.control_socket()),
             initial_identity: endpoint.read_process_identity().ok().flatten(),
             endpoint,
             initial: Some(inventory),
@@ -228,8 +228,8 @@ impl DaemonTeardown {
                 if stopped.is_some() {
                     return TeardownOutcome::DaemonStopped {
                         pid,
-                        detached: shutdown.detached,
-                        still_attached: shutdown.still_attached,
+                        stopped: shutdown.stopped,
+                        still_running: shutdown.still_running,
                     };
                 }
                 let detail = wait.last_error.take().map_or_else(
@@ -262,7 +262,7 @@ impl DaemonTeardown {
             .filter(|identity| identity.pid() == pid)
             .map_or_else(
                 || crate::process::is_alive(pid),
-                Instance::still_identifies_running_process,
+                DaemonIdentity::still_identifies_running_process,
             )
     }
 
@@ -377,8 +377,8 @@ mod tests {
     fn teardown_outcomes_have_truthful_severity_and_ids() {
         let stopped = TeardownOutcome::DaemonStopped {
             pid: 42,
-            detached: 2,
-            still_attached: Vec::new(),
+            stopped: 2,
+            still_running: Vec::new(),
         }
         .outcome();
         assert_eq!(stopped.id, "daemon");
@@ -401,8 +401,8 @@ mod tests {
         let outcomes = vec![
             TeardownOutcome::DaemonStopped {
                 pid: 31114,
-                detached: 2,
-                still_attached: Vec::new(),
+                stopped: 2,
+                still_running: Vec::new(),
             },
             TeardownOutcome::StaleRecordRemoved,
         ];
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].key, "daemon");
         assert_eq!(rows[0].glyph, Glyph::Done);
-        assert_eq!(rows[0].value, "stopped (pid 31114, detached 2 filesystems)");
+        assert_eq!(rows[0].value, "stopped (pid 31114, stopped 2 Filesystems)");
     }
 
     /// The "nothing running" branch: `Nothing to stop. The daemon
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn a_teardown_failure_never_shows_the_filesystems_stay_attached_line() {
+    fn a_teardown_failure_never_shows_the_filesystems_stay_running_line() {
         let outcomes = vec![TeardownOutcome::DaemonShutdownFailed {
             error: "busy".to_owned(),
         }];
@@ -466,9 +466,9 @@ mod tests {
     #[test]
     fn successful_rpc_shutdown_needs_no_missing_identity_cleanup() {
         let root = tempfile::tempdir().unwrap();
-        let endpoint = Bootstrap::<Client>::under_root(root.path());
+        let endpoint = Profile::under_root(root.path());
         let teardown = DaemonTeardown {
-            rpc: crate::rpc::RpcClient::from_endpoint(endpoint.clone()),
+            rpc: crate::rpc::RpcClient::from_endpoint(endpoint.control_socket()),
             endpoint,
             initial_identity: None,
             initial: None,

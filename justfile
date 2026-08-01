@@ -105,7 +105,7 @@ check scope='': (_install-wasi-sdk "check" scope)
     }
 
     test_host() {
-      OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run --profile ci --workspace \
+      cargo nextest run --profile ci --workspace \
         --exclude 'omnifs-provider-*' \
         --exclude test-provider
     }
@@ -157,13 +157,22 @@ validate scope='providers':
 test scope='host':
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ "{{ scope }}" != host ]]; then
-      printf 'unknown test scope: %s (expected host)\n' "{{ scope }}" >&2
-      exit 1
-    fi
-    OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run --profile ci --workspace \
-      --exclude 'omnifs-provider-*' \
-      --exclude test-provider
+    case "{{ scope }}" in
+      fast)
+        cargo nextest run --profile fast --workspace \
+          --exclude 'omnifs-provider-*' \
+          --exclude test-provider
+        ;;
+      host)
+        cargo nextest run --profile ci --workspace \
+          --exclude 'omnifs-provider-*' \
+          --exclude test-provider
+        ;;
+      *)
+        printf 'unknown test scope: %s (expected fast or host)\n' "{{ scope }}" >&2
+        exit 1
+        ;;
+    esac
 
 import 'just/dev.just'
 mod npm 'just/npm.just'

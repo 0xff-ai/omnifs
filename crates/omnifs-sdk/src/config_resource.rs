@@ -6,8 +6,9 @@
 //! manifest records it as a string field with an omnifs host-resource binding
 //! that the host resolves at mount-start.
 
-use std::ops::Deref;
 use std::path::Path;
+
+use derive_more::{AsRef, Deref, Display};
 
 /// Compile-time JSON bytes for a provider config's field dialect.
 ///
@@ -25,7 +26,9 @@ pub trait ConfigMetadataBytes {
 /// preopened WASI directory. The manifest records this as a string field with a
 /// host-file binding; the host preopens the file's parent directory at the same
 /// path at mount-start, so the provider opens the value unchanged.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[derive(AsRef, Clone, Debug, Deref, Display, PartialEq, Eq, serde::Deserialize)]
+#[as_ref(str)]
+#[deref(forward)]
 #[serde(transparent)]
 pub struct HostFile(pub String);
 
@@ -33,7 +36,9 @@ pub struct HostFile(pub String);
 /// provider callouts over. The manifest records this as a string field with a
 /// host-socket binding; the host resolves it into the callout allowlist at
 /// mount-start.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[derive(AsRef, Clone, Debug, Deref, Display, PartialEq, Eq, serde::Deserialize)]
+#[as_ref(str)]
+#[deref(forward)]
 #[serde(transparent)]
 pub struct HostSocket(pub String);
 
@@ -50,25 +55,9 @@ macro_rules! host_resource_field {
                 value.0
             }
         }
-        impl Deref for $ty {
-            type Target = str;
-            fn deref(&self) -> &str {
-                &self.0
-            }
-        }
-        impl AsRef<str> for $ty {
-            fn as_ref(&self) -> &str {
-                &self.0
-            }
-        }
         impl AsRef<Path> for $ty {
             fn as_ref(&self) -> &Path {
                 Path::new(&self.0)
-            }
-        }
-        impl std::fmt::Display for $ty {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(&self.0)
             }
         }
     };

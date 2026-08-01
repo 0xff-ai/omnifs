@@ -1536,7 +1536,7 @@ mod tests {
                 &host,
                 vec![MountBuildInput {
                     config: RuntimeMountConfig {
-                        name: omnifs_core::MountName::new("test").unwrap(),
+                        name: omnifs_core::ResourceName::new("test").unwrap(),
                         provider: artifact.reference(),
                         config: serde_json::json!({}),
                         max_fetch_blob_bytes: None,

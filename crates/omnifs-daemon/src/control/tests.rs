@@ -3,8 +3,11 @@
 use super::*;
 use crate::daemon::DaemonParts;
 use hyper_util::rt::TokioIo;
-use omnifs_api::{CredentialStatusKind, ProviderImportDisposition};
-use std::time::Duration;
+use omnifs_api::{
+    FilesystemDefinition, NormalizedResourceSet, ProviderImportDisposition, ResourceDefinition,
+};
+use omnifs_core::{FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName};
+use omnifs_state::{FilesystemObservation, FilesystemPhase, ResourceApplyRequest};
 use tokio_stream::StreamExt as _;
 use tonic::transport::Endpoint;
 use tower::service_fn;
@@ -82,28 +85,6 @@ fn append_uleb(output: &mut Vec<u8>, mut value: usize) {
     }
 }
 
-fn begin_request(id: omnifs_core::MutationId) -> wire::BeginMutationRequest {
-    wire::BeginMutationRequest {
-        mutation_id: id.as_bytes().to_vec().into(),
-    }
-}
-
-fn apply_request(
-    id: omnifs_core::MutationId,
-    ops: &[omnifs_api::MutationOp],
-) -> wire::ApplyMutationRequest {
-    wire::ApplyMutationRequest {
-        mutation_id: id.as_bytes().to_vec().into(),
-        ops: ops.iter().map(grpc::to_mutation_op).collect(),
-    }
-}
-
-fn drop_request(id: omnifs_core::MutationId) -> wire::DropMutationRequest {
-    wire::DropMutationRequest {
-        mutation_id: id.as_bytes().to_vec().into(),
-    }
-}
-
 /// Decode the structured error code an aborted/failed-precondition status
 /// carries in its details, so tests assert on the domain code rather than
 /// just the transport-level `tonic::Code`.
@@ -135,15 +116,6 @@ async fn import_test_provider(c: &mut Client, bytes: Vec<u8>) -> omnifs_core::Pr
     import_provider_bytes(c, bytes).await.provider.id
 }
 
-#[test]
-fn manager_recovery_required_maps_to_recovery_required() {
-    let error = crate::manager::ManagerError::RecoveryRequired("blocked".to_owned());
-    assert_eq!(
-        super::manager_error(&error).code,
-        ControlErrorCode::RecoveryRequired
-    );
-}
-
 struct TestRuntime {
     daemon: Arc<super::Daemon>,
     control: Arc<super::ControlServer>,
@@ -161,40 +133,22 @@ impl TestRuntime {
 }
 
 async fn test_daemon(dir: &tempfile::TempDir) -> TestRuntime {
-    test_daemon_with_limits(
-        dir,
-        CONTROL_CONNECTION_LIMIT,
-        CONTROL_PREFACE_TIMEOUT,
-        Duration::from_secs(30),
-    )
-    .await
-}
-
-/// A daemon whose mutation lease is short enough that lease-expiry tests can
-/// wait it out with a real (short) sleep instead of a real 30-second one.
-async fn test_daemon_with_lease(dir: &tempfile::TempDir, lease: Duration) -> TestRuntime {
-    test_daemon_with_limits(
-        dir,
-        CONTROL_CONNECTION_LIMIT,
-        CONTROL_PREFACE_TIMEOUT,
-        lease,
-    )
-    .await
+    test_daemon_with_limits(dir, CONTROL_CONNECTION_LIMIT, CONTROL_PREFACE_TIMEOUT).await
 }
 
 async fn test_daemon_with_limits(
     dir: &tempfile::TempDir,
     connection_limit: usize,
     preface_timeout: std::time::Duration,
-    lease: Duration,
 ) -> TestRuntime {
-    let _ = dir;
-    let context = Arc::new(crate::context::DaemonContext::resolve().unwrap());
+    let profile = omnifs_bootstrap::Profile::under_root(dir.path());
+    let state_paths = omnifs_state::DaemonStatePaths::new(profile.root().join("daemon-state"));
+    let context = Arc::new(crate::context::DaemonContext::new(profile, state_paths).unwrap());
     context.prepare_startup_dirs().unwrap();
     let listener = context.bind_control_socket().unwrap();
     let state = Arc::new(
         omnifs_state::StateStore::open(
-            context.endpoint(),
+            context.state_paths().clone(),
             omnifs_state::StateStoreOptions::default(),
         )
         .await
@@ -204,12 +158,12 @@ async fn test_daemon_with_limits(
     let host = Arc::new(
         omnifs_engine::HostOnline::open_runtime(omnifs_engine::HostRuntimeOpen {
             projection: paths.projection_cache().to_path_buf(),
-            wasmtime: paths.wasmtime_cache().to_path_buf(),
             clones: paths.clone_cache().to_path_buf(),
+            engine: omnifs_engine::ComponentEngine::new(paths.wasmtime_cache()).unwrap(),
         })
         .unwrap(),
     );
-    let draft = crate::generation_builder::GenerationDraft::load(&state)
+    let draft = crate::generation_builder::GenerationDraft::load_resources(&state)
         .await
         .unwrap();
     let parts = draft.prepare(&state, &host).await.unwrap().into_parts();
@@ -217,12 +171,10 @@ async fn test_daemon_with_limits(
         omnifs_engine::ServingCell::new(context.namespace_epoch().daemon_instance(), parts.ready);
     parts.pending_refreshes.activate(&state).await.unwrap();
     state.mark_serving(parts.revision).await.unwrap();
-    let manager = crate::manager::MutationManager::spawn_with_lease(
-        Arc::clone(&state),
-        host,
-        Arc::clone(&serving),
-        lease,
-    );
+    let resources =
+        crate::resource_control::ResourceControl::new(Arc::clone(&state), context.instance_id())
+            .await
+            .unwrap();
     let (shutdown, _) = tokio::sync::watch::channel(false);
     let embedded = Arc::new(super::EmbeddedProviders::default());
     let daemon = Arc::new(super::Daemon::new(DaemonParts {
@@ -230,7 +182,7 @@ async fn test_daemon_with_limits(
         embedded: Arc::clone(&embedded),
         state,
         serving,
-        manager,
+        resources,
         inspector: None,
         shutdown_tx: shutdown.clone(),
     }));
@@ -251,6 +203,108 @@ async fn test_daemon_with_limits(
     }
 }
 
+fn doctor_filesystem_spec(name: &str) -> FilesystemSpec {
+    let protocol = if cfg!(target_os = "linux") {
+        FilesystemProtocol::Fuse
+    } else {
+        FilesystemProtocol::Nfs
+    };
+    FilesystemSpec::new(
+        protocol,
+        FilesystemRuntime::Host,
+        format!("/tmp/omnifs-control-doctor-{name}").into(),
+        None,
+        None,
+    )
+    .unwrap()
+}
+
+fn doctor_filesystem_set(names: &[&str]) -> NormalizedResourceSet {
+    NormalizedResourceSet::new(
+        names
+            .iter()
+            .map(|&name| {
+                ResourceDefinition::Filesystem(FilesystemDefinition {
+                    name: ResourceName::new(name).unwrap(),
+                    spec: doctor_filesystem_spec(name),
+                })
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+async fn apply_doctor_filesystems(runtime: &TestRuntime, names: &[&str], mutation: u8) {
+    let desired = doctor_filesystem_set(names);
+    let snapshot = runtime.daemon.state.resource_snapshot().await.unwrap();
+    runtime
+        .daemon
+        .state
+        .apply_resources(ResourceApplyRequest {
+            mutation_id: omnifs_core::MutationId::from_bytes([mutation; 16]),
+            base_revision: snapshot.revision,
+            expected_desired_digest: desired.digest(),
+            desired,
+            credential_secrets: Vec::new(),
+        })
+        .await
+        .unwrap();
+}
+
+async fn mark_doctor_filesystem_starting(runtime: &TestRuntime, name: &str) {
+    let name = ResourceName::new(name).unwrap();
+    let instance = runtime
+        .daemon
+        .state
+        .filesystem_instance(&name)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut observation = FilesystemObservation::from_instance(&instance);
+    observation.phase = FilesystemPhase::Starting;
+    runtime
+        .daemon
+        .state
+        .write_filesystem_observation(observation)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+fn seed_doctor_host_record(runtime: &TestRuntime, name: &str) -> omnifs_mtab::RunnerRecord {
+    let filesystem = ResourceName::new(name).unwrap();
+    let state_dir = runtime
+        .daemon
+        .context
+        .state_paths()
+        .filesystem_runtime(&filesystem);
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let record = omnifs_mtab::RunnerRecord {
+        version: omnifs_mtab::RunnerRecord::VERSION,
+        instance_id: "0123456789abcdef0123456789abcdef".to_owned(),
+        pid: 42,
+        process_group: 42,
+        filesystem,
+        spec: doctor_filesystem_spec(name),
+        control_socket: state_dir.join("missing-control.sock"),
+    };
+    std::fs::write(
+        state_dir.join("runner.json"),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    record
+}
+
+fn seeded_doctor_host_record_path(runtime: &TestRuntime, name: &str) -> std::path::PathBuf {
+    runtime
+        .daemon
+        .context
+        .state_paths()
+        .filesystem_runtime(&ResourceName::new(name).unwrap())
+        .join("runner.json")
+}
+
 #[tokio::test]
 #[allow(unsafe_code)]
 async fn tonic_reports_starting_state_and_invalid_requests() {
@@ -260,7 +314,9 @@ async fn tonic_reports_starting_state_and_invalid_requests() {
     unsafe {
         std::env::set_var("OMNIFS_HOME", &home);
     }
-    let context = Arc::new(crate::context::DaemonContext::resolve().unwrap());
+    let profile = omnifs_bootstrap::Profile::resolve().unwrap();
+    let state_paths = omnifs_state::DaemonStatePaths::new(profile.root().join("daemon-state"));
+    let context = Arc::new(crate::context::DaemonContext::new(profile, state_paths).unwrap());
     context.prepare_startup_dirs().unwrap();
     let listener = context.bind_control_socket().unwrap();
     let (shutdown, _) = tokio::sync::watch::channel(false);
@@ -284,6 +340,31 @@ async fn tonic_reports_starting_state_and_invalid_requests() {
     );
     let status = c.ready(wire::Empty {}).await.unwrap_err();
     assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    let resources = c.get_resources(wire::Empty {}).await.unwrap_err();
+    assert_eq!(error_code(&resources), ControlErrorCode::NotReady);
+    let doctor = c.run_doctor(wire::Empty {}).await.unwrap_err();
+    assert_eq!(error_code(&doctor), ControlErrorCode::NotReady);
+    let repairs = c
+        .apply_doctor_repairs(wire::ApplyDoctorRepairsRequest { ids: Vec::new() })
+        .await
+        .unwrap_err();
+    assert_eq!(error_code(&repairs), ControlErrorCode::NotReady);
+    control.set_recovery(DaemonRecovery {
+        phase: DaemonPhase::RecoveryRequired,
+        durable_revision: None,
+        serving_revision: None,
+        store_health: HealthReport::new(HealthState::Unhealthy, "test recovery"),
+        repair: None,
+    });
+    let resources = c.get_resources(wire::Empty {}).await.unwrap_err();
+    assert_eq!(error_code(&resources), ControlErrorCode::RecoveryRequired);
+    let doctor = c.run_doctor(wire::Empty {}).await.unwrap_err();
+    assert_eq!(error_code(&doctor), ControlErrorCode::RecoveryRequired);
+    let repairs = c
+        .apply_doctor_repairs(wire::ApplyDoctorRepairsRequest { ids: Vec::new() })
+        .await
+        .unwrap_err();
+    assert_eq!(error_code(&repairs), ControlErrorCode::RecoveryRequired);
     let invalid = c
         .repair_state(wire::RepairStateRequest::default())
         .await
@@ -295,6 +376,216 @@ async fn tonic_reports_starting_state_and_invalid_requests() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[allow(unsafe_code)]
+async fn tonic_doctor_round_trips_on_ready_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::ENV_LOCK.lock().await;
+    let home = std::fs::canonicalize(dir.path()).unwrap();
+    unsafe {
+        std::env::set_var("OMNIFS_HOME", &home);
+    }
+    let runtime = test_daemon(&dir).await;
+    let mut c = client(&home.join("control.sock")).await;
+    let response = c.run_doctor(wire::Empty {}).await.unwrap().into_inner();
+    let report = grpc::run_doctor_response(&response).unwrap();
+    assert!(!report.findings.is_empty());
+    assert!(report.remediations.is_empty());
+
+    let response = c
+        .apply_doctor_repairs(wire::ApplyDoctorRepairsRequest { ids: Vec::new() })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        grpc::apply_doctor_repairs_response(&response)
+            .unwrap()
+            .is_empty()
+    );
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(unsafe_code)]
+async fn tonic_doctor_does_not_offer_repairs_for_owned_filesystem_states() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::ENV_LOCK.lock().await;
+    let home = std::fs::canonicalize(dir.path()).unwrap();
+    unsafe {
+        std::env::set_var("OMNIFS_HOME", &home);
+    }
+    let runtime = test_daemon(&dir).await;
+    let names = ["owned-desired", "owned-starting", "owned-deleting"];
+    for name in names {
+        seed_doctor_host_record(&runtime, name);
+    }
+    apply_doctor_filesystems(&runtime, &names, 0x71).await;
+    mark_doctor_filesystem_starting(&runtime, "owned-starting").await;
+    apply_doctor_filesystems(&runtime, &["owned-desired", "owned-starting"], 0x72).await;
+
+    assert_eq!(
+        runtime
+            .daemon
+            .state
+            .filesystem_instance(&ResourceName::new("owned-desired").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .phase,
+        FilesystemPhase::Pending
+    );
+    assert_eq!(
+        runtime
+            .daemon
+            .state
+            .filesystem_instance(&ResourceName::new("owned-starting").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .phase,
+        FilesystemPhase::Starting
+    );
+    assert_eq!(
+        runtime
+            .daemon
+            .state
+            .filesystem_instance(&ResourceName::new("owned-deleting").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .phase,
+        FilesystemPhase::Deleting
+    );
+
+    let mut client = client(&home.join("control.sock")).await;
+    let response = client
+        .run_doctor(wire::Empty {})
+        .await
+        .unwrap()
+        .into_inner();
+    let report = grpc::run_doctor_response(&response).unwrap();
+    assert!(report.remediations.is_empty());
+    for name in names {
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| {
+                finding
+                    .target
+                    .as_deref()
+                    .is_some_and(|target| target.contains(name))
+            })
+            .unwrap_or_else(|| panic!("missing doctor finding for {name}"));
+        assert_eq!(finding.fix, None);
+        assert_eq!(finding.remediation_id, None);
+    }
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(unsafe_code)]
+async fn tonic_apply_doctor_repairs_rechecks_desired_and_observed_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::ENV_LOCK.lock().await;
+    let home = std::fs::canonicalize(dir.path()).unwrap();
+    unsafe {
+        std::env::set_var("OMNIFS_HOME", &home);
+    }
+    let runtime = test_daemon(&dir).await;
+    let desired_record = seed_doctor_host_record(&runtime, "race-desired");
+    let observed_record = seed_doctor_host_record(&runtime, "race-observed");
+
+    let mut client = client(&home.join("control.sock")).await;
+    let response = client
+        .run_doctor(wire::Empty {})
+        .await
+        .unwrap()
+        .into_inner();
+    let report = grpc::run_doctor_response(&response).unwrap();
+    let desired_offer = report
+        .remediations
+        .iter()
+        .find(|offer| offer.command_line.contains("race-desired"))
+        .cloned()
+        .expect("doctor did not offer cleanup for race-desired");
+    let observed_offer = report
+        .remediations
+        .iter()
+        .find(|offer| offer.command_line.contains("race-observed"))
+        .cloned()
+        .expect("doctor did not offer cleanup for race-observed");
+    assert_eq!(report.remediations.len(), 2);
+
+    apply_doctor_filesystems(&runtime, &["race-desired"], 0x81).await;
+    apply_doctor_filesystems(&runtime, &["race-desired", "race-observed"], 0x82).await;
+    apply_doctor_filesystems(&runtime, &["race-desired"], 0x83).await;
+    assert_eq!(
+        runtime
+            .daemon
+            .state
+            .filesystem_instance(&ResourceName::new("race-observed").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .phase,
+        FilesystemPhase::Deleting
+    );
+
+    let response = client
+        .apply_doctor_repairs(wire::ApplyDoctorRepairsRequest {
+            ids: vec![desired_offer.id.clone(), observed_offer.id.clone()],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let outcomes = grpc::apply_doctor_repairs_response(&response).unwrap();
+    assert_eq!(outcomes.len(), 2);
+    let desired_outcome = outcomes
+        .iter()
+        .find(|outcome| outcome.id == desired_offer.id)
+        .unwrap();
+    assert_eq!(
+        desired_outcome.state,
+        omnifs_api::DoctorRepairState::Skipped
+    );
+    assert_eq!(
+        desired_outcome.error.as_deref(),
+        Some("filesystem became desired since diagnosis")
+    );
+    let observed_outcome = outcomes
+        .iter()
+        .find(|outcome| outcome.id == observed_offer.id)
+        .unwrap();
+    assert_eq!(
+        observed_outcome.state,
+        omnifs_api::DoctorRepairState::Skipped
+    );
+    assert_eq!(
+        observed_outcome.error.as_deref(),
+        Some("filesystem became observed since diagnosis")
+    );
+
+    assert_eq!(
+        omnifs_mtab::RunnerRecord::read(
+            seeded_doctor_host_record_path(&runtime, "race-desired")
+                .parent()
+                .unwrap()
+        )
+        .unwrap(),
+        Some(desired_record)
+    );
+    assert_eq!(
+        omnifs_mtab::RunnerRecord::read(
+            seeded_doctor_host_record_path(&runtime, "race-observed")
+                .parent()
+                .unwrap()
+        )
+        .unwrap(),
+        Some(observed_record)
+    );
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(unsafe_code)]
 async fn idle_control_peer_releases_connection_capacity_after_preface_deadline() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = crate::ENV_LOCK.lock().await;
@@ -302,13 +593,7 @@ async fn idle_control_peer_releases_connection_capacity_after_preface_deadline()
     unsafe {
         std::env::set_var("OMNIFS_HOME", &home);
     }
-    let runtime = test_daemon_with_limits(
-        &dir,
-        1,
-        std::time::Duration::from_secs(2),
-        Duration::from_secs(30),
-    )
-    .await;
+    let runtime = test_daemon_with_limits(&dir, 1, std::time::Duration::from_secs(2)).await;
     let idle = tokio::net::UnixStream::connect(home.join("control.sock"))
         .await
         .unwrap();
@@ -355,13 +640,7 @@ async fn established_tonic_channel_remains_usable_after_preface_deadline() {
     unsafe {
         std::env::set_var("OMNIFS_HOME", &home);
     }
-    let runtime = test_daemon_with_limits(
-        &dir,
-        1,
-        std::time::Duration::from_millis(20),
-        Duration::from_secs(30),
-    )
-    .await;
+    let runtime = test_daemon_with_limits(&dir, 1, std::time::Duration::from_millis(20)).await;
     let mut c = client(&home.join("control.sock")).await;
     c.get_status(wire::Empty {}).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -463,102 +742,6 @@ async fn tonic_followed_log_stream_ends_cleanly_when_daemon_stops() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[allow(unsafe_code)]
-async fn tonic_lists_and_deletes_credentials_without_returning_material() {
-    let dir = tempfile::tempdir().unwrap();
-    let _guard = crate::ENV_LOCK.lock().await;
-    let home = std::fs::canonicalize(dir.path()).unwrap();
-    unsafe {
-        std::env::set_var("OMNIFS_HOME", &home);
-    }
-    let runtime = test_daemon(&dir).await;
-    let mut c = client(&home.join("control.sock")).await;
-    let provider = import_test_provider(&mut c, provider_wasm()).await;
-    let key = omnifs_api::CredentialKey {
-        provider_name: "demo".to_owned(),
-        scheme: "pat".to_owned(),
-        account_label: "work".to_owned(),
-    };
-    let submission = omnifs_api::CredentialSubmission {
-        provider,
-        scheme: key.scheme.clone(),
-        account_label: key.account_label.clone(),
-        material: omnifs_api::CredentialMaterial::StaticToken {
-            token: omnifs_api::SecretBytes::new(b"never-return-this".to_vec()),
-        },
-        overrides: omnifs_api::CredentialClientOverrides {
-            client_id: None,
-            client_secret: None,
-            redirect_uri: None,
-            scopes: None,
-        },
-    };
-
-    let submit_id = omnifs_core::MutationId::from_bytes([9; 16]);
-    c.begin_mutation(begin_request(submit_id)).await.unwrap();
-    let response = c
-        .apply_mutation(apply_request(
-            submit_id,
-            &[omnifs_api::MutationOp::SubmitCredential(submission)],
-        ))
-        .await
-        .unwrap()
-        .into_inner();
-    let submitted = match grpc::mutation_op_result(&response.results[0]).unwrap() {
-        omnifs_api::MutationOpResult::Credential(status) => status,
-        other @ omnifs_api::MutationOpResult::Mount(_) => {
-            panic!("expected a credential result, got {other:?}")
-        },
-    };
-    assert_eq!(submitted.last_mutation_id, submit_id);
-
-    let recovery = c
-        .get_recovery_state(wire::Empty {})
-        .await
-        .unwrap()
-        .into_inner()
-        .recovery
-        .unwrap();
-    assert_eq!(
-        grpc::daemon_recovery(&recovery).unwrap().phase,
-        DaemonPhase::Ready,
-        "an unreferenced credential still activates a (no-op) serving generation"
-    );
-
-    let listed = c
-        .list_credentials(wire::Empty {})
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(listed.credentials.len(), 1);
-    assert_eq!(
-        grpc::credential_status(&listed.credentials[0]).unwrap(),
-        submitted
-    );
-    assert!(!format!("{listed:?}").contains("never-return-this"));
-
-    let delete_id = omnifs_core::MutationId::from_bytes([10; 16]);
-    c.begin_mutation(begin_request(delete_id)).await.unwrap();
-    let response = c
-        .apply_mutation(apply_request(
-            delete_id,
-            &[omnifs_api::MutationOp::DeleteCredential(key)],
-        ))
-        .await
-        .unwrap()
-        .into_inner();
-    let deleted = match grpc::mutation_op_result(&response.results[0]).unwrap() {
-        omnifs_api::MutationOpResult::Credential(status) => status,
-        other @ omnifs_api::MutationOpResult::Mount(_) => {
-            panic!("expected a credential result, got {other:?}")
-        },
-    };
-    assert_eq!(deleted.status, CredentialStatusKind::Deleted);
-    assert_eq!(deleted.last_mutation_id, delete_id);
-    runtime.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(unsafe_code)]
 async fn tonic_inventory_and_status_use_generated_messages() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = crate::ENV_LOCK.lock().await;
@@ -585,7 +768,7 @@ async fn tonic_inventory_and_status_use_generated_messages() {
     assert_eq!(inventory.durable_revision, inventory.serving_revision);
     assert!(inventory.mounts.is_empty());
     assert!(inventory.credentials.is_empty());
-    assert!(inventory.attachments.is_empty());
+    assert!(inventory.filesystems.is_empty());
     let status = c
         .get_status(wire::Empty {})
         .await
@@ -595,157 +778,13 @@ async fn tonic_inventory_and_status_use_generated_messages() {
         .unwrap();
     let status = grpc::daemon_status(&status).unwrap();
     assert!(status.mounts.is_empty());
-    assert!(status.active_mutation.is_none());
     runtime.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[allow(unsafe_code)]
-async fn begin_while_held_rejects_with_mutation_in_progress() {
-    let dir = tempfile::tempdir().unwrap();
-    let _guard = crate::ENV_LOCK.lock().await;
-    let home = std::fs::canonicalize(dir.path()).unwrap();
-    unsafe {
-        std::env::set_var("OMNIFS_HOME", &home);
-    }
-    let runtime = test_daemon(&dir).await;
-    let mut c = client(&home.join("control.sock")).await;
-    let first = omnifs_core::MutationId::from_bytes([1; 16]);
-    let second = omnifs_core::MutationId::from_bytes([2; 16]);
-    c.begin_mutation(begin_request(first)).await.unwrap();
-    let error = c.begin_mutation(begin_request(second)).await.unwrap_err();
-    assert_eq!(error.code(), tonic::Code::Aborted);
-    assert_eq!(
-        error_code(&error),
-        omnifs_api::ControlErrorCode::MutationInProgress
-    );
-    runtime.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(unsafe_code)]
-async fn expired_lease_is_stolen_by_next_begin() {
-    let dir = tempfile::tempdir().unwrap();
-    let _guard = crate::ENV_LOCK.lock().await;
-    let home = std::fs::canonicalize(dir.path()).unwrap();
-    unsafe {
-        std::env::set_var("OMNIFS_HOME", &home);
-    }
-    let runtime = test_daemon_with_lease(&dir, Duration::from_millis(30)).await;
-    let mut c = client(&home.join("control.sock")).await;
-    let first = omnifs_core::MutationId::from_bytes([1; 16]);
-    c.begin_mutation(begin_request(first)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    let second = omnifs_core::MutationId::from_bytes([2; 16]);
-    c.begin_mutation(begin_request(second)).await.unwrap();
-    runtime.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(unsafe_code)]
-async fn apply_after_lease_expiry_rejects_with_lease_expired() {
-    let dir = tempfile::tempdir().unwrap();
-    let _guard = crate::ENV_LOCK.lock().await;
-    let home = std::fs::canonicalize(dir.path()).unwrap();
-    unsafe {
-        std::env::set_var("OMNIFS_HOME", &home);
-    }
-    let runtime = test_daemon_with_lease(&dir, Duration::from_millis(30)).await;
-    let mut c = client(&home.join("control.sock")).await;
-    let id = omnifs_core::MutationId::from_bytes([1; 16]);
-    c.begin_mutation(begin_request(id)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    let error = c.apply_mutation(apply_request(id, &[])).await.unwrap_err();
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-    assert_eq!(
-        error_code(&error),
-        omnifs_api::ControlErrorCode::LeaseExpired
-    );
-    runtime.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(unsafe_code)]
-async fn apply_without_begin_rejects_with_lease_not_held() {
-    let dir = tempfile::tempdir().unwrap();
-    let _guard = crate::ENV_LOCK.lock().await;
-    let home = std::fs::canonicalize(dir.path()).unwrap();
-    unsafe {
-        std::env::set_var("OMNIFS_HOME", &home);
-    }
-    let runtime = test_daemon(&dir).await;
-    let mut c = client(&home.join("control.sock")).await;
-    let id = omnifs_core::MutationId::from_bytes([1; 16]);
-    let error = c.apply_mutation(apply_request(id, &[])).await.unwrap_err();
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-    assert_eq!(
-        error_code(&error),
-        omnifs_api::ControlErrorCode::LeaseNotHeld
-    );
-    runtime.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(unsafe_code)]
-async fn drop_mutation_is_idempotent() {
-    let dir = tempfile::tempdir().unwrap();
-    let _guard = crate::ENV_LOCK.lock().await;
-    let home = std::fs::canonicalize(dir.path()).unwrap();
-    unsafe {
-        std::env::set_var("OMNIFS_HOME", &home);
-    }
-    let runtime = test_daemon(&dir).await;
-    let mut c = client(&home.join("control.sock")).await;
-    let id = omnifs_core::MutationId::from_bytes([1; 16]);
-    // Dropping a mutation that never began succeeds vacuously.
-    c.drop_mutation(drop_request(id)).await.unwrap();
-    c.begin_mutation(begin_request(id)).await.unwrap();
-    c.drop_mutation(drop_request(id)).await.unwrap();
-    c.drop_mutation(drop_request(id)).await.unwrap();
-    // The slot is free again: another id can begin immediately.
-    let other = omnifs_core::MutationId::from_bytes([2; 16]);
-    c.begin_mutation(begin_request(other)).await.unwrap();
-    runtime.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(unsafe_code)]
-async fn status_shows_active_mutation_while_held() {
-    let dir = tempfile::tempdir().unwrap();
-    let _guard = crate::ENV_LOCK.lock().await;
-    let home = std::fs::canonicalize(dir.path()).unwrap();
-    unsafe {
-        std::env::set_var("OMNIFS_HOME", &home);
-    }
-    let runtime = test_daemon(&dir).await;
-    let mut c = client(&home.join("control.sock")).await;
-    let id = omnifs_core::MutationId::from_bytes([1; 16]);
-    c.begin_mutation(begin_request(id)).await.unwrap();
-    let status = c
-        .get_status(wire::Empty {})
-        .await
-        .unwrap()
-        .into_inner()
-        .status
-        .unwrap();
-    let status = grpc::daemon_status(&status).unwrap();
-    assert_eq!(status.active_mutation.unwrap().mutation_id, id);
-    c.drop_mutation(drop_request(id)).await.unwrap();
-    let status = c
-        .get_status(wire::Empty {})
-        .await
-        .unwrap()
-        .into_inner()
-        .status
-        .unwrap();
-    let status = grpc::daemon_status(&status).unwrap();
-    assert!(status.active_mutation.is_none());
-    runtime.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[allow(unsafe_code)]
-async fn two_op_batch_applies_atomically_and_reports_the_batch_id() {
+#[allow(clippy::too_many_lines)]
+async fn typed_resources_apply_fast_and_progress_recovers_after_disconnect() {
     let dir = tempfile::tempdir().unwrap();
     let _guard = crate::ENV_LOCK.lock().await;
     let home = std::fs::canonicalize(dir.path()).unwrap();
@@ -755,13 +794,89 @@ async fn two_op_batch_applies_atomically_and_reports_the_batch_id() {
     let runtime = test_daemon(&dir).await;
     let mut c = client(&home.join("control.sock")).await;
     let provider = import_test_provider(&mut c, provider_wasm()).await;
+    let provider_name = omnifs_core::ResourceName::new("demo").unwrap();
+    let credential_name = omnifs_core::ResourceName::new("alice").unwrap();
+    let declarations = omnifs_api::ResourceDeclarations {
+        api_version: omnifs_api::API_VERSION.to_owned(),
+        resources: vec![
+            omnifs_api::ResourceDefinition::Provider(omnifs_api::ProviderDefinition {
+                name: provider_name.clone(),
+                artifact: provider,
+            }),
+            omnifs_api::ResourceDefinition::Credential(omnifs_api::CredentialDefinition {
+                name: credential_name.clone(),
+                provider: provider_name.clone(),
+                scheme: "pat".to_owned(),
+                account: "alice".to_owned(),
+            }),
+            omnifs_api::ResourceDefinition::Mount(omnifs_api::MountResourceDefinition {
+                name: omnifs_core::ResourceName::new("demo-mount").unwrap(),
+                provider: provider_name,
+                credential: Some(credential_name.clone()),
+                config: serde_json::json!({}),
+                limits: None,
+            }),
+        ],
+    };
+    let plan_wire = c
+        .plan_resources(grpc::to_plan_resources_request(&declarations))
+        .await
+        .unwrap()
+        .into_inner();
+    let plan = grpc::plan_resources_response(&plan_wire).unwrap();
+    assert_eq!(plan.base_revision, omnifs_core::ResourceRevision::new(0));
+    assert_eq!(plan.changes.len(), 3);
 
-    let submission = omnifs_api::CredentialSubmission {
-        provider,
-        scheme: "pat".to_owned(),
-        account_label: "work".to_owned(),
+    let secret = b"service-boundary-secret";
+    let mutation_id = omnifs_core::MutationId::from_bytes([0x51; 16]);
+    let request = omnifs_api::ApplyResourcesRequest {
+        mutation_id,
+        base_revision: plan.base_revision,
+        expected_desired_digest: plan.desired_digest,
+        declarations: declarations.clone(),
+        credential_material: vec![omnifs_api::CredentialMaterialSidecar {
+            credential: credential_name.clone(),
+            material: omnifs_api::CredentialMaterial::StaticToken {
+                token: omnifs_api::SecretBytes::new(secret.to_vec()),
+            },
+            overrides: omnifs_api::CredentialClientOverrides {
+                client_id: None,
+                client_secret: None,
+                redirect_uri: None,
+                scopes: None,
+            },
+        }],
+    };
+    let response = c
+        .apply_resources(grpc::to_apply_resources_request(&request))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        !response
+            .encode_to_vec()
+            .windows(secret.len())
+            .any(|part| part == secret),
+        "apply response must not contain credential material"
+    );
+    let receipt = grpc::apply_resources_response(&response).unwrap();
+    assert!(receipt.changed);
+    assert_eq!(receipt.revision, plan.base_revision.next().unwrap());
+
+    let retry = c
+        .apply_resources(grpc::to_apply_resources_request(&request))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(grpc::apply_resources_response(&retry).unwrap(), receipt);
+
+    let action_id = omnifs_core::ActionId::from_bytes([0x61; 16]);
+    let set_request = |token: &[u8]| omnifs_api::SetCredentialMaterialRequest {
+        action_id,
+        base_action_generation: 0,
+        credential: credential_name.clone(),
         material: omnifs_api::CredentialMaterial::StaticToken {
-            token: omnifs_api::SecretBytes::new(b"batched-secret".to_vec()),
+            token: omnifs_api::SecretBytes::new(token.to_vec()),
         },
         overrides: omnifs_api::CredentialClientOverrides {
             client_id: None,
@@ -770,104 +885,118 @@ async fn two_op_batch_applies_atomically_and_reports_the_batch_id() {
             scopes: None,
         },
     };
-    let definition = omnifs_api::MountDefinition {
-        name: omnifs_core::MountName::new("demo").unwrap(),
-        provider,
-        auth: Some(omnifs_api::MountCredential {
-            scheme: "pat".to_owned(),
-            account_label: "work".to_owned(),
-        }),
-        limits: None,
-        config: b"{}".to_vec(),
-    };
+    let action_response = c
+        .set_credential_material(grpc::to_set_credential_material_request(&set_request(
+            b"first-action-secret",
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(
+        !action_response
+            .encode_to_vec()
+            .windows(b"first-action-secret".len())
+            .any(|part| part == b"first-action-secret")
+    );
+    let action = grpc::set_credential_material_response(&action_response)
+        .unwrap()
+        .action;
+    assert_eq!(action.action_id, action_id);
+    let action_retry = c
+        .set_credential_material(grpc::to_set_credential_material_request(&set_request(
+            b"different-secret-is-ignored",
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        grpc::set_credential_material_response(&action_retry)
+            .unwrap()
+            .action,
+        action
+    );
 
-    let id = omnifs_core::MutationId::from_bytes([42; 16]);
-    c.begin_mutation(begin_request(id)).await.unwrap();
-    let response = c
-        .apply_mutation(apply_request(
-            id,
-            &[
-                omnifs_api::MutationOp::SubmitCredential(submission),
-                omnifs_api::MutationOp::CreateMount(definition),
-            ],
+    let mut first_watch = c
+        .watch_progress(grpc::to_progress_target(
+            omnifs_api::ProgressTarget::DesiredRevision(receipt.revision),
         ))
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(response.results.len(), 2);
-    // The batch's durable commit is unconditional and happens before
-    // generation activation is attempted; this test's provider fixture is a
-    // metadata-only stub, not a real WASM component, so activation itself is
-    // expected to fail here. That is an engine-level concern, not the batch
-    // atomicity and provenance this test exists to check.
+    let initial = first_watch.message().await.unwrap().unwrap();
+    let initial = grpc::progress_event(&initial).unwrap();
+    assert!(matches!(
+        initial.event,
+        omnifs_api::ProgressEventKind::Snapshot(ref snapshot)
+            if snapshot.desired_revision == receipt.revision
+                && snapshot.resources.iter().all(|status| {
+                    status.desired_revision == receipt.revision
+                        && status.phase == omnifs_api::ResourcePhase::Pending
+                })
+    ));
+    drop(first_watch);
 
-    let mounts = c.list_mounts(wire::Empty {}).await.unwrap().into_inner();
-    assert_eq!(mounts.mounts.len(), 1);
+    let resources = c.get_resources(wire::Empty {}).await.unwrap().into_inner();
     assert_eq!(
-        grpc::mount_record(&mounts.mounts[0])
-            .unwrap()
-            .last_mutation_id,
-        id
+        grpc::get_resources_response(&resources).unwrap().revision,
+        receipt.revision
     );
-    let credentials = c
-        .list_credentials(wire::Empty {})
+    let mut resumed = c
+        .watch_progress(grpc::to_progress_target(
+            omnifs_api::ProgressTarget::DesiredRevision(receipt.revision),
+        ))
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(credentials.credentials.len(), 1);
-    assert_eq!(
-        grpc::credential_status(&credentials.credentials[0])
+    assert!(matches!(
+        grpc::progress_event(&resumed.message().await.unwrap().unwrap())
             .unwrap()
-            .last_mutation_id,
-        id
-    );
-    runtime.shutdown().await;
-}
+            .event,
+        omnifs_api::ProgressEventKind::Snapshot(_)
+    ));
+    drop(resumed);
 
-#[tokio::test(flavor = "multi_thread")]
-#[allow(unsafe_code)]
-async fn batch_second_op_failure_leaves_no_first_op_row_behind() {
-    let dir = tempfile::tempdir().unwrap();
-    let _guard = crate::ENV_LOCK.lock().await;
-    let home = std::fs::canonicalize(dir.path()).unwrap();
-    unsafe {
-        std::env::set_var("OMNIFS_HOME", &home);
-    }
-    let runtime = test_daemon(&dir).await;
-    let mut c = client(&home.join("control.sock")).await;
-    let provider = import_test_provider(&mut c, provider_wasm()).await;
-    let definition = omnifs_api::MountDefinition {
-        name: omnifs_core::MountName::new("demo").unwrap(),
-        provider,
-        auth: None,
-        limits: None,
-        config: b"{}".to_vec(),
+    let empty = omnifs_api::ResourceDeclarations {
+        api_version: omnifs_api::API_VERSION.to_owned(),
+        resources: Vec::new(),
     };
-
-    let id = omnifs_core::MutationId::from_bytes([7; 16]);
-    c.begin_mutation(begin_request(id)).await.unwrap();
-    let error = c
-        .apply_mutation(apply_request(
-            id,
-            &[
-                omnifs_api::MutationOp::CreateMount(definition),
-                omnifs_api::MutationOp::RemoveMount {
-                    name: omnifs_core::MountName::new("missing").unwrap(),
-                },
-            ],
+    let empty_digest = empty.clone().normalize().unwrap().digest();
+    let stale = c
+        .apply_resources(grpc::to_apply_resources_request(
+            &omnifs_api::ApplyResourcesRequest {
+                mutation_id: omnifs_core::MutationId::from_bytes([0x52; 16]),
+                base_revision: omnifs_core::ResourceRevision::new(0),
+                expected_desired_digest: empty_digest,
+                declarations: empty,
+                credential_material: Vec::new(),
+            },
         ))
         .await
         .unwrap_err();
-    assert_eq!(error.code(), tonic::Code::NotFound);
+    assert_eq!(error_code(&stale), ControlErrorCode::StaleBaseRevision);
 
-    let mounts = c.list_mounts(wire::Empty {}).await.unwrap().into_inner();
-    assert!(
-        mounts.mounts.is_empty(),
-        "the first op's row must not survive the second op's failure"
+    let unsupported = omnifs_api::ResourceDeclarations {
+        api_version: "omnifs.dev/v999".to_owned(),
+        resources: Vec::new(),
+    };
+    let unsupported = c
+        .plan_resources(grpc::to_plan_resources_request(&unsupported))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error_code(&unsupported),
+        ControlErrorCode::UnsupportedApiVersion
     );
 
-    // The lease released on failure too: a fresh mutation can begin.
-    let next = omnifs_core::MutationId::from_bytes([8; 16]);
-    c.begin_mutation(begin_request(next)).await.unwrap();
+    let unknown_action = c
+        .watch_progress(grpc::to_progress_target(
+            omnifs_api::ProgressTarget::Action(omnifs_core::ActionId::from_bytes([0x99; 16])),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error_code(&unknown_action),
+        ControlErrorCode::ActionUnavailable
+    );
     runtime.shutdown().await;
 }

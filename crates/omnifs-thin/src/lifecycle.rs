@@ -1,5 +1,5 @@
 use crate::host_control::{HostControl, RunnerPhase, StopOutcome, StopRequest};
-use omnifs_core::fs;
+use omnifs_core::{FilesystemProtocol, FilesystemRuntime, FilesystemSpec, ResourceName};
 use omnifs_vfs::{TeardownOutcome, TeardownRequest};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,7 +21,8 @@ pub(crate) struct Lifecycle {
 }
 
 pub(crate) struct LifecycleConfig<'a> {
-    pub(crate) spec: &'a fs::Spec,
+    pub(crate) filesystem: &'a ResourceName,
+    pub(crate) spec: &'a FilesystemSpec,
     pub(crate) state_dir: Option<&'a Path>,
     pub(crate) runner_control: Option<RunnerControlConfig>,
 }
@@ -35,6 +36,7 @@ impl Lifecycle {
     pub(crate) fn prepare(config: LifecycleConfig<'_>) -> anyhow::Result<Self> {
         let LifecycleConfig {
             spec,
+            filesystem,
             state_dir,
             runner_control,
         } = config;
@@ -42,7 +44,7 @@ impl Lifecycle {
         let (wire_teardown_tx, wire_teardown_rx) = mpsc::channel(1);
         let (host_stop_tx, host_stop_rx) = mpsc::channel(1);
         let host_control = match spec.runtime() {
-            fs::Runtime::Host => {
+            FilesystemRuntime::Host => {
                 let state_dir = state_dir
                     .ok_or_else(|| anyhow::anyhow!("host filesystem requires --state-dir"))?;
                 let runner_control = runner_control.ok_or_else(|| {
@@ -54,13 +56,17 @@ impl Lifecycle {
                     instance_id,
                     socket,
                 } = runner_control;
-                let record =
-                    omnifs_mtab::RunnerRecord::new(instance_id.clone(), spec.clone(), socket)?;
+                let record = omnifs_mtab::RunnerRecord::new(
+                    instance_id.clone(),
+                    filesystem.clone(),
+                    spec.clone(),
+                    socket,
+                )?;
                 let mut control = HostControl::bind(state_dir, &record)?;
                 control.spawn(instance_id, phase.subscribe(), host_stop_tx);
                 Some(control)
             },
-            fs::Runtime::Docker | fs::Runtime::Libkrun => {
+            FilesystemRuntime::Docker | FilesystemRuntime::Libkrun => {
                 anyhow::ensure!(
                     runner_control.is_none(),
                     "--runner-instance and --runner-control are host-only"
@@ -79,14 +85,14 @@ impl Lifecycle {
     }
 }
 
-pub(crate) fn preflight(spec: &fs::Spec, state_dir: Option<&Path>) -> anyhow::Result<()> {
+pub(crate) fn preflight(spec: &FilesystemSpec, state_dir: Option<&Path>) -> anyhow::Result<()> {
     let mount_point = spec.location();
     std::fs::create_dir_all(mount_point)?;
     if !omnifs_nfs::mount_is_active_checked(mount_point)? {
         return Ok(());
     }
     anyhow::ensure!(
-        spec.protocol() == fs::Protocol::Nfs && omnifs_nfs::mount_is_omnifs(mount_point),
+        spec.protocol() == FilesystemProtocol::Nfs && omnifs_nfs::mount_is_omnifs(mount_point),
         "refusing to start a filesystem: {} is already mounted",
         mount_point.display()
     );
@@ -101,7 +107,7 @@ pub(crate) fn preflight(spec: &fs::Spec, state_dir: Option<&Path>) -> anyhow::Re
 }
 
 pub(crate) async fn coordinate_mount(
-    spec: &fs::Spec,
+    spec: &FilesystemSpec,
     lifecycle: &mut Lifecycle,
     mount_done: oneshot::Receiver<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
@@ -116,7 +122,7 @@ pub(crate) async fn coordinate_mount(
 }
 
 struct MountCoordinator<'a> {
-    protocol: fs::Protocol,
+    protocol: FilesystemProtocol,
     mount_point: PathBuf,
     lifecycle: &'a mut Lifecycle,
     mount_done: oneshot::Receiver<anyhow::Result<()>>,
@@ -132,7 +138,7 @@ struct MountCoordinator<'a> {
 
 impl<'a> MountCoordinator<'a> {
     fn new(
-        protocol: fs::Protocol,
+        protocol: FilesystemProtocol,
         mount_point: PathBuf,
         lifecycle: &'a mut Lifecycle,
         mount_done: oneshot::Receiver<anyhow::Result<()>>,
@@ -250,10 +256,10 @@ impl<'a> MountCoordinator<'a> {
             let mount = self.mount_point.clone();
             self.unmount_task = Some(tokio::task::spawn_blocking(move || {
                 match protocol {
-                    fs::Protocol::Nfs => {
+                    FilesystemProtocol::Nfs => {
                         omnifs_nfs::unmount(&mount).map_err(|error| error.to_string())
                     },
-                    fs::Protocol::Fuse => {
+                    FilesystemProtocol::Fuse => {
                         #[cfg(target_os = "linux")]
                         {
                             omnifs_fuse::mount::unmount(&mount).map_err(|error| error.to_string())
@@ -394,20 +400,28 @@ mod tests {
     ) -> (MountCoordinator<'_>, oneshot::Sender<anyhow::Result<()>>) {
         let (mount_done, mount_done_rx) = oneshot::channel();
         (
-            MountCoordinator::new(fs::Protocol::Nfs, mount_point, lifecycle, mount_done_rx),
+            MountCoordinator::new(
+                FilesystemProtocol::Nfs,
+                mount_point,
+                lifecycle,
+                mount_done_rx,
+            ),
             mount_done,
         )
     }
 
     fn guest_lifecycle() -> Lifecycle {
-        let spec = fs::Spec::new(
-            fs::Id::new("test").unwrap(),
-            fs::Protocol::Nfs,
-            fs::Runtime::Docker,
-            PathBuf::from(fs::GUEST_LOCATION),
+        let filesystem = ResourceName::new("test").unwrap();
+        let spec = FilesystemSpec::new(
+            FilesystemProtocol::Fuse,
+            FilesystemRuntime::Docker,
+            PathBuf::from(omnifs_core::FILESYSTEM_GUEST_LOCATION),
+            None,
+            None,
         )
         .unwrap();
         Lifecycle::prepare(LifecycleConfig {
+            filesystem: &filesystem,
             spec: &spec,
             state_dir: None,
             runner_control: None,

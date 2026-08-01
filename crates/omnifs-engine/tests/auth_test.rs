@@ -318,7 +318,7 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
     ));
     let temp = tempfile::tempdir().unwrap();
     let caches = Caches::open(temp.path()).unwrap();
-    let name = omnifs_core::MountName::new("test").unwrap();
+    let name = omnifs_core::ResourceName::new("test").unwrap();
     let resources = mount(
         &caches,
         &name,

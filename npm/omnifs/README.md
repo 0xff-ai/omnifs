@@ -1,7 +1,9 @@
 # omnifs
 
-`omnifs` projects external services as native filesystems. The npm package
-installs the native `omnifs` CLI and daemon binary for your host platform.
+`omnifs` is a filesystem projection system. It projects external services into
+a shared virtual namespace that can be exposed as one or more filesystems. The
+npm package installs the native `omnifs` CLI and daemon binary for your host
+platform.
 
 ```bash
 npm install -g @0xff-ai/omnifs

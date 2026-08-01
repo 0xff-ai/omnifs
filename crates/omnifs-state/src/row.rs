@@ -5,7 +5,6 @@
 //! place instead of once per table.
 
 use anyhow::Context as _;
-use omnifs_core::MutationId;
 use sqlx::Row as _;
 use sqlx::sqlite::SqliteRow;
 use std::num::NonZeroU64;
@@ -27,9 +26,6 @@ pub(crate) trait RowExt {
     fn bytes(&self, column: &str) -> anyhow::Result<Vec<u8>>;
 
     fn optional_bytes(&self, column: &str) -> anyhow::Result<Option<Vec<u8>>>;
-
-    /// Read a 16-byte `last_mutation_id` provenance column.
-    fn mutation_id(&self, column: &str) -> anyhow::Result<MutationId>;
 }
 
 impl RowExt for SqliteRow {
@@ -72,10 +68,6 @@ impl RowExt for SqliteRow {
         self.try_get(column)
             .with_context(|| format!("read column `{column}`"))
     }
-
-    fn mutation_id(&self, column: &str) -> anyhow::Result<MutationId> {
-        decode_mutation_id(&self.bytes(column)?)
-    }
 }
 
 /// Widen a domain counter into the signed integer `SQLite` stores.
@@ -86,14 +78,4 @@ pub(crate) fn sql_int(value: u64, what: &str) -> anyhow::Result<i64> {
 /// Adapt a domain decode failure into the error `FromRow` must return.
 pub(crate) fn decode_error(error: anyhow::Error) -> sqlx::Error {
     sqlx::Error::Decode(error.into())
-}
-
-/// Decode a stored 16-byte mutation id, shared by row decoding and the plain
-/// tuple read `serving_state` uses.
-pub(crate) fn decode_mutation_id(bytes: &[u8]) -> anyhow::Result<MutationId> {
-    let length = bytes.len();
-    let array: [u8; 16] = bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("stored mutation id has {length} bytes; expected 16"))?;
-    Ok(MutationId::from_bytes(array))
 }

@@ -5,8 +5,11 @@ use super::context::{ATTACH_PORT_COUNT, ATTACH_PORT_MIN, DaemonContext};
 use super::provider_bundle::EmbeddedProviders;
 use anyhow::Context as _;
 use omnifs_api::{
-    CONTROL_SHUTDOWN_DRAIN_SECS, CredentialHealth, DaemonHealth, DaemonInventory, DaemonPhase,
-    DaemonRecovery, DaemonStatus, HealthReport, HealthState, MountHealth, MountInfo, MountRecord,
+    CONTROL_SHUTDOWN_DRAIN_SECS, ControlError, ControlErrorCode, CredentialHealth, DaemonHealth,
+    DaemonInventory, DaemonPhase, DaemonRecovery, DaemonStatus, FilesystemAccess,
+    FilesystemCommand, FilesystemDefinition, FilesystemPhase as ApiFilesystemPhase,
+    FilesystemStatus, GetFilesystemAccessRequest, HealthReport, HealthState, MountHealth,
+    MountInfo, MountRecord,
 };
 use omnifs_engine::{Inspector, ServingCell};
 use omnifs_state::StateStore;
@@ -56,10 +59,13 @@ pub(crate) struct Daemon {
     pub(crate) state: Arc<StateStore>,
     pub(crate) inspector: Option<Arc<Inspector>>,
     pub(crate) serving: Arc<ServingCell>,
-    pub(crate) manager: Arc<crate::manager::MutationManager>,
+    pub(crate) resources: Arc<crate::resource_control::ResourceControl>,
+    pub(crate) reconciler: OnceLock<Arc<crate::serving_reconciler::ServingReconciler>>,
+    pub(crate) filesystems: OnceLock<Arc<crate::filesystem_supervisor::FilesystemSupervisor>>,
     pub(crate) vfs: Arc<omnifs_vfs::VfsServer>,
     pub(crate) bound_tcp: OnceLock<omnifs_vfs::Endpoint>,
     pub(crate) shutdown_tx: tokio::sync::watch::Sender<bool>,
+    pub(crate) doctor: crate::doctor::DoctorState,
 }
 
 pub(crate) struct DaemonParts {
@@ -67,7 +73,7 @@ pub(crate) struct DaemonParts {
     pub(crate) embedded: Arc<EmbeddedProviders>,
     pub(crate) state: Arc<StateStore>,
     pub(crate) serving: Arc<ServingCell>,
-    pub(crate) manager: Arc<crate::manager::MutationManager>,
+    pub(crate) resources: Arc<crate::resource_control::ResourceControl>,
     pub(crate) inspector: Option<Arc<Inspector>>,
     pub(crate) shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -79,7 +85,7 @@ impl Daemon {
             embedded,
             state,
             serving,
-            manager,
+            resources,
             inspector,
             shutdown_tx,
         } = parts;
@@ -90,11 +96,14 @@ impl Daemon {
             embedded,
             state,
             inspector,
-            manager,
+            resources,
+            reconciler: OnceLock::new(),
+            filesystems: OnceLock::new(),
             serving,
             vfs,
             bound_tcp: OnceLock::new(),
             shutdown_tx,
+            doctor: crate::doctor::DoctorState::new(),
         }
     }
 
@@ -116,7 +125,7 @@ impl Daemon {
     }
 
     /// Run every shutdown step even after an earlier one fails, so a state
-    /// store that will not close cleanly cannot mask a manager or drain
+    /// store that will not close cleanly cannot mask a reconciler or drain
     /// failure (or vice versa). The first failure is the returned error;
     /// later ones are logged rather than discarded.
     ///
@@ -129,22 +138,75 @@ impl Daemon {
     /// `repairs.recv()`. Every caller that wants the process to actually
     /// stop already sends the signal itself.
     pub(crate) async fn shutdown(&self) -> anyhow::Result<()> {
-        let manager_result = self
-            .manager
-            .shutdown()
-            .await
-            .map_err(|error| anyhow::anyhow!("mutation manager shutdown: {error}"));
+        self.resources.shutdown();
+        info!("stopping filesystem runtimes");
+        let filesystem_result = match self.filesystems.get() {
+            Some(supervisor) => supervisor.shutdown().await,
+            None => Ok(()),
+        };
+        info!("filesystem runtimes stopped; stopping serving reconciler");
+        let reconciler_result = match self.reconciler.get() {
+            Some(reconciler) => reconciler.shutdown().await,
+            None => Ok(()),
+        };
+        info!("serving reconciler stopped; stopping namespace listeners");
         let retired = self.serving.retire_active();
         self.vfs.shutdown().await;
+        info!("namespace listeners stopped; draining active generation");
         let generation_result = match retired.drain(DRAIN_TIMEOUT).await {
             omnifs_engine::DrainOutcome::Drained => Ok(()),
             omnifs_engine::DrainOutcome::Stuck { active, .. } => Err(anyhow::anyhow!(
                 "active generation retained {active} request(s) after shutdown grace"
             )),
         };
+        info!("active generation drained; closing state store");
         let state_result = self.state.shutdown().await;
+        info!("state store closed");
 
-        crate::first_error([manager_result, generation_result, state_result])
+        crate::first_error([
+            filesystem_result,
+            reconciler_result,
+            generation_result,
+            state_result,
+        ])
+    }
+
+    pub(crate) fn install_reconciler(
+        &self,
+        reconciler: Arc<crate::serving_reconciler::ServingReconciler>,
+    ) -> anyhow::Result<()> {
+        self.reconciler
+            .set(reconciler)
+            .map_err(|_| anyhow::anyhow!("serving reconciler already installed"))
+    }
+
+    pub(crate) fn install_filesystem_supervisor(
+        &self,
+        supervisor: Arc<crate::filesystem_supervisor::FilesystemSupervisor>,
+    ) -> anyhow::Result<()> {
+        self.filesystems
+            .set(supervisor)
+            .map_err(|_| anyhow::anyhow!("filesystem supervisor already installed"))
+    }
+
+    pub(crate) fn filesystem_supervisor(
+        &self,
+    ) -> anyhow::Result<&Arc<crate::filesystem_supervisor::FilesystemSupervisor>> {
+        self.filesystems
+            .get()
+            .context("filesystem supervisor is unavailable")
+    }
+
+    pub(crate) fn provider_imported(&self, outcome: &omnifs_state::ProviderImportOutcome) {
+        let repaired = outcome.disposition == omnifs_state::ProviderImportDisposition::Repaired;
+        let Some(reconciler) = self.reconciler.get() else {
+            tracing::warn!(
+                provider = %outcome.reference.id,
+                "provider preparation owner is unavailable"
+            );
+            return;
+        };
+        reconciler.provider_imported(outcome.reference.id, repaired);
     }
 
     async fn start_listeners(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -249,7 +311,7 @@ impl Daemon {
         mounts.sort_by(|a, b| a.mount.cmp(&b.mount));
         let attach_serving = self.vfs.ready();
         let attach_tcp = self.attach_tcp();
-        let filesystems = self.vfs.attachments();
+        let filesystems = self.live_filesystems();
         let health = self.daemon_health(attach_serving, &filesystems, &views);
         DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -260,14 +322,13 @@ impl Daemon {
             filesystems,
             mounts,
             health: Box::new(health),
-            active_mutation: self.manager.active_mutation(),
         }
     }
 
     fn daemon_health(
         &self,
         attach_serving: bool,
-        filesystems: &[omnifs_core::fs::Spec],
+        filesystems: &[FilesystemDefinition],
         views: &[MountStatusView],
     ) -> DaemonHealth {
         DaemonHealth::new(
@@ -285,16 +346,16 @@ impl Daemon {
 
     fn filesystem_health(
         attach_serving: bool,
-        filesystems: &[omnifs_core::fs::Spec],
+        filesystems: &[FilesystemDefinition],
     ) -> HealthReport {
         let mut listed = vec!["attach socket local".to_string()];
         listed.extend(filesystems.iter().map(|filesystem| {
             format!(
                 "attached `{}` ({}) at {} via {}",
-                filesystem.id(),
-                filesystem.protocol(),
-                filesystem.location().display(),
-                filesystem.runtime()
+                filesystem.name,
+                filesystem.spec.protocol(),
+                filesystem.spec.location().display(),
+                filesystem.spec.runtime()
             )
         }));
         let listed = listed.join(", ");
@@ -367,7 +428,9 @@ impl Daemon {
 
     pub(crate) async fn recovery(&self) -> anyhow::Result<DaemonRecovery> {
         let state = self.state.serving_state().await?;
-        let durable_revision = self.state.mount_revision().await?;
+        let durable_revision = omnifs_core::ResourceRevision::new(
+            self.state.resource_snapshot().await?.revision.get(),
+        );
         let serving = self.serving.provenance();
         let phase = match state.recovery {
             omnifs_state::RecoveryState::Ready => DaemonPhase::Ready,
@@ -377,7 +440,6 @@ impl Daemon {
             phase,
             durable_revision: Some(durable_revision),
             serving_revision: Some(serving.revision()),
-            failed_mutation: state.failed_mutation,
             store_health: HealthReport::new(HealthState::Healthy, "control store available"),
             repair: None,
         })
@@ -401,13 +463,14 @@ impl Daemon {
             health: *status.health,
             mounts: self.mount_records().await?,
             credentials,
-            attachments: self.vfs.attachments(),
-            active_mutation: status.active_mutation,
+            filesystems: self.live_filesystems(),
         })
     }
 
     pub(crate) async fn mount_records(&self) -> anyhow::Result<Vec<MountRecord>> {
-        let mounts = self.state.list_mounts().await?;
+        let mounts = crate::generation_builder::ResolvedDesired::load(&self.state)
+            .await?
+            .mounts;
         let mut health = self.live_mount_healths();
         mounts
             .into_iter()
@@ -417,10 +480,201 @@ impl Daemon {
             })
             .collect()
     }
+
+    pub(crate) async fn filesystem_status(
+        &self,
+        name: &omnifs_core::ResourceName,
+    ) -> anyhow::Result<Option<FilesystemStatus>> {
+        let desired = self
+            .state
+            .desired_filesystems()
+            .await?
+            .into_iter()
+            .find(|filesystem| &filesystem.definition.name == name);
+        let Some(desired) = desired else {
+            return Ok(None);
+        };
+        let instance = self.state.filesystem_instance(name).await?;
+        let phase =
+            instance
+                .as_ref()
+                .map_or(ApiFilesystemPhase::Pending, |instance| {
+                    match instance.phase {
+                        omnifs_state::FilesystemPhase::Pending => ApiFilesystemPhase::Pending,
+                        omnifs_state::FilesystemPhase::WaitingForNamespace => {
+                            ApiFilesystemPhase::WaitingForNamespace
+                        },
+                        omnifs_state::FilesystemPhase::Starting => ApiFilesystemPhase::Starting,
+                        omnifs_state::FilesystemPhase::Ready => ApiFilesystemPhase::Ready,
+                        omnifs_state::FilesystemPhase::Stopping => ApiFilesystemPhase::Stopping,
+                        omnifs_state::FilesystemPhase::Retrying => ApiFilesystemPhase::Retrying,
+                        omnifs_state::FilesystemPhase::Failed => ApiFilesystemPhase::Failed,
+                        omnifs_state::FilesystemPhase::Deleting => ApiFilesystemPhase::Deleting,
+                    }
+                });
+        Ok(Some(FilesystemStatus {
+            definition: desired.definition,
+            desired_revision: desired.revision,
+            desired_version: desired.version,
+            observed_version: instance
+                .as_ref()
+                .and_then(|instance| instance.observed_version),
+            phase,
+            runtime_instance: instance
+                .as_ref()
+                .and_then(|instance| instance.runtime_instance.clone()),
+            action_generation: instance
+                .as_ref()
+                .map_or(0, |instance| instance.action_generation),
+            error_code: instance
+                .as_ref()
+                .and_then(|instance| instance.last_error_code.clone()),
+            detail: instance
+                .as_ref()
+                .and_then(|instance| instance.last_error_detail.clone()),
+            retry_at_unix_ms: instance
+                .as_ref()
+                .and_then(|instance| instance.retry_at)
+                .and_then(|seconds| u64::try_from(seconds).ok())
+                .and_then(|seconds| seconds.checked_mul(1_000)),
+            deleting: instance.as_ref().is_some_and(|instance| instance.deleting),
+        }))
+    }
+
+    pub(crate) async fn filesystem_access(
+        &self,
+        request: GetFilesystemAccessRequest,
+    ) -> Result<FilesystemAccess, ControlError> {
+        let status = self
+            .filesystem_status(&request.filesystem)
+            .await
+            .map_err(|error| {
+                ControlError::new(
+                    ControlErrorCode::Internal,
+                    format!("read filesystem status: {error:#}"),
+                )
+            })?
+            .ok_or_else(|| {
+                ControlError::new(
+                    ControlErrorCode::NotFound,
+                    format!("filesystem `{}` was not found", request.filesystem),
+                )
+            })?;
+        let runtime_instance = status.runtime_instance.as_deref().ok_or_else(|| {
+            ControlError::new(
+                ControlErrorCode::NotReady,
+                format!(
+                    "filesystem `{}` has no running instance",
+                    request.filesystem
+                ),
+            )
+        })?;
+        if status.phase != ApiFilesystemPhase::Ready
+            || status.observed_version != Some(status.desired_version)
+        {
+            return Err(ControlError::new(
+                ControlErrorCode::NotReady,
+                format!("filesystem `{}` is not ready", request.filesystem),
+            ));
+        }
+        let expected = omnifs_vfs::Session {
+            filesystem: request.filesystem.clone(),
+            spec: status.definition.spec.clone(),
+            runtime_instance: runtime_instance.to_owned(),
+        };
+        if !self
+            .vfs
+            .sessions()
+            .iter()
+            .any(|session| session == &expected)
+        {
+            return Err(ControlError::new(
+                ControlErrorCode::NotReady,
+                format!(
+                    "filesystem `{}` has no exact VFS session",
+                    request.filesystem
+                ),
+            ));
+        }
+        let driver = self
+            .filesystem_runtime_driver(&status.definition)
+            .map_err(|error| {
+                ControlError::new(
+                    ControlErrorCode::Internal,
+                    format!("open filesystem runtime: {error:#}"),
+                )
+            })?;
+        let confirmed = driver.confirmed(runtime_instance).await.map_err(|error| {
+            ControlError::new(
+                ControlErrorCode::NotReady,
+                format!("filesystem runtime identity is not ready: {error}"),
+            )
+        })?;
+        if confirmed.is_none() {
+            return Err(ControlError::new(
+                ControlErrorCode::NotReady,
+                format!("filesystem `{}` runtime is absent", request.filesystem),
+            ));
+        }
+        if status.definition.spec.runtime() == omnifs_core::FilesystemRuntime::Host {
+            return Ok(FilesystemAccess::HostPath(
+                status.definition.spec.location().to_path_buf(),
+            ));
+        }
+        if status.definition.spec.runtime() == omnifs_core::FilesystemRuntime::Libkrun {
+            crate::fs_runtime::ensure_socat_available().map_err(|error| {
+                ControlError::new(
+                    ControlErrorCode::Internal,
+                    format!("socat is required to open this shell: {error:#}"),
+                )
+            })?;
+        }
+        let command = driver
+            .shell_command(
+                request.interactive,
+                request.shell.as_deref(),
+                &request.command,
+            )
+            .expect("guest runtimes always expose a typed shell command");
+        Ok(FilesystemAccess::Command(FilesystemCommand {
+            program: command.get_program().to_os_string(),
+            args: command.get_args().map(ToOwned::to_owned).collect(),
+            current_dir: command.get_current_dir().map(ToOwned::to_owned),
+        }))
+    }
+
+    fn filesystem_runtime_driver(
+        &self,
+        definition: &FilesystemDefinition,
+    ) -> anyhow::Result<crate::fs_runtime::RuntimeDriver> {
+        let runtime_paths = crate::fs_runtime::RuntimePaths::from_daemon_state(
+            self.context.profile().root().to_path_buf(),
+            std::env::var_os(omnifs_bootstrap::OMNIFS_HOME_ENV).is_none(),
+            self.context.state_paths(),
+            self.context.process_identity().executable().to_path_buf(),
+        );
+        crate::fs_runtime::RuntimeDriver::new(
+            &runtime_paths,
+            definition.name.clone(),
+            definition.spec.clone(),
+            crate::fs_runtime::RuntimeEventSink::discard(),
+        )
+    }
+
+    pub(crate) fn live_filesystems(&self) -> Vec<FilesystemDefinition> {
+        self.vfs
+            .sessions()
+            .into_iter()
+            .map(|session| FilesystemDefinition {
+                name: session.filesystem,
+                spec: session.spec,
+            })
+            .collect()
+    }
 }
 /// One mount's live status, derived once from an atomic
 /// `ServingCell::mount_statuses_with_provenance` read. Feeds `MountInfo`
-/// (control status), `MountRecord` (inventory and `GetMount`), and the
+/// (control status), `MountRecord` (inventory), and the
 /// top-level health rollup, so all three agree on what a mount's health is.
 struct MountStatusView {
     name: String,
@@ -464,10 +718,10 @@ impl LiveMountHealths {
 
     pub(crate) fn take(
         &mut self,
-        mount: &omnifs_state::StoredMount,
+        mount: &crate::generation_builder::ResolvedMount,
     ) -> (MountHealth, Option<CredentialHealth>) {
         self.0
-            .remove(mount.document.name.as_str())
+            .remove(mount.name.as_str())
             .filter(|live| live.version == mount.version)
             .map_or_else(Self::missing, |live| (live.health, live.auth_health))
     }

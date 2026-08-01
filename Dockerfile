@@ -45,11 +45,12 @@ RUN --mount=type=cache,id=omnifs-cargo-registry,target=/usr/local/cargo/registry
 
 # --- Docker-hosted FUSE filesystem ---
 #
-# `omnifs fs attach` (see `crates/omnifs-cli/src/fs_container.rs`)
-# launches a separate, credential-free container that only ever runs the slim
-# `omnifs-thin` binary, attached over TCP to a host-native daemon's shared
-# namespace. It never runs a provider, so it gets its own minimal base: no
-# `OMNIFS_HOME`, no provider store, no control socket, none of an
+# The daemon's Docker Filesystem runtime
+# (`crates/omnifs-daemon/src/fs_runtime/docker/container.rs`) launches a separate,
+# credential-free container that only ever runs the slim `omnifs-thin` binary,
+# attached over TCP to a host-native daemon's shared namespace. It never runs
+# a provider, so it gets its own minimal base: no `OMNIFS_HOME`, no provider
+# store, no control socket, none of an
 # interactive-shell toolbox (zsh, gum, git, ripgrep, nfs-common...) — and,
 # no provider-store build context at all.
 #

@@ -1,7 +1,7 @@
 //! On-disk layout, permissions, and control-store repair.
 
 use anyhow::Context as _;
-use omnifs_bootstrap::{Bootstrap, Daemon};
+use omnifs_core::ResourceName;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,40 +12,47 @@ pub(crate) const DATABASE_FILE: &str = "state.sqlite3";
 pub(crate) const CONTROL_STORE_DIR: &str = "control-store";
 pub(crate) const STAGING_DIR: &str = "staging";
 pub(crate) const CACHE_DIR: &str = "cache";
+pub(crate) const RUNTIME_DIR: &str = "runtime";
 pub(crate) const LOG_DIR: &str = "logs";
 pub(crate) const DAEMON_LOG_FILE: &str = "daemon.log";
 pub(crate) const PROJECTION_CACHE_DIR: &str = "projection";
 pub(crate) const WASMTIME_CACHE_DIR: &str = "wasmtime";
 pub(crate) const CLONE_CACHE_DIR: &str = "git";
+pub(crate) const GUEST_IMAGES_CACHE_DIR: &str = "guest-images";
+pub(crate) const FILESYSTEMS_DIR: &str = "filesystems";
 
 /// Headroom multiplier reserved against the disk budget for one import.
 const PROVIDER_DISK_MULTIPLIER: u64 = 3;
 
 static REPAIR_ARCHIVE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Paths owned by one daemon state root.
+///
+/// Constructing this value performs no I/O. [`Self::prepare`] creates and
+/// restricts the directories needed before `SQLite` is opened, including the
+/// required Wasmtime cache directory.
 #[derive(Debug, Clone)]
-pub(crate) struct StorePaths {
+pub struct DaemonStatePaths {
     root: PathBuf,
 }
 
-impl StorePaths {
+#[cfg(test)]
+pub(crate) type StorePaths = DaemonStatePaths;
+
+impl DaemonStatePaths {
     #[must_use]
-    pub(crate) fn for_endpoint(endpoint: &Bootstrap<Daemon>) -> Self {
-        Self {
-            root: endpoint.bootstrap_dir().join("daemon-state"),
-        }
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
     }
 
     #[cfg(test)]
     #[must_use]
     pub(crate) fn under_root(root: &Path) -> Self {
-        Self {
-            root: root.to_path_buf(),
-        }
+        Self::new(root)
     }
 
     #[must_use]
-    pub(crate) fn root(&self) -> &Path {
+    pub fn root(&self) -> &Path {
         &self.root
     }
 
@@ -80,17 +87,102 @@ impl StorePaths {
         self.root.join(LOG_DIR)
     }
 
-    pub(crate) fn prepare(&self) -> anyhow::Result<()> {
+    /// Private root for daemon-owned runtime records and sockets.
+    #[must_use]
+    pub fn runtime(&self) -> PathBuf {
+        self.root.join(RUNTIME_DIR)
+    }
+
+    /// Private directory containing one runtime subdirectory per filesystem.
+    #[must_use]
+    pub fn filesystems_runtime(&self) -> PathBuf {
+        self.runtime().join(FILESYSTEMS_DIR)
+    }
+
+    /// Private runtime directory for one validated filesystem name.
+    #[must_use]
+    pub fn filesystem_runtime(&self, name: &ResourceName) -> PathBuf {
+        self.filesystems_runtime().join(name.as_str())
+    }
+
+    /// Create and restrict one filesystem's private runtime directory.
+    pub fn prepare_filesystem_runtime(&self, name: &ResourceName) -> anyhow::Result<PathBuf> {
+        let path = self.filesystem_runtime(name);
+        ensure_private_dir(&path)?;
+        Ok(path)
+    }
+
+    /// Private cache for guest image layers and resolved image data.
+    #[must_use]
+    pub fn guest_images_cache(&self) -> PathBuf {
+        self.cache().join(GUEST_IMAGES_CACHE_DIR)
+    }
+
+    /// Private directory containing one daemon-owned filesystem log per name.
+    #[must_use]
+    pub fn filesystem_logs(&self) -> PathBuf {
+        self.logs().join(FILESYSTEMS_DIR)
+    }
+
+    /// Private log path for one validated filesystem name.
+    #[must_use]
+    pub fn filesystem_log(&self, name: &ResourceName) -> PathBuf {
+        self.filesystem_logs()
+            .join(format!("{}.log", name.as_str()))
+    }
+
+    /// Open one filesystem log with private file permissions.
+    pub fn open_filesystem_log(&self, name: &ResourceName) -> anyhow::Result<std::fs::File> {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+        ensure_private_dir(&self.root)?;
+        ensure_private_dir(&self.logs())?;
+        ensure_private_dir(&self.filesystem_logs())?;
+        let path = self.filesystem_log(name);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("open filesystem log {}", path.display()))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restrict filesystem log {}", path.display()))?;
+        Ok(file)
+    }
+
+    pub fn prepare(&self) -> anyhow::Result<()> {
         for path in [
             self.root.clone(),
             self.control_store(),
             self.staging(),
             self.cache(),
+            self.runtime(),
             self.logs(),
+            self.filesystems_runtime(),
+            self.filesystem_logs(),
+            self.guest_images_cache(),
         ] {
             ensure_private_dir(&path)?;
         }
+        let engine = self.engine_paths();
+        for path in [
+            engine.projection_cache(),
+            engine.wasmtime_cache(),
+            engine.clone_cache(),
+        ] {
+            ensure_private_dir(path)?;
+        }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn engine_paths(&self) -> crate::EngineStatePaths {
+        let cache = self.cache();
+        crate::EngineStatePaths {
+            projection: cache.join(PROJECTION_CACHE_DIR),
+            wasmtime: cache.join(WASMTIME_CACHE_DIR),
+            clones: cache.join(CLONE_CACHE_DIR),
+        }
     }
 
     pub(crate) fn restrict_database_files(&self) -> anyhow::Result<()> {

@@ -1,245 +1,182 @@
 # AGENTS.md
 
-Repository-local guidance for working in `omnifs`, shared by Codex, Claude, and human contributors. `CLAUDE.md` is a symlink to this file. Keep this file self-contained because other agents read it directly and do not expand imports.
+Repository guide for agents and contributors working on `omnifs`.
+`CLAUDE.md` is a symlink to this file, so keep it self-contained.
 
 ## Start here
 
-`omnifs` projects external services as native filesystems. Providers own meaning: what paths exist and what bytes they hold. The host owns trust, auth, callouts, caching, and I/O. Filesystems translate one shared projected tree into OS protocol behavior.
+`omnifs` is a filesystem projection system. It projects external services into
+one shared virtual namespace. Providers own meaning: what paths exist and what
+bytes they hold. The host owns trust, authorization, callouts, caching, and
+I/O. FUSE and NFS expose the namespace to the OS as one or more filesystems.
 
-The product contract is simple: the projected tree must behave like real files for the standard Linux toolbox, judged against every consumer, not one calling pattern. Shells, scripts, editors, agents, and applications are served by the same mount. Do not special-case one consumer.
+Before changing the repository:
 
-## How docs bind
+1. Read `docs/contracts/00-index.md`, then the one contract for the area.
+2. Read `docs/architecture/00-overview.md` only when you need system rationale;
+   it routes to focused architecture notes.
+3. Trace the production call path and its tests before deciding.
 
-`AGENTS.md` is the always-loaded operating guide. It carries universal rules, routing instructions, validation defaults, and active footguns.
-
-- `docs/contracts/`: binding rules by task area. Read only the contract relevant to the code you are touching.
-- `docs/architecture/`: current explanatory model and rationale. Read only the architecture note relevant to the subsystem or boundary you need to understand.
-
-If a rule here and a contract disagree, follow current code plus the relevant contract, then update this file in the same change. If architecture prose disagrees with code or contracts, treat it as stale explanation and fix it when practical.
+Contracts bind behavior. Architecture notes explain the current design and
+rejected prior designs. Source code is the final check on current shape. If
+code and a contract disagree, resolve the conflict and update the contract in
+the same change.
 
 ## Rule tiers
 
-- **Invariants.** A change that breaks one is wrong. If a task seems to require it, stop and surface the conflict.
-- **Gated decisions.** Allowed only after surfacing the tradeoff and getting explicit sign-off.
-- **Direction.** Strong guidance, but a deliberate called-out departure is allowed.
-- **Current shape.** Today's implementation. Understand it before changing it, but expect it to churn.
-- **Footguns.** Concrete traps that are true only while their stated condition holds. Delete a footgun when the condition dies.
-- **Conventions.** Judgment defaults. Follow them unless the code gives a better reason.
+- **Invariant:** breaking it is wrong. Stop if the task appears to require it.
+- **Gated decision:** surface the tradeoff and get explicit approval first.
+- **Direction:** follow it unless the code gives a concrete reason not to.
+- **Footgun:** a current trap. Remove the note when its condition disappears.
 
 ## Universal invariants
 
-- The host owns trust. Providers are untrusted, even when built in this repo.
-- The host knows paths, bytes, content types, file attributes, cache metadata, capability outcomes, and effects. Object meaning stays SDK/provider-side.
-- All object reasoning lives SDK-side: identity, canonical assembly via render, versioning, preload, and revalidation.
-- No provider-specific behavior belongs in the host, tree, or filesystems.
-- `omnifs-engine` owns projection semantics shared by FUSE, NFS, and future filesystems.
-- Filesystems translate namespace answers into protocol state. They consume the narrow `omnifs_engine::namespace` surface, never internal tree/view modules directly, and do not decide projection semantics. The daemon is a registry that serves several filesystems over one shared namespace.
-- Host caching is opaque byte storage. Providers do not add private LRUs or time-based expiration policy.
-- Declarations must bind behavior. A permission, capability, schema rule, routing rule, cache contract, or validation guarantee must feed an enforced runtime or build-time decision.
+- The host owns trust; all providers, including embedded providers, are
+  untrusted.
+- Providers and the SDK own object identity, canonical assembly, rendering,
+  versioning, preload, revalidation, and route topology. The host knows only
+  paths, bytes, attributes, cache facts, capabilities, and effects.
+- `omnifs-engine` owns shared projection semantics. Filesystems consume only
+  the narrow namespace surface and own protocol state, not projection policy.
+- Host caching is opaque byte and fact storage. Providers do not add private
+  LRUs or expiration policy.
+- SQLite is the sole desired-state authority for Provider, Credential, Mount,
+  and Filesystem resources; the CLI has no desired-state journal.
+  `ApplyResources` ends after validation, one SQLite transaction, and a
+  non-blocking reconcile wakeup; daemon workers reconcile after the reply.
+- The daemon owns provider preparation, namespace publication, Filesystem
+  lifecycle, and live VFS sessions. Filesystems stay out of process.
+- Credentials and other secret bytes never enter resources, KCL, status,
+  progress, receipts, logs, Debug output, Inspector, or dedupe hashes.
+- A declaration must bind behavior. Permissions, capabilities, schema rules,
+  cache contracts, and validation claims must feed an enforced decision.
 
 ## Gated decisions
 
-Allowed, but never as a side effect. Surface the tradeoff and get sign-off in the same change.
+Get explicit approval before changing:
 
-- **Provider WASM authority.** New callout families, preopens, process effects, socket effects, or broader network authority change the security model.
-- **Auth or transport model.** Changing auth or transport, such as clone over SSH versus HTTPS/token, changes the operational contract.
-- **Strict config parsing where enforced.** CLI config and mount auth/config blocks use strict serde parsing. Loosening existing `deny_unknown_fields` hides misconfiguration.
-- **Specified technology substitution.** If a task names a technology, library, or architecture, do not substitute another approach when blocked. Report the blocker and wait for approval.
+- Provider WASM authority, including callout families, preopens, process
+  effects, socket effects, or broader network access.
+- Authentication or transport models.
+- Existing strict `deny_unknown_fields` parsing.
+- A technology, library, or architecture named by the task.
 
-## Load the right contract
+## Work rules
 
-| If touching | Read |
-|---|---|
-| Trust, byte boundary, provider authority, auth, credentials, sandbox claims | `docs/contracts/10-system.md` |
-| Provider SDK, provider macros, objects, routes, WIT, metadata, provider config, endpoints | `docs/contracts/20-provider-sdk.md` |
-| Projection tree, cache, attrs, listing, lookup, traversal, learned sizes, live growth | `docs/contracts/30-projection-tree.md` |
-| FUSE, NFS, mount protocol behavior, filesystem state, protocol replies | `docs/contracts/40-filesystems.md` |
-| CLI, daemon, typed local control protocol, filesystem runtimes, profile layout, mount and credential RPC, dev home | `docs/contracts/50-control-plane.md` |
-| CI, validation commands, provider artifacts, generated schema, docs checks | `docs/contracts/60-build-validation.md` |
-| System model or rationale | `docs/architecture/00-overview.md` |
+- Diagnose root causes before changing code. Preserve the original failure
+  signal; do not weaken tests, fixtures, coverage, or strict parsing to hide it.
+- Keep one fact under one owner. Delete duplicate DTOs, compatibility aliases,
+  bridge layers, and one-caller forwarding helpers when the direct path exists.
+- This project is pre-alpha and has no backward-compatibility obligation.
+  Delete obsolete readers, migrations, wire fields, aliases, and APIs unless a
+  current interoperability requirement says otherwise.
+- Add an abstraction only for two real callers or one volatile external
+  boundary. Prefer parsed domain types over strings, maps, or raw JSON.
+- Public APIs need current callers and enforced invariants. Dependencies must
+  pay for themselves; remove a direct dependency when its final use disappears.
+- Treat WIT, protobuf, VFS wire, shared domain type, and public constructor
+  changes as repository-wide migrations. Update definitions, generated
+  bindings, constructors, patterns, callers, fixtures, and tests together, then
+  validate in dependency order per `docs/contracts/60-build-validation.md`.
+- Before changing a shared lookup, attribute, cache, or identity type, inspect
+  its callers and relevant history; confirm the existing owner before adding a
+  type or cache.
+- Preserve user changes in dirty worktrees. Do not use destructive Git commands
+  or rewrite history without explicit approval.
+- Before stacked Git work, inspect the base, merge state, ancestry, and
+  overlapping worktrees. Do not rebase or replay until the target relationship
+  is explicit.
+- Delegate only disjoint write sets. One agent owns each shared protocol,
+  schema, or public API migration. A handoff states files changed, focused
+  checks run, and pending work; the parent runs the combined gate.
+- Use Conventional Commits when asked to commit. Do not push or open a pull
+  request without explicit approval.
 
-## Load architecture detail when needed
+## Execution preflight
 
-| If you need rationale for | Read |
-|---|---|
-| File attrs, stat/read behavior, learned sizes, live files, real-tool compatibility | `docs/architecture/10-file-attributes.md` |
-| Route precedence, capture validation, lookup/listing authority, exhaustive listings | `docs/architecture/20-route-dispatch-and-listing.md` |
-| Object/view/blob cache roles, canonical push, effects, invalidation fences | `docs/architecture/30-cache-and-effects.md` |
-| Auth trust boundary, OAuth ownership, credential injection, grants versus needs | `docs/architecture/40-auth-boundary.md` |
-| NFSv4 loopback filehandles, stateids, leases, attrs, mount lifecycle | `docs/architecture/50-nfs-filesystem.md` |
-| Provider async execution, host imports, callout tracing, same-instance concurrency | `docs/architecture/60-async-provider-runtime.md` |
+Before the first broad build, test, Git write, or networked command:
+
+1. Confirm the active worktree and all write targets are writable. A sibling
+   worktree does not inherit the main worktree's permissions.
+2. Check artifacts before treating a missing file as a code failure:
+   provider-backed host tests need `just build providers`; local libkrun use
+   needs `just guest-image`.
+3. Use one narrow command to separate code from environment failures.
+   Permission errors from `sccache`, Cargo or Git locks, cache databases,
+   keyrings, or network access are environment failures.
+4. Rerun a required sandbox-blocked operation with scoped escalation. Do not
+   disable `sccache` or widen validation. Serialize commands that write the
+   same lockfile, provider artifacts, Git index, or live filesystem state.
 
 ## Orientation
 
-- `crates/omnifs-core`: shared path, mount and provider content identities, filesystem identity, and file-contract primitives.
-- `crates/omnifs-sdk`: provider authoring API, object model, route registration, and dispatch.
-- `crates/omnifs-wit/wit/provider.wit`: provider component contract. Guest bindings live at `omnifs_wit::provider`; host (Wasmtime) bindings at `omnifs_wit::host` behind `host-bindings`.
-- `crates/omnifs-bootstrap`: profile-root resolution, the fixed control socket, daemon process identity, and the daemon spawn lock.
-- `crates/omnifs-state`: daemon-owned SQLx/SQLite state, provider artifacts, mounts, credentials, projection cache, and raw daemon logs.
-- `crates/omnifs-daemon`: daemon lifecycle and recovery, local gRPC control, namespace supervision, bounded raw-log streaming, and serialized durable mutations.
-- `crates/omnifs-vfs`: shared VFS facade (`Namespace` and plain answers); enable `wire` for framing, handshake, attach/reconnect, readiness, and `VfsServer`.
-- `crates/omnifs-engine`: trusted runtime, callouts, auth, cache, pagination, shared projection semantics (`TreeNamespace`), and opaque cache storage.
-- `crates/omnifs-fuse` and `crates/omnifs-nfs`: protocol adapters.
-- `crates/omnifs-mtab`: `/proc/mounts` parsing, NFS mount state files, and shared platform unmount command construction.
-- `crates/omnifs-libkrun`: private fixed-purpose libkrun loader, VM configuration, and shutdown control used only by the Apple Silicon filesystem runtime.
-- `crates/omnifs-cli`: daemon process owner, control client, lifecycle, auth commands, dev sessions, and control-plane UX.
-- `crates/omnifs-inspector`: Inspector state, replay and live-event sources, terminal lifecycle, and TUI rendering. The CLI owns command dispatch and receipt presentation.
-- `crates/omnifs-itest`: host-driven provider and tree conformance tests.
-- `scripts/ci/*` and `just/*.just`: maintainer command surface, CI orchestration, runtime image assembly, and generated-artifact checks.
-- `providers/*`: product providers. Read `providers/DESIGN.md` and `skills/omnifs-provider-sdk/SKILL.md` before changing provider shape.
-
-## Vocabulary
-
-- **Projection.** A mapping of an external system into paths and bytes.
-- **Canonical.** Bytes returned from upstream as-is and stored in the canonical cache.
-- **Provider.** A sandboxed WASM component (`wasm32-wasip2`) that defines paths, bytes, and object meaning for one service.
-- **Upstream.** The external service or data source a provider projects.
-- **Host.** The trusted runtime that owns auth, caching, callout execution, namespace state, and I/O.
-- **Filesystem.** One named OS-facing instance over the complete shared namespace. Its strict persisted `fs::Spec` contains ID, protocol (`fuse` or `nfs`), runtime (`host`, `docker`, or `libkrun`), and resolved location. Host filesystems run through hidden `omnifs run-fs`; Docker and libkrun guests use `omnifs-thin`. The daemon never runs a filesystem in-process.
-- **Omnifs VFS wire protocol.** The internal daemon-to-filesystem serialization of `omnifs_engine::Namespace` for out-of-process filesystems. It is not the provider protocol and does not own projection semantics.
-- **Mount.** A configured provider projection rooted into the served filesystem tree.
-- **Object.** Provider-side domain identity plus canonical bytes and derived files.
-- **Render.** SDK-side assembly of an object's canonical bytes. A provider concern, never a filesystem concern.
-- **Path.** `omnifs_core::path::Path`, the parsed provider path type used inside SDK and tree policy.
-- **Callout.** A host-run effect a provider awaits through an async WIT import, such as HTTP. The host executes it and the component future resumes with the result.
-- **Effect.** The single terminal channel a provider returns for cache writes, invalidations, and related host-visible side effects.
-
-## Avoid these frames
-
-- Do not call the current daemon `omnifsd`. There is one `omnifs` binary with a hidden `omnifs daemon` subcommand.
-- Do not describe macFUSE, `diskutil`, or macOS FUSE mounting as current integration paths. macOS host-native integration is NFSv4 loopback.
-- Do not alias `omnifs_core::path::Path` as `ProtocolPath` or another local name. Import it as `Path`; alias `std::path::Path` as `StdPath` when both are needed.
-- Do not claim the sandbox prevents all exfiltration. It reduces confused-deputy and lateral-movement risk, but an allowed provider can still exfiltrate through its allowed domains.
-- Do not frame agents, editors, or shells as separate product modes. They are consumers of the same mount.
-
-## Current shape
-
-- A single `omnifs` binary is both CLI and daemon. The runtime loop lives behind hidden `omnifs daemon`.
-- The CLI owns OAuth/static-auth UX, filesystem specs and runners, profile config, `ClientOwnerId`, the single-record mutation journal (`client/mutations.json`), metrics, and daemon spawn. It talks to the daemon only through typed local RPC.
-- The control protocol uses tonic/protobuf gRPC over the profile's local Unix socket. Credential material may cross only in request payloads on that socket; it never appears in filesystem attach/TCP traffic, responses, status, inventory, logs, Debug, or Inspector output. Credential health is non-secret operational state.
-- The daemon owns provider artifacts, credentials, mounts, SQLite state/cache, attach endpoints, live attachments, and raw log bytes. The daemon has one mutation slot: `BeginMutation` acquires its fixed 30s lease (no renewal, stealable once expired), `ApplyMutation` runs every submitted op in one transaction, and `DropMutation` releases it early. A client recovers an interrupted request by re-reading its target and comparing `last_mutation_id` against the id it journaled, not by asking the daemon for a durable receipt.
-- Provider imports carry no mutation identity and never touch the mutation lease: the daemon dedupes by content digest, so a dropped upload just retries and importing identical bytes twice returns `Unchanged`. `mount add` and `mount update` send typed definitions to the daemon inside a mutation batch; the daemon validates provider metadata, credentials, and grants before serving the namespace.
-- `mount update` re-reads the mount under its own lease and applies its patch as one op in that batch; there is no version-based compare-and-swap. A batch's ops apply in one transaction (the first failure rolls back all of them), and every row a batch writes is stamped with that batch's mutation id, which is the only provenance a client needs.
-- The daemon is a pure namespace server and control-plane owner. `VfsServer` binds one fixed Unix and one fixed TCP endpoint on every start, owns connection tasks and live attachments, and treats either listener's exit as fatal. Host filesystems use hidden `omnifs run-fs`; Docker and libkrun guests keep the slim `omnifs-thin` binary.
-- CLI-owned filesystem specs live under `client/filesystems/specs`; lifecycle uses `fs create|attach|detach|restart|rm|shell|ls --name <id>`. Attach rejects an existing confirmed instance, detach proves mount absence and runtime exit, and remove never detaches implicitly. Docker and libkrun use `/omnifs`.
-- The CLI owns filesystem launch and teardown through host processes, Docker containers, and libkrun VMs. `down` asks the daemon to stop attached filesystems, drains for a bound, and preserves client filesystem specs.
-- Libkrun resolves an immutable guest image base, then materializes `filesystems/runtime/<id>/libkrun/root.raw` with mode 0600 for each launch. The helper record and private control carry the full resolved filesystem spec plus a random process instance. Docker container names and labels carry the ID, and exact inspection also verifies the flat command against the stored spec.
-- Wire protocol v9 carries the exact resolved filesystem spec plus server stop control. The daemon keys attachments by ID, accepts reconnect overlap only for the same exact spec, and rejects conflicting fields. A failed reconnect past the attach deadline enters filesystem-owned teardown.
-- `omnifs status` joins configured specs with daemon attachments. Commands that act on Docker, libkrun, or a host filesystem process probe only the runtime named by the spec. `omnifs doctor` owns stray and stale-record reporting and requires a cleanly stopped daemon, interactive consent, and fresh exact identity proof before destructive remediation.
-- Global `--output human|json|jsonl`, `--quiet`, `--no-input`, and `--yes` belong to the invocation after Clap parses it. JSON emits exactly one result/error envelope; JSONL emits events followed by one terminal result/error. Clap owns parse failures and exits 2 before output mode applies. Status and list results use plural resource arrays and absolute machine paths. Human reports use `tabled` for wide resource rows and one Inventory-selected closing action.
-- Profile-local dogfood metrics are appended only under `$OMNIFS_HOME/metrics/`, controlled by `[metrics] enabled` and `OMNIFS_METRICS`, and never transmitted. The local JSONL writer has no networking dependency and never fails a product operation.
-- `omnifs fs shell --name <id> [--shell <path>] [--] [<argv>...]` enters one exact guest filesystem. For a host filesystem it verifies the mounted phase and reports the ordinary host path.
-- Logs preserve raw bytes. Doctor groups checks by owner, asks once for a deduplicated repair set, continues after independent repair failures, and rescans. Inspector bounds ingestion, keeps stale data on disconnect, derives help from its keymap, and restores terminal plus panic-hook state before printing its session receipt.
-- Boot-and-orient onboarding belongs to `omnifs setup`, which starts the daemon, lists embedded providers with an honest auth label, and offers two quick-start confirms: mount every no-sign-in provider in one atomic batch, and attach the platform's recommended filesystem.
-- `just dev` builds providers and the native CLI, starts the host daemon, ensures `dev-host` and `dev-docker` specs, attaches them, and opens a shell inside `dev-docker` at `/omnifs`.
-- The daemon runs on the host. The dev Docker filesystem carries `ai.0xff.omnifs.home` and `ai.0xff.omnifs.fs` labels. Detach it with `target/debug/omnifs fs detach --name dev-docker`.
-- `Dockerfile`'s `filesystem-dev` stage is the contributor image path. The image entrypoint is only `omnifs-thin`; the launcher passes the flat named arguments. Release image assembly uses `scripts/ci/build-filesystem-image.sh`.
-- A provider is one `#[omnifs_sdk::provider]` impl with synchronous `fn start` registering routes on a `Router`. `r.object::<O>` and `r.file_object::<O>` bind objects; `r.alias` mounts the same object at another template; `r.dir`, `r.file`, and `r.treeref` are the path-oriented face for non-object routes.
-- Provider namespace and notify exports are async component functions. SDK callout futures await host imports directly; the host uses Wasmtime component async with `run_concurrent` so one provider instance can have multiple filesystem operations in flight.
-
-## Product contract
-
-The mount must behave like real files for the standard toolbox:
-
-- read: `cat`, `head`, `tail` including `-f`, `-n`, and `-c`, `less`, `xxd`, `hexdump`, `od`, `file`
-- search and traverse: `grep -r`, `rg`, `find` including `-name`, `-size`, and `-type`, `fd`
-- stat: `ls -l`, `ls -h`, `du -sh`, `wc`, `stat`
-- copy and archive: `cp`, `mv`, `tar c`, `tar x`, `tar t`, `rsync`
-- compare and hash: `diff`, `cmp`, `*sum`
-- inspect and edit: `jq`, `yq`, `xmllint`, `vim`, `nano`; mmap editors are best effort
-
-When a feature touches mount behavior, prove no regression through `crates/omnifs-itest`, a relevant `*smoke*` test, a focused unit test, or the live runtime path described in `CONTRIBUTING.md`.
-
-## Working rules
-
-### Ground yourself
-
-- Trace the real flow before deciding. Read the files a change touches, their call sites, and the owning docs.
-- Simplicity after comprehension is good. Simplicity that skips the flow ships confident wrong fixes.
-- When investigating a failure, identify the root cause before proposing or making fixes.
-- Preserve the original failure signal until the underlying mechanism is understood. Do not weaken tests, fixtures, coverage, or scenarios to make a failure disappear unless explicitly asked.
-
-### Shape code around owners
-
-- One fact has one owner: one authoritative type, function, config field, or document.
-- Keep ownership separate from placement. Ownership follows the invariant and data source, not nearby files.
-- Model the boundary, not the workaround. If call sites need side parameters, fake variants, or bypass paths, fix the missing domain boundary.
-- Public API is a contract, not a sketchpad. Exported types, enum variants, macro arguments, route verbs, and trait methods need current users and clear invariants.
-- Add an abstraction only for two honest pressures or one genuinely volatile external boundary.
-- Prefer parsed forms after parse boundaries. Do not fall back to strings, maps, or JSON values for internal policy unless the format itself is the domain.
-- Delete bridge layers when the direct path exists. Transitional adapters, duplicate DTOs, compatibility aliases, and one-caller forwarding helpers should not harden.
-- This project is pre-alpha and carries no backward-compatibility obligation. Delete obsolete APIs, wire fields, readers, aliases, and migrations outright unless the task explicitly establishes a current interoperability requirement.
-- Prefer extending an existing representative test over adding a situational regression case. Add a new fixture only when it protects a durable concurrency, lifecycle, protocol, security, previously silent failure, or public output invariant that existing coverage cannot express cleanly.
-- Dependencies must pay rent. Remove unused direct dependencies in the same change that makes them unused.
-
-### Worktree and agent handoff
-
-- This repo often moves work across sibling worktrees. Before replaying or integrating, inspect the full source worktree state, not only the last discussed diff.
-- Tracked diffs do not include every handoff artifact. Copy required untracked files explicitly, but exclude ignored local state such as `.cache`, `.serena`, `dist`, and `target`.
-- Do not infer task ownership from branch names, worktree names, or public branches. Use an explicit local ledger or handoff note for manual multi-agent work.
-- Prefer local handoff paths such as `git fetch /path` or `format-patch | git am`. Reserve public branches for integration or review boundaries unless the user explicitly asks to publish.
-- Keep transient trackers, test plans, implementation ledgers, and handoff notes outside the tracked repository. During active work the task thread or an ignored local file may coordinate it; after integration, current code, contracts, architecture notes, and Git history are the durable authority.
-- Create redesign implementation tasks with the user's **approve for me** permission profile whenever the thread tool exposes that setting. Luna subagents inherit the parent thread's permission profile when no per-agent setting exists; their briefs must require immediate approval requests for necessary escalations rather than treating sandbox or network denial as a product blocker or silently skipping required work.
-- Apply the global coordination contract to this repo. Record live NFS locks, provider-build contention, generated-artifact provenance, and other shared runtime resources in the local task ledger before dispatch.
+- `omnifs-core`: shared identities, paths, and filesystem primitives.
+- `omnifs-api`: resource domain and typed local control protocol.
+- `omnifs-bootstrap`: pre-RPC profile, socket, spawn lock, and daemon identity.
+- `omnifs-state`: SQLite desired state, actions, observations, and caches.
+- `omnifs-daemon`: reconciliation, local control, Filesystems, VFS serving,
+  runtime mechanics, and Doctor.
+- `omnifs-engine`: trusted provider runtime and projection semantics.
+- `omnifs-vfs`: namespace facade, wire protocol, reconnect, and sessions.
+- `omnifs-fuse`, `omnifs-nfs`, `omnifs-mtab`: OS protocol adapters and mount
+  mechanics.
+- `omnifs-libkrun`, `omnifs-thin`: out-of-process filesystem helpers.
+- `omnifs-cli`, `omnifs-inspector`: user commands, output, and inspection.
+- `omnifs-sdk`, `omnifs-wit`, `providers/`: provider authoring and components.
+- `omnifs-itest`: host, provider, filesystem, and live conformance tests.
 
 ## Validation
 
-Fast sanity for host or CLI code:
+Run the narrowest meaningful check while iterating. Before a push or handoff,
+run `just check`. Detailed gates and live-lane requirements live in
+`docs/contracts/60-build-validation.md`.
 
-```bash
-cargo fmt
-cargo nextest run
-```
+- Host or CLI sanity: `cargo fmt` and focused `cargo nextest run`; use
+  `just test fast` for the default quick host lane.
+- Documentation changes: `just docs-check`.
+- Provider manifest changes: `just schema`.
+- Mount, runtime, provider, clone, or traversal changes require the relevant
+  live path. Rust checks alone are not enough.
+- Always use `target/debug/omnifs` or `target/release/omnifs`, never bare
+  `omnifs`.
 
-Finish source review before broad validation. Tests replace a preceding `cargo check` or `cargo test --no-run` for the same target. Run one broad gate on the final tree, and rerun it only after a relevant code change.
+## Active footguns
 
-Use the right wider gate for the change:
-
-- **Before a push or PR handoff.** Run `just check`; it composes formatting, justfile and docs checks, workflow linting, provider gates, host clippy and tests, and whitespace validation. CI keeps the scoped lanes separate for parallelism.
-- **WASM toolchain.** Provider WASM builds need wasi-sdk. Provider build and check recipes install the pinned version when needed.
-- **Fresh worktree or missing artifacts.** Run `just build providers` before treating missing provider artifacts as product failures.
-- **Host gate.** Use `just check host` and `just test host`; both exclude provider/test-provider WASM crates from host-target builds.
-- **Provider or broad-surface change.** Run the affected provider, host, generated-artifact, and docs gates explicitly.
-- **Mount, provider, clone, traversal, or runtime behavior.** Rust checks are not enough. Validate through the live runtime with `just dev -y`, `omnifs status`, and the smoke path in `CONTRIBUTING.md`.
-- **Route-surface change.** Run the host integration path that initializes and compiles provider routers, especially `all_providers_initialize_and_compile`.
-- **Control protocol change.** Run the focused typed request/reply and lifecycle tests for the daemon, CLI, Inspector, and existing control-plane fixtures.
-- **Provider manifest schema change.** Run `just schema` and keep the checked-in schema synchronized.
-- **Documentation-heavy change.** Run `just docs-check` locally. It is not a CI gate and does not block a merge, so run it yourself when you touch `docs/`.
-
-Do not use `cargo check --workspace --all-targets` as the host gate. If validation cannot run, say exactly what failed, what was skipped, and the next best check.
-
-## Footguns
-
-- **Both attach endpoints are part of daemon readiness.** Startup binds the fixed Unix path and the profile's nonzero TCP port before publishing readiness. Failure of either bind aborts startup; exit of either listener after readiness is fatal.
-
-- **Bare `omnifs` on PATH may be the stale npm release.** A global `@0xff-ai/omnifs` shim under the node/fnm tree can shadow the worktree binary and serve a stale published build with retired behavior, such as the pre-host-native Docker-daemon model. When operating the daemon, mounts, or any CLI command from this worktree, always run the compiled `target/debug/omnifs` or `target/release/omnifs`, never bare `omnifs`; a stale shim answering `omnifs status` or `omnifs shell` with errors like a missing `omnifs` Docker container is this footgun, not a real regression.
-- **Default members, not workspace.** `cargo check --workspace --all-targets` forces WASM guest crates onto the host target and fails on `main` too. Guest crates build through `just build providers` and `just check providers`.
-- **`omnifs-wit` guest and host are separate modules.** SDK/providers use `omnifs_wit::provider` (`wit-bindgen`); engine/itest use `omnifs_wit::host` (wasmtime, behind `host-bindings`). Do not make those feature alternates of one module again: Cargo unification would replace guest `Guest` traits with host structs and break providers under whole-workspace checks.
-- **Stale wit-bindgen after `.wit` edits.** Incremental builds can serve stale codegen. Run `cargo clean -p omnifs-wit` or a clean build before trusting downstream errors.
-- **Provider rebuild contention under nextest.** Some `omnifs-engine` integration tests shell out to `just build providers`. Reliable flow: `just build providers`, then `OMNIFS_ITEST_SKIP_PROVIDER_BUILD=1 cargo nextest run ...` (or `just test host`, which sets that flag for you).
-- **Integration fixtures share only compiled Wasmtime artifacts.** `RuntimeHarness` must bind `HostContext` to `omnifs_engine::test_support::wasm_cache_dir`; nextest runs each test in a separate process, so falling back to a per-fixture temporary cache recompiles identical components. Keep all runtime data private to each fixture, and make CI cache the same explicit compiled-component directory.
-- **Host checks may need generated provider artifacts.** If a host check fails because provider WASM is missing, build providers first or point the check at an existing artifact directory.
-- **Provider metadata is compiled directly into provider Wasm.** The `#[provider]` macro assembles the manifest JSON at compile time and emits exactly one `omnifs.provider-metadata.v1` custom section. Missing or invalid metadata means the provider artifact is stale or malformed, so rebuild it with `just build providers`. The host reads and validates the section pre-instantiation; it never instantiates a component to discover metadata.
-- **Host resource bindings must stay per-field.** `HostFile` and `HostSocket` are string config fields with host-resource bindings. Keep the binding on the field metadata; hiding it in the type shape makes host resource lookup miss it.
-- **Object anchors mount at their `r.object` template.** Mount directory-shaped objects at the real anchor path, or use a detached object handle plus `r.object`/`r.alias`.
-- **Router compile errors are component-init errors.** `cargo check --target wasm32-wasip2` can type-check incoherent route trees. Provider route validity is proved when initialization consumes the registration builder through `Router::compile`.
-- **Live NFS mount tests are serialized for a reason.** macOS live NFS tests use a cross-process TCP lock. Do not parallelize or remove that guard casually.
-- **Never enable `serde_json/preserve_order`.** Canonical mount bytes embed a mount's config as `serde_json` text, and `MountVersion` is a hash over those bytes. `serde_json::Map` is a `BTreeMap` only while that feature is off; turning it on anywhere in the workspace switches to insertion order, silently changing every mount version and invalidating stored CAS tokens. `omnifs_state::mount::tests::canonical_config_text_is_pinned` fails if this happens.
+- Both fixed VFS listeners are part of readiness. Failure to bind either, or
+  either listener exiting later, is fatal.
+- `cargo check --workspace --all-targets` builds WASM guests for the host and
+  is not the host gate. Use `just check host` and `just test host`.
+- `omnifs-wit` guest bindings (`provider`) and host bindings (`host`) must
+  coexist. Cargo feature unification makes feature-alternate modules unsafe.
+- After WIT changes, stale generated bindings may require
+  `cargo clean -p omnifs-wit` or a clean build.
+- Host integration tests reuse the built provider sidecars and serialize an
+  automatic build only when an artifact is missing.
+- Integration fixtures share only the explicit compiled Wasmtime cache.
+  Runtime state remains private to each fixture.
+- Provider metadata lives in one custom WASM section. Missing metadata usually
+  means the artifact is stale; rebuild providers.
+- Never enable `serde_json/preserve_order`. Mount versions depend on canonical
+  map ordering; `omnifs_state::mount::tests::canonical_config_text_is_pinned`
+  guards this.
+- Live NFS mount tests use a cross-process lock. Do not parallelize them.
 
 ## Documentation
 
-- Update `docs/contracts/` when a boundary, ownership rule, gated decision, or validation contract changes.
-- Update `docs/architecture/` when the current explanatory model or rationale changes.
-- Keep task instructions next to the owning surface until a repeated pattern justifies a guide namespace.
-- Keep tracked documentation about the current system. Carry proposals and campaign planning in the active task or issue, then update current contracts and architecture when the decision lands.
-- Do not transcribe WIT blocks, struct definitions, or crate layouts into docs. Cite symbols and files instead.
-- Grep docs for old names when renaming a crate, type, route verb, command, generated artifact, or doc path.
-- `just docs-check` fails on nonexistent `docs/` links and enforces the `docs/contracts/` theme-file template. It does not check code paths.
-
-## After a change
-
-- Run the narrowest meaningful validation and report exact commands.
-- Update the relevant contract when a boundary, contract, or user-visible behavior changed.
-- Delete stale footguns in this file when their condition no longer holds.
-- Update current shape when the implementation shape changes.
-- Fix or add a rule here when the work proves one wrong or missing.
+- Contracts contain enforced current behavior. Architecture notes contain the
+  current model, rationale, and rejected prior designs. Do not keep completed
+  plans, migration playbooks, temporary ledgers, or campaign checklists.
+- Update contracts with ownership or behavior; update architecture with the
+  model or rationale; delete stale footguns.
+- Start each focused architecture note with `Status`, `Scope`, `Read when`, and
+  `Binding contracts`.
+- Architecture notes explain a choice, its owner, its effects, its failure
+  boundary, and why rejected designs failed. Put binding `must`, `never`, and
+  `do not` rules in contracts.
+- Use a table when a subsystem has several runtimes, protocols, states, or
+  authority sources. Use prose for rationale and causal flow.
+- Do not copy source structs, WIT blocks, protobuf messages, volatile enums,
+  command flags, or dependency internals into architecture prose. Name the
+  source owner and proof test when exact detail matters; pin external behavior
+  to its version.
+- Run `just docs-check` after documentation changes.

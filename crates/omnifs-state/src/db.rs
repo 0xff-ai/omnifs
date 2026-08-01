@@ -1,7 +1,7 @@
 //! Connection configuration, integrity, and the shared transaction dance.
 
 use anyhow::Context as _;
-use omnifs_core::{MountRevision, MutationId};
+use omnifs_core::ResourceRevision;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqliteSynchronous};
 use sqlx::{Connection as _, SqlitePool};
 use std::fmt::Display;
@@ -132,24 +132,22 @@ impl Db<'_> {
             RecoveryTransition::Serving { revision } => {
                 sqlx::query(
                     "UPDATE recovery_state \
-                     SET state = 'ready', detail = NULL, serving_mount_revision = ?1, \
-                         failed_mutation_id = NULL, updated_at = unixepoch() \
-                     WHERE singleton = 1",
+                     SET state = 'ready', detail = NULL, serving_resource_revision = ?1, \
+                         updated_at = unixepoch() \
+                     WHERE singleton = 1 AND serving_resource_revision <= ?1",
                 )
                 .bind(sql_int(revision.get(), "mount revision")?)
                 .execute(&mut *self.0)
                 .await
                 .context("mark serving state ready")?;
             },
-            RecoveryTransition::RecoveryRequired { mutation, detail } => {
+            RecoveryTransition::RecoveryRequired { detail } => {
                 sqlx::query(
                     "UPDATE recovery_state \
-                     SET state = 'recovery-required', detail = ?1, failed_mutation_id = ?2, \
-                         updated_at = unixepoch() \
+                     SET state = 'recovery-required', detail = ?1, updated_at = unixepoch() \
                      WHERE singleton = 1",
                 )
                 .bind(detail)
-                .bind(mutation.map(|id| id.as_bytes().to_vec()))
                 .execute(&mut *self.0)
                 .await
                 .context("mark recovery required")?;
@@ -198,11 +196,6 @@ fn decode_attach_port(port: i64) -> anyhow::Result<NonZeroU16> {
 
 /// One durable move of the serving head.
 pub(crate) enum RecoveryTransition {
-    Serving {
-        revision: MountRevision,
-    },
-    RecoveryRequired {
-        mutation: Option<MutationId>,
-        detail: String,
-    },
+    Serving { revision: ResourceRevision },
+    RecoveryRequired { detail: String },
 }

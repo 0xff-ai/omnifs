@@ -4,8 +4,8 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::error::ExitCode;
-use crate::image::BUILD_CHANNEL;
 use crate::ui::output::{Output, ResultVerdict};
+use omnifs_bootstrap::BUILD_CHANNEL;
 
 pub async fn run(output: Output) -> Result<ExitCode> {
     if output.is_structured() {

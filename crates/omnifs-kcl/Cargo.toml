@@ -1,0 +1,23 @@
+[package]
+name = "omnifs-kcl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Local KCL authoring and strict resource conversion for omnifs"
+
+[dependencies]
+kcl-lang = { workspace = true }
+omnifs-api = { workspace = true }
+omnifs-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

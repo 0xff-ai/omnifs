@@ -163,7 +163,7 @@ fn wire_reattach_survives_filesystem_and_daemon_restart() {
     let socket = home.join("daemon-state/local.sock");
     let mount_point = home.join("mnt-reattach");
     std::fs::create_dir_all(&mount_point).expect("mount point");
-    let state_dir = home.join("nfs-state");
+    let state_dir = home.join("daemon-state/runtime/filesystems/reattach");
     let daemon_args = live::daemon_args(&home);
 
     let spawn_daemon = || {

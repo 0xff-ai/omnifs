@@ -1,6 +1,8 @@
 # omnifs-cli
 
-The `omnifs` command-line tool and host-native daemon. It mounts [omnifs](https://github.com/0xff-ai/omnifs) providers so external services such as GitHub, arXiv, and DNS appear as ordinary files and directories.
+The `omnifs` command and host-native daemon form a filesystem projection
+system. They project external services such as GitHub, arXiv, and DNS into a
+shared virtual namespace that can be exposed as one or more filesystems.
 
 ## Install
 
@@ -8,13 +10,9 @@ The `omnifs` command-line tool and host-native daemon. It mounts [omnifs](https:
 npm install -g @0xff-ai/omnifs
 ```
 
-The npm package installs the native `omnifs` binary for Linux and macOS. Commands start the hidden host-native daemon through its local control socket; named filesystems are independent runners managed with `omnifs fs`. Providers, credentials, and caching never run in a container.
-
-Host filesystems run through the full binary's hidden `omnifs run-fs` command. Docker and libkrun guests use the slim `omnifs-thin` runner. The Docker FUSE filesystem uses the version-matched `ghcr.io/0xff-ai/omnifs-filesystem:<version>` image. Local development uses `omnifs-filesystem:dev` and never pulls it.
-
-Binary releases for Linux and macOS are also attached to each [GitHub Release](https://github.com/0xff-ai/omnifs/releases).
-
-From source, use:
+The npm package installs the native `omnifs` binary for Linux and macOS.
+Binary releases are also attached to each
+[GitHub Release](https://github.com/0xff-ai/omnifs/releases). From source:
 
 ```bash
 cargo install omnifs-cli
@@ -24,41 +22,75 @@ cargo install omnifs-cli
 
 ```bash
 omnifs setup
+omnifs status
 omnifs fs ls
 ```
 
-`omnifs setup` boots the daemon, shows status, and lists every embedded provider through daemon RPC with an honest auth label. It then offers two default-yes confirms: mount every provider that needs no sign-in in one atomic batch, and attach the platform-recommended filesystem. `--yes` accepts both without asking; `--no-input` declines both and still exits 0. Anything that needs a sign-in or a config value goes through `omnifs mount add`. The CLI stores profile config at `OMNIFS_HOME/config.toml` and filesystem state under `OMNIFS_HOME/client`; the daemon stores credentials, mounts, providers, cache, and logs under `OMNIFS_HOME/daemon-state`.
+`omnifs setup` starts the daemon, lists embedded providers, and offers a small
+initial desired resource set. The daemon stores resources, provider artifacts,
+credential material, action receipts, caches, logs, and observed Filesystem
+state under `OMNIFS_HOME/daemon-state`.
 
-## Platform
+## Resources and automation
 
-Create and attach a host, Docker, or libkrun filesystem explicitly. Host locations must be absolute; Docker and libkrun own their guest location:
+Interactive `provider`, `mount`, `credential`, and `fs` commands edit
+the complete desired set, show the typed plan, ask for consent, apply one
+SQLite transaction, and follow daemon progress to a terminal revision or
+action.
+
+KCL is the automation surface:
 
 ```bash
-omnifs fs create --name local --protocol nfs --runtime host --location "/Users/me/omnifs"
-omnifs fs create --name docker --runtime docker
-omnifs fs create --name vm --runtime libkrun
-omnifs fs attach --name local
-omnifs fs attach --name docker
-omnifs fs restart --name docker
-omnifs fs shell --name docker -- ls -la /omnifs
-omnifs fs detach --name docker
+omnifs plan omnifs.k
+omnifs apply omnifs.k --yes
 ```
 
-Docker and libkrun deliver FUSE only. Every filesystem attaches to the host-native daemon over the wire protocol and exposes every mount.
+Author `omnifs.k` as the desired resource set. The client evaluates it in
+process and converts its result to strict Rust resource types. KCL never
+contains secrets. Static-token automation uses only `omnifs credential set
+NAME --from-env VARIABLE`.
 
-## Output
+## Filesystems
 
-Global `--output human|json|jsonl` selects the output contract. JSON emits one envelope with plural resource arrays such as `result.filesystems`, `result.mounts`, and `result.providers`; JSONL emits the same single terminal result or error with a stream-record discriminator. Finite structured commands never emit progress records. `--quiet`, `--no-input`, and `--yes` are also invocation-wide.
+A Filesystem is one desired OS-facing exposure of the complete shared
+namespace. Resource presence asks the daemon to keep its filesystem runtime
+attached. Removing the resource asks the daemon to stop the exact runtime and
+VFS session.
 
-Human resource reports use soft, borderless tables and print at most one Inventory-selected recovery action. `omnifs inspect` uses ratatui only on an interactive human terminal; `--plain` and JSONL are line streams. The TUI keeps a timestamped operation stream and selected stage detail, with help on `?`.
+```bash
+omnifs fs add
+omnifs fs ls
+omnifs fs show local
+omnifs fs restart local
+omnifs fs shell local -- ls -la /omnifs
+omnifs fs rm local
+```
+
+Host Filesystems use FUSE on Linux or NFSv4 loopback on macOS. Docker and
+libkrun Filesystems use FUSE at `/omnifs`. Every Filesystem exposes every
+configured Mount.
+
+## Progress and output
+
+Human and JSONL mutations wait and stream typed progress by default. JSON waits
+and emits one terminal envelope. Quiet human mode waits and prints only the
+terminal receipt. Non-TTY human progress uses stable lines without cursor
+control. Ctrl-C stops only the viewer, exits 130, and prints the exact revision
+or action follow command while daemon work continues.
+
+Global `--output human|json|jsonl`, `--quiet`, `--no-input`, and `--yes` apply
+to the full invocation. Read commands return plural resource arrays and
+absolute machine paths.
+
+## Configuration
+
+Optional profile config lives at `~/.omnifs/config.toml`, or
+`$OMNIFS_HOME/config.toml` when `OMNIFS_HOME` is set. Use command help for the
+current surface.
 
 ## Status
 
-Pre-1.0. CLI surface and config format may evolve before v1.
-
-## Configuration file
-
-Optional. Lives at `~/.omnifs/config.toml` by default, or `$OMNIFS_HOME/config.toml` when `OMNIFS_HOME` is set. The CLI uses defaults when it is absent; use command help for current overrides rather than copying version-specific runtime settings.
+Pre-1.0. CLI and config formats may change before v1.
 
 ## License
 

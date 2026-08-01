@@ -3,7 +3,8 @@
 use anyhow::Context as _;
 
 use omnifs_api::DaemonInfo;
-use omnifs_bootstrap::{Bootstrap, Daemon, Instance};
+use omnifs_bootstrap::{DaemonIdentity, Profile};
+use omnifs_state::DaemonStatePaths;
 use std::net::SocketAddr;
 use std::num::NonZeroU16;
 use std::os::unix::fs::MetadataExt as _;
@@ -16,25 +17,26 @@ pub(crate) const ATTACH_PORT_MIN: u16 = 20_000;
 pub(crate) const ATTACH_PORT_COUNT: u16 = 10_000;
 
 pub(crate) struct DaemonContext {
-    endpoint: Bootstrap<Daemon>,
+    profile: Profile,
+    state_paths: DaemonStatePaths,
     attach_socket: PathBuf,
     /// Random per-start id reported in status and written to process identity.
     instance_id: String,
     daemon_instance: [u8; 16],
-    process: Instance,
+    process: DaemonIdentity,
 }
 
 impl DaemonContext {
-    pub(crate) fn resolve() -> anyhow::Result<Self> {
-        let endpoint = Bootstrap::<Daemon>::for_daemon()?;
-        let attach_socket = endpoint.bootstrap_dir().join("daemon-state/local.sock");
-        let process = Instance::current()?;
+    pub(crate) fn new(profile: Profile, state_paths: DaemonStatePaths) -> anyhow::Result<Self> {
+        let attach_socket = state_paths.root().join("local.sock");
+        let process = DaemonIdentity::current()?;
         let mut daemon_instance = [0_u8; 16];
         hex::decode_to_slice(process.instance_token(), &mut daemon_instance)
             .context("decode daemon process instance token")?;
 
         Ok(Self {
-            endpoint,
+            profile,
+            state_paths,
             attach_socket,
             instance_id: process.instance_token().to_owned(),
             daemon_instance,
@@ -43,7 +45,7 @@ impl DaemonContext {
     }
 
     pub(crate) fn prepare_startup_dirs(&self) -> anyhow::Result<()> {
-        std::fs::create_dir_all(self.endpoint.bootstrap_dir())?;
+        std::fs::create_dir_all(self.profile.root())?;
         if let Some(parent) = self.attach_socket.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -51,7 +53,7 @@ impl DaemonContext {
     }
 
     pub(crate) fn control_socket(&self) -> PathBuf {
-        self.endpoint.control_socket()
+        self.profile.control_socket()
     }
 
     pub(crate) fn instance_id(&self) -> &str {
@@ -68,16 +70,20 @@ impl DaemonContext {
 
     /// Bind the host-native control socket at `<profile>/control.sock`.
     pub(crate) fn bind_control_socket(&self) -> anyhow::Result<UnixListener> {
-        self.endpoint
+        self.profile
             .bind_control_socket()
             .with_context(|| format!("bind control socket {}", self.control_socket().display()))
     }
 
-    pub(crate) fn endpoint(&self) -> &Bootstrap<Daemon> {
-        &self.endpoint
+    pub(crate) fn profile(&self) -> &Profile {
+        &self.profile
     }
 
-    pub(crate) fn process_identity(&self) -> &Instance {
+    pub(crate) fn state_paths(&self) -> &DaemonStatePaths {
+        &self.state_paths
+    }
+
+    pub(crate) fn process_identity(&self) -> &DaemonIdentity {
         &self.process
     }
 
@@ -86,6 +92,40 @@ impl DaemonContext {
         attach_unix: Option<PathBuf>,
         attach_tcp: Option<SocketAddr>,
     ) -> DaemonInfo {
+        let supported_filesystem_pairs = [
+            omnifs_core::FilesystemProtocol::Fuse,
+            omnifs_core::FilesystemProtocol::Nfs,
+        ]
+        .into_iter()
+        .flat_map(|protocol| {
+            [
+                omnifs_core::FilesystemRuntime::Host,
+                omnifs_core::FilesystemRuntime::Docker,
+                omnifs_core::FilesystemRuntime::Libkrun,
+            ]
+            .into_iter()
+            .filter(move |runtime| {
+                omnifs_core::filesystem_pair_supported_on_current_host(protocol, *runtime)
+            })
+            .map(move |runtime| (protocol, runtime))
+        })
+        .collect();
+        let platform_default_filesystem_pair = match (std::env::consts::OS, std::env::consts::ARCH)
+        {
+            ("linux", _) => Some((
+                omnifs_core::FilesystemProtocol::Fuse,
+                omnifs_core::FilesystemRuntime::Host,
+            )),
+            ("macos", "aarch64") => Some((
+                omnifs_core::FilesystemProtocol::Fuse,
+                omnifs_core::FilesystemRuntime::Libkrun,
+            )),
+            ("macos", _) => Some((
+                omnifs_core::FilesystemProtocol::Nfs,
+                omnifs_core::FilesystemRuntime::Host,
+            )),
+            _ => None,
+        };
         DaemonInfo {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             pid: self.process.pid(),
@@ -93,6 +133,8 @@ impl DaemonContext {
             executable: self.process.executable().to_path_buf(),
             attach_unix,
             attach_tcp,
+            supported_filesystem_pairs,
+            platform_default_filesystem_pair,
         }
     }
 
@@ -100,7 +142,7 @@ impl DaemonContext {
     /// range, so a fresh daemon and a restarted one land on the same first
     /// guess before falling back to `StateStore`'s persisted port.
     pub(crate) fn attach_port_candidates(&self) -> impl Iterator<Item = NonZeroU16> + use<> {
-        let digest = blake3::hash(self.endpoint.bootstrap_dir().as_os_str().as_encoded_bytes());
+        let digest = blake3::hash(self.profile.root().as_os_str().as_encoded_bytes());
         let bytes = digest.as_bytes();
         let offset = u16::from_le_bytes([bytes[0], bytes[1]]) % ATTACH_PORT_COUNT;
         (0..ATTACH_PORT_COUNT).map(move |step| {
@@ -139,11 +181,13 @@ mod tests {
     use tempfile::TempDir;
 
     fn context(root: &Path) -> DaemonContext {
-        let endpoint = Bootstrap::<Daemon>::under_root(root);
-        let process = Instance::current().unwrap();
+        let profile = Profile::under_root(root);
+        let state_paths = DaemonStatePaths::new(root.join("daemon-state"));
+        let process = DaemonIdentity::current().unwrap();
         DaemonContext {
             attach_socket: root.join("daemon-state/local.sock"),
-            endpoint,
+            profile,
+            state_paths,
             instance_id: "test-instance".to_owned(),
             daemon_instance: [0x42; 16],
             process,
@@ -177,5 +221,25 @@ mod tests {
         drop(listener);
         assert!(target.exists(), "symlink target must not be removed");
         assert!(path.exists());
+    }
+
+    #[test]
+    fn daemon_info_advertises_supported_pairs_and_default_policy() {
+        let temp = TempDir::new().unwrap();
+        let info = context(temp.path()).daemon_info(None, None);
+        assert!(!info.supported_filesystem_pairs.is_empty());
+        assert!(
+            info.supported_filesystem_pairs
+                .iter()
+                .all(|(protocol, runtime)| {
+                    omnifs_core::filesystem_pair_supported_on_current_host(*protocol, *runtime)
+                })
+        );
+        if let Some((protocol, runtime)) = info.platform_default_filesystem_pair {
+            assert!(
+                info.supported_filesystem_pairs
+                    .contains(&(protocol, runtime))
+            );
+        }
     }
 }

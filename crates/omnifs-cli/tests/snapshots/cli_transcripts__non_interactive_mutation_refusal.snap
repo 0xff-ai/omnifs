@@ -1,0 +1,9 @@
+---
+source: crates/omnifs-cli/tests/cli_transcripts.rs
+expression: "fixture.transcript(&fixture.run(&[\"fs\", \"add\"]))"
+---
+exit: 4
+stdout:
+stderr:
+✗ interactive resource mutations require a terminal. Use omnifs plan <file> and omnifs apply <file> --yes for
+automation.

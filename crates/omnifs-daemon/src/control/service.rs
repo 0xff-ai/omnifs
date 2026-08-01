@@ -1,10 +1,11 @@
 //! The gRPC control surface: one method per control-plane operation.
 
 use super::mapping::{
-    api_credential_status, api_mount_record, api_provider_import_disposition,
-    api_provider_metadata, api_provider_reference, credential_id,
+    api_credential_status, api_provider_import_disposition, api_provider_metadata,
+    api_provider_reference, credential_id,
 };
 use super::*;
+use tokio_stream::StreamExt as _;
 
 const PROVIDER_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
 pub(crate) struct GrpcControlService {
@@ -30,7 +31,6 @@ impl GrpcControlService {
                 phase: DaemonPhase::Starting,
                 durable_revision: None,
                 serving_revision: None,
-                failed_mutation: None,
                 store_health: HealthReport::new(HealthState::Degraded, "daemon is starting"),
                 repair: None,
             }),
@@ -54,8 +54,7 @@ impl GrpcControlService {
                 ),
                 mounts: Vec::new(),
                 credentials: Vec::new(),
-                attachments: Vec::new(),
-                active_mutation: None,
+                filesystems: Vec::new(),
             }),
             ControlPhase::Recovery(recovery) => Ok(DaemonInventory {
                 info: self.control.context.daemon_info(None, None),
@@ -69,8 +68,7 @@ impl GrpcControlService {
                 ),
                 mounts: Vec::new(),
                 credentials: Vec::new(),
-                attachments: Vec::new(),
-                active_mutation: None,
+                filesystems: Vec::new(),
             }),
             ControlPhase::Ready(daemon) => daemon.inventory().await.map_err(grpc_internal),
             ControlPhase::ShuttingDown => Err(grpc_status(ControlPhase::shutting_down())),
@@ -153,23 +151,6 @@ async fn import_provider_inner(
 /// mount, and an `Unchanged` re-import repaired nothing, so only
 /// `Repaired` warrants this. Best-effort: the import itself already
 /// committed, so a rebuild failure is logged rather than failing the RPC.
-async fn rebuild_after_repair(daemon: &Daemon, outcome: &omnifs_state::ProviderImportOutcome) {
-    if outcome.disposition != omnifs_state::ProviderImportDisposition::Repaired {
-        return;
-    }
-    if let Err(error) = daemon
-        .manager
-        .rebuild_for_provider_repair(outcome.reference.id)
-        .await
-    {
-        tracing::warn!(
-            provider = %outcome.reference.id,
-            %error,
-            "could not rebuild serving generation after provider repair"
-        );
-    }
-}
-
 fn provider_import_response(
     outcome: omnifs_state::ProviderImportOutcome,
 ) -> wire::ImportProviderResponse {
@@ -231,6 +212,31 @@ impl wire::control_server::Control for GrpcControlService {
         Ok(Response::new(wire::RecoveryResponse {
             recovery: Some(grpc::to_daemon_recovery(&self.recovery().await?)),
         }))
+    }
+
+    async fn run_doctor(
+        &self,
+        _request: Request<wire::Empty>,
+    ) -> Result<Response<wire::RunDoctorResponse>, Status> {
+        let daemon = self.daemon()?;
+        let report = daemon.run_doctor().await.map_err(grpc_internal)?;
+        Ok(Response::new(grpc::to_run_doctor_response(&report)))
+    }
+
+    async fn apply_doctor_repairs(
+        &self,
+        request: Request<wire::ApplyDoctorRepairsRequest>,
+    ) -> Result<Response<wire::ApplyDoctorRepairsResponse>, Status> {
+        let daemon = self.daemon()?;
+        let ids =
+            grpc::apply_doctor_repairs_request(&request.into_inner()).map_err(grpc_invalid)?;
+        let outcomes = daemon
+            .apply_doctor_repairs(ids)
+            .await
+            .map_err(grpc_internal)?;
+        Ok(Response::new(grpc::to_apply_doctor_repairs_response(
+            &outcomes,
+        )))
     }
 
     async fn repair_state(
@@ -306,36 +312,35 @@ impl wire::control_server::Control for GrpcControlService {
         let ControlPhase::Ready(daemon) = self.phase() else {
             let _ = self.control.shutdown_tx.send(true);
             return Ok(Response::new(wire::ShutdownResponse {
-                detached: 0,
-                still_attached: Vec::new(),
+                stopped: 0,
+                still_running: Vec::new(),
             }));
         };
+        daemon.resources.shutdown();
+        let supervisor = Arc::clone(daemon.filesystem_supervisor().map_err(grpc_internal)?);
         let vfs = Arc::clone(&daemon.vfs);
         let shutdown_tx = daemon.shutdown_tx.clone();
         let result = tokio::spawn(async move {
-            let (detached, still_attached) = if stop_filesystems {
-                let before = vfs.attachments().len();
-                vfs.stop_filesystems();
-                let still = vfs.drain_attachments(DRAIN_TIMEOUT).await;
+            let (stopped, still_running) = if stop_filesystems {
+                let before = vfs.sessions().len();
+                let still = supervisor.stop_all().await?;
                 (
                     before.saturating_sub(still.len()),
-                    still
-                        .into_iter()
-                        .map(|identity| identity.to_string())
-                        .collect(),
+                    still.into_iter().map(|name| name.to_string()).collect(),
                 )
             } else {
                 (0, Vec::new())
             };
             let _ = shutdown_tx.send(true);
-            (detached, still_attached)
+            anyhow::Ok((stopped, still_running))
         })
         .await
-        .map_err(|error| grpc_internal(error.to_string()))?;
-        let (detached, still_attached) = result;
+        .map_err(|error| grpc_internal(error.to_string()))?
+        .map_err(grpc_internal)?;
+        let (stopped, still_running) = result;
         Ok(Response::new(wire::ShutdownResponse {
-            detached: u32::try_from(detached).map_err(grpc_internal)?,
-            still_attached,
+            stopped: u32::try_from(stopped).map_err(grpc_internal)?,
+            still_running,
         }))
     }
 
@@ -404,7 +409,7 @@ impl wire::control_server::Control for GrpcControlService {
             .import_provider(upload)
             .await
             .map_err(grpc_internal)?;
-        rebuild_after_repair(&daemon, &outcome).await;
+        daemon.provider_imported(&outcome);
         Ok(Response::new(provider_import_response(outcome)))
     }
 
@@ -434,102 +439,8 @@ impl wire::control_server::Control for GrpcControlService {
             .import_provider(upload)
             .await
             .map_err(grpc_internal)?;
-        rebuild_after_repair(&daemon, &outcome).await;
+        daemon.provider_imported(&outcome);
         Ok(Response::new(provider_import_response(outcome)))
-    }
-
-    async fn begin_mutation(
-        &self,
-        request: Request<wire::BeginMutationRequest>,
-    ) -> Result<Response<wire::BeginMutationResponse>, Status> {
-        let daemon = self.daemon()?;
-        let request = request.into_inner();
-        let id =
-            omnifs_core::MutationId::from_bytes(exact_bytes(&request.mutation_id, "mutation id")?);
-        let lease_deadline_unix_ms = daemon
-            .manager
-            .begin(id)
-            .await
-            .map_err(|error| manager_status(&error))?;
-        Ok(Response::new(wire::BeginMutationResponse {
-            lease_deadline_unix_ms,
-        }))
-    }
-
-    async fn apply_mutation(
-        &self,
-        request: Request<wire::ApplyMutationRequest>,
-    ) -> Result<Response<wire::ApplyMutationResponse>, Status> {
-        let daemon = self.daemon()?;
-        let request = request.into_inner();
-        let id =
-            omnifs_core::MutationId::from_bytes(exact_bytes(&request.mutation_id, "mutation id")?);
-        let ops = request
-            .ops
-            .iter()
-            .map(grpc::mutation_op)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(grpc_invalid)?;
-        let outcome = daemon
-            .manager
-            .apply(id, ops)
-            .await
-            .map_err(|error| manager_status(&error))?;
-        Ok(Response::new(wire::ApplyMutationResponse {
-            results: outcome
-                .results
-                .iter()
-                .map(grpc::to_mutation_op_result)
-                .collect(),
-            serving: Some(grpc::to_serving_outcome(&outcome.serving)),
-        }))
-    }
-
-    async fn drop_mutation(
-        &self,
-        request: Request<wire::DropMutationRequest>,
-    ) -> Result<Response<wire::DropMutationResponse>, Status> {
-        let daemon = self.daemon()?;
-        let request = request.into_inner();
-        let id =
-            omnifs_core::MutationId::from_bytes(exact_bytes(&request.mutation_id, "mutation id")?);
-        daemon
-            .manager
-            .drop_mutation(id)
-            .await
-            .map_err(|error| manager_status(&error))?;
-        Ok(Response::new(wire::DropMutationResponse {}))
-    }
-
-    async fn list_mounts(
-        &self,
-        _request: Request<wire::Empty>,
-    ) -> Result<Response<wire::ListMountsResponse>, Status> {
-        let daemon = self.daemon()?;
-        let mounts = daemon.mount_records().await.map_err(grpc_internal)?;
-        Ok(Response::new(wire::ListMountsResponse {
-            mounts: mounts.iter().map(grpc::to_mount_record).collect(),
-        }))
-    }
-
-    async fn get_mount(
-        &self,
-        request: Request<wire::GetMountRequest>,
-    ) -> Result<Response<wire::GetMountResponse>, Status> {
-        let daemon = self.daemon()?;
-        let name = omnifs_core::MountName::new(request.into_inner().name)
-            .map_err(|_| grpc_invalid("invalid mount name"))?;
-        let mount = daemon.state.get_mount(&name).await.map_err(grpc_internal)?;
-        let mount = mount
-            .map(|mount| {
-                let mut health = daemon.live_mount_healths();
-                let (mount_health, auth_health) = health.take(&mount);
-                api_mount_record(mount, mount_health, auth_health).map_err(grpc_internal)
-            })
-            .transpose()?;
-        Ok(Response::new(wire::GetMountResponse {
-            mount: mount.as_ref().map(grpc::to_mount_record),
-        }))
     }
 
     async fn list_credentials(
@@ -580,6 +491,186 @@ impl wire::control_server::Control for GrpcControlService {
         Ok(Response::new(wire::GetCredentialStatusResponse {
             status: status.as_ref().map(grpc::to_credential_status),
         }))
+    }
+
+    async fn get_resources(
+        &self,
+        _request: Request<wire::Empty>,
+    ) -> Result<Response<wire::GetResourcesResponse>, Status> {
+        let daemon = self.daemon()?;
+        let snapshot = daemon
+            .resources
+            .snapshot()
+            .await
+            .map_err(|error| resource_control_status(&error))?;
+        Ok(Response::new(wire::GetResourcesResponse {
+            snapshot: Some(grpc::to_resource_snapshot(&snapshot)),
+        }))
+    }
+
+    async fn plan_resources(
+        &self,
+        request: Request<wire::PlanResourcesRequest>,
+    ) -> Result<Response<wire::PlanResourcesResponse>, Status> {
+        let daemon = self.daemon()?;
+        let declarations = grpc::resource_declarations(&required(
+            request.into_inner().declarations,
+            "resource declarations",
+        )?)
+        .map_err(|error| resource_grpc_error(&error))?;
+        let plan = daemon
+            .resources
+            .plan(declarations)
+            .await
+            .map_err(|error| resource_control_status(&error))?;
+        Ok(Response::new(wire::PlanResourcesResponse {
+            plan: Some(grpc::to_resource_plan(&plan)),
+        }))
+    }
+
+    async fn apply_resources(
+        &self,
+        request: Request<wire::ApplyResourcesRequest>,
+    ) -> Result<Response<wire::ApplyResourcesResponse>, Status> {
+        let daemon = self.daemon()?;
+        let request = grpc::apply_resources_request(&request.into_inner())
+            .map_err(|error| resource_grpc_error(&error))?;
+        let receipt = daemon
+            .resources
+            .apply(request)
+            .await
+            .map_err(|error| resource_control_status(&error))?;
+        Ok(Response::new(wire::ApplyResourcesResponse {
+            receipt: Some(grpc::to_apply_receipt(&receipt)),
+        }))
+    }
+
+    async fn set_credential_material(
+        &self,
+        request: Request<wire::SetCredentialMaterialRequest>,
+    ) -> Result<Response<wire::SetCredentialMaterialResponse>, Status> {
+        let daemon = self.daemon()?;
+        let request =
+            grpc::set_credential_material_request(&request.into_inner()).map_err(grpc_invalid)?;
+        let receipt = daemon
+            .resources
+            .set_credential_material(request)
+            .await
+            .map_err(|error| resource_control_status(&error))?;
+        Ok(Response::new(wire::SetCredentialMaterialResponse {
+            receipt: Some(grpc::to_credential_receipt(&receipt)),
+        }))
+    }
+
+    async fn revoke_credential(
+        &self,
+        request: Request<wire::RevokeCredentialRequest>,
+    ) -> Result<Response<wire::RevokeCredentialResponse>, Status> {
+        let daemon = self.daemon()?;
+        let request =
+            grpc::revoke_credential_request(&request.into_inner()).map_err(grpc_invalid)?;
+        let receipt = daemon
+            .resources
+            .revoke_credential(request)
+            .await
+            .map_err(|error| resource_control_status(&error))?;
+        Ok(Response::new(wire::RevokeCredentialResponse {
+            receipt: Some(grpc::to_credential_receipt(&receipt)),
+        }))
+    }
+
+    async fn get_filesystem_status(
+        &self,
+        request: Request<wire::GetFilesystemStatusRequest>,
+    ) -> Result<Response<wire::GetFilesystemStatusResponse>, Status> {
+        let daemon = self.daemon()?;
+        let name = omnifs_core::ResourceName::new(request.into_inner().filesystem_name)
+            .map_err(grpc_invalid)?;
+        let status = daemon
+            .filesystem_status(&name)
+            .await
+            .map_err(grpc_internal)?;
+        Ok(Response::new(grpc::to_get_filesystem_status_response(
+            status.as_ref(),
+        )))
+    }
+
+    async fn restart_filesystem(
+        &self,
+        request: Request<wire::RestartFilesystemRequest>,
+    ) -> Result<Response<wire::RestartFilesystemResponse>, Status> {
+        let daemon = self.daemon()?;
+        let request =
+            grpc::restart_filesystem_request(&request.into_inner()).map_err(grpc_invalid)?;
+        let receipt = daemon
+            .resources
+            .restart_filesystem(request)
+            .await
+            .map_err(|error| resource_control_status(&error))?;
+        Ok(Response::new(grpc::to_restart_filesystem_response(
+            &receipt,
+        )))
+    }
+
+    async fn get_filesystem_access(
+        &self,
+        request: Request<wire::GetFilesystemAccessRequest>,
+    ) -> Result<Response<wire::GetFilesystemAccessResponse>, Status> {
+        let daemon = self.daemon()?;
+        let request =
+            grpc::get_filesystem_access_request(&request.into_inner()).map_err(grpc_invalid)?;
+        let access = daemon
+            .filesystem_access(request)
+            .await
+            .map_err(grpc_status)?;
+        Ok(Response::new(grpc::to_get_filesystem_access_response(
+            &access,
+        )))
+    }
+
+    type WatchProgressStream =
+        Pin<Box<dyn tokio_stream::Stream<Item = Result<wire::ProgressEvent, Status>> + Send>>;
+
+    async fn watch_progress(
+        &self,
+        request: Request<wire::WatchProgressRequest>,
+    ) -> Result<Response<Self::WatchProgressStream>, Status> {
+        let daemon = self.daemon()?;
+        let target = grpc::progress_target(&request.into_inner()).map_err(grpc_invalid)?;
+        if daemon.resources.progress().target_state(target)
+            == crate::progress::ProgressTargetState::Unavailable
+        {
+            let code = if matches!(target, omnifs_api::ProgressTarget::Action(_)) {
+                ControlErrorCode::ActionUnavailable
+            } else {
+                ControlErrorCode::NotFound
+            };
+            return Err(grpc_status(ControlError::new(
+                code,
+                "progress target is unknown or no longer retained",
+            )));
+        }
+        let permit = Arc::clone(&self.control.stream_permits)
+            .try_acquire_owned()
+            .map_err(|_| {
+                grpc_status(ControlError::new(
+                    ControlErrorCode::Busy,
+                    "stream capacity exhausted",
+                ))
+            })?;
+        let receive = daemon.resources.progress().subscribe(target);
+        let stream = ReceiverStream::new(receive).map(move |event| {
+            let _permit = &permit;
+            let event = grpc::to_progress_event(&event);
+            if event.encoded_len() > omnifs_api::CONTROL_STREAM_ITEM_MAX_BYTES {
+                return Err(grpc_status(ControlError::new(
+                    ControlErrorCode::PlanTooLarge,
+                    "progress snapshot exceeds the control stream item limit",
+                )));
+            }
+            Ok(event)
+        });
+        Ok(Response::new(Box::pin(stream)))
     }
 
     type SubscribeInspectorStream = ReceiverStream<Result<wire::InspectorStreamItem, Status>>;

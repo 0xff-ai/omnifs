@@ -1,7 +1,8 @@
 //! CLI type definitions: top-level parser and command enum.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::fmt::Write as _;
+use std::path::PathBuf;
 
 use crate::commands;
 use crate::commands::doctor::DoctorVerdict;
@@ -56,26 +57,46 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Show daemon, mount, and auth status
-    Status,
+    /// Show resources and follow typed daemon work
+    Status(StatusArgs),
+
+    /// Preview the complete desired resource set from KCL
+    Plan {
+        /// KCL source file. Defaults to ./omnifs.k when it exists.
+        path: Option<PathBuf>,
+    },
+
+    /// Apply the complete desired resource set from KCL
+    Apply {
+        /// KCL source file. Defaults to ./omnifs.k when it exists.
+        path: Option<PathBuf>,
+    },
 
     /// Stop the daemon and clean up
     ///
-    /// Asks attached filesystems to stop, drains them for a bounded time, then
+    /// Asks Filesystems to stop, drains them for a bounded time, then
     /// stops the daemon. Busy stragglers are reported for `omnifs doctor`.
     Down,
     /// Tail the daemon log
     Logs(commands::logs::LogsArgs),
     /// Stream FUSE, provider, and callout events
     Inspect(commands::inspect::InspectArgs),
-    /// Add, list, reauthenticate, revoke, or remove mounts
+    /// Add, list, show, or remove Provider resources
+    Provider(commands::provider::ProviderArgs),
+
+    /// Add, list, update, authenticate, or remove Mount resources
     Mount(commands::mount::MountArgs),
 
-    /// List or remove stored credentials
+    /// Manage declared credential slots and their secret material
     Credential(commands::credential::CredentialArgs),
 
-    /// Start the daemon, list providers, and offer quick-start mounts and filesystems
-    Setup(commands::setup::SetupArgs),
+    /// Add, list, inspect, remove, restart, or enter Filesystems
+    #[command(name = "fs")]
+    Filesystem(commands::filesystem::FilesystemArgs),
+
+    /// Start the daemon and offer a resource-based quick start
+    #[command(after_help = "Examples:\n  omnifs setup")]
+    Setup,
 
     /// Install omnifs usage skills for agent harnesses
     Skill(commands::skill::SkillArgs),
@@ -100,13 +121,19 @@ pub enum Commands {
     /// Run a host filesystem. Internal: launched by filesystem lifecycle commands.
     #[command(hide = true)]
     RunFs(omnifs_thin::RunFsArgs),
+}
 
-    /// Configure and manage named filesystems
-    ///
-    /// Create, attach, detach, restart, remove, or list FUSE and NFS filesystems.
-    /// Every filesystem renders the daemon's same shared namespace and carries no
-    /// provider credentials.
-    Fs(commands::fs::FsArgs),
+#[derive(Args, Debug, Clone)]
+pub struct StatusArgs {
+    /// Follow typed daemon progress instead of printing one status snapshot.
+    #[arg(long)]
+    pub follow: bool,
+    /// Follow one desired revision to its terminal result.
+    #[arg(long, requires = "follow", conflicts_with = "action")]
+    pub revision: Option<omnifs_core::ResourceRevision>,
+    /// Follow one durable action to its terminal result.
+    #[arg(long, requires = "follow", conflicts_with = "revision")]
+    pub action: Option<omnifs_core::ActionId>,
 }
 
 impl Cli {
@@ -140,48 +167,62 @@ impl Cli {
 impl Commands {
     fn labels(&self) -> (Option<&'static str>, &'static str) {
         match self {
-            Self::Status => (Some("status"), "status"),
+            Self::Status(_) => (Some("status"), "status"),
+            Self::Plan { .. } => (Some("plan"), "plan"),
+            Self::Apply { .. } => (Some("apply"), "apply"),
             Self::Down => (Some("down"), "down"),
             Self::Logs(_) => (Some("logs"), "logs"),
             Self::Inspect(_) => (Some("inspect"), "inspect"),
+            Self::Provider(args) => (
+                Some("provider"),
+                match &args.command {
+                    commands::provider::ProviderCommand::Add => "provider.add",
+                    commands::provider::ProviderCommand::Ls => "provider.ls",
+                    commands::provider::ProviderCommand::Show { .. } => "provider.show",
+                    commands::provider::ProviderCommand::Rm { .. } => "provider.rm",
+                },
+            ),
             Self::Mount(args) => (
                 Some("mount"),
                 match &args.command {
-                    commands::mount::MountCommand::Add(_) => "mount.add",
+                    commands::mount::MountCommand::Add => "mount.add",
                     commands::mount::MountCommand::Ls => "mount.ls",
-                    commands::mount::MountCommand::Show(_) => "mount.show",
-                    commands::mount::MountCommand::Update(_) => "mount.update",
-                    commands::mount::MountCommand::Reauth(_) => "mount.reauth",
-                    commands::mount::MountCommand::Revoke(_) => "mount.revoke",
+                    commands::mount::MountCommand::Show { .. } => "mount.show",
+                    commands::mount::MountCommand::Update { .. } => "mount.update",
+                    commands::mount::MountCommand::Reauth { .. } => "mount.reauth",
+                    commands::mount::MountCommand::Revoke { .. } => "mount.revoke",
                     commands::mount::MountCommand::Rm { .. } => "mount.rm",
                 },
             ),
             Self::Credential(args) => (
                 Some("credential"),
                 match &args.command {
+                    commands::credential::CredentialCommand::Login => "credential.login",
+                    commands::credential::CredentialCommand::Set(_) => "credential.set",
                     commands::credential::CredentialCommand::Ls => "credential.ls",
-                    commands::credential::CredentialCommand::Rm(_) => "credential.rm",
+                    commands::credential::CredentialCommand::Show { .. } => "credential.show",
+                    commands::credential::CredentialCommand::Rm { .. } => "credential.rm",
+                    commands::credential::CredentialCommand::Revoke { .. } => "credential.revoke",
                 },
             ),
-            Self::Setup(_) => (Some("setup"), "setup"),
+            Self::Filesystem(args) => (
+                Some("fs"),
+                match &args.command {
+                    commands::filesystem::FilesystemCommand::Add => "fs.add",
+                    commands::filesystem::FilesystemCommand::Ls => "fs.ls",
+                    commands::filesystem::FilesystemCommand::Show { .. } => "fs.show",
+                    commands::filesystem::FilesystemCommand::Rm { .. } => "fs.rm",
+                    commands::filesystem::FilesystemCommand::Restart { .. } => "fs.restart",
+                    commands::filesystem::FilesystemCommand::Shell(_) => "fs.shell",
+                },
+            ),
+            Self::Setup => (Some("setup"), "setup"),
             Self::Skill(_) => (Some("skill"), "skill"),
             Self::Doctor => (Some("doctor"), "doctor"),
             Self::Completions(_) => (Some("completions"), "completions"),
             Self::Version => (Some("version"), "version"),
             Self::Daemon => (None, "daemon"),
             Self::RunFs(_) => (None, "run-fs"),
-            Self::Fs(args) => (
-                Some("fs"),
-                match &args.command {
-                    commands::fs::FsCommand::Create(_) => "fs.create",
-                    commands::fs::FsCommand::Rm(_) => "fs.rm",
-                    commands::fs::FsCommand::Attach(_) => "fs.attach",
-                    commands::fs::FsCommand::Detach(_) => "fs.detach",
-                    commands::fs::FsCommand::Restart(_) => "fs.restart",
-                    commands::fs::FsCommand::Shell(_) => "fs.shell",
-                    commands::fs::FsCommand::Ls => "fs.ls",
-                },
-            ),
         }
     }
 
@@ -202,13 +243,31 @@ impl Commands {
                 let verdict = commands::doctor::run(output).await?;
                 Ok(exit_for_verdict(verdict))
             },
-            Self::Status => commands::status::run(output).await,
+            Self::Status(args) => {
+                if args.follow {
+                    let target = match (args.revision, args.action) {
+                        (Some(revision), None) => {
+                            commands::status::FollowTarget::Revision(revision)
+                        },
+                        (None, Some(action)) => commands::status::FollowTarget::Action(action),
+                        (None, None) => commands::status::FollowTarget::Current,
+                        (Some(_), Some(_)) => unreachable!("clap rejects conflicting targets"),
+                    };
+                    commands::status::follow(target, output).await
+                } else {
+                    commands::status::run(output).await
+                }
+            },
+            Self::Plan { path } => commands::plan::run(path, output).await,
+            Self::Apply { path } => commands::apply::run(path, output).await,
             Self::Down => commands::down::run(output).await,
             Self::Logs(args) => args.run(&output).await.map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),
+            Self::Provider(args) => args.run(output).await,
             Self::Mount(args) => args.run(output).await,
             Self::Credential(args) => args.run(output).await,
-            Self::Setup(args) => Box::pin(args.run(output)).await,
+            Self::Filesystem(args) => args.run(output).await,
+            Self::Setup => Box::pin(commands::setup::run(output)).await,
             Self::Skill(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Completions(args) => args.run(&output).map(|()| ExitCode::Success),
             Self::Version => commands::version::run(output).await,
@@ -216,7 +275,6 @@ impl Commands {
             Self::RunFs(_) => {
                 anyhow::bail!("run-fs must be dispatched before the CLI runtime starts")
             },
-            Self::Fs(args) => Box::pin(args.run(output)).await,
         }
     }
 }
@@ -346,7 +404,7 @@ fn fresh_profile_degradation(inventory: &crate::inventory::Inventory) -> Option<
         } => inventory
             .filesystems
             .iter()
-            .find(|filesystem| filesystem.spec.id() == &id)
+            .find(|filesystem| filesystem.name == id)
             .map(|filesystem| {
                 (
                     format!(
@@ -376,12 +434,7 @@ mod tests {
     use super::{Cli, fresh_profile_block};
 
     fn caps(color: bool) -> crate::ui::render::Capabilities {
-        crate::ui::render::Capabilities {
-            width: 120,
-            is_tty: color,
-            color,
-            quiet: false,
-        }
+        crate::ui::render::Capabilities { width: 120, color }
     }
 
     /// The fresh-profile screen:
@@ -459,21 +512,22 @@ mod tests {
         );
     }
 
-    /// Leftover failed filesystem state (e.g. a stale entry under
-    /// `client/filesystems/state`) can flip the verdict to `Degraded` while the daemon
+    /// A failed Filesystem can flip the verdict to `Degraded` while the daemon
     /// is otherwise running and there are still zero mounts; the screen must
-    /// name that filesystem and reuse its own `fix` field verbatim.
+    /// name that Filesystem and reuse its own `fix` field verbatim.
     #[test]
     fn fresh_profile_screen_names_a_failed_filesystem_while_daemon_is_up() {
-        let filesystem = crate::inventory::FilesystemStatus {
-            spec: omnifs_core::fs::Spec::new(
-                "test".parse().unwrap(),
-                omnifs_core::fs::Protocol::Fuse,
-                omnifs_core::fs::Runtime::Docker,
-                omnifs_core::fs::GUEST_LOCATION.into(),
+        let filesystem = crate::inventory::FilesystemAccessStatus {
+            name: "test".parse().unwrap(),
+            spec: omnifs_core::FilesystemSpec::new(
+                omnifs_core::FilesystemProtocol::Fuse,
+                omnifs_core::FilesystemRuntime::Docker,
+                omnifs_core::FILESYSTEM_GUEST_LOCATION.into(),
+                None,
+                None,
             )
             .unwrap(),
-            state: crate::inventory::FilesystemState::Failed,
+            state: crate::inventory::FilesystemAccessState::Failed,
             mount_count: 0,
             fix: Some("omnifs logs (container exited)".to_owned()),
         };
@@ -500,48 +554,26 @@ mod tests {
         );
     }
 
-    /// Every interactive prompt site in the crate paired with the flag (or,
-    /// for `auth/login`'s manual-code paste, the documented absence of one;
-    /// see `auth::login::tests::no_input_bails_before_the_manual_code_paste`
-    /// for that site's own coverage) that answers it without a terminal.
-    /// Only flags that actually exist on the named subcommand belong here:
-    /// `has_arg` panics rather than silently passing on a renamed or removed
-    /// subcommand, so a row can never go stale unnoticed.
     #[test]
-    fn prompt_sites_have_non_interactive_flags() {
+    fn only_confirmation_flows_keep_non_interactive_approval() {
         let command = Cli::command();
-        let table = [
-            ("mount add provider selection", "mount add", "provider"),
-            ("mount add mount name collision", "mount add", "name"),
-            ("mount add auth scheme", "mount add", "scheme"),
-            ("mount add OAuth browser", "mount add", "no-browser"),
-            ("mount add static token", "mount add", "token-env"),
-            ("mount add auth suppression", "mount add", "no-auth"),
-            ("mount add provider config", "mount add", "config-json"),
-            ("mount add resource limits", "mount add", "limits-json"),
-            (
-                "token_source's static-token password prompt",
-                "mount add",
-                "token",
-            ),
-            (
-                "spec_creation's host-file path prompt",
-                "mount add",
-                "config-json",
-            ),
-            (
-                "spec_creation's dynamic-domain allowlist prompt",
-                "mount add",
-                "config-json",
-            ),
-            ("setup's quick-start offer confirms", "setup", "yes"),
-            ("doctor's repair confirm", "doctor", "yes"),
-        ];
-
-        for (prompt, subcommand, arg) in table {
+        for subcommand in ["setup", "doctor"] {
+            assert!(has_arg(&command, subcommand, "yes"));
+        }
+        for retired in [
+            "provider",
+            "name",
+            "scheme",
+            "no-browser",
+            "token-env",
+            "no-auth",
+            "config-json",
+            "limits-json",
+            "token",
+        ] {
             assert!(
-                has_arg(&command, subcommand, arg),
-                "prompt site `{prompt}` must be covered by `{subcommand}` arg `{arg}`"
+                !has_arg(&command, "mount add", retired),
+                "interactive mount authoring still accepts `{retired}`"
             );
         }
     }
@@ -550,8 +582,9 @@ mod tests {
     fn removed_lifecycle_commands_are_not_in_the_user_grammar() {
         for argv in [
             &["omnifs", "up"][..],
-            &["omnifs", "apply"][..],
             &["omnifs", "up", "--offline"][..],
+            &["omnifs", "fs", "attach", "main"][..],
+            &["omnifs", "fs", "detach", "main"][..],
         ] {
             let Err(error) = Cli::try_parse_from(argv) else {
                 panic!("obsolete command parsed: {argv:?}");
@@ -561,8 +594,44 @@ mod tests {
     }
 
     #[test]
-    fn credential_inventory_and_removal_are_in_the_user_grammar() {
-        assert!(Cli::try_parse_from(["omnifs", "credential", "ls"]).is_ok());
+    fn plan_and_apply_are_in_the_user_grammar() {
+        for argv in [
+            &["omnifs", "plan"][..],
+            &["omnifs", "plan", "resources.k"][..],
+            &["omnifs", "apply", "--yes"][..],
+            &["omnifs", "apply", "resources.k", "--yes"][..],
+        ] {
+            assert!(
+                Cli::try_parse_from(argv).is_ok(),
+                "declarative command did not parse: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_commands_use_resource_names_and_env_only_secrets() {
+        for argv in [
+            &["omnifs", "credential", "login"][..],
+            &["omnifs", "credential", "ls"][..],
+            &["omnifs", "credential", "show", "work"][..],
+            &["omnifs", "credential", "rm", "work"][..],
+            &["omnifs", "credential", "revoke", "work"][..],
+            &[
+                "omnifs",
+                "credential",
+                "set",
+                "work",
+                "--from-env",
+                "OMNIFS_TEST_TOKEN",
+            ][..],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_ok(), "{argv:?}");
+        }
+        assert!(Cli::try_parse_from(["omnifs", "credential", "rm"]).is_err());
+        assert!(
+            Cli::try_parse_from(["omnifs", "credential", "set", "work", "--token", "secret"])
+                .is_err()
+        );
         assert!(
             Cli::try_parse_from([
                 "omnifs",
@@ -575,13 +644,12 @@ mod tests {
                 "--account",
                 "work",
             ])
-            .is_ok()
+            .is_err()
         );
-        assert!(Cli::try_parse_from(["omnifs", "credential", "rm"]).is_err());
     }
 
     #[test]
-    fn help_groups_invocation_options_and_drops_the_old_mount_name_flag() {
+    fn help_groups_invocation_options_and_drops_mount_authoring_flags() {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.contains("Global options:"), "{help}");
 
@@ -590,16 +658,22 @@ mod tests {
             .find_subcommand("mount")
             .and_then(|mount| mount.find_subcommand("add"))
             .expect("mount add");
-        assert!(
-            mount_add
-                .get_arguments()
-                .any(|arg| arg.get_long() == Some("name"))
-        );
-        assert!(
-            !mount_add
-                .get_arguments()
-                .any(|arg| arg.get_long() == Some("as"))
-        );
+        for retired in [
+            "name",
+            "as",
+            "provider",
+            "config-json",
+            "limits-json",
+            "token",
+            "token-env",
+        ] {
+            assert!(
+                !mount_add
+                    .get_arguments()
+                    .any(|arg| { arg.get_id() == retired || arg.get_long() == Some(retired) }),
+                "mount add still accepts `{retired}`"
+            );
+        }
     }
 
     #[test]

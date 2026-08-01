@@ -1,31 +1,27 @@
 //! Assembles one durable serving generation from durable state.
 //!
-//! [`GenerationDraft::load`] reads the durable serving snapshot;
+//! [`GenerationDraft::load_resources`] reads the durable desired resources;
 //! [`GenerationDraft::prepare`] resolves every mounted provider and
 //! credential, binds auth, and returns a [`GenerationBuild`] ready to
-//! publish. The single mutation lease means every batch is followed by
-//! exactly one load/prepare/activate pass, so the draft carries no staging
-//! API of its own.
+//! publish. Resource reconciliation owns the load/prepare/activate pass.
 
-mod auth_fingerprint;
-mod credential_codec;
 mod refresh_sink;
 mod revocation;
 
-pub(crate) use revocation::{PreparedCredentialRevocation, prepare_credential_revocation};
+pub(crate) use revocation::prepare_credential_revocation;
 
+use crate::auth_fingerprint::auth_fingerprint;
+use crate::credential_codec::decode_payload;
+use crate::credential_document::{material_scopes, runtime_overrides};
 use anyhow::Context as _;
-use auth_fingerprint::auth_fingerprint;
-use credential_codec::{CredentialPayload, decode_payload, encode_payload};
-use omnifs_api::{
-    CredentialClientOverrides, CredentialMaterial, CredentialSubmission, SecretBytes,
-};
+use omnifs_api::{CredentialClientOverrides, CredentialMaterial, ResourceDefinition, SecretBytes};
 use omnifs_auth::{
     AuthBinding, AuthKind, AuthScheme, CredentialEntry, CredentialId, CredentialService,
-    DurableCredentialSnapshot, OAuthClient, OAuthRequest, OAuthRuntimeOverrides, RefreshSink,
+    DurableCredentialSnapshot, OAuthClient, OAuthRequest, RefreshSink,
 };
 use omnifs_core::{
-    AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MountRevision, ProviderId,
+    ActionId, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MountVersion,
+    ProviderId, ResourceName, ResourceRevision,
 };
 use omnifs_engine::{
     CredentialProvenance, GenerationProvenance, HostOnline, MountBuildInput, MountBuildState,
@@ -33,8 +29,8 @@ use omnifs_engine::{
     RuntimeMountConfig,
 };
 use omnifs_state::{
-    CredentialDocument, CredentialState, SecretMaterial, StateStore, StoredCredential, StoredMount,
-    StoredProvider,
+    CredentialRevocationFinish, CredentialState, StateStore, StoredCredential, StoredProvider,
+    StoredProviderMetadata,
 };
 use refresh_sink::StateRefreshSink;
 use secrecy::SecretString;
@@ -43,54 +39,184 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 
 /// The durable serving snapshot as of `load`: every active mount and
-/// credential a fresh generation should be built from. A mutation batch
-/// commits durably first; `load` then re-reads the result, so the draft
-/// always reflects the batch's outcome rather than staging it separately.
+/// credential a fresh generation should be built from. Resource apply
+/// commits desired state first; `load` then re-reads the result, so the draft
+/// always reflects the durable outcome rather than staging it separately.
 pub(crate) struct GenerationDraft {
-    revision: MountRevision,
-    mounts: Vec<StoredMount>,
+    revision: ResourceRevision,
+    mounts: Vec<ResolvedMount>,
     credentials: Vec<CredentialRuntime>,
     pending_refreshes: Vec<PendingRefresh>,
 }
 
-impl GenerationDraft {
+pub(crate) struct ResolvedDesired {
+    pub(crate) revision: ResourceRevision,
+    pub(crate) mounts: Vec<ResolvedMount>,
+    credentials: Vec<CredentialId>,
+}
+
+pub(crate) struct ResolvedMount {
+    pub(crate) name: ResourceName,
+    pub(crate) provider: omnifs_core::ProviderRef,
+    pub(crate) credential: Option<CredentialId>,
+    pub(crate) limits: Option<omnifs_api::ResourceLimits>,
+    pub(crate) config: serde_json::Value,
+    pub(crate) canonical: Vec<u8>,
+    pub(crate) version: MountVersion,
+    pub(crate) revision: ResourceRevision,
+}
+
+impl ResolvedMount {
+    fn new(
+        definition: &omnifs_api::MountResourceDefinition,
+        provider: omnifs_core::ProviderRef,
+        credential: Option<CredentialId>,
+        revision: ResourceRevision,
+    ) -> anyhow::Result<Self> {
+        let credential_key = credential.as_ref().map(|id| {
+            (
+                id.provider_name().to_owned(),
+                id.scheme().to_owned(),
+                id.account().to_owned(),
+            )
+        });
+        let canonical = serde_json::to_vec(&(
+            definition.name.as_str(),
+            provider.id,
+            provider.meta.name.as_str(),
+            provider.meta.version.as_ref().map(ToString::to_string),
+            credential_key,
+            &definition.limits,
+            &definition.config,
+        ))
+        .context("encode resolved mount")?;
+        let mut hasher = blake3::Hasher::new_derive_key("omnifs resolved mount version v1");
+        hasher.update(&canonical);
+        Ok(Self {
+            name: definition.name.clone(),
+            provider,
+            credential,
+            limits: definition.limits.clone(),
+            config: definition.config.clone(),
+            canonical,
+            version: MountVersion::from_digest(*hasher.finalize().as_bytes()),
+            revision,
+        })
+    }
+}
+
+impl ResolvedDesired {
     pub(crate) async fn load(state: &StateStore) -> anyhow::Result<Self> {
-        let durable = state.serving_snapshot().await?;
+        let desired = state.resource_snapshot().await?;
+        let revision = desired.revision;
+        let mut providers = HashMap::<ResourceName, StoredProviderMetadata>::new();
+        for resource in desired.resources.resources() {
+            let ResourceDefinition::Provider(provider) = resource else {
+                continue;
+            };
+            let retained = state
+                .load_provider_metadata(provider.artifact)
+                .await?
+                .with_context(|| {
+                    format!(
+                        "provider resource `{}` artifact {} is not retained",
+                        provider.name, provider.artifact
+                    )
+                })?;
+            providers.insert(provider.name.clone(), retained);
+        }
+
+        let mut credential_ids = HashMap::new();
+        for resource in desired.resources.resources() {
+            let ResourceDefinition::Credential(credential) = resource else {
+                continue;
+            };
+            let provider = providers.get(&credential.provider).with_context(|| {
+                format!(
+                    "credential resource `{}` provider `{}` is absent",
+                    credential.name, credential.provider
+                )
+            })?;
+            credential_ids.insert(
+                credential.name.clone(),
+                CredentialId::new(
+                    provider.reference.meta.name.to_string(),
+                    credential.scheme.clone(),
+                    credential.account.clone(),
+                )?,
+            );
+        }
+
+        let mut mounts = Vec::new();
+        for resource in desired.resources.resources() {
+            let ResourceDefinition::Mount(mount) = resource else {
+                continue;
+            };
+            let provider = providers.get(&mount.provider).with_context(|| {
+                format!(
+                    "mount resource `{}` provider `{}` is absent",
+                    mount.name, mount.provider
+                )
+            })?;
+            let credential = mount
+                .credential
+                .as_ref()
+                .map(|name| {
+                    credential_ids.get(name).cloned().with_context(|| {
+                        format!(
+                            "mount resource `{}` credential `{name}` is absent",
+                            mount.name
+                        )
+                    })
+                })
+                .transpose()?;
+            mounts.push(ResolvedMount::new(
+                mount,
+                provider.reference.clone(),
+                credential,
+                revision,
+            )?);
+        }
+
+        Ok(Self {
+            revision,
+            mounts,
+            credentials: credential_ids.into_values().collect(),
+        })
+    }
+}
+
+pub(crate) fn empty_generation(host: &HostOnline) -> anyhow::Result<PublishReadyGeneration> {
+    let table = Arc::new(MountTable::prepare_durable(host, Vec::new())?);
+    Ok(PreparedGeneration::new(
+        table,
+        tokio::runtime::Handle::current(),
+        GenerationProvenance::default(),
+    )
+    .activate())
+}
+
+impl GenerationDraft {
+    /// Resolve the authoritative declarative resources into one immutable
+    /// serving draft. Provider resource names are aliases only; mounted
+    /// generations pin the exact retained artifact digest.
+    pub(crate) async fn load_resources(state: &StateStore) -> anyhow::Result<Self> {
+        let resolved = ResolvedDesired::load(state).await?;
         let mut credentials = Vec::new();
         let mut pending_refreshes = Vec::new();
-        for credential in durable.credentials {
-            match credential.summary.state {
-                CredentialState::Active => {},
-                CredentialState::PendingRepublish => {
-                    pending_refreshes.push(PendingRefresh {
-                        id: credential.summary.id.clone(),
-                        version: credential.summary.version,
-                        generation: credential.summary.generation,
-                    });
-                },
-                CredentialState::Blocked
-                | CredentialState::RevocationPending
-                | CredentialState::RevocationUnknown
-                | CredentialState::Deleted => continue,
-            }
-            credentials.push(CredentialRuntime::from_stored(credential)?);
+        for id in resolved.credentials {
+            let Some(stored) = state.get_credential(&id).await? else {
+                continue;
+            };
+            collect_credential(stored, &mut credentials, &mut pending_refreshes)?;
         }
+
         Ok(Self {
-            revision: durable.revision,
-            mounts: durable.mounts,
+            revision: resolved.revision,
+            mounts: resolved.mounts,
             credentials,
             pending_refreshes,
         })
-    }
-
-    pub(crate) fn has_pending_refreshes(&self) -> bool {
-        !self.pending_refreshes.is_empty()
-    }
-
-    /// The mounts this draft was loaded with, so a caller can check whether
-    /// any of them pins a given provider before deciding to rebuild.
-    pub(crate) fn mounts(&self) -> &[StoredMount] {
-        &self.mounts
     }
 
     pub(crate) fn provenance(&self) -> GenerationProvenance {
@@ -99,7 +225,7 @@ impl GenerationDraft {
             self.mounts
                 .iter()
                 .map(|mount| MountProvenance {
-                    name: mount.document.name.clone(),
+                    name: mount.name.clone(),
                     version: mount.version,
                 })
                 .collect(),
@@ -142,7 +268,7 @@ impl GenerationDraft {
 
         let mut providers: HashMap<ProviderId, Option<LoadedProvider>> = HashMap::new();
         for mount in &mounts {
-            let id = mount.document.provider.id;
+            let id = mount.provider.id;
             if let std::collections::hash_map::Entry::Vacant(entry) = providers.entry(id) {
                 let provider = state
                     .load_provider(id)
@@ -178,7 +304,7 @@ impl GenerationDraft {
         let mut inputs = Vec::with_capacity(mounts.len());
         for mount in mounts {
             let provider = providers
-                .get(&mount.document.provider.id)
+                .get(&mount.provider.id)
                 .expect("every mount provider was loaded")
                 .as_ref();
             inputs.push(build_mount_input(mount, provider, &credentials, &service)?);
@@ -193,6 +319,29 @@ impl GenerationDraft {
             pending_refreshes: PendingRefreshes(pending_refreshes),
         })
     }
+}
+
+fn collect_credential(
+    stored: StoredCredential,
+    credentials: &mut Vec<CredentialRuntime>,
+    pending_refreshes: &mut Vec<PendingRefresh>,
+) -> anyhow::Result<()> {
+    match stored.summary.state {
+        CredentialState::Active => {},
+        CredentialState::PendingRepublish => {
+            pending_refreshes.push(PendingRefresh {
+                id: stored.summary.id.clone(),
+                version: stored.summary.version,
+                generation: stored.summary.generation,
+            });
+        },
+        CredentialState::Blocked
+        | CredentialState::RevocationPending
+        | CredentialState::RevocationUnknown
+        | CredentialState::Deleted => return Ok(()),
+    }
+    credentials.push(CredentialRuntime::from_stored(stored)?);
+    Ok(())
 }
 
 struct PendingRefresh {
@@ -212,7 +361,7 @@ pub(crate) struct GenerationBuild {
 /// caller is ready to publish.
 pub(crate) struct GenerationParts {
     pub(crate) ready: PublishReadyGeneration,
-    pub(crate) revision: MountRevision,
+    pub(crate) revision: ResourceRevision,
     pub(crate) pending_refreshes: PendingRefreshes,
 }
 
@@ -241,46 +390,6 @@ impl PendingRefreshes {
         }
         Ok(())
     }
-}
-
-pub(crate) async fn prepare_credential_document(
-    state: &StateStore,
-    submission: CredentialSubmission,
-) -> anyhow::Result<CredentialDocument> {
-    let provider = state
-        .load_provider(submission.provider)
-        .await?
-        .with_context(|| format!("provider {} is not retained", submission.provider))?;
-    let id = CredentialId::new(
-        provider.reference.meta.name.to_string(),
-        submission.scheme.clone(),
-        submission.account_label.clone(),
-    )?;
-    let payload = CredentialPayload {
-        material: submission.material,
-        overrides: submission.overrides,
-    };
-    let fingerprint = auth_fingerprint(
-        submission.provider,
-        provider
-            .manifest
-            .auth
-            .as_ref()
-            .and_then(|manifest| manifest.scheme(&submission.scheme))
-            .with_context(|| format!("provider declares no auth scheme `{}`", submission.scheme))?,
-        &payload.overrides,
-    )?;
-    let kind = validate_payload(&provider, &submission.scheme, &payload)?;
-    let scopes = material_scopes(&payload.material);
-    let material = encode_payload(&payload)?;
-    Ok(CredentialDocument {
-        id,
-        provider: submission.provider,
-        kind,
-        auth_fingerprint: fingerprint,
-        scopes,
-        material: SecretMaterial::new(material),
-    })
 }
 
 struct CredentialRuntime {
@@ -339,20 +448,95 @@ pub(crate) fn credential_scopes(stored: &StoredCredential) -> anyhow::Result<Vec
     Ok(material_scopes(&payload.material))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RevocationActionOutcome {
+    Deleted,
+    Unknown,
+}
+
+/// Finish the upstream part of a declarative credential action after the old
+/// generation has drained and can no longer admit calls with the old secret.
+pub(crate) async fn finish_resource_credential_revocation(
+    state: &StateStore,
+    credential_name: &ResourceName,
+    action_id: ActionId,
+) -> anyhow::Result<RevocationActionOutcome> {
+    let desired = state.resource_snapshot().await?;
+    let credential = desired
+        .resources
+        .resources()
+        .iter()
+        .find_map(|resource| match resource {
+            ResourceDefinition::Credential(credential) if credential.name == *credential_name => {
+                Some(credential)
+            },
+            _ => None,
+        })
+        .with_context(|| format!("credential resource `{credential_name}` is absent"))?;
+    let provider = desired
+        .resources
+        .resources()
+        .iter()
+        .find_map(|resource| match resource {
+            ResourceDefinition::Provider(provider) if provider.name == credential.provider => {
+                Some(provider)
+            },
+            _ => None,
+        })
+        .with_context(|| {
+            format!(
+                "credential resource `{credential_name}` provider `{}` is absent",
+                credential.provider
+            )
+        })?;
+    let metadata = state
+        .load_provider_metadata(provider.artifact)
+        .await?
+        .with_context(|| format!("provider {} is not retained", provider.artifact))?;
+    let id = omnifs_auth::CredentialId::new(
+        metadata.reference.meta.name.to_string(),
+        credential.scheme.clone(),
+        credential.account.clone(),
+    )?;
+    let stored = state
+        .get_credential(&id)
+        .await?
+        .with_context(|| format!("credential resource `{credential_name}` has no material"))?;
+    let scopes = credential_scopes(&stored)?;
+    let revocation = prepare_credential_revocation(state, &stored).await?;
+    let finish = match tokio::time::timeout(std::time::Duration::from_secs(15), revocation.revoke())
+        .await
+    {
+        Ok(Ok(())) => CredentialRevocationFinish::Deleted,
+        Ok(Err(error)) => {
+            tracing::warn!(credential = %credential_name, %error, "credential revocation failed");
+            CredentialRevocationFinish::Unknown
+        },
+        Err(_) => {
+            tracing::warn!(credential = %credential_name, "credential revocation timed out");
+            CredentialRevocationFinish::Unknown
+        },
+    };
+    state
+        .finish_credential_revocation(id, action_id, finish, scopes)
+        .await?;
+    Ok(match finish {
+        CredentialRevocationFinish::Deleted => RevocationActionOutcome::Deleted,
+        CredentialRevocationFinish::Unknown => RevocationActionOutcome::Unknown,
+    })
+}
+
 fn build_mount_input(
-    mount: StoredMount,
+    mount: ResolvedMount,
     provider: Option<&LoadedProvider>,
     credentials: &HashMap<CredentialId, CredentialRuntime>,
     service: &Arc<CredentialService>,
 ) -> anyhow::Result<MountBuildInput> {
     let config = RuntimeMountConfig {
-        name: mount.document.name.clone(),
-        provider: mount.document.provider.clone(),
-        config: mount.document.config,
-        max_fetch_blob_bytes: mount
-            .document
-            .limits
-            .and_then(|limits| limits.max_fetch_blob_bytes),
+        name: mount.name,
+        provider: mount.provider.clone(),
+        config: mount.config,
+        max_fetch_blob_bytes: mount.limits.and_then(|limits| limits.max_fetch_blob_bytes),
     };
     let canonical = Arc::from(mount.canonical.into_boxed_slice());
     let Some(provider) = provider else {
@@ -367,7 +551,7 @@ fn build_mount_input(
         bytes: Arc::clone(&provider.bytes),
         manifest: provider.manifest.clone(),
     });
-    let state = match mount.document.credential.as_ref() {
+    let state = match mount.credential.as_ref() {
         None => MountBuildState::Active {
             auth: None,
             credential_generation: None,
@@ -443,47 +627,6 @@ fn build_auth_binding(
     Ok(Arc::new(binding))
 }
 
-fn validate_payload(
-    provider: &StoredProvider,
-    scheme_key: &str,
-    payload: &CredentialPayload,
-) -> anyhow::Result<AuthKind> {
-    let scheme = provider
-        .manifest
-        .auth
-        .as_ref()
-        .and_then(|manifest| manifest.scheme(scheme_key))
-        .with_context(|| format!("provider declares no auth scheme `{scheme_key}`"))?;
-    let kind = classify_material(&payload.material);
-    match (scheme, kind) {
-        (AuthScheme::StaticToken(_), AuthKind::StaticToken) => {
-            anyhow::ensure!(
-                no_overrides(&payload.overrides),
-                "static-token credentials do not accept OAuth overrides"
-            );
-        },
-        (AuthScheme::Oauth(scheme), AuthKind::OAuth) => {
-            OAuthRequest::from_runtime(scheme.clone(), runtime_overrides(&payload.overrides)?)?;
-        },
-        _ => anyhow::bail!("credential material does not match provider auth scheme"),
-    }
-    Ok(kind)
-}
-
-fn classify_material(material: &CredentialMaterial) -> AuthKind {
-    match material {
-        CredentialMaterial::StaticToken { .. } => AuthKind::StaticToken,
-        CredentialMaterial::OAuth { .. } => AuthKind::OAuth,
-    }
-}
-
-fn material_scopes(material: &CredentialMaterial) -> Vec<String> {
-    match material {
-        CredentialMaterial::StaticToken { .. } => Vec::new(),
-        CredentialMaterial::OAuth { scopes, .. } => scopes.clone(),
-    }
-}
-
 fn decode_entry(material: &CredentialMaterial) -> anyhow::Result<CredentialEntry> {
     Ok(match material {
         CredentialMaterial::StaticToken { token } => {
@@ -520,26 +663,4 @@ fn secret_string(secret: &SecretBytes) -> anyhow::Result<SecretString> {
             .context("credential token is not UTF-8")?
             .to_owned(),
     ))
-}
-
-fn runtime_overrides(
-    overrides: &CredentialClientOverrides,
-) -> anyhow::Result<OAuthRuntimeOverrides> {
-    Ok(OAuthRuntimeOverrides {
-        scopes: overrides.scopes.clone(),
-        redirect_uri: overrides.redirect_uri.clone(),
-        client_id: overrides.client_id.clone(),
-        client_secret: overrides
-            .client_secret
-            .as_ref()
-            .map(secret_string)
-            .transpose()?,
-    })
-}
-
-fn no_overrides(overrides: &CredentialClientOverrides) -> bool {
-    overrides.client_id.is_none()
-        && overrides.client_secret.is_none()
-        && overrides.redirect_uri.is_none()
-        && overrides.scopes.is_none()
 }

@@ -8,6 +8,7 @@ homepage.workspace = true
 description = "Centralized integration tests and harnesses for omnifs providers"
 
 [dependencies]
+fs2 = { workspace = true }
 omnifs-api = { workspace = true }
 bytes = { workspace = true }
 hyper-util = { workspace = true }
@@ -27,6 +28,7 @@ time = { workspace = true, features = ["formatting"] }
 
 [dev-dependencies]
 omnifs-fuse = { workspace = true }
+omnifs-libkrun = { workspace = true }
 rusqlite = { workspace = true }
 base64 = "0.22"
 hickory-proto = "0.26"

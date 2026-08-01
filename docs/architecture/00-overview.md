@@ -1,116 +1,115 @@
 # Architecture overview
 
 Status: current-architecture
-Scope: the current explanatory model and rationale for `omnifs`. Binding rules live in `docs/contracts/`; this document explains how the pieces fit together.
+Scope: the current explanatory model and rationale for `omnifs`.
 
-`omnifs` projects external services such as GitHub, DNS, arXiv, Docker, Linear, and databases as a filesystem. A trusted host runtime loads each provider as a `wasm32-wasip2` component and drives it through the byte-level `omnifs:provider` WIT interface. Every filesystem exposes the same projected namespace.
+Read when: orienting to the whole system or deciding which focused
+architecture note and binding contract owns a change.
 
-## The spine
+Binding contracts: start with `docs/contracts/00-index.md`.
 
-The load-bearing decision is where meaning lives.
+`omnifs` is a filesystem projection system. It projects external services into
+one shared virtual namespace. A trusted host loads untrusted providers as
+`wasm32-wasip2` components; FUSE and NFS expose the same namespace to the OS as
+one or more filesystems.
 
-The host knows paths, bytes, tree structure, content types, file attributes, cache metadata, capability outcomes, and effects. It does not request an object, parse a provider object, render a representation, or derive a path-to-object mapping from payload contents.
+## Ownership
 
-The provider SDK owns upstream-specific meaning: identity, canonical assembly, rendering into representations, versioning, preload, revalidation, and route topology. Where provider code needs the host to mutate state, it returns an explicit effect.
+| Owner | Owns | Does not own |
+|---|---|---|
+| Provider and SDK | Upstream meaning, object identity, canonical assembly, rendering, versioning, preload, revalidation, and routes | Storage, credentials, host I/O, or OS protocol state |
+| `omnifs-engine` | Projection semantics, cache facts, attrs, lookup, listing, reads, and provider execution | Provider-specific object meaning or OS protocol state |
+| `omnifs-vfs` | Namespace facade, framing, handshake, reconnect, stop, and invalidation delivery | Projection policy |
+| FUSE and NFS | Inodes or filehandles, protocol state, replies, mounts, and teardown | Provider calls, cache schema, or shared tree policy |
+| Daemon | Desired state, SQLite, credentials, provider preparation, reconciliation, runtimes, and live VFS sessions | Client prompts or provider meaning |
+| CLI | Setup, auth UX, resource authoring, output, metrics, and daemon spawn | Desired-state storage or runtime lifecycle |
 
-This keeps the host reusable across providers and filesystems. It also keeps provider compromise bounded by the authority the host resolved for that mount.
+The key decision is that providers own meaning while the host owns trust and
+effects. The host sees paths, bytes, attributes, cache facts, capabilities, and
+effects. It never parses canonical provider objects or renders their
+representations.
 
-## Providers and objects
+## Namespace flow
 
-A provider is one `#[omnifs_sdk::provider]` implementation with synchronous `fn start` registering routes on a `Router`. `file` and `dir` are filesystem nouns; object, direct, blob, stream, collection, children, choices, and tree behavior are SDK faces that lower to byte-level WIT effects.
+1. FUSE or NFS sends a validated path request through the VFS wire protocol.
+2. `TreeNamespace` applies shared dispatch, lookup, listing, attr, and read
+   policy.
+3. A durable fact may answer directly. Online access also applies freshness;
+   cache-only access returns complete facts and known entries from partial
+   listings. Provider-dependent misses return `OfflineMiss`.
+4. Provider execution may await host HTTP, blob-fetch, or Git callouts.
+   Wasmtime suspends the component while the host enforces grants, injects
+   credentials, performs I/O, and records tracing.
+5. A successful provider terminal contains a typed result and explicit effects.
+   The engine validates both, commits one projection transition, updates memory,
+   emits invalidations, then exposes the result. Errors carry no effects.
+6. The filesystem adapter translates the namespace answer into FUSE or NFS
+   protocol state.
 
-Object faces fit provider concepts with identity and replayable canonical bytes. `r.object::<O>(template, |o| ..)` and `r.file_object::<O>(template, |o| ..)` bind an `Object` to a path template. Canonical bytes are verbatim upstream bytes or a provider-assembled canonical blob. Derived and representation leaves decode the canonical through the object type and render from it.
+Warm object reads push cached canonical bytes into the provider, which decodes
+and renders them. There is no host-side render or canonical-read callout.
 
-Path-oriented routes, `r.dir`, `r.file`, and `r.treeref`, are correct when the domain is not object-shaped. Docker operational state, database browse surfaces, and subtree handoff do not need fake object identity merely to fit the object API.
+Lookup, listing, read, and open share one route-precedence model. A listing is
+exhaustive only when the provider or a closed literal route shape proves the
+child set complete. Absence from a partial listing is not `NotFound`.
 
-Identity is layered. The provider computes a logical id from object kind and normalized identity captures. The host stores it in a mount-scoped keyspace, so two mounts with different credentials cannot share private canonical bytes for the same upstream identity.
+File facts keep size, stability, version evidence, content type, and byte
+source together. Unknown lengths use a one-byte stat compatibility hint until
+a complete observation proves the exact size; the hint never bounds reads.
 
-## Callouts and effects
+## Resource flow
 
-Provider namespace and notify calls are async component exports that return terminal results. When provider code awaits host work, it calls an async WIT import. The host executes callouts such as HTTP fetches, blob fetches, git clone/open operations, and blob reads, then the component future resumes with the typed result.
+1. The CLI reads the current revision, plans a complete Provider, Credential,
+   Mount, and Filesystem set, and calls `ApplyResources`.
+2. The daemon validates and commits that set plus its receipt in one SQLite
+   transaction, then wakes reconcilers and returns.
+3. Daemon workers prepare providers, publish the latest valid generation,
+   process credential actions, and reconcile Filesystems. A failed build leaves
+   the last good generation active.
+4. `FilesystemSupervisor` realizes each desired Filesystem as an exact
+   out-of-process runtime and waits for its identity-matched VFS session.
 
-One provider instance can serve multiple concurrent filesystem operations. Wasmtime's component async runtime owns suspension while the host owns the callout executors, auth injection, capability checks, tracing, and cache-visible effects.
+Progress streams observe durable work but do not own or cancel it. SQLite is
+the only desired-state authority; the CLI keeps no journal or fallback reader.
 
-Terminal host mutations travel through effects and the operation's typed result:
+## Runtime variants
 
-- canonical stores select object identity and content-addressed body bytes.
-- filesystem effects write materialized files, directories, attrs, and listing facts.
-- invalidations remove object or listing state.
+| Runtime | Filesystem process | Attach transport | Visible mount |
+|---|---|---|---|
+| Host | Hidden `omnifs run-fs` | Unix VFS | Host |
+| Docker | `omnifs-thin` in a container | Verified bridge TCP VFS | Container |
+| libkrun | `omnifs-thin` in a fixed microVM | Vsock bridge to Unix VFS | Guest |
 
-The operation owner validates and lowers the complete terminal into one projection transition, commits it once, and then exposes the typed result. Errors do not carry effects. New terminal host mutations should be new explicit effect fields, not tunneled through callouts.
+The daemon itself always runs on the host. macOS host-native integration is
+read-only NFSv4.0 loopback; libkrun FUSE remains guest-visible.
 
-## Caches and reads
+## Trust
 
-The host owns storage as opaque facts and bytes.
+Provider metadata declares auth and capability needs. The resolved mount spec
+is the runtime grant authority. Credentials stay in daemon-owned state and are
+injected only into allowed host callouts. Filesystem runners receive no
+credentials.
 
-- One global `BodyStore` stores every complete body by BLAKE3 identity.
-- One projection keyspace stores object relations, typed lookup/attr/file/listing facts, blob request references, Git identities, and freshness for an exact spec/provider identity.
-- Each projection has a derived process-local memory tier. Provider blob handles and Git tree handles never enter durable rows.
-
-On a warm object read, the host pushes cached canonical bytes into the provider's read operation. The provider decodes and renders from those bytes. There is no provider-to-host canonical-read callout and no host-side render operation.
-
-Online access uses freshness deadlines to decide when provider revalidation is needed. Cache-only access ignores those deadlines and serves complete durable facts. A missing body, partial listing, deferred/live/ranged value, or other provider-dependent fact returns `OfflineMiss`; a corrupt relation fails table construction.
-
-## Dispatch and listing
-
-Route dispatch must have one owner for precedence. Lookup, listing, read, and open all need the same route-target resolution model.
-
-Listing honesty matters. A listing is exhaustive only when the provider actually enumerated every entry. A capped listing must stay non-exhaustive unless a real resume cursor exists. `lookup` can resolve a name that did not appear in a non-exhaustive `readdir`.
-
-Literal route prefixes are auto-navigable directories. Capture validators participate in match candidacy, so a parse rejection can fall through to another candidate instead of becoming an accidental read-time error.
-
-## File attributes
-
-Projected files carry explicit size, stability, version, content type, and byte-source evidence. Stat-size and read-termination are separate: read termination must not depend on a guessed stat size.
-
-Unknown and non-zero sizes use truthful sentinel behavior until exact size is learned from real reads. Learned-size publication belongs in shared tree/file-attr policy, not in FUSE or NFS local heuristics.
-
-## Filesystems
-
-FUSE and NFS are protocol adapters over the same projected tree. Each attached filesystem has a stable `fs::Id`, a fully resolved persisted spec, and a separate process, container, or VM. Host filesystems use hidden `omnifs run-fs`; Docker and libkrun guests use the slim `omnifs-thin` binary. Both attach over the Omnifs VFS wire protocol.
-
-FUSE owns inode tables, kernel notifications, mount/unmount mechanics, and FUSE reply construction. NFSv4.0 loopback owns filehandles, stateids, leases, NFS protocol errors, mount readiness, and teardown. Runner and NFS filehandle state live under the filesystem ID's leaf in `cache/filesystems/<id>`.
-
-Neither filesystem owns projection semantics, provider WIT calls, cache schema, root enumeration, learned-size rules, preload policy, inline-byte policy, or negative lookup policy.
-
-A filesystem consumes the same `omnifs_vfs::Namespace` through the Omnifs VFS wire protocol. `omnifs-engine` remains the projection owner; `omnifs-vfs` owns the facade and postcard serialization, framing, the strict handshake, attach target resolution and reconnect, server-pushed stop, direct validated `Path` requests, terminal `OfflineMiss`, and ordered invalidation events. The fixed Unix and TCP endpoints serve this one internal protocol. The launcher supplies the exact resolved spec in every handshake; the daemon rejects a reused ID with conflicting fields.
-
-## Control plane
-
-There is one `omnifs` binary. The runtime loop lives behind hidden `omnifs daemon`. The CLI owns setup, OAuth/static-auth UX, client config, the single-record mutation journal, filesystem specs and runners, metrics, and daemon spawn. The daemon owns providers, credentials, mounts, SQLite state/cache, logs, live attachments, and namespace serving. The typed local RPC wire types live in `omnifs-api`; the CLI has no direct daemon-store API.
-
-The active profile root comes from `OMNIFS_HOME` or `$HOME/.omnifs`. Client state lives under `client/`, including strict filesystem specs under `client/filesystems/specs`, while daemon state lives under `daemon-state/`, including `control-store/state.sqlite3`, provider artifacts, mounts, credentials, projection cache, and raw logs. Mount changes are batched ops applied under the daemon's single mutation lease; every written row is stamped with the applying batch's id, which is the only provenance a client needs to tell whether an interrupted request committed. There is no client-side Git desired state, snapshot handoff, or offline mode.
-
-The daemon has one runtime mode: host-native. It is a pure namespace server and attachment registry. Docker and libkrun run only FUSE filesystems as separate processes; they are not daemon runtime modes. On Apple Silicon macOS, the CLI starts the private sibling `omnifs-libkrun`, which loads the signed packaged dylib and firmware and exposes one fixed VM shape. Its helper-owned attach bridge turns daemon target closure into guest stream closure, which lets the wire retry loop reconnect after daemon replacement. Contributor dev sessions run through `scripts/dev.ts`, which writes a dedicated `~/.omnifs-dev` profile, invokes mount and credential RPC, and starts the daemon on the host directly.
-
-## Auth and sandbox
-
-Providers never hold stored tokens. Provider metadata declares auth needs and capability needs. The host resolves mount config, credential bindings, and capability grants, then injects auth on host-run callouts.
-
-The sandbox reduces confused-deputy and lateral-movement risk. It does not claim to prevent all exfiltration: a provider with allowed network destinations can still use those destinations maliciously.
-
-The resolved mount spec is the runtime grant authority. Required capabilities are enforced at mount materialization. Over-grant detection remains a future policy decision.
+The sandbox limits authority but cannot prevent all exfiltration through an
+allowed destination. Over-grant detection is not yet enforced.
 
 ## Rejected directions
 
-These directions were explicitly ruled out and should not return without a new gated decision:
+Rejected designs include host-side object meaning or rendering, provider-owned
+caches, fake cursors or exhaustive claims, provider-specific filesystem policy,
+macFUSE as the macOS path, a second public daemon binary, and projected writes
+that trigger upstream mutations.
 
-- host-side object semantics or host-side rendering.
-- provider-owned content caches or TTLs.
-- fake resumable cursors or exhaustive claims over truncated listings.
-- `canonical-read` callouts.
-- provider-specific behavior in host, tree, FUSE, or NFS.
-- macFUSE, `diskutil`, or macOS-specific FUSE mounting.
-- a separate public `omnifsd` binary name.
-- writable projected files that execute upstream mutations as a side effect of writes.
+## Focused notes
 
-## Where to go next
-
-- Binding task-area rules: `docs/contracts/00-index.md`
-- File attribute rationale: `docs/architecture/10-file-attributes.md`
-- Route dispatch rationale: `docs/architecture/20-route-dispatch-and-listing.md`
-- Cache and effects rationale: `docs/architecture/30-cache-and-effects.md`
-- Auth boundary rationale: `docs/architecture/40-auth-boundary.md`
-- NFS filesystem rationale: `docs/architecture/50-nfs-filesystem.md`
-- Async provider runtime: `docs/architecture/60-async-provider-runtime.md`
-- Provider authoring: `providers/DESIGN.md` and `skills/omnifs-provider-sdk/SKILL.md`
+| Topic | Read |
+|---|---|
+| Binding rules | `docs/contracts/00-index.md` |
+| File attributes | `docs/architecture/10-file-attributes.md` |
+| Dispatch and listing | `docs/architecture/20-route-dispatch-and-listing.md` |
+| Cache and effects | `docs/architecture/30-cache-and-effects.md` |
+| Auth | `docs/architecture/40-auth-boundary.md` |
+| NFS | `docs/architecture/50-nfs-filesystem.md` |
+| Async runtime | `docs/architecture/60-async-provider-runtime.md` |
+| Resource control | `docs/architecture/70-resource-control-plane.md` |
+| Provider authoring | `providers/DESIGN.md`, `skills/omnifs-provider-sdk/SKILL.md` |

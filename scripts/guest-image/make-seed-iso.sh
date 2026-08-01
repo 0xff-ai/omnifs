@@ -7,7 +7,8 @@
 # it with the native hdiutil (no mkisofs/xorriso dependency); a libkrun launch
 # regenerates it fresh every time.
 #
-# Usage: make-seed-iso.sh --out PATH --client-owner ID --filesystem-id ID --attach-addr HOST:PORT
+# Usage: make-seed-iso.sh --out PATH --filesystem-name NAME --runtime-instance ID --attach-addr HOST:PORT
+#   --libkrun-guest-image REF
 #   [--ready-vsock-port PORT] [--ssh-pubkey KEY]
 set -euo pipefail
 
@@ -15,8 +16,9 @@ seed_label=OMNIFS-SEED
 
 out=""
 attach_addr=""
-filesystem_id=""
-client_owner=""
+filesystem_name=""
+runtime_instance=""
+libkrun_guest_image=""
 ready_vsock_port="0"
 ssh_pubkey=""
 
@@ -30,12 +32,16 @@ while [[ $# -gt 0 ]]; do
       attach_addr="$2"
       shift 2
       ;;
-    --filesystem-id)
-      filesystem_id="$2"
+    --filesystem-name)
+      filesystem_name="$2"
       shift 2
       ;;
-    --client-owner)
-      client_owner="$2"
+    --runtime-instance)
+      runtime_instance="$2"
+      shift 2
+      ;;
+    --libkrun-guest-image)
+      libkrun_guest_image="$2"
       shift 2
       ;;
     --ready-vsock-port)
@@ -54,9 +60,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 : "${out:?--out PATH is required}"
-: "${filesystem_id:?--filesystem-id ID is required}"
-: "${client_owner:?--client-owner ID is required}"
+: "${filesystem_name:?--filesystem-name NAME is required}"
+: "${runtime_instance:?--runtime-instance ID is required}"
 : "${attach_addr:?--attach-addr HOST:PORT is required}"
+: "${libkrun_guest_image:?--libkrun-guest-image REF is required}"
+
+if [[ ! "$runtime_instance" =~ ^[0-9a-f]{32}$ ]]; then
+  echo "make-seed-iso.sh: --runtime-instance must be exactly 32 lowercase hex characters" >&2
+  exit 2
+fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "make-seed-iso.sh: hdiutil is macOS-only; this script has no other backend" >&2
@@ -78,8 +90,9 @@ trap 'rm -rf "$staging"' EXIT
 # The boot smoke omits the key, which leaves ssh disabled for that launch.
 cat >"$staging/omnifs-seed.conf" <<EOF
 OMNIFS_ATTACH_ADDR=${attach_addr}
-OMNIFS_CLIENT_OWNER=${client_owner}
-OMNIFS_FS_ID=${filesystem_id}
+OMNIFS_FILESYSTEM_NAME=${filesystem_name}
+OMNIFS_RUNTIME_INSTANCE=${runtime_instance}
+OMNIFS_LIBKRUN_GUEST_IMAGE=${libkrun_guest_image}
 OMNIFS_READY_VSOCK_PORT=${ready_vsock_port}
 EOF
 if [[ -n "$ssh_pubkey" ]]; then

@@ -1,7 +1,7 @@
 //! Human-only responsive resource tables.
 //!
 //! This module deliberately has no serde surface and no knowledge of mounts,
-//! providers, or filesystems. Commands provide cells and state tokens; the
+//! providers, or Filesystems. Commands provide cells and state tokens; the
 //! renderer owns layout, terminal width, and action placement.
 
 use std::fmt::Write as _;

@@ -13,8 +13,9 @@ use tracing::info;
 pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     crate::init_tracing();
     let crate::RunnerArgs {
-        client_owner,
+        filesystem,
         spec,
+        runtime_instance,
         state_dir,
         attach,
         port,
@@ -36,6 +37,7 @@ pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     let mut lifecycle = {
         let _runtime_guard = runtime.enter();
         Lifecycle::prepare(LifecycleConfig {
+            filesystem: &filesystem,
             spec: &spec,
             state_dir: Some(&state_dir),
             runner_control,
@@ -46,8 +48,9 @@ pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     let namespace = runtime
         .block_on(WireNamespace::attach_with_teardown(
             target,
-            client_owner,
+            filesystem,
             spec.clone(),
+            runtime_instance,
             handle.clone(),
             lifecycle.wire_teardown_tx.clone(),
         ))

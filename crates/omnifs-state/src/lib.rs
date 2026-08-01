@@ -1,20 +1,20 @@
 //! Daemon-private durable state.
 
-mod batch;
+mod action;
 mod blob;
 mod credential;
 mod db;
-mod mount;
+mod filesystem;
 mod paths;
 mod provider;
+mod resource;
 mod row;
 mod writer;
 
 use anyhow::Context as _;
-use omnifs_bootstrap::{Bootstrap, Daemon};
 use omnifs_core::{
-    AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MountName, MountRevision,
-    MountVersion, MutationId, ProviderId,
+    ActionId, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, ProviderId,
+    ResourceRevision,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnection, SqlitePoolOptions};
@@ -26,28 +26,31 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 
-use credential::{credential_summaries_query, pending_revocations_query, stored_credentials_query};
+use credential::{credential_summaries_query, stored_credentials_query};
 use db::{Db, RecoveryTransition};
-use mount::mounts_query;
-use paths::{
-    CLONE_CACHE_DIR, DAEMON_LOG_FILE, PROJECTION_CACHE_DIR, StorePaths, WASMTIME_CACHE_DIR,
-    ensure_private_dir,
-};
+use paths::{DAEMON_LOG_FILE, ensure_private_dir};
 use provider::{
     MAX_PROVIDER_BYTES, PROVIDER_CHUNK_BYTES, provider_metadata_query, providers_query,
 };
 use writer::StateWriter;
 
-pub use batch::{BatchError, OpOutcome, StateOp, StateOpError};
+pub use action::{
+    ActionWriteError, CredentialActionOperation, CredentialActionRequest, FilesystemActionRequest,
+};
 pub use credential::{
     CredentialDocument, CredentialRefreshKind, CredentialRefreshOutcome,
-    CredentialRevocationFinish, CredentialState, CredentialSummary, PendingCredentialRevocation,
-    SecretMaterial, StoredCredential, next_submitted,
+    CredentialRevocationFinish, CredentialState, CredentialSummary, SecretMaterial,
+    StoredCredential, next_submitted,
 };
-pub use mount::{MountDocument, MountLimits, StoredMount};
+pub use filesystem::{FilesystemInstance, FilesystemObservation, FilesystemPhase};
+pub use paths::DaemonStatePaths;
 pub use provider::{
     ProviderImportDisposition, ProviderImportOutcome, ProviderUpload, StoredProvider,
     StoredProviderMetadata, ValidatedProviderUpload,
+};
+pub use resource::{
+    CredentialSecretSidecar, DesiredFilesystem, ResourceApplyError, ResourceApplyRequest,
+    ResourceSnapshot,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -95,7 +98,7 @@ impl Default for StateStoreOptions {
 }
 
 pub struct StateStore {
-    paths: StorePaths,
+    paths: DaemonStatePaths,
     options: StateStoreOptions,
     reads: SqlitePool,
     writer: StateWriter,
@@ -110,20 +113,16 @@ pub enum ControlStoreRepairDisposition {
 }
 
 impl StateStore {
-    pub async fn open(
-        endpoint: &Bootstrap<Daemon>,
-        options: StateStoreOptions,
-    ) -> anyhow::Result<Self> {
-        Self::open_paths(StorePaths::for_endpoint(endpoint), options).await
+    pub async fn open(paths: DaemonStatePaths, options: StateStoreOptions) -> anyhow::Result<Self> {
+        Self::open_paths(paths, options).await
     }
 
     /// Archive the authoritative control store as one directory entry and open
     /// a fresh store. Cache, logs, staging, and bootstrap state stay untouched.
     pub async fn recreate_control_store(
-        endpoint: &Bootstrap<Daemon>,
+        paths: DaemonStatePaths,
         options: StateStoreOptions,
     ) -> anyhow::Result<(Self, ControlStoreRepairDisposition)> {
-        let paths = StorePaths::for_endpoint(endpoint);
         ensure_private_dir(paths.root())?;
         let archive = paths.archive_control_store()?;
         let disposition = if archive.is_some() {
@@ -144,7 +143,10 @@ impl StateStore {
         }
     }
 
-    async fn open_paths(paths: StorePaths, options: StateStoreOptions) -> anyhow::Result<Self> {
+    pub async fn open_paths(
+        paths: DaemonStatePaths,
+        options: StateStoreOptions,
+    ) -> anyhow::Result<Self> {
         paths.prepare()?;
         paths.cleanup_staging()?;
 
@@ -176,79 +178,180 @@ impl StateStore {
 
     #[must_use]
     pub fn engine_paths(&self) -> EngineStatePaths {
-        let cache = self.paths.cache();
-        EngineStatePaths {
-            projection: cache.join(PROJECTION_CACHE_DIR),
-            wasmtime: cache.join(WASMTIME_CACHE_DIR),
-            clones: cache.join(CLONE_CACHE_DIR),
-        }
+        self.paths.engine_paths()
     }
 
-    pub async fn mount_revision(&self) -> anyhow::Result<MountRevision> {
-        let revision: i64 =
-            sqlx::query_scalar("SELECT revision FROM mount_state WHERE singleton = 1")
-                .fetch_one(&self.reads)
-                .await
-                .context("read mount revision")?;
-        Ok(MountRevision::new(
-            u64::try_from(revision).context("mount revision is negative")?,
-        ))
+    /// Read one exact, non-secret desired-resource head.
+    pub async fn resource_snapshot(&self) -> anyhow::Result<ResourceSnapshot> {
+        resource::snapshot(&self.reads).await
     }
 
-    /// Read one exact durable head for serving-generation preparation.
-    pub async fn serving_snapshot(&self) -> anyhow::Result<DurableServingSnapshot> {
-        let mut transaction = self
+    /// Atomically replace the complete desired resource set.
+    pub async fn apply_resources(
+        &self,
+        request: ResourceApplyRequest,
+    ) -> Result<omnifs_api::ApplyReceipt, ResourceApplyError> {
+        self.writer
+            .call(move |mut connection| async move {
+                let result = Db::new(&mut connection).apply_resources(request).await;
+                (connection, result)
+            })
+            .await
+            .map_err(ResourceApplyError::Store)?
+    }
+
+    /// Accept one credential action and its secret input in the same writer
+    /// transaction as the durable non-secret receipt.
+    pub async fn accept_credential_action(
+        &self,
+        request: CredentialActionRequest,
+    ) -> Result<omnifs_api::ActionReceipt, ActionWriteError> {
+        self.writer
+            .call(move |mut connection| async move {
+                let result = Db::new(&mut connection)
+                    .accept_credential_action(request)
+                    .await;
+                (connection, result)
+            })
+            .await?
+    }
+
+    /// Accept one non-secret filesystem restart action and its durable receipt
+    /// in one writer transaction.
+    pub async fn accept_filesystem_action(
+        &self,
+        request: FilesystemActionRequest,
+    ) -> Result<omnifs_api::ActionReceipt, ActionWriteError> {
+        self.writer
+            .call(move |mut connection| async move {
+                let result = Db::new(&mut connection)
+                    .accept_filesystem_action(request)
+                    .await;
+                (connection, result)
+            })
+            .await?
+    }
+
+    pub async fn action_receipt(
+        &self,
+        action_id: omnifs_core::ActionId,
+    ) -> anyhow::Result<Option<omnifs_api::ActionReceipt>> {
+        let mut connection = self
             .reads
-            .begin()
+            .acquire()
             .await
-            .context("begin durable serving snapshot")?;
-        let revision: i64 =
-            sqlx::query_scalar("SELECT revision FROM mount_state WHERE singleton = 1")
-                .fetch_one(&mut *transaction)
-                .await
-                .context("read snapshot mount revision")?;
-        let mounts = sqlx::query_as::<_, StoredMount>(mounts_query!("ORDER BY name"))
-            .fetch_all(&mut *transaction)
-            .await
-            .context("read snapshot mounts")?;
-        let credentials = sqlx::query_as::<_, StoredCredential>(stored_credentials_query!(
-            "WHERE status <> 'deleted' ORDER BY provider_name, scheme, account"
-        ))
-        .fetch_all(&mut *transaction)
-        .await
-        .context("read snapshot credentials")?;
-        transaction
-            .commit()
-            .await
-            .context("release durable serving snapshot")?;
+            .context("acquire action receipt reader")?;
+        action::action_receipt(&mut connection, action_id).await
+    }
 
-        Ok(DurableServingSnapshot {
-            revision: MountRevision::new(
-                u64::try_from(revision).context("mount revision is negative")?,
-            ),
-            mounts,
-            credentials,
-        })
+    pub async fn pending_actions(&self) -> anyhow::Result<Vec<omnifs_api::ActionReceipt>> {
+        let mut connection = self
+            .reads
+            .acquire()
+            .await
+            .context("acquire pending action reader")?;
+        action::pending_actions(&mut connection).await
+    }
+
+    pub async fn action_receipts(&self) -> anyhow::Result<Vec<omnifs_api::ActionReceipt>> {
+        let mut connection = self
+            .reads
+            .acquire()
+            .await
+            .context("acquire action receipt reader")?;
+        action::action_receipts(&mut connection).await
+    }
+
+    /// Read one exact observed filesystem instance, including a deleting
+    /// tombstone that no longer has a desired resource.
+    pub async fn filesystem_instance(
+        &self,
+        name: &omnifs_core::ResourceName,
+    ) -> anyhow::Result<Option<FilesystemInstance>> {
+        let mut connection = self
+            .reads
+            .acquire()
+            .await
+            .context("acquire filesystem instance reader")?;
+        filesystem::load_instance(&mut connection, name).await
+    }
+
+    /// Read all observed filesystem instances in stable name order.
+    pub async fn filesystem_instances(&self) -> anyhow::Result<Vec<FilesystemInstance>> {
+        filesystem::list_instances(&self.reads).await
+    }
+
+    /// Read all desired filesystem definitions with their durable versions.
+    pub async fn desired_filesystems(&self) -> anyhow::Result<Vec<DesiredFilesystem>> {
+        resource::desired_filesystems(&self.reads).await
+    }
+
+    /// Record one observed filesystem phase after checking the exact desired,
+    /// action, and runtime identity observed before the supervisor effect.
+    ///
+    /// A stale write returns `None` and cannot change desired state, deletion
+    /// state, or action generation.
+    pub async fn write_filesystem_observation(
+        &self,
+        observation: FilesystemObservation,
+    ) -> anyhow::Result<Option<FilesystemInstance>> {
+        self.writer
+            .call(move |mut connection| async move {
+                let result = Db::new(&mut connection)
+                    .write_filesystem_observation(observation)
+                    .await;
+                (connection, result)
+            })
+            .await?
+    }
+
+    /// Clear a deletion tombstone only if its desired row and exact runtime
+    /// identity have not changed since the teardown proof.
+    pub async fn clear_filesystem_instance_if_deleting(
+        &self,
+        name: omnifs_core::ResourceName,
+        runtime_instance: Option<String>,
+    ) -> anyhow::Result<bool> {
+        self.writer
+            .call(move |mut connection| async move {
+                let result = Db::new(&mut connection)
+                    .delete_filesystem_instance_if_deleting(name, runtime_instance)
+                    .await;
+                (connection, result)
+            })
+            .await?
+    }
+
+    pub async fn transition_action(
+        &self,
+        action_id: omnifs_core::ActionId,
+        phase: omnifs_api::ActionPhase,
+        error_code: Option<String>,
+        detail: Option<String>,
+    ) -> Result<omnifs_api::ActionReceipt, ActionWriteError> {
+        self.writer
+            .call(move |mut connection| async move {
+                let result = Db::new(&mut connection)
+                    .transition_action(action_id, phase, error_code, detail)
+                    .await;
+                (connection, result)
+            })
+            .await?
     }
 
     pub async fn serving_state(&self) -> anyhow::Result<ServingState> {
-        let (state, detail, revision, failed_mutation) =
-            sqlx::query_as::<_, (String, Option<String>, i64, Option<Vec<u8>>)>(
-                "SELECT state, detail, serving_mount_revision, failed_mutation_id \
-                 FROM recovery_state WHERE singleton = 1",
-            )
-            .fetch_one(&self.reads)
-            .await
-            .context("read recovery state")?;
+        let (state, detail, revision) = sqlx::query_as::<_, (String, Option<String>, i64)>(
+            "SELECT state, detail, serving_resource_revision \
+             FROM recovery_state WHERE singleton = 1",
+        )
+        .fetch_one(&self.reads)
+        .await
+        .context("read recovery state")?;
         Ok(ServingState {
             recovery: RecoveryState::from_row(&state, detail)?,
-            revision: MountRevision::new(
+            revision: ResourceRevision::new(
                 u64::try_from(revision).context("serving revision is negative")?,
             ),
-            failed_mutation: failed_mutation
-                .as_deref()
-                .map(row::decode_mutation_id)
-                .transpose()?,
         })
     }
 
@@ -265,17 +368,13 @@ impl StateStore {
             .await?
     }
 
-    pub async fn mark_serving(&self, revision: MountRevision) -> anyhow::Result<()> {
+    pub async fn mark_serving(&self, revision: ResourceRevision) -> anyhow::Result<()> {
         self.transition(RecoveryTransition::Serving { revision })
             .await
     }
 
-    pub async fn mark_recovery_required(
-        &self,
-        mutation: Option<MutationId>,
-        detail: String,
-    ) -> anyhow::Result<()> {
-        self.transition(RecoveryTransition::RecoveryRequired { mutation, detail })
+    pub async fn mark_recovery_required(&self, detail: String) -> anyhow::Result<()> {
+        self.transition(RecoveryTransition::RecoveryRequired { detail })
             .await
     }
 
@@ -379,43 +478,6 @@ impl StateStore {
         .context("list providers")
     }
 
-    pub async fn get_mount(&self, name: &MountName) -> anyhow::Result<Option<StoredMount>> {
-        sqlx::query_as::<_, StoredMount>(mounts_query!("WHERE name = ?1"))
-            .bind(name.as_str())
-            .fetch_optional(&self.reads)
-            .await
-            .context("load mount")
-    }
-
-    pub async fn list_mounts(&self) -> anyhow::Result<Vec<StoredMount>> {
-        sqlx::query_as::<_, StoredMount>(mounts_query!("ORDER BY name"))
-            .fetch_all(&self.reads)
-            .await
-            .context("list mounts")
-    }
-
-    /// Apply every op in `ops`, in order, inside one transaction. The first
-    /// failure rolls back the whole batch. Every mounts/credentials row this
-    /// batch creates or updates is stamped with `mutation_id`, and the global
-    /// mount revision advances at most once, only if `ops` touches a mount.
-    ///
-    /// This is the sole entry point for the six wire mutation ops (mount
-    /// create/update/remove, credential submit/delete/revoke); there is no
-    /// standalone method for any of them.
-    pub async fn apply_batch(
-        &self,
-        mutation_id: MutationId,
-        ops: Vec<StateOp>,
-    ) -> Result<Vec<OpOutcome>, BatchError> {
-        self.writer
-            .call(move |mut connection| async move {
-                let result = Db::new(&mut connection).apply_batch(mutation_id, ops).await;
-                (connection, result)
-            })
-            .await
-            .map_err(BatchError::Store)?
-    }
-
     pub async fn get_credential(
         &self,
         id: &omnifs_auth::CredentialId,
@@ -440,30 +502,19 @@ impl StateStore {
         .context("list credentials")
     }
 
-    pub async fn pending_credential_revocations(
-        &self,
-    ) -> anyhow::Result<Vec<PendingCredentialRevocation>> {
-        sqlx::query_as::<_, PendingCredentialRevocation>(pending_revocations_query!(
-            "WHERE status = 'revocation-pending' ORDER BY provider_name, scheme, account"
-        ))
-        .fetch_all(&self.reads)
-        .await
-        .context("list pending credential revocations")
-    }
-
     /// Complete a revocation an out-of-band provider call finished, matching
-    /// it against the batch id recorded when the revocation began.
+    /// it against the durable action id recorded when revocation began.
     pub async fn finish_credential_revocation(
         &self,
         id: omnifs_auth::CredentialId,
-        mutation_id: MutationId,
+        action_id: ActionId,
         finish: CredentialRevocationFinish,
         scopes: Vec<String>,
     ) -> Result<CredentialMutationOutcome, CredentialWriteError> {
         self.writer
             .call(move |mut connection| async move {
                 let result = Db::new(&mut connection)
-                    .write_credential_revocation_finish(id, mutation_id, finish, scopes)
+                    .write_credential_revocation_finish(id, action_id, finish, scopes)
                     .await;
                 (connection, result)
             })
@@ -546,10 +597,9 @@ fn validate_provider_file_name(file_name: String) -> anyhow::Result<String> {
 }
 
 /// Open the daemon-owned log for append before the `StateStore` runtime starts.
-pub fn open_daemon_log(endpoint: &Bootstrap<Daemon>) -> anyhow::Result<std::fs::File> {
+pub fn open_daemon_log(paths: &DaemonStatePaths) -> anyhow::Result<std::fs::File> {
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
-    let paths = StorePaths::for_endpoint(endpoint);
     ensure_private_dir(paths.root())?;
     let logs = paths.logs();
     ensure_private_dir(&logs)?;
@@ -566,26 +616,6 @@ pub fn open_daemon_log(endpoint: &Bootstrap<Daemon>) -> anyhow::Result<std::fs::
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MountMutationOutcome {
-    pub name: MountName,
-    pub version: Option<MountVersion>,
-    pub revision: MountRevision,
-}
-
-/// The lease serializes every write, so the CAS conflicts a client-supplied
-/// `if_version` used to catch are unreachable except through a bug; only
-/// plain existence integrity errors and internal storage failures remain.
-#[derive(Debug, thiserror::Error)]
-pub enum MountWriteError {
-    #[error("mount `{0}` already exists")]
-    AlreadyExists(MountName),
-    #[error("mount `{0}` was not found")]
-    NotFound(MountName),
-    #[error(transparent)]
-    Store(#[from] anyhow::Error),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialMutationOutcome {
     pub provider_name: String,
     pub scheme: String,
@@ -597,10 +627,6 @@ pub struct CredentialMutationOutcome {
     pub version: CredentialVersion,
     pub generation: CredentialGeneration,
     pub state: CredentialState,
-    /// Provenance: the batch that produced this outcome, echoed back so the
-    /// daemon can populate `CredentialStatus.last_mutation_id` without a
-    /// second read.
-    pub last_mutation_id: MutationId,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -608,8 +634,7 @@ pub enum CredentialWriteError {
     #[error("credential `{0}` was not found")]
     NotFound(omnifs_auth::CredentialId),
     /// Real compare-and-swap, reachable only from the background refresh and
-    /// activation paths: they race the lease-serialized batch writers rather
-    /// than being serialized by them.
+    /// activation paths: they can race daemon action and reconcile writers.
     #[error("credential `{id}` changed; expected {expected:?}, found {actual:?}")]
     Conflict {
         id: omnifs_auth::CredentialId,
@@ -634,14 +659,6 @@ pub enum CredentialWriteError {
     Store(#[from] anyhow::Error),
 }
 
-/// One transactionally consistent durable input for serving preparation.
-#[derive(Debug)]
-pub struct DurableServingSnapshot {
-    pub revision: MountRevision,
-    pub mounts: Vec<StoredMount>,
-    pub credentials: Vec<StoredCredential>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryState {
     Ready,
@@ -663,8 +680,7 @@ impl RecoveryState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServingState {
     pub recovery: RecoveryState,
-    pub revision: MountRevision,
-    pub failed_mutation: Option<MutationId>,
+    pub revision: ResourceRevision,
 }
 
 #[cfg(test)]

@@ -98,31 +98,17 @@ type Fixtures = {
   dbContainerId: string | null;
 };
 
-type FilesystemRow = {
-  id: string;
-  protocol: "fuse" | "nfs";
-  runtime: "host" | "docker" | "libkrun";
-  location: string;
-  state: "attached" | "detached" | "unknown";
-};
-
 const $ = Bun.$;
 const DB_IMAGE = "omnifs-dev-db:local";
 const DB_CONTAINER = "omnifs-dev-db";
 const K8S_COMPOSE_PROJECT = "omnifs-devcluster";
 const FILESYSTEM_DEV_IMAGE = "omnifs-filesystem:dev";
-// The fixed guest location in `omnifs_core::fs`; guest filesystems always mount here.
+// The fixed guest location in `omnifs_core::filesystem`; guest filesystems always mount here.
 const GUEST_MOUNT = "/omnifs";
 // The filesystem image ships a minimal Debian base (fuse3, coreutils, findutils,
 // jq, rsync, tar, xxd) with no bash/zsh (`Dockerfile`'s `filesystem-base`), so
 // the interactive dev shell and any container-side probe use POSIX `/bin/sh`.
 const GUEST_SHELL = "/bin/sh";
-// Label `crates/omnifs-cli/src/fs_container.rs` stamps on the filesystem
-// container with the profile root (== `OMNIFS_HOME`): the single
-// owner of the home->container-name mapping, so this script discovers the
-// container by label instead of re-deriving its hashed name.
-const FILESYSTEM_HOME_LABEL = "ai.0xff.omnifs.home";
-
 // Dev mounts whose provider needs a static token, and the host env var that
 // holds it. Dev orchestration, not provider or mount data, so it lives here
 // rather than in the mount templates.
@@ -208,59 +194,54 @@ async function main() {
 
   const fixtures = await startFixtures(render.mounts, fixturePaths);
   try {
-    // Host-resource mounts activate as soon as `mount add` reaches the daemon,
-    // so their files and sockets must exist before the mount RPC.
-    await writeDevHome(devHome, filesystemImage, omnifsCli, render);
-
+    // Host resources must exist before declarative apply wakes daemon
+    // reconciliation.
     const hostProtocol = process.platform === "linux" ? "fuse" : "nfs";
     const hostLocation = join(devHome, "mnt");
     mkdirSync(hostLocation, { recursive: true });
-    console.log(`Attaching the host ${hostProtocol.toUpperCase()} filesystem`);
-    await ensureFilesystemAttached(
-      omnifsCli,
+    const configPath = writeDevConfig(
       devHome,
-      {
-        id: "dev-host",
-        protocol: hostProtocol,
-        runtime: "host",
-        location: hostLocation,
-      },
+      providerStore,
+      render,
+      filesystemImage,
+      hostProtocol,
+      hostLocation,
+    );
+    const revision = await applyDevConfig(
+      omnifsCli,
+      configPath,
+      cliEnv(devHome, { OMNIFS_FILESYSTEM_IMAGE: filesystemImage }),
+      render.mounts.filter((mount) => mount.tokenEnv).map(credentialName),
+    );
+    for (const mount of render.mounts) {
+      if (!mount.tokenEnv) {
+        continue;
+      }
+      await run(
+        $`${omnifsCli} credential set ${credentialName(mount)} --from-env ${mount.tokenEnv}`.env(
+          cliEnv(devHome, render.credentialEnv),
+        ),
+      );
+    }
+    await run(
+      $`${omnifsCli} status --follow --revision ${revision}`.env(
+        cliEnv(devHome, { OMNIFS_FILESYSTEM_IMAGE: filesystemImage }),
+      ),
     );
 
-    console.log("Attaching the Docker-hosted FUSE filesystem");
-    await ensureFilesystemAttached(
-      omnifsCli,
-      devHome,
-      {
-        id: "dev-docker",
-        protocol: "fuse",
-        runtime: "docker",
-        location: GUEST_MOUNT,
-      },
-      { OMNIFS_FILESYSTEM_IMAGE: filesystemImage },
-    );
-
-    const filesystemContainer = await discoverFilesystemContainer(devHome);
     if (keepRunning(options)) {
       if (options.detach) {
-        console.log(
-          `Detached. Stop with \`${omnifsCli} fs detach --name dev-docker && ${omnifsCli} fs detach --name dev-host && ${omnifsCli} down\`.`,
-        );
+        console.log(`Detached. Stop with \`${omnifsCli} down\`.`);
       }
       return;
     }
 
     try {
-      console.log(`Opening a shell in \`${filesystemContainer}\` at ${GUEST_MOUNT}`);
-      await runInteractive([
-        "docker",
-        "exec",
-        "-it",
-        "-w",
-        GUEST_MOUNT,
-        filesystemContainer,
-        GUEST_SHELL,
-      ]);
+      console.log(`Opening a shell in \`dev-docker\` at ${GUEST_MOUNT}`);
+      await runInteractive(
+        [omnifsCli, "fs", "shell", "dev-docker", "--", GUEST_SHELL],
+        cliEnv(devHome, { OMNIFS_FILESYSTEM_IMAGE: filesystemImage }),
+      );
     } finally {
       await teardownSession(devHome, omnifsCli, fixturePaths, fixtures);
     }
@@ -540,73 +521,187 @@ function cliEnv(devHome: string, extra: Record<string, string | undefined> = {})
   return { ...process.env, ...extra, OMNIFS_HOME: devHome };
 }
 
-async function writeDevHome(
+function writeDevConfig(
   devHome: string,
-  filesystemImage: string,
-  omnifsCli: string,
+  providerStore: string,
   render: DevHomeRender,
-): Promise<void> {
+  filesystemImage: string,
+  hostProtocol: "fuse" | "nfs",
+  hostLocation: string,
+): string {
   mkdirSync(devHome, { recursive: true });
   chmodPrivateDir(devHome);
-
-  // The daemon always runs host-native. Keep the Docker filesystem image in the
-  // client config so `fs attach` resolves the local build without a
-  // registry lookup. Filesystem lifecycle itself is imperative and explicit.
-  writeFileSync(
-    join(devHome, "config.toml"),
-    [`[filesystem]`, `docker_image = ${JSON.stringify(filesystemImage)}`, ``].join("\n"),
-  );
-
-  for (const mount of render.mounts) {
-    await runInitMount(devHome, omnifsCli, mount, render.credentialEnv);
+  const index = JSON.parse(
+    readFileSync(join(providerStore, "index.json"), "utf8"),
+  ) as ProviderStoreIndex;
+  const resources: unknown[] = [];
+  const providerNames = [...new Set(render.mounts.map((mount) => mount.provider))].sort();
+  for (const providerName of providerNames) {
+    const provider = index.providers.find((candidate) => candidate.name === providerName);
+    if (!provider) {
+      throw new Error(`provider store bundle index has no exact entry for ${providerName}`);
+    }
+    resources.push({
+      kind: "Provider",
+      spec: {
+        name: providerName,
+        source: {
+          local: {
+            path: join(providerStore, `${provider.id}.wasm`),
+            expectedDigest: provider.id,
+          },
+        },
+      },
+    });
   }
+  for (const mount of render.mounts) {
+    let credential: string | undefined;
+    const auth = mount.template.auth;
+    if (auth) {
+      if (auth.type !== "static-token" || !auth.scheme || !mount.tokenEnv) {
+        throw new Error(`${mount.name}: unsupported dev auth template ${JSON.stringify(auth)}`);
+      }
+      credential = credentialName(mount);
+      resources.push({
+        kind: "Credential",
+        spec: {
+          name: credential,
+          provider: mount.provider,
+          scheme: auth.scheme,
+          account: "default",
+        },
+      });
+    }
+    const limits = mount.template.limits as
+      | { max_memory_mb?: number; max_fetch_blob_bytes?: number }
+      | undefined;
+    resources.push({
+      kind: "Mount",
+      spec: {
+        name: mount.name,
+        provider: mount.provider,
+        ...(credential ? { credential } : {}),
+        config: mount.template.config ?? {},
+        ...(limits
+          ? {
+              limits: {
+                ...(limits.max_memory_mb === undefined
+                  ? {}
+                  : { maxMemoryMb: limits.max_memory_mb }),
+                ...(limits.max_fetch_blob_bytes === undefined
+                  ? {}
+                  : { maxFetchBlobBytes: limits.max_fetch_blob_bytes }),
+              },
+            }
+          : {}),
+      },
+    });
+  }
+  resources.push(
+    {
+      kind: "Filesystem",
+      spec: {
+        name: "dev-host",
+        protocol: hostProtocol,
+        runtime: "host",
+        location: hostLocation,
+      },
+    },
+    {
+      kind: "Filesystem",
+      spec: {
+        name: "dev-docker",
+        protocol: "fuse",
+        runtime: "docker",
+        location: GUEST_MOUNT,
+        dockerImage: filesystemImage,
+      },
+    },
+  );
+  const configPath = join(devHome, "dev.omnifs.k");
+  const source =
+    "# Generated by just dev. Secrets stay in environment variables.\n" +
+    `config = ${renderKclValue({
+      apiVersion: "omnifs.dev/v1alpha1",
+      resources,
+    })}\n`;
+  writeFileSync(configPath, source, { mode: 0o600 });
+  return configPath;
 }
 
-async function runInitMount(
-  devHome: string,
-  omnifsCli: string,
-  mount: DevMountRender,
-  credentialEnv: Record<string, string>,
-): Promise<void> {
-  const args = [
-    "mount",
-    "add",
-    mount.provider,
-    "--name",
-    mount.name,
-    "--no-input",
-    "--yes",
-  ];
-  if (Object.prototype.hasOwnProperty.call(mount.template, "auth")) {
-    const auth = mount.template.auth;
-    if (auth?.type === "static-token") {
-      if (auth.scheme) {
-        args.push("--scheme", auth.scheme);
-      }
-      if (mount.tokenEnv) {
-        // Dev/CI tokens (e.g. the Actions integration token) can fail the
-        // provider's validation probe while working for their scope; dev
-        // rendering stores them unvalidated, as it always has.
-        args.push("--token-env", mount.tokenEnv, "--no-validate");
-      }
-    } else {
-      throw new Error(`${mount.name}: unsupported dev auth template ${JSON.stringify(auth)}`);
-    }
-  } else {
-    args.push("--no-auth");
-  }
-  if (mount.template.config) {
-    args.push("--config-json", JSON.stringify(mount.template.config));
-  }
-  if (mount.template.limits) {
-    args.push("--limits-json", JSON.stringify(mount.template.limits));
-  }
+function credentialName(mount: DevMountRender): string {
+  return `${mount.name}-credential`;
+}
 
-  await run(
-    $`${omnifsCli} ${args}`.env(
-      cliEnv(devHome, credentialEnv),
-    ),
+async function applyDevConfig(
+  omnifsCli: string,
+  configPath: string,
+  env: Record<string, string | undefined>,
+  credentialNames: string[],
+): Promise<string> {
+  const child = Bun.spawn(
+    [omnifsCli, "apply", configPath, "--yes", "--output", "json"],
+    {
+      cwd: workspace,
+      env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "inherit",
+    },
   );
+  const stdout = await new Response(child.stdout).text();
+  const code = await child.exited;
+  const envelope = JSON.parse(stdout) as {
+    verdict: string;
+    result?: { receipt?: { revision: number } };
+    error?: {
+      id: string;
+      message: string;
+      details?: { receipt?: { revision: number } };
+    };
+  };
+  const revision =
+    envelope.result?.receipt?.revision ??
+    envelope.error?.details?.receipt?.revision;
+  if (code === 0 && revision !== undefined) {
+    return String(revision);
+  }
+  // A declaration may need credential material before the revision can
+  // serve. Apply has still committed the exact desired set. Continue only
+  // for that typed post-commit outcome, set secrets through durable actions,
+  // then follow the same revision below.
+  if (
+    envelope.error?.id === "reconcile-failed" &&
+    revision !== undefined &&
+    credentialNames.some((name) => envelope.error?.message.includes(name))
+  ) {
+    return String(revision);
+  }
+  throw new Error(
+    `declarative apply failed with status ${code}: ${stdout.trim()}`,
+  );
+}
+
+function renderKclValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "None";
+  }
+  if (typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    return String(value);
+  }
+  if (typeof value === "boolean") {
+    return value ? "True" : "False";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(renderKclValue).join(", ")}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  return `{${entries
+    .map(([key, item]) => `${JSON.stringify(key)} = ${renderKclValue(item)}`)
+    .join(", ")}}`;
 }
 
 async function startFixtures(mounts: DevMountRender[], fixturePaths: FixturePaths): Promise<Fixtures> {
@@ -641,81 +736,12 @@ async function startFixtures(mounts: DevMountRender[], fixturePaths: FixturePath
   return fixtures;
 }
 
-/// Discover the running filesystem container by the profile-home label
-/// `crates/omnifs-cli/src/fs_container.rs` stamps on it, rather than
-/// re-deriving its (possibly hashed) name in this script.
-async function discoverFilesystemContainer(devHome: string): Promise<string> {
-  const name = (await awaitText(
-    $`docker ps --filter ${`label=${FILESYSTEM_HOME_LABEL}=${devHome}`} --format {{.Names}}`.quiet(),
-  )).trim();
-  if (!name) {
-    throw new Error(
-      `no filesystem container found for home ${devHome}; the Docker filesystem may have exited without one`,
-    );
-  }
-  return name;
-}
-
-async function ensureFilesystemAttached(
-  omnifsCli: string,
-  devHome: string,
-  expected: Omit<FilesystemRow, "state">,
-  extraEnv: Record<string, string | undefined> = {},
-): Promise<void> {
-  const env = cliEnv(devHome, extraEnv);
-  const raw = await awaitText($`${omnifsCli} fs ls --output json`.env(env));
-  const envelope = JSON.parse(raw) as {
-    result: { filesystems: FilesystemRow[] };
-  };
-  let row = envelope.result.filesystems.find((filesystem) => filesystem.id === expected.id);
-  if (!row) {
-    const args = [
-      "fs",
-      "create",
-      "--name",
-      expected.id,
-      "--protocol",
-      expected.protocol,
-      "--runtime",
-      expected.runtime,
-    ];
-    if (expected.runtime === "host") {
-      args.push("--location", expected.location);
-    }
-    await run($`${omnifsCli} ${args}`.env(env));
-    row = { ...expected, state: "detached" };
-  }
-  if (
-    row.protocol !== expected.protocol ||
-    row.runtime !== expected.runtime ||
-    row.location !== expected.location
-  ) {
-    throw new Error(
-      `filesystem ${expected.id} has ${row.protocol}/${row.runtime} at ${row.location}, expected ${expected.protocol}/${expected.runtime} at ${expected.location}`,
-    );
-  }
-  if (row.state === "unknown") {
-    throw new Error(`filesystem ${expected.id} has unknown state; run omnifs doctor`);
-  }
-  if (row.state === "detached") {
-    await run($`${omnifsCli} fs attach --name ${expected.id}`.env(env));
-  }
-}
-
 async function teardownSession(
   devHome: string,
   omnifsCli: string,
   fixturePaths: FixturePaths,
   fixtures: Fixtures,
 ): Promise<void> {
-  await $`${omnifsCli} fs detach --name dev-docker`
-    .env(cliEnv(devHome))
-    .quiet()
-    .nothrow();
-  await $`${omnifsCli} fs detach --name dev-host`
-    .env(cliEnv(devHome))
-    .quiet()
-    .nothrow();
   await $`${omnifsCli} down`.env(cliEnv(devHome)).quiet().nothrow();
   if (fixtures.k8s) {
     await run(
@@ -810,10 +836,13 @@ async function awaitText(command: ShellCommand): Promise<string> {
   return command.quiet().text();
 }
 
-async function runInteractive(args: string[]): Promise<void> {
+async function runInteractive(
+  args: string[],
+  env: Record<string, string | undefined> = process.env,
+): Promise<void> {
   const child = Bun.spawn(args, {
     cwd: workspace,
-    env: process.env,
+    env,
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",

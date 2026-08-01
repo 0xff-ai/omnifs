@@ -27,6 +27,9 @@ pub(crate) const KIND_EVENT: u8 = 2;
 /// A server-pushed [`ServerControl`](crate::ServerControl), always carried
 /// with `request_id = 0`.
 pub(crate) const KIND_CONTROL: u8 = 3;
+/// An empty transport heartbeat. Clients send one with `request_id = 0` and
+/// servers echo it so an idle filesystem detects a dead daemon connection.
+pub(crate) const KIND_HEARTBEAT: u8 = 4;
 
 /// Maximum accepted frame size (`len` field), 16 MiB. A larger `len` is a
 /// protocol error; the connection is dropped.

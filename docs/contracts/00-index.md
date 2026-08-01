@@ -5,7 +5,8 @@ Owns: the agent-facing map for binding `omnifs` rules.
 
 ## Read when
 
-Read this first when deciding which contract applies. Do not load every contract by default. `AGENTS.md` is the always-loaded router; the files here are task-area rules.
+Read this first to choose a contract. `AGENTS.md` is always loaded; this index
+routes the task without loading every contract.
 
 ## Rules
 
@@ -20,15 +21,16 @@ Read this first when deciding which contract applies. Do not load every contract
 
 Documentation types:
 
-- `AGENTS.md`: always-loaded operating guide.
-- `docs/contracts/`: binding rules by task area.
-- `docs/architecture/`: current explanatory model and rationale, loaded only when a task needs subsystem context.
+- `AGENTS.md`: always-loaded universal rules and operating entry point.
+- `docs/contracts/`: binding task-area rules.
+- `docs/architecture/`: current model and rationale, loaded only for subsystem
+  context.
 
 ## Must not
 
-- Do not turn contracts into broad explanatory essays.
-- Do not split a contract file unless agents can avoid loading irrelevant rules because of the split.
-- Do not keep a stale mixed doc path as alternate authority.
+- Turn contracts into broad explanatory essays.
+- Split a contract unless the split avoids loading irrelevant rules.
+- Keep a stale mixed doc path as alternate authority.
 
 ## Code
 

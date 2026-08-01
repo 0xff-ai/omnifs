@@ -1,5 +1,5 @@
 use fs2::FileExt as _;
-use omnifs_core::fs;
+use omnifs_core::{FilesystemSpec, ResourceName};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
@@ -33,16 +33,18 @@ pub struct RunnerRecord {
     pub instance_id: String,
     pub pid: u32,
     pub process_group: u32,
-    pub spec: fs::Spec,
+    pub filesystem: ResourceName,
+    pub spec: FilesystemSpec,
     pub control_socket: PathBuf,
 }
 
 impl RunnerRecord {
-    pub const VERSION: u8 = 1;
+    pub const VERSION: u8 = 2;
 
     pub fn new(
         instance_id: String,
-        spec: fs::Spec,
+        filesystem: ResourceName,
+        spec: FilesystemSpec,
         control_socket: PathBuf,
     ) -> Result<Self, RunnerRecordError> {
         let pid = std::process::id();
@@ -52,6 +54,7 @@ impl RunnerRecord {
             instance_id,
             pid,
             process_group,
+            filesystem,
             spec,
             control_socket,
         };
@@ -229,11 +232,13 @@ mod tests {
             instance_id: instance.to_owned(),
             pid: 42,
             process_group: 42,
-            spec: fs::Spec::new(
-                fs::Id::new(id).unwrap(),
-                fs::Protocol::Nfs,
-                fs::Runtime::Host,
+            filesystem: ResourceName::new(id).unwrap(),
+            spec: FilesystemSpec::new(
+                omnifs_core::FilesystemProtocol::Nfs,
+                omnifs_core::FilesystemRuntime::Host,
                 PathBuf::from(mount),
+                None,
+                None,
             )
             .unwrap(),
             control_socket: PathBuf::from("/tmp/control.sock"),
@@ -273,7 +278,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
             temp.path().join(RUNNER_RECORD),
-            r#"{"version":1,"instance_id":"bad","pid":1,"process_group":1,"spec":{"id":"main","protocol":"nfs","runtime":"host","location":"/mnt"},"control_socket":"/tmp/c","extra":true}"#,
+            r#"{"version":2,"instance_id":"bad","pid":1,"process_group":1,"filesystem":"main","spec":{"protocol":"nfs","runtime":"host","location":"/mnt","docker_image":null,"libkrun_guest_image":null},"control_socket":"/tmp/c","extra":true}"#,
         )
         .unwrap();
         assert!(RunnerRecord::read(temp.path()).is_err());

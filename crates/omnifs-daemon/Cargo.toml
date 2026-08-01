@@ -13,9 +13,14 @@ omnifs-auth = { workspace = true }
 omnifs-bootstrap = { workspace = true }
 omnifs-core = { workspace = true }
 omnifs-engine = { workspace = true, features = ["runtime"] }
+omnifs-libkrun = { workspace = true }
+omnifs-mtab = { workspace = true }
+omnifs-nfs = { workspace = true }
 omnifs-provider = { workspace = true }
 omnifs-state = { workspace = true }
+omnifs-thin = { workspace = true }
 omnifs-vfs = { workspace = true, features = ["wire"] }
+bollard = { workspace = true }
 bytes = { workspace = true }
 tonic = { workspace = true }
 tokio-stream = { workspace = true }
@@ -23,12 +28,16 @@ prost = { workspace = true }
 tower = { workspace = true }
 anyhow = { workspace = true }
 blake3 = { workspace = true }
-clap = { workspace = true }
+futures-util = { workspace = true }
 hex = { workspace = true }
+getrandom = "0.3"
+oci-client = { workspace = true }
+reqwest = { workspace = true }
 postcard = { workspace = true }
 secrecy = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

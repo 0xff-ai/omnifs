@@ -16,10 +16,15 @@ use bytes::Bytes;
 use hyper_util::rt::TokioIo;
 use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
-    CONTROL_REQUEST_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInfo, DaemonStatus,
-    MountDefinition, MountOpResult, ProviderImportReceipt,
+    ActionPhase, ApplyResourcesRequest, CONTROL_REQUEST_TIMEOUT_SECS,
+    CONTROL_STREAM_PAYLOAD_MAX_BYTES, DaemonInfo, DaemonStatus, FilesystemDefinition,
+    MountResourceDefinition, ProgressEventKind, ProgressTarget, ProviderDefinition,
+    ProviderImportReceipt, ResourceDeclarations, ResourceDefinition, RestartFilesystemRequest,
 };
-use omnifs_core::{MountName, ProviderId};
+use omnifs_core::{
+    ActionId, FilesystemProtocol, FilesystemRuntime, FilesystemSpec, MutationId, ProviderId,
+    ResourceKind, ResourceName,
+};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::runtime::{Builder, Runtime};
@@ -29,20 +34,27 @@ use tower::service_fn;
 
 type ControlClient = wire::control_client::ControlClient<Channel>;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(CONTROL_REQUEST_TIMEOUT_SECS);
-const MUTATION_TIMEOUT: Duration = Duration::from_secs(30);
 const PROVIDER_CHUNK_BYTES: usize = CONTROL_STREAM_PAYLOAD_MAX_BYTES;
 
-/// A unique-enough mutation id for a test fixture: a live daemon only needs
-/// ids that never collide within one hermetic home's lifetime, not
-/// cryptographic randomness, so an incrementing counter avoids pulling in a
-/// random-bytes dependency for test-only code.
-fn next_mutation_id() -> Vec<u8> {
+/// A unique-enough resource-apply id for a test fixture.
+fn next_mutation_id() -> MutationId {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut bytes = [0_u8; 16];
     bytes[8..].copy_from_slice(&counter.to_be_bytes());
-    bytes.to_vec()
+    MutationId::from_bytes(bytes)
+}
+
+/// A unique-enough durable action id for a test fixture.
+fn next_action_id() -> ActionId {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut bytes = [0_u8; 16];
+    bytes[..8].copy_from_slice(b"itestact");
+    bytes[8..].copy_from_slice(&counter.to_be_bytes());
+    ActionId::from_bytes(bytes)
 }
 
 /// Fixed, non-ephemeral port used purely as a cross-process lock for live NFS
@@ -156,9 +168,10 @@ pub fn thin_runner_bin() -> PathBuf {
 
 /// Build the flat internal argv for a directly spawned host runner.
 ///
-/// Product lifecycle uses hidden `omnifs run-fs`; live protocol tests spawn
-/// the slim binary to isolate the wire boundary, so they must supply the same
-/// private control identity and process-group shape as the host launcher.
+/// Product lifecycle uses hidden `omnifs run-fs`; a few protocol conformance
+/// lanes spawn the slim binary to isolate the wire boundary. Their operational
+/// records still live under daemon state so these tests cannot recreate the
+/// retired legacy client filesystem tree.
 pub fn thin_host_runner_command(
     id: &str,
     protocol: &str,
@@ -170,7 +183,8 @@ pub fn thin_host_runner_command(
 
     static INSTANCE: AtomicU64 = AtomicU64::new(1);
     let instance = format!("{:032x}", INSTANCE.fetch_add(1, Ordering::Relaxed));
-    let control = state_dir.join(format!("control-{instance}.sock"));
+    let profile = state_dir.ancestors().nth(4).unwrap_or(state_dir);
+    let control = profile.join(".r").join(format!("{}.sock", &instance[16..]));
     let mut command = Command::new(thin_runner_bin());
     command
         .args(["--name", id, "--protocol", protocol, "--runtime", "host"])
@@ -218,6 +232,12 @@ pub struct HermeticHome {
 /// Build a hermetic profile root and create the filesystem mount point.
 #[must_use]
 pub fn hermetic_home() -> HermeticHome {
+    // macOS exposes a long per-user TMPDIR. Nested runtime and control socket
+    // names can exceed sockaddr_un::sun_path there, so live lanes keep the
+    // path string under the short `/tmp` alias.
+    #[cfg(target_os = "macos")]
+    let home = tempfile::tempdir_in("/tmp").expect("home tempdir");
+    #[cfg(not(target_os = "macos"))]
     let home = tempfile::tempdir().expect("home tempdir");
     let mount_point = home.path().join("mnt");
     std::fs::create_dir_all(&mount_point).expect("mount point");
@@ -235,9 +255,8 @@ pub fn daemon_args(_home: &Path) -> Vec<OsString> {
 /// provider mounted, torn down on drop.
 pub struct NativeDaemon {
     daemon: Child,
-    filesystem: Child,
     pub mount_point: PathBuf,
-    _home: TempDir,
+    home: TempDir,
     /// Cross-process NFS serialization lock, held for the lane's lifetime.
     /// `None` when the caller holds the lock externally (the perf lane spans two
     /// sequential lanes under one lock, so no per-lane bring-up owns its own).
@@ -246,13 +265,12 @@ pub struct NativeDaemon {
 
 impl Drop for NativeDaemon {
     fn drop(&mut self) {
-        sigterm(&self.filesystem);
-        wait_briefly(&mut self.filesystem);
+        if matches!(self.daemon.try_wait(), Ok(None)) {
+            best_effort_remove_filesystem(self.home.path(), "native");
+        }
         self.detach_mount();
         sigterm(&self.daemon);
         wait_briefly(&mut self.daemon);
-        let _ = self.filesystem.kill();
-        let _ = self.filesystem.wait();
         let _ = self.daemon.kill();
         let _ = self.daemon.wait();
     }
@@ -292,7 +310,7 @@ impl NativeDaemon {
 /// attached over one shared namespace. Torn down on drop.
 pub struct MultiFilesystemDaemon {
     daemon: Child,
-    filesystems: Vec<Child>,
+    filesystem_names: Vec<String>,
     pub mount_points: Vec<PathBuf>,
     home: TempDir,
     /// Cross-process NFS serialization lock, held for the lane's lifetime.
@@ -301,21 +319,16 @@ pub struct MultiFilesystemDaemon {
 
 impl Drop for MultiFilesystemDaemon {
     fn drop(&mut self) {
-        for filesystem in &self.filesystems {
-            sigterm(filesystem);
-        }
-        for filesystem in &mut self.filesystems {
-            wait_briefly(filesystem);
+        if matches!(self.daemon.try_wait(), Ok(None)) {
+            for name in &self.filesystem_names {
+                best_effort_remove_filesystem(self.home.path(), name);
+            }
         }
         for mount_point in &self.mount_points {
             detach_mount_any(mount_point);
         }
         sigterm(&self.daemon);
         wait_briefly(&mut self.daemon);
-        for filesystem in &mut self.filesystems {
-            let _ = filesystem.kill();
-            let _ = filesystem.wait();
-        }
         let _ = self.daemon.kill();
         let _ = self.daemon.wait();
     }
@@ -422,46 +435,25 @@ pub fn start_multi_filesystem_daemon(kinds: &[&str]) -> Option<MultiFilesystemDa
     }
     seed_test_namespace(&control_socket);
 
-    let attach_socket = home.path().join("daemon-state/local.sock");
-    let mut filesystems = Vec::with_capacity(kinds.len());
+    let mut filesystem_names = Vec::with_capacity(kinds.len());
     for ((index, kind), mount_point) in kinds.iter().enumerate().zip(&mount_points) {
         let id = format!("live-{index}");
-        let state_dir = home.path().join(format!("client/filesystems/state/{id}"));
-        let mut command = match *kind {
-            "fuse" | "nfs" => {
-                thin_host_runner_command(&id, kind, mount_point, &state_dir, Some(&attach_socket))
-            },
+        match *kind {
+            "fuse" | "nfs" => ensure_host_filesystem(home.path(), &id, kind, mount_point),
             other => panic!("unsupported filesystem kind `{other}`"),
-        };
-        command
-            .env("OMNIFS_HOME", home.path())
-            .env("RUST_LOG", "warn");
-        match command.spawn() {
-            Ok(child) => filesystems.push(child),
-            Err(error) => {
-                for filesystem in &mut filesystems {
-                    let _ = filesystem.kill();
-                    let _ = filesystem.wait();
-                }
-                let _ = daemon.kill();
-                let _ = daemon.wait();
-                eprintln!("skip: spawn omnifs-thin {kind} failed: {error}");
-                return None;
-            },
         }
+        filesystem_names.push(id);
     }
 
     let mut daemon = MultiFilesystemDaemon {
         daemon,
-        filesystems,
+        filesystem_names,
         mount_points,
         home,
         _nfs_lock: nfs_lock,
     };
 
-    // Wait for every filesystem to serve the projected tree. A non-zero exit
-    // before serving is a hard failure (bad CLI parse or bind collision); a
-    // clean exit is a skip.
+    // Wait for every daemon-owned Filesystem to serve the projected tree.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let all_serving = daemon
@@ -485,18 +477,6 @@ pub fn start_multi_filesystem_daemon(kinds: &[&str]) -> Option<MultiFilesystemDa
             },
             Ok(None) => {},
             Err(error) => panic!("poll daemon child status: {error}"),
-        }
-        for filesystem in &mut daemon.filesystems {
-            match filesystem.try_wait() {
-                Ok(Some(status)) => {
-                    eprintln!(
-                        "skip: filesystem runner exited ({status}) before every mount served"
-                    );
-                    return None;
-                },
-                Ok(None) => {},
-                Err(error) => panic!("poll filesystem child status: {error}"),
-            }
         }
         if Instant::now() >= deadline {
             eprintln!("skip: not every filesystem served within 30s");
@@ -683,7 +663,7 @@ fn wire_filesystem(
 
     // The out-of-process renderer attaches over the requested transport and
     // mounts the tree: `--attach <socket>` for Unix, or the VFS TCP env pair.
-    let state_dir = home_path.join("client/filesystems/state/wire");
+    let state_dir = home_path.join("daemon-state/runtime/filesystems/wire");
     let attach_socket = home_path.join("daemon-state/local.sock");
     let mut filesystem_cmd = thin_host_runner_command(
         "wire",
@@ -766,8 +746,8 @@ fn wire_filesystem(
     }
 }
 
-/// Import the test provider and create the two mounts used by live conformance
-/// fixtures through the same daemon RPCs as the CLI.
+/// Import the test provider and declare the two mounts used by live
+/// conformance fixtures through the resource apply path.
 pub fn seed_test_namespace(socket: &Path) -> ProviderId {
     let bytes = std::fs::read(crate::provider_wasm_path("test_provider.wasm"))
         .expect("read test provider wasm");
@@ -775,17 +755,7 @@ pub fn seed_test_namespace(socket: &Path) -> ProviderId {
     let receipt = import_provider(socket, bytes);
     assert_eq!(receipt.provider.id, provider);
 
-    for name in ["test", "test2"] {
-        let definition = MountDefinition {
-            name: MountName::new(name).expect("valid test mount name"),
-            provider,
-            auth: None,
-            limits: None,
-            config: br"{}".to_vec(),
-        };
-        let result = create_mount(socket, &definition);
-        assert_eq!(result.name.as_str(), name);
-    }
+    apply_test_namespace(socket, provider);
     provider
 }
 
@@ -803,6 +773,219 @@ pub fn control_ready(socket: &Path) -> bool {
 
 fn control_socket_ready(socket: &Path) -> bool {
     control_ready(socket)
+}
+
+/// Apply one daemon-owned host Filesystem and wait for its revision to reach
+/// the ready phase. Live acceptance fixtures use this path instead of taking
+/// ownership of a runner process themselves.
+fn ensure_host_filesystem(home: &Path, name: &str, protocol: &str, location: &Path) {
+    let protocol = protocol
+        .parse::<FilesystemProtocol>()
+        .unwrap_or_else(|error| panic!("invalid test Filesystem protocol: {error}"));
+    ensure_filesystem(
+        &home.join("control.sock"),
+        FilesystemDefinition {
+            name: ResourceName::new(name).expect("valid test Filesystem name"),
+            spec: FilesystemSpec::new(
+                protocol,
+                FilesystemRuntime::Host,
+                location.to_path_buf(),
+                None,
+                None,
+            )
+            .expect("valid host Filesystem spec"),
+        },
+    );
+}
+
+/// Add or replace one desired Filesystem through the same typed apply and
+/// progress protocol used by the CLI, preserving every other desired resource.
+pub fn ensure_filesystem(socket: &Path, definition: FilesystemDefinition) {
+    update_filesystem(socket, Some(definition), None);
+}
+
+fn best_effort_remove_filesystem(home: &Path, name: &str) {
+    let socket = home.join("control.sock");
+    let _ = std::panic::catch_unwind(|| remove_filesystem(&socket, name));
+}
+
+/// Remove one desired Filesystem through the typed resource apply protocol.
+pub fn remove_filesystem(socket: &Path, name: &str) {
+    update_filesystem(socket, None, Some(name));
+}
+
+fn update_filesystem(
+    socket: &Path,
+    definition: Option<FilesystemDefinition>,
+    remove_name: Option<&str>,
+) {
+    block_on(async {
+        let mut client = connect(socket.to_path_buf())
+            .await
+            .expect("connect to update test Filesystem");
+        let snapshot = client
+            .get_resources(Request::new(wire::Empty {}))
+            .await
+            .expect("get resources before updating test Filesystem")
+            .into_inner();
+        let snapshot = grpc::get_resources_response(&snapshot).expect("decode resource snapshot");
+        let mut resources = snapshot.resources;
+        if let Some(remove_name) = remove_name {
+            resources.retain(|resource| {
+                resource.kind() != ResourceKind::Filesystem
+                    || resource.name().as_str() != remove_name
+            });
+        }
+        if let Some(definition) = definition {
+            resources.retain(|resource| {
+                resource.kind() != ResourceKind::Filesystem || resource.name() != &definition.name
+            });
+            resources.push(ResourceDefinition::Filesystem(definition));
+        }
+        let declarations = ResourceDeclarations {
+            api_version: omnifs_api::API_VERSION.to_owned(),
+            resources,
+        };
+        apply_and_wait(&mut client, snapshot.revision, declarations).await;
+    });
+}
+
+/// Restart one desired Filesystem through the durable typed action protocol
+/// and wait for its terminal receipt.
+pub fn restart_filesystem(socket: &Path, name: &str) {
+    block_on(async {
+        let mut client = connect(socket.to_path_buf())
+            .await
+            .expect("connect to restart test Filesystem");
+        let status = client
+            .get_filesystem_status(Request::new(wire::GetFilesystemStatusRequest {
+                filesystem_name: name.to_owned(),
+            }))
+            .await
+            .expect("get test Filesystem status before restart")
+            .into_inner();
+        let status = grpc::get_filesystem_status_response(&status)
+            .expect("decode test Filesystem status")
+            .expect("test Filesystem is desired");
+        let action_id = next_action_id();
+        let response = client
+            .restart_filesystem(Request::new(grpc::to_restart_filesystem_request(
+                &RestartFilesystemRequest {
+                    action_id,
+                    base_action_generation: status.action_generation,
+                    filesystem: status.definition.name,
+                },
+            )))
+            .await
+            .expect("accept test Filesystem restart")
+            .into_inner();
+        let receipt =
+            grpc::restart_filesystem_response(&response).expect("decode Filesystem action receipt");
+        assert_eq!(receipt.action_id, action_id);
+
+        let mut stream = client
+            .watch_progress(grpc::to_progress_target(ProgressTarget::Action(action_id)))
+            .await
+            .expect("watch test Filesystem restart")
+            .into_inner();
+        let deadline = tokio::time::Instant::now() + Duration::from_mins(3);
+        loop {
+            let message = tokio::time::timeout_at(deadline, stream.message())
+                .await
+                .expect("test Filesystem restart reaches a terminal state")
+                .expect("read test Filesystem action progress")
+                .expect("test Filesystem action stream remains open");
+            match grpc::progress_event(&message)
+                .expect("decode test Filesystem action progress")
+                .event
+            {
+                ProgressEventKind::Snapshot(snapshot) | ProgressEventKind::Resync(snapshot) => {
+                    if let Some(receipt) = snapshot
+                        .actions
+                        .into_iter()
+                        .find(|receipt| receipt.action_id == action_id)
+                    {
+                        match receipt.phase {
+                            ActionPhase::Ready => return,
+                            ActionPhase::Failed => {
+                                panic!("test Filesystem restart failed: {:?}", receipt.detail)
+                            },
+                            ActionPhase::Accepted
+                            | ActionPhase::Running
+                            | ActionPhase::Retrying => {},
+                        }
+                    }
+                },
+                ProgressEventKind::ActionCompleted(receipt) if receipt.action_id == action_id => {
+                    return;
+                },
+                ProgressEventKind::ActionFailed {
+                    receipt,
+                    error_code,
+                    detail,
+                } if receipt.action_id == action_id => {
+                    panic!("test Filesystem restart failed ({error_code}): {detail}");
+                },
+                _ => {},
+            }
+        }
+    });
+}
+
+async fn apply_and_wait(
+    client: &mut ControlClient,
+    base_revision: omnifs_core::ResourceRevision,
+    declarations: ResourceDeclarations,
+) {
+    let desired = declarations
+        .clone()
+        .normalize()
+        .expect("normalize test resources");
+    let response = client
+        .apply_resources(grpc::to_apply_resources_request(&ApplyResourcesRequest {
+            mutation_id: next_mutation_id(),
+            base_revision,
+            expected_desired_digest: desired.digest(),
+            declarations,
+            credential_material: Vec::new(),
+        }))
+        .await
+        .expect("apply test Filesystem resources")
+        .into_inner();
+    let receipt = grpc::apply_resources_response(&response).expect("decode apply receipt");
+    let mut stream = client
+        .watch_progress(grpc::to_progress_target(ProgressTarget::DesiredRevision(
+            receipt.revision,
+        )))
+        .await
+        .expect("watch test Filesystem revision")
+        .into_inner();
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(3);
+    loop {
+        let message = tokio::time::timeout_at(deadline, stream.message())
+            .await
+            .expect("test Filesystem revision reaches a terminal state")
+            .expect("read test Filesystem progress")
+            .expect("test Filesystem progress stream remains open");
+        match grpc::progress_event(&message)
+            .expect("decode test Filesystem progress")
+            .event
+        {
+            ProgressEventKind::Snapshot(snapshot) | ProgressEventKind::Resync(snapshot)
+                if snapshot.observed_revision == Some(receipt.revision) =>
+            {
+                return;
+            },
+            ProgressEventKind::RevisionReady(revision) if revision == receipt.revision => return,
+            ProgressEventKind::RevisionFailed { detail, .. } => {
+                panic!("test Filesystem revision failed: {detail}")
+            },
+            ProgressEventKind::RevisionSuperseded { replaced_by, .. } => {
+                panic!("test Filesystem revision was superseded by {replaced_by}")
+            },
+            _ => {},
+        }
+    }
 }
 
 pub fn control_status(socket: &Path) -> DaemonStatus {
@@ -918,52 +1101,71 @@ fn import_provider(socket: &Path, bytes: Vec<u8>) -> ProviderImportReceipt {
     })
 }
 
-/// Create one mount through a fresh single-op `BeginMutation`/`ApplyMutation`
-/// batch, the same lease-scoped path the CLI's mutation runner uses.
-fn create_mount(socket: &Path, definition: &MountDefinition) -> MountOpResult {
+fn apply_test_namespace(socket: &Path, provider: ProviderId) {
     block_on(async {
         let mut client = connect(socket.to_path_buf())
             .await
             .expect("connect to daemon control socket");
-        let mutation_id: Bytes = next_mutation_id().into();
-
-        let mut begin_request = Request::new(wire::BeginMutationRequest {
-            mutation_id: mutation_id.clone(),
-        });
-        begin_request.set_timeout(MUTATION_TIMEOUT);
-        client
-            .begin_mutation(begin_request)
+        let provider_name = ResourceName::new("test-provider").expect("valid provider name");
+        let declarations = ResourceDeclarations {
+            api_version: omnifs_api::API_VERSION.to_owned(),
+            resources: vec![
+                ResourceDefinition::Provider(ProviderDefinition {
+                    name: provider_name.clone(),
+                    artifact: provider,
+                }),
+                ResourceDefinition::Mount(MountResourceDefinition {
+                    name: ResourceName::new("test").expect("valid mount name"),
+                    provider: provider_name.clone(),
+                    credential: None,
+                    config: serde_json::json!({}),
+                    limits: None,
+                }),
+                ResourceDefinition::Mount(MountResourceDefinition {
+                    name: ResourceName::new("test2").expect("valid mount name"),
+                    provider: provider_name,
+                    credential: None,
+                    config: serde_json::json!({}),
+                    limits: None,
+                }),
+            ],
+        };
+        let desired = declarations
+            .clone()
+            .normalize()
+            .expect("normalize test namespace resources");
+        let snapshot = client
+            .get_resources(Request::new(wire::Empty {}))
             .await
-            .expect("begin test mutation");
-
-        let mut apply_request = Request::new(wire::ApplyMutationRequest {
-            mutation_id,
-            ops: vec![wire::MutationOp {
-                op: Some(wire::mutation_op::Op::CreateMount(wire::CreateMountOp {
-                    definition: Some(grpc::to_mount_definition(definition)),
-                })),
-            }],
+            .expect("get resource snapshot")
+            .into_inner()
+            .snapshot
+            .as_ref()
+            .map(grpc::resource_snapshot)
+            .transpose()
+            .expect("decode resource snapshot")
+            .expect("resource snapshot missing");
+        let request = grpc::to_apply_resources_request(&ApplyResourcesRequest {
+            mutation_id: next_mutation_id(),
+            base_revision: snapshot.revision,
+            expected_desired_digest: desired.digest(),
+            declarations,
+            credential_material: Vec::new(),
         });
-        apply_request.set_timeout(MUTATION_TIMEOUT);
         let response = client
-            .apply_mutation(apply_request)
+            .apply_resources(Request::new(request))
             .await
-            .expect("apply test mount creation")
+            .expect("apply test namespace resources")
             .into_inner();
-        let result = response
-            .results
-            .into_iter()
-            .next()
-            .expect("mutation batch reply missing its one op result");
-        match result.result.expect("mutation op result missing its op") {
-            wire::mutation_op_result::Result::Mount(mount) => {
-                grpc::mount_op_result(&mount).expect("decode mount op result")
-            },
-            wire::mutation_op_result::Result::Credential(_) => {
-                panic!("expected a mount op result from a mount-create batch")
-            },
-        }
-    })
+        let receipt = response
+            .receipt
+            .as_ref()
+            .map(grpc::apply_receipt)
+            .transpose()
+            .expect("decode apply receipt")
+            .expect("apply reply missing receipt");
+        assert_eq!(receipt.desired_digest, desired.digest());
+    });
 }
 
 /// Bring up `omnifs daemon` with an explicit local filesystem runner and only the
@@ -1055,42 +1257,16 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
     }
     seed_test_namespace(&control_socket);
 
-    let attach_socket = hermetic.home.path().join("daemon-state/local.sock");
     #[cfg(target_os = "linux")]
-    let mut filesystem_command = thin_host_runner_command(
-        "native",
-        "fuse",
-        &mount_point,
-        &hermetic.home.path().join("client/filesystems/state/native"),
-        Some(&attach_socket),
-    );
+    let protocol = "fuse";
     #[cfg(not(target_os = "linux"))]
-    let mut filesystem_command = thin_host_runner_command(
-        "native",
-        "nfs",
-        &mount_point,
-        &hermetic.home.path().join("client/filesystems/state/native"),
-        Some(&attach_socket),
-    );
-    let filesystem = filesystem_command
-        .env("OMNIFS_HOME", hermetic.home.path())
-        .env("RUST_LOG", "warn")
-        .spawn();
-    let filesystem = match filesystem {
-        Ok(filesystem) => filesystem,
-        Err(error) => {
-            let _ = daemon.kill();
-            let _ = daemon.wait();
-            eprintln!("skip: spawn local filesystem runner failed: {error}");
-            return None;
-        },
-    };
+    let protocol = "nfs";
+    ensure_host_filesystem(hermetic.home.path(), "native", protocol, &mount_point);
 
     let mut daemon = NativeDaemon {
         daemon,
-        filesystem,
         mount_point: mount_point.clone(),
-        _home: hermetic.home,
+        home: hermetic.home,
         _nfs_lock: nfs_lock,
     };
 
@@ -1101,9 +1277,9 @@ fn native_daemon(nfs_lock: Option<TcpListener>) -> Option<NativeDaemon> {
         if message.is_file() {
             return Some(daemon);
         }
-        match daemon.filesystem.try_wait() {
+        match daemon.daemon.try_wait() {
             Ok(Some(status)) => {
-                eprintln!("skip: filesystem runner exited ({status}) before the mount was active");
+                eprintln!("skip: daemon exited ({status}) before the mount was active");
                 return None;
             },
             Ok(None) => {},
