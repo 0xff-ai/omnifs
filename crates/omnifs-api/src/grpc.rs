@@ -31,9 +31,9 @@ use crate::{
     SetCredentialMaterialRequest,
 };
 use omnifs_core::{
-    ActionId, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, FilesystemSpec,
-    FilesystemVersion, MountVersion, MutationId, ProviderId, ResourceDigest, ResourceKey,
-    ResourceKind, ResourceName, ResourceRevision,
+    ActionId, AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, FilesystemProtocol,
+    FilesystemRuntime, FilesystemSpec, FilesystemVersion, MountVersion, MutationId, ProviderId,
+    ResourceDigest, ResourceKey, ResourceKind, ResourceName, ResourceRevision,
 };
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -185,6 +185,45 @@ fn to_daemon_health(v: &DaemonHealth) -> wire::DaemonHealth {
     }
 }
 
+pub fn filesystem_pair(
+    v: &wire::FsPair,
+) -> Result<(FilesystemProtocol, FilesystemRuntime), FromGrpcError> {
+    let protocol = match wire::FsProtocol::try_from(v.protocol)
+        .map_err(|_| FromGrpcError::Invalid("filesystem protocol"))?
+    {
+        wire::FsProtocol::FsFuse => FilesystemProtocol::Fuse,
+        wire::FsProtocol::FsNfs => FilesystemProtocol::Nfs,
+        wire::FsProtocol::Unspecified => {
+            return Err(FromGrpcError::Unspecified("filesystem protocol"));
+        },
+    };
+    let runtime = match wire::FsRuntime::try_from(v.runtime)
+        .map_err(|_| FromGrpcError::Invalid("filesystem runtime"))?
+    {
+        wire::FsRuntime::FsHost => FilesystemRuntime::Host,
+        wire::FsRuntime::FsDocker => FilesystemRuntime::Docker,
+        wire::FsRuntime::FsLibkrun => FilesystemRuntime::Libkrun,
+        wire::FsRuntime::Unspecified => {
+            return Err(FromGrpcError::Unspecified("filesystem runtime"));
+        },
+    };
+    Ok((protocol, runtime))
+}
+
+pub fn to_filesystem_pair(v: &(FilesystemProtocol, FilesystemRuntime)) -> wire::FsPair {
+    wire::FsPair {
+        protocol: match v.0 {
+            FilesystemProtocol::Fuse => wire::FsProtocol::FsFuse as i32,
+            FilesystemProtocol::Nfs => wire::FsProtocol::FsNfs as i32,
+        },
+        runtime: match v.1 {
+            FilesystemRuntime::Host => wire::FsRuntime::FsHost as i32,
+            FilesystemRuntime::Docker => wire::FsRuntime::FsDocker as i32,
+            FilesystemRuntime::Libkrun => wire::FsRuntime::FsLibkrun as i32,
+        },
+    }
+}
+
 pub fn daemon_info(v: &wire::DaemonInfo) -> Result<DaemonInfo, FromGrpcError> {
     Ok(DaemonInfo {
         version: v.version.clone(),
@@ -201,6 +240,16 @@ pub fn daemon_info(v: &wire::DaemonInfo) -> Result<DaemonInfo, FromGrpcError> {
             .as_deref()
             .map(|x| x.parse().map_err(|_| FromGrpcError::Invalid("attach tcp")))
             .transpose()?,
+        supported_filesystem_pairs: v
+            .supported_filesystem_pairs
+            .iter()
+            .map(filesystem_pair)
+            .collect::<Result<_, _>>()?,
+        platform_default_filesystem_pair: v
+            .platform_default_filesystem_pair
+            .as_ref()
+            .map(filesystem_pair)
+            .transpose()?,
     })
 }
 pub fn to_daemon_info(v: &DaemonInfo) -> wire::DaemonInfo {
@@ -211,6 +260,15 @@ pub fn to_daemon_info(v: &DaemonInfo) -> wire::DaemonInfo {
         executable: path_bytes(&v.executable).into(),
         attach_unix: v.attach_unix.as_ref().map(|x| path_bytes(x).into()),
         attach_tcp: v.attach_tcp.map(|x| x.to_string()),
+        supported_filesystem_pairs: v
+            .supported_filesystem_pairs
+            .iter()
+            .map(to_filesystem_pair)
+            .collect(),
+        platform_default_filesystem_pair: v
+            .platform_default_filesystem_pair
+            .as_ref()
+            .map(to_filesystem_pair),
     }
 }
 fn recovery_offer(v: &wire::RecoveryOffer) -> Result<RecoveryOffer, FromGrpcError> {
@@ -2807,6 +2865,54 @@ mod tests {
         assert_eq!(
             doctor_repair_outcome(&outcome),
             Err(FromGrpcError::Unspecified("doctor repair state"))
+        );
+    }
+
+    #[test]
+    fn daemon_info_round_trip_filesystem_pairs_and_rejects_malformed_pairs() {
+        let info = DaemonInfo {
+            version: "0.1.0".into(),
+            pid: 7,
+            instance_id: "0123456789abcdef".into(),
+            executable: PathBuf::from("/usr/local/bin/omnifs"),
+            attach_unix: None,
+            attach_tcp: None,
+            supported_filesystem_pairs: vec![
+                (FilesystemProtocol::Fuse, FilesystemRuntime::Host),
+                (FilesystemProtocol::Fuse, FilesystemRuntime::Docker),
+                (FilesystemProtocol::Fuse, FilesystemRuntime::Libkrun),
+                (FilesystemProtocol::Nfs, FilesystemRuntime::Host),
+            ],
+            platform_default_filesystem_pair: Some((
+                FilesystemProtocol::Fuse,
+                FilesystemRuntime::Docker,
+            )),
+        };
+        assert_eq!(daemon_info(&to_daemon_info(&info)).unwrap(), info);
+
+        let mut malformed = wire::FsPair {
+            protocol: wire::FsProtocol::Unspecified as i32,
+            runtime: wire::FsRuntime::FsHost as i32,
+        };
+        assert_eq!(
+            filesystem_pair(&malformed),
+            Err(FromGrpcError::Unspecified("filesystem protocol"))
+        );
+        malformed.protocol = 99;
+        assert_eq!(
+            filesystem_pair(&malformed),
+            Err(FromGrpcError::Invalid("filesystem protocol"))
+        );
+        malformed.protocol = wire::FsProtocol::FsFuse as i32;
+        malformed.runtime = wire::FsRuntime::Unspecified as i32;
+        assert_eq!(
+            filesystem_pair(&malformed),
+            Err(FromGrpcError::Unspecified("filesystem runtime"))
+        );
+        malformed.runtime = 99;
+        assert_eq!(
+            filesystem_pair(&malformed),
+            Err(FromGrpcError::Invalid("filesystem runtime"))
         );
     }
 

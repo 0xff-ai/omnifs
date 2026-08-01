@@ -411,6 +411,8 @@ message DaemonInfo {
   bytes executable = 4;
   optional bytes attach_unix = 5;
   optional string attach_tcp = 6;
+  repeated FsPair supported_filesystem_pairs = 7;
+  optional FsPair platform_default_filesystem_pair = 8;
 }
 message DaemonStatus { string version = 1; uint32 pid = 2; string instance_id = 3; bytes executable = 4; optional string attach_tcp = 5; repeated FilesystemResource filesystems = 6; repeated MountInfo mounts = 7; DaemonHealth health = 8; }
 message DaemonInventory { DaemonInfo info = 1; DaemonPhase phase = 2; optional uint64 durable_revision = 3; optional uint64 serving_revision = 4; DaemonHealth health = 5; repeated MountRecord mounts = 6; repeated CredentialStatus credentials = 7; repeated FilesystemResource filesystems = 8; }
@@ -470,6 +472,7 @@ enum DoctorRepairState {
 }
 enum FsProtocol { FS_PROTOCOL_UNSPECIFIED = 0; FS_FUSE = 1; FS_NFS = 2; }
 enum FsRuntime { FS_RUNTIME_UNSPECIFIED = 0; FS_HOST = 1; FS_DOCKER = 2; FS_LIBKRUN = 3; }
+message FsPair { FsProtocol protocol = 1; FsRuntime runtime = 2; }
 enum ResourceKind { RESOURCE_KIND_UNSPECIFIED = 0; RESOURCE_PROVIDER = 1; RESOURCE_CREDENTIAL = 2; RESOURCE_MOUNT = 3; RESOURCE_FILESYSTEM = 4; }
 enum ResourcePhase { RESOURCE_PHASE_UNSPECIFIED = 0; RESOURCE_PENDING = 1; RESOURCE_PREPARING = 2; RESOURCE_READY = 3; RESOURCE_RETRYING = 4; RESOURCE_FAILED = 5; RESOURCE_BLOCKED = 6; RESOURCE_DELETING = 7; }
 enum ResourceChangeAction { RESOURCE_CHANGE_ACTION_UNSPECIFIED = 0; RESOURCE_CREATE = 1; RESOURCE_UPDATE = 2; RESOURCE_DELETE = 3; RESOURCE_UNCHANGED = 4; }

@@ -1,6 +1,6 @@
 //! Shared control-plane domain and wire types for the `omnifs` CLI and daemon.
 
-use omnifs_core::ResourceRevision;
+use omnifs_core::{FilesystemProtocol, FilesystemRuntime, ResourceRevision};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -89,6 +89,8 @@ pub struct DaemonInfo {
     pub executable: PathBuf,
     pub attach_unix: Option<PathBuf>,
     pub attach_tcp: Option<SocketAddr>,
+    pub supported_filesystem_pairs: Vec<(FilesystemProtocol, FilesystemRuntime)>,
+    pub platform_default_filesystem_pair: Option<(FilesystemProtocol, FilesystemRuntime)>,
 }
 
 /// Opaque identity of one daemon recovery offer.
@@ -325,7 +327,7 @@ mod tests {
         CredentialHealth, DaemonInfo, DaemonPhase, DaemonRecovery, HealthReport, HealthState,
         RecoveryId, RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt,
     };
-    use omnifs_core::ResourceRevision;
+    use omnifs_core::{FilesystemProtocol, FilesystemRuntime, ResourceRevision};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
 
@@ -349,6 +351,14 @@ mod tests {
             executable: PathBuf::from("/usr/local/bin/omnifs"),
             attach_unix: Some(PathBuf::from("/tmp/omnifs-local.sock")),
             attach_tcp: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000)),
+            supported_filesystem_pairs: vec![
+                (FilesystemProtocol::Fuse, FilesystemRuntime::Host),
+                (FilesystemProtocol::Nfs, FilesystemRuntime::Host),
+            ],
+            platform_default_filesystem_pair: Some((
+                FilesystemProtocol::Fuse,
+                FilesystemRuntime::Host,
+            )),
         };
         let info_json = serde_json::to_value(&info).unwrap();
         assert!(info_json.get("config_dir").is_none());
