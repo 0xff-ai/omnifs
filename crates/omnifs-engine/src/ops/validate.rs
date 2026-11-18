@@ -125,7 +125,7 @@ where
                     self.entry(&sibling.kind)?;
                 }
             },
-            wit_types::LookupChildResult::Subtree(tree) => self.subtree_tree(*tree)?,
+            wit_types::LookupChildResult::Subtree(subtree) => self.subtree(subtree)?,
             wit_types::LookupChildResult::NotFound(_) => {},
             wit_types::LookupChildResult::Feed(claims) => self.claims(claims)?,
         }
@@ -151,7 +151,7 @@ where
                         .map_err(|error| format!("page validator: {error}"))?;
                 }
             },
-            wit_types::ListChildrenResult::Subtree(tree) => self.subtree_tree(*tree)?,
+            wit_types::ListChildrenResult::Subtree(subtree) => self.subtree(subtree)?,
             wit_types::ListChildrenResult::Unchanged(_) if !validated => {
                 return Err(
                     "list-children answered unchanged to a call without a validator".into(),
@@ -293,11 +293,16 @@ where
         Ok(())
     }
 
-    fn subtree_tree(&self, tree: u64) -> std::result::Result<(), String> {
-        if !(self.tree_exists)(tree) {
-            return Err(format!("subtree result references unknown tree {tree}"));
+    /// A subtree names a tree the host opened and a commit.
+    fn subtree(&self, subtree: &wit_types::Subtree) -> std::result::Result<(), String> {
+        if !(self.tree_exists)(subtree.tree) {
+            return Err(format!(
+                "subtree result references unknown tree {}",
+                subtree.tree
+            ));
         }
-        Ok(())
+        crate::cloner::GitCloner::validate_commit(&subtree.commit)
+            .map_err(|error| format!("subtree commit: {error}"))
     }
 
     fn track_unique_path_id(
@@ -751,11 +756,20 @@ mod tests {
     }
 
     #[test]
-    fn subtree_result_requires_known_tree() {
-        let result = Ok(wit_types::LookupChildResult::Subtree(7));
+    fn subtree_result_requires_known_tree_and_a_commit() {
+        let subtree = |commit: &str| {
+            Ok(wit_types::LookupChildResult::Subtree(wit_types::Subtree {
+                tree: 7,
+                commit: commit.to_string(),
+            }))
+        };
+        let result = subtree("0123456789abcdef0123456789abcdef01234567");
         let error = validate_lookup(&result, &effects(), |_| false).unwrap_err();
         assert!(error.contains("references unknown tree 7"));
         validate_lookup(&result, &effects(), |_| true).unwrap();
+
+        let error = validate_lookup(&subtree("--upload-pack=x"), &effects(), |_| true).unwrap_err();
+        assert!(error.contains("subtree commit"));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use crate::browse::List;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::handler::{Cursor, DirIntent};
+use crate::handler::{Cursor, DirIntent, Tree};
 use omnifs_core::path::Path;
 
 use super::super::compiled::CompiledRouter;
@@ -31,7 +31,8 @@ impl<S> CompiledRouter<S> {
     ///
     /// The validator of the cached page of `cursor` ([`Cx::version`]) reaches
     /// a dir route and the collection of an object anchor, the owners of the
-    /// page, and never the anchor object's own load.
+    /// page, and never the anchor object's own load; the commit of a tree
+    /// reaches its tree method.
     pub async fn list_children(
         &self,
         cx: &Cx<S>,
@@ -61,8 +62,11 @@ impl<S> CompiledRouter<S> {
             .await
             .map_err(|error| error.with_context("list-children", &abs))?;
             return match answer {
-                super::super::handlers::DirAnswer::Tree(tree_ref) => {
-                    Ok(List::subtree(tree_ref.tree_ref))
+                super::super::handlers::DirAnswer::Tree(Tree::At { tree, commit }) => {
+                    Ok(List::subtree(tree.tree_ref, commit))
+                },
+                super::super::handlers::DirAnswer::Tree(Tree::Unchanged) => {
+                    Ok(List::unchanged(None, crate::browse::Effects::new()))
                 },
                 super::super::handlers::DirAnswer::Listing(listing) => {
                     shape.dir_projection_into_list(&abs, &listing.into_dir_projection())

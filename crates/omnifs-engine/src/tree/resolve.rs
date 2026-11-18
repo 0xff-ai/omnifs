@@ -2,6 +2,8 @@
 
 use crate::cache::MountResources;
 use crate::effect_apply::LookupOutcome;
+use crate::ops::namespace::PageRequest;
+use crate::tree_refs::TreeRef;
 use crate::view::{DirentsPayload, EntryMeta};
 use omnifs_api::events::CacheKind;
 use omnifs_core::path::Path;
@@ -22,8 +24,6 @@ impl EngineNamespace {
     pub(crate) async fn resolve(&self, path: &Path, _ctx: &RequestCtx) -> Result<Node> {
         let (mount, rel) = self.split_mount_path(path)?;
 
-        // A provider may hand the mount root itself to a durable Git subtree.
-        // Resolve it only through the coherent exact positive lookup fact.
         if rel.is_root() {
             if mount.is_empty() {
                 return Ok(Node::new(
@@ -33,7 +33,7 @@ impl EngineNamespace {
                     NodeBody::Provider,
                 ));
             }
-            return self.mount_root_node(mount);
+            return self.mount_root_node(mount).await;
         }
 
         let entry = self.entry_for(&mount)?;
@@ -84,7 +84,7 @@ impl EngineNamespace {
         if Self::is_mount_enumeration_root(parent.mount(), parent.path())
             && self.mount_names().iter().any(|mount| mount == name)
         {
-            return self.mount_root_node(name.to_string());
+            return self.mount_root_node(name.to_string()).await;
         }
         let entry = self.entry_for(parent.mount())?;
         self.resolve_child_in(parent.mount().to_string(), entry, parent.path(), name)
@@ -109,7 +109,7 @@ impl EngineNamespace {
         if Self::is_mount_enumeration_root(&mount, parent)
             && self.mount_names().iter().any(|m| m == name)
         {
-            return self.mount_root_node(name.to_string());
+            return self.mount_root_node(name.to_string()).await;
         }
 
         // Root ignore files are host-owned. Resolve them before cached dirents
@@ -141,8 +141,22 @@ impl EngineNamespace {
             && resources
                 .is_fed(&rel)
                 .map_err(|error| TreeError::internal(error.to_string()))?;
-        if !fed && let Some(node) = cached_child_node(entry, &mount, parent, name, &rel)? {
-            return Ok(node);
+        if !fed {
+            if let Some(tree_ref) = self.current_tree(entry, &rel).await? {
+                return Ok(Node::new(
+                    mount,
+                    rel,
+                    EntryMeta::directory(),
+                    NodeBody::Host {
+                        tree_ref,
+                        relative: std::path::PathBuf::new(),
+                        kind: super::node::HostKind::Directory,
+                    },
+                ));
+            }
+            if let Some(node) = cached_child_node(entry, &mount, parent, name, &rel)? {
+                return Ok(node);
+            }
         }
 
         crate::inspector::cache_event(CacheKind::BrowseMiss);
@@ -188,47 +202,23 @@ impl EngineNamespace {
         }
     }
 
-    fn mount_root_node(&self, mount: String) -> Result<Node> {
+    async fn mount_root_node(&self, mount: String) -> Result<Node> {
         let rel = Path::root();
         let entry = self
             .configured_entry(&mount)
             .ok_or_else(|| TreeError::not_found(format!("no such mount: {mount}")))?;
-        let resources = entry.resources();
-        let offline = entry.runtime().is_none();
-        let expired = !offline
-            && resources
-                .view_expired(&rel, crate::clock::now_millis())
-                .map_err(|error| TreeError::internal(error.to_string()))?;
-        if offline || !expired {
-            let positive_directory = resources
-                .lookup_payload(&rel)
-                .map_err(|error| TreeError::internal(error.to_string()))?
-                .is_some_and(|lookup| {
-                    matches!(
-                        lookup,
-                        crate::view::LookupPayload::Positive(meta) if meta.is_directory()
-                    )
-                });
-            // Git facts persist across a restart while open trees live only in
-            // memory, so a fact without an open tree falls through to the
-            // provider, which opens the repository again.
-            if positive_directory
-                && let Some(git) = resources
-                    .git_for_path(&rel)
-                    .map_err(|error| TreeError::internal(error.to_string()))?
-                && let Some(tree_ref) = entry.trees().by_identity(&git.id, &git.relative_path)
-            {
-                return Ok(Node::new(
-                    mount,
-                    rel,
-                    EntryMeta::directory(),
-                    NodeBody::Host {
-                        tree_ref,
-                        relative: std::path::PathBuf::new(),
-                        kind: super::node::HostKind::Directory,
-                    },
-                ));
-            }
+        // A provider may hand the mount root itself to a Git tree.
+        if let Some(tree_ref) = self.current_tree(entry, &rel).await? {
+            return Ok(Node::new(
+                mount,
+                rel,
+                EntryMeta::directory(),
+                NodeBody::Host {
+                    tree_ref,
+                    relative: std::path::PathBuf::new(),
+                    kind: super::node::HostKind::Directory,
+                },
+            ));
         }
 
         // Ordinary mount roots remain provider-shaped while their durable
@@ -239,6 +229,57 @@ impl EngineNamespace {
             EntryMeta::directory(),
             NodeBody::Provider,
         ))
+    }
+
+    /// The open tree of the Git fact of the tree path `rel`, at the commit of
+    /// the fact. Online, past the deadline of the tree path and outside the
+    /// rate-limit window of the mount, `list-children` of the tree path with
+    /// the commit as its validator comes first, in the one flight of the
+    /// path: `unchanged` renews the deadline, and a subtree with a new commit
+    /// updates the Git fact and renews it. `None` without a Git fact of `rel`
+    /// or without its tree open.
+    pub(crate) async fn current_tree(
+        &self,
+        entry: &crate::registry::MountEntry,
+        rel: &Path,
+    ) -> Result<Option<TreeRef>> {
+        let resources = entry.resources();
+        let captured_epoch = resources.current_epoch();
+        let Some(git) = resources
+            .git_for_path(rel)
+            .map_err(|error| TreeError::internal(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let Some(tree_ref) = entry.trees().by_identity(&git.id, &git.relative_path) else {
+            return Ok(None);
+        };
+        let Some(runtime) = entry.runtime() else {
+            return Ok(Some(tree_ref));
+        };
+        if runtime.rate_limited_until().is_some()
+            || !resources
+                .view_expired(rel, crate::clock::now_millis())
+                .map_err(|error| TreeError::internal(error.to_string()))?
+        {
+            return Ok(Some(tree_ref));
+        }
+        crate::inspector::cache_event(CacheKind::BrowseMiss);
+        let request = PageRequest {
+            cursor: None,
+            validator: Some(git.commit),
+        };
+        match runtime.list_children(rel, request, captured_epoch).await? {
+            crate::ops::namespace::ListOutcome::Unchanged => Ok(Some(tree_ref)),
+            crate::ops::namespace::ListOutcome::Subtree(tree) => runtime
+                .tree_ref(tree)
+                .map(Some)
+                .ok_or_else(|| TreeError::internal(format!("unresolved tree_ref {tree}"))),
+            crate::ops::namespace::ListOutcome::Entries(_)
+            | crate::ops::namespace::ListOutcome::Feed(_) => {
+                Err(TreeError::internal("the tree path answered no tree"))
+            },
+        }
     }
 }
 
@@ -258,16 +299,17 @@ fn cached_child_node(
         && resources
             .view_expired(rel, crate::clock::now_millis())
             .map_err(|error| TreeError::internal(error.to_string()))?;
-    if let Some(node) = cached_lookup_node(resources, entry.trees(), mount, rel, offline, expired)?
-    {
+    if let Some(node) = cached_lookup_node(resources, mount, rel, offline, expired)? {
         return Ok(Some(node));
     }
 
+    // Online, a directory the parent's listing names resolves through its own
+    // lookup, which alone tells a provider directory from a Git tree handoff.
     let cached_parent = cached_dirents(resources, parent)?;
     if let Some(meta) = cached_parent.as_ref().and_then(|dirents| {
         dirents
             .entries()
-            .find(|entry| entry.name == name)
+            .find(|entry| entry.name == name && (offline || entry.meta.is_file()))
             .map(|entry| entry.meta.clone())
     }) {
         crate::inspector::cache_event(CacheKind::BrowseHit);
@@ -309,7 +351,6 @@ fn fed_lookup_node(resources: &MountResources, mount: String, rel: Path) -> Resu
 
 fn cached_lookup_node(
     resources: &MountResources,
-    trees: &crate::tree_refs::TreeRefs,
     mount: &str,
     rel: &Path,
     offline: bool,
@@ -324,26 +365,16 @@ fn cached_lookup_node(
 
     match payload {
         crate::view::LookupPayload::Positive(meta) if offline || !expired => {
-            if let Some(git) = resources
+            // An open tree serves before the cache. Git facts persist across
+            // a restart while open trees live only in memory: without an open
+            // tree, the lookup is a miss, and the provider opens the
+            // repository again.
+            if resources
                 .git_for_path(rel)
                 .map_err(|error| TreeError::internal(error.to_string()))?
+                .is_some()
             {
-                // Git facts persist across a restart while open trees live only
-                // in memory: without an open tree, the lookup is a miss, and the
-                // provider opens the repository again.
-                let Some(tree_ref) = trees.by_identity(&git.id, &git.relative_path) else {
-                    return Ok(None);
-                };
-                return Ok(Some(Node::new(
-                    mount.to_string(),
-                    rel.clone(),
-                    EntryMeta::directory(),
-                    NodeBody::Host {
-                        tree_ref,
-                        relative: std::path::PathBuf::new(),
-                        kind: super::node::HostKind::Directory,
-                    },
-                )));
+                return Ok(None);
             }
             crate::inspector::cache_event(CacheKind::BrowseHit);
             Ok(Some(Node::new(
@@ -375,7 +406,6 @@ mod tests {
     use crate::cache::{
         Caches, FactPayload, GitWrite, ProjectionId, ProjectionTransition, RecordWrite,
     };
-    use crate::tree_refs::TreeRefs;
     use crate::view::LookupPayload;
     use omnifs_core::{MountName, ProviderId};
 
@@ -406,6 +436,7 @@ mod tests {
                         path: path.clone(),
                         id: GitId::new("m", "https://example.test/repo.git", None),
                         relative_path: String::new(),
+                        commit: "0123456789abcdef0123456789abcdef01234567".into(),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -413,7 +444,7 @@ mod tests {
             )
             .unwrap();
 
-        let node = cached_lookup_node(&resources, &TreeRefs::new(), "m", &path, false, false)
+        let node = cached_lookup_node(&resources, "m", &path, false, false)
             .expect("a Git fact without an open tree is no internal error");
         assert!(node.is_none());
     }

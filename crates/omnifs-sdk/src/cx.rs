@@ -43,8 +43,9 @@ impl<S> Clone for Cx<S> {
 struct CxShared {
     id: u64,
     /// The validator the host sent with a `list-children` call: the token of
-    /// the cached page of its cursor. Set by host glue via
-    /// [`Cx::with_version`]; read by handlers through [`Cx::version`].
+    /// the cached page of its cursor, or the commit of a tree. Set by host
+    /// glue via [`Cx::with_version`]; read by handlers through
+    /// [`Cx::version`].
     version: Option<crate::file_attrs::VersionToken>,
 }
 
@@ -88,7 +89,9 @@ impl<S> Cx<S> {
     /// once that page is past its deadline. A dir handler maps it to
     /// `If-None-Match` through
     /// [`crate::endpoint::RequestBuilder::maybe_if_none_match`] and answers
-    /// [`crate::projection::DirListing::unchanged`] while it still matches.
+    /// [`crate::projection::DirListing::unchanged`] while it still matches. For
+    /// a tree it is the commit of the tree, and a tree method answers
+    /// [`crate::handler::Tree::unchanged`] while that commit stands.
     pub fn version(&self) -> Option<&crate::file_attrs::VersionToken> {
         self.shared.version.as_ref()
     }

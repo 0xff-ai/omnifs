@@ -101,6 +101,18 @@
     ]
   },
   {
+    "template": "/repos/{repo}/tree",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": [
+      {
+        "name": "repo",
+        "type_name": "String",
+        "choices": null
+      }
+    ]
+  },
+  {
     "template": "/scoped",
     "kind": "Dir",
     "object_kind": null,
@@ -321,6 +333,18 @@
       {
         "name": "book",
         "type_name": "u64",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "template": "/repos/{repo}",
+    "kind": "Object",
+    "object_kind": "test.repo",
+    "captures": [
+      {
+        "name": "repo",
+        "type_name": "String",
         "choices": null
       }
     ]

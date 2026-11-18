@@ -206,9 +206,10 @@ struct NodeRecord {
     host: Option<HostRecord>,
 }
 
+/// A node of a tree: its path under the root of the tree and its kind. The
+/// tree is the current tree of its tree path.
 #[derive(Clone)]
 struct HostRecord {
-    tree_ref: TreeRef,
     relative: PathBuf,
     kind: HostKind,
 }
@@ -479,8 +480,7 @@ impl EngineNamespace {
             self.ids.get(&id).and_then(|r| r.attrs.clone()).as_ref(),
             node.attrs().cloned(),
         );
-        let incoming_host = node.host().map(|(tree_ref, relative, kind)| HostRecord {
-            tree_ref: tree_ref.clone(),
+        let incoming_host = node.host().map(|(_, relative, kind)| HostRecord {
             relative: relative.clone(),
             kind,
         });
@@ -513,19 +513,14 @@ impl EngineNamespace {
         let mut chain = Vec::new();
         let mut current = full_path.clone();
         let anchor = loop {
-            if let Some(record) = self.ids.get(&current)
-                && let Some(host) = &record.host
+            let host = self
+                .ids
+                .get(&current)
+                .and_then(|record| record.host.clone());
+            if let Some(host) = host
+                && let Some(node) = self.host_anchor(&current, host).await?
             {
-                break crate::Node::new(
-                    current.segments().next().unwrap_or_default().to_string(),
-                    host_node_path(&current),
-                    EntryMeta::directory(),
-                    NodeBody::Host {
-                        tree_ref: host.tree_ref.clone(),
-                        relative: host.relative.clone(),
-                        kind: host.kind,
-                    },
-                );
+                break node;
             }
             let Some((parent, name)) = current.parent_and_name() else {
                 break self
@@ -542,6 +537,41 @@ impl EngineNamespace {
             node = self.resolve_child(&node, &name, &RequestCtx).await?;
         }
         Ok(node)
+    }
+
+    /// The node of the host record at `full_path` in the current tree of its
+    /// tree path, the ancestor its relative path starts from; `None` once
+    /// that path has no open tree.
+    async fn host_anchor(
+        &self,
+        full_path: &Path,
+        host: HostRecord,
+    ) -> Result<Option<crate::Node>, NsError> {
+        let mount = full_path
+            .segments()
+            .next()
+            .expect("host paths have a mount segment");
+        let path = host_node_path(full_path);
+        let tree = host
+            .relative
+            .components()
+            .try_fold(path.clone(), |path, _| path.parent())
+            .ok_or_else(|| NsError::Internal {
+                message: format!("host record of {full_path} is deeper than its path"),
+            })?;
+        let tree_ref = self.current_tree(self.entry_for(mount)?, &tree).await?;
+        Ok(tree_ref.map(|tree_ref| {
+            crate::Node::new(
+                mount.to_string(),
+                path,
+                EntryMeta::directory(),
+                NodeBody::Host {
+                    tree_ref,
+                    relative: host.relative,
+                    kind: host.kind,
+                },
+            )
+        }))
     }
 
     // --- invalidation -------------------------------------------------------
@@ -938,7 +968,7 @@ impl EngineNamespace {
                     .into_iter()
                     .filter_map(|(name, child_relative, metadata)| {
                         let full = full_path.join(&name).ok()?;
-                        let child = self.intern_host(&full, child_relative, tree_ref, &metadata);
+                        let child = self.intern_host(&full, child_relative, &metadata);
                         Some(DirEntry {
                             name,
                             path: child,
@@ -1225,16 +1255,9 @@ impl EngineNamespace {
         hasher.finish()
     }
 
-    fn intern_host(
-        &self,
-        full_path: &Path,
-        relative: PathBuf,
-        tree_ref: &TreeRef,
-        metadata: &HostMetadata,
-    ) -> Path {
+    fn intern_host(&self, full_path: &Path, relative: PathBuf, metadata: &HostMetadata) -> Path {
         let id = full_path.clone();
         let host = Some(HostRecord {
-            tree_ref: tree_ref.clone(),
             relative,
             kind: host_kind(&metadata.kind),
         });
@@ -1335,7 +1358,10 @@ impl HostMetadata {
             accessed: self.accessed,
             modified: self.modified,
             created: self.created,
-            ttl: TTL_STATIC,
+            // A node of a tree has the zero lifetime of dynamic entries, so
+            // each access reaches the namespace, which asks for the commit of
+            // the tree once its tree path is past its deadline.
+            ttl: TTL_DYNAMIC,
             change,
             direct_io: false,
             stability: Stability::Stable,
@@ -1560,7 +1586,9 @@ fn hash_attr_facts(hasher: &mut DefaultHasher, attrs: Option<&FileAttrsCache>, e
 
 #[cfg(test)]
 mod tests {
-    use super::{EngineNamespace, EntryKind, INSPECTOR_SYNTHETIC_ROOT, inspector_identity};
+    use super::{
+        DirCursor, EngineNamespace, EntryKind, INSPECTOR_SYNTHETIC_ROOT, inspector_identity,
+    };
     use crate::MountTable;
     use crate::namespace::Namespace;
     use omnifs_core::path::Path;
@@ -1632,6 +1660,20 @@ mod tests {
         run_git(path, &["commit", "-m", "fixture"]);
     }
 
+    /// The commit `HEAD` of the repository at `path` names.
+    fn head(path: &StdPath) -> String {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output()
+            .expect("run git rev-parse");
+        assert!(output.status.success(), "git rev-parse failed");
+        String::from_utf8(output.stdout)
+            .expect("a commit is UTF-8")
+            .trim_end()
+            .to_string()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     // Keep the complete host-projection fixture together so clone identity,
     // subtree routing, file modes, symlinks, and ranged reads share one setup.
@@ -1639,9 +1681,9 @@ mod tests {
     async fn git_clone_tree_ref_namespace_fixture_preserves_host_projection() {
         use crate::authority::RuntimeAuthority;
         use crate::cache::identity::GitId;
+        use crate::cache::{GitWrite, ProjectionTransition};
         use crate::git::GitExecutor;
         use crate::tree::MATERIALIZE_MAX_BYTES;
-        use crate::tree_refs::TreeRefs;
         use omnifs_wit::host::types::{CalloutResult, GitOpenRequest};
         use std::io::{Seek, SeekFrom, Write};
         #[cfg(unix)]
@@ -1656,8 +1698,9 @@ mod tests {
             Arc::new(crate::GitCloner::new(temp.path().join("clones")).expect("git cloner"));
         let git_id = GitId::new("test", remote, Some("main"));
         let source_url = source.to_string_lossy().into_owned();
+        let commit = head(&source);
         let clone_path = cloner
-            .clone_if_needed(&git_id, &source_url, remote, Some("main"), 1)
+            .open_at(&git_id, &source_url, remote, Some("main"), &commit, 1)
             .expect("warm local clone");
 
         #[cfg(unix)]
@@ -1684,7 +1727,9 @@ mod tests {
             .expect("large tail offset");
         large.write_all(b"tail!").expect("large tail");
 
-        let trees = Arc::new(TreeRefs::new());
+        let registry = fixture_registry(temp.path());
+        let entry = registry.entry("test").expect("test mount");
+        let trees = Arc::clone(entry.trees());
         let reopened_root = clone_path.clone();
         let reopened_src = clone_path.join("src");
         let root_ref = trees
@@ -1713,6 +1758,7 @@ mod tests {
             &GitOpenRequest {
                 clone_url: remote.to_string(),
                 reference: Some("main".to_string()),
+                commit: commit.clone(),
             },
             2,
         ) {
@@ -1721,16 +1767,34 @@ mod tests {
         };
         assert_eq!(info.repo, info.tree);
         let tree_ref = trees.resolve(info.tree).expect("registered tree ref");
-        let namespace = EngineNamespace::online(
-            fixture_registry(temp.path()),
-            tokio::runtime::Handle::current(),
-        );
+        let namespace =
+            EngineNamespace::online(Arc::clone(&registry), tokio::runtime::Handle::current());
+        // The Git fact of the tree path serves the nodes of its tree.
+        let published = entry
+            .resources()
+            .publish(
+                ProjectionTransition {
+                    git: vec![GitWrite {
+                        path: Path::parse("/checkout").expect("tree path"),
+                        id: git_id,
+                        relative_path: String::new(),
+                        commit,
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                entry.resources().current_epoch(),
+            )
+            .expect("publish the Git fact");
+        assert!(matches!(
+            published,
+            crate::cache::PublicationOutcome::Committed { .. }
+        ));
         let checkout = Path::parse("/test/checkout").expect("checkout path");
         let checkout_metadata = namespace
             .host_stat(&tree_ref, StdPath::new(""))
             .await
             .expect("checkout stat");
-        namespace.intern_host(&checkout, PathBuf::new(), &tree_ref, &checkout_metadata);
+        namespace.intern_host(&checkout, PathBuf::new(), &checkout_metadata);
 
         let checkout_attrs = namespace
             .getattr(checkout.clone())
@@ -1819,6 +1883,185 @@ mod tests {
             .expect("large tail read");
         assert_eq!(tail.bytes, b"tail!");
         assert!(tail.eof);
+    }
+
+    /// Run a namespace operation, answering the commit requests of the tree
+    /// route of the test provider in order with `commits`, `304` for `None`,
+    /// and the open of each answered commit with `executor`. Returns the
+    /// output and the `if-none-match` of each commit request; an operation
+    /// that makes other requests times out.
+    async fn answering_commits<T>(
+        runtime: &crate::Engine,
+        executor: &crate::git::GitExecutor,
+        operation: impl std::future::Future<Output = T>,
+        commits: &[Option<&str>],
+    ) -> (T, Vec<Option<String>>) {
+        use omnifs_wit::host::types::{Callout, CalloutResult, HttpResponse};
+
+        let next = || async {
+            loop {
+                match runtime.try_recv_test_callout() {
+                    Some(callout) => break callout,
+                    None => tokio::time::sleep(std::time::Duration::from_millis(2)).await,
+                }
+            }
+        };
+        let answer = async {
+            let mut validators = Vec::new();
+            for commit in commits {
+                let request = next().await;
+                let Callout::Fetch(fetch) = request.callout() else {
+                    panic!("expected the commit request, got {:?}", request.callout());
+                };
+                validators.push(
+                    fetch
+                        .headers
+                        .iter()
+                        .find(|header| header.name.eq_ignore_ascii_case("if-none-match"))
+                        .map(|header| header.value.clone()),
+                );
+                let Some(commit) = commit else {
+                    request.answer(CalloutResult::HttpResponse(HttpResponse {
+                        status: 304,
+                        headers: Vec::new(),
+                        body: Vec::new(),
+                    }));
+                    continue;
+                };
+                request.answer(CalloutResult::HttpResponse(HttpResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: commit.as_bytes().to_vec(),
+                }));
+                let open = next().await;
+                let Callout::GitOpenRepo(git) = open.callout() else {
+                    panic!("expected the open at {commit}, got {:?}", open.callout());
+                };
+                assert_eq!(git.commit, *commit);
+                let opened = executor.open_repo(git, open.op_id());
+                open.answer(opened);
+            }
+            validators
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(operation, answer)
+        })
+        .await
+        .expect("the operation makes exactly the answered requests")
+    }
+
+    /// A tree that the listing of its parent names resolves through its own
+    /// lookup. Past the deadline of its tree path it asks for its commit
+    /// again: `unchanged` keeps the checkout, and a new commit is fetched into
+    /// the clone, checked out, and read in the tree. The nodes of the tree
+    /// answer with the zero lifetime of dynamic entries.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tree_past_its_deadline_follows_the_commit_of_its_upstream() {
+        use crate::authority::RuntimeAuthority;
+        use crate::cache::identity::GitId;
+        use crate::git::GitExecutor;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("fixture tempdir");
+        let source = temp.path().join("source");
+        local_fixture_repo(&source);
+        let first = head(&source);
+
+        // The clone of the remote of the tree route, seeded from the local
+        // repository it fetches its commits from.
+        let remote = "https://fixture.test/fixture.git";
+        let cloner =
+            Arc::new(crate::GitCloner::new(temp.path().join("clones")).expect("git cloner"));
+        cloner
+            .open_at(
+                &GitId::new("test", remote, None),
+                &source.to_string_lossy(),
+                remote,
+                None,
+                &first,
+                1,
+            )
+            .expect("seed the clone");
+        let registry = fixture_registry(temp.path());
+        let runtime = registry.get("test").expect("test runtime");
+        let entry = registry.entry("test").expect("test mount");
+        let executor = GitExecutor::new(
+            cloner,
+            RuntimeAuthority::for_test(&[], &["https://fixture.test/*"], &[]),
+            Arc::clone(entry.trees()),
+            "test",
+        );
+        let namespace =
+            EngineNamespace::online(Arc::clone(&registry), tokio::runtime::Handle::current());
+
+        // The listing of the anchor names the tree, which still resolves
+        // through its own lookup.
+        let anchor = Path::parse("/test/repos/fixture").unwrap();
+        let (listing, validators) = answering_commits(
+            &runtime,
+            &executor,
+            namespace.readdir(anchor, DirCursor::start(), 0),
+            &[],
+        )
+        .await;
+        assert!(
+            listing
+                .expect("anchor listing")
+                .entries
+                .iter()
+                .any(|entry| entry.name == "tree")
+        );
+        assert!(validators.is_empty());
+        let (tree, validators) = answering_commits(
+            &runtime,
+            &executor,
+            namespace.lookup(Path::parse("/test/repos/fixture").unwrap(), "tree"),
+            &[Some(&first)],
+        )
+        .await;
+        let tree = tree.expect("tree lookup");
+        assert_eq!(validators, [None], "a lookup carries no commit");
+        assert_eq!(tree.attrs().expect("tree attrs").ttl, Duration::ZERO);
+        let (readme, validators) = answering_commits(
+            &runtime,
+            &executor,
+            namespace.lookup(tree.path.clone(), "README.md"),
+            &[],
+        )
+        .await;
+        let readme = readme.expect("README lookup");
+        assert!(validators.is_empty(), "the tree serves within its deadline");
+        assert_eq!(readme.attrs().expect("README attrs").ttl, Duration::ZERO);
+        let read = || Namespace::read(namespace.as_ref(), readme.path.clone(), 0, 64);
+
+        tokio::time::sleep(Duration::from_millis(3_300)).await;
+        let (kept, validators) = answering_commits(&runtime, &executor, read(), &[None]).await;
+        assert_eq!(kept.expect("README read").bytes, b"Hello from cache\n");
+        assert_eq!(validators, [Some(first.clone())]);
+
+        std::fs::write(source.join("README.md"), b"Hello from the second commit\n")
+            .expect("second README");
+        run_git(&source, &["commit", "-am", "second"]);
+        let second = head(&source);
+        tokio::time::sleep(Duration::from_millis(3_300)).await;
+        let (moved, validators) =
+            answering_commits(&runtime, &executor, read(), &[Some(&second)]).await;
+        assert_eq!(
+            moved.expect("README read").bytes,
+            b"Hello from the second commit\n"
+        );
+        assert_eq!(validators, [Some(first)]);
+        let fact = entry
+            .resources()
+            .git_for_path(&Path::parse("/repos/fixture/tree").unwrap())
+            .expect("Git fact read")
+            .expect("the Git fact of the tree");
+        assert_eq!(fact.commit, second);
+        let (_, validators) = answering_commits(&runtime, &executor, read(), &[]).await;
+        assert!(
+            validators.is_empty(),
+            "the new commit renews the deadline of the tree"
+        );
     }
 
     #[test]

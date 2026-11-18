@@ -4,9 +4,10 @@
 //! representation, and computed faces; a child-object `comments` collection with a
 //! typed page cursor; scoped intent-tagged invalidation from `on_tick`;
 //! object-load prefetch via `preload_object`; an object alias; deferred, ranged,
-//! and live files; an object tree handoff; paged and partial listings, with
-//! and without page validators; an object feed with fed faces; rate limits;
-//! and object aliases.
+//! and live files; object tree handoffs, one with an unknown handle and one of
+//! a Git remote at the commit its upstream answers; paged and partial
+//! listings, with and without page validators; an object feed with fed faces;
+//! rate limits; and object aliases.
 //!
 //! It is the conformance fixture every host integration test drives, so every
 //! pinned behavior is preserved on the new surface: the root, hello, and items
@@ -113,8 +114,11 @@ impl Item {
     /// Returns an intentionally unknown handle so host validation can exercise
     /// the retained object-directory tree-handoff boundary.
     #[allow(clippy::unused_async)]
-    async fn unknown_tree(_cx: Cx<State>, _key: ItemKey) -> Result<TreeRef> {
-        Ok(TreeRef::new(777))
+    async fn unknown_tree(_cx: Cx<State>, _key: ItemKey) -> Result<Tree> {
+        Ok(Tree::at(
+            TreeRef::new(777),
+            "0123456789abcdef0123456789abcdef01234567",
+        ))
     }
 
     /// The hand-written load `#[object]` forwards `Object::load` to. Item 404 is
@@ -525,6 +529,64 @@ async fn shelf_change(cx: Cx<State>) -> Result<FileProjection> {
 }
 
 // ===========================================================================
+// Object family: `Repo`, with the tree of a Git remote
+// ===========================================================================
+
+#[omnifs_sdk::object(kind = "test.repo", key = RepoKey)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Repo {
+    repo: String,
+}
+
+impl Repo {
+    fn load(
+        _cx: &Cx<State>,
+        key: &RepoKey,
+        _since: Option<Validator>,
+    ) -> impl core::future::Future<Output = Result<Load<Self>>> {
+        let bytes = format!(r#"{{"repo":"{}"}}"#, key.repo).into_bytes();
+        core::future::ready(
+            Self::decode(&bytes).map(|repo| Load::fresh(repo, Canonical::new(bytes, None))),
+        )
+    }
+
+    /// The tree of the repository at the commit its upstream answers: a
+    /// `304` to the commit of the tree stands, and a `200` names the commit
+    /// the open checks out.
+    async fn tree(cx: Cx<State>, key: RepoKey) -> Result<Tree> {
+        let mut request = cx.http().get(format!(
+            "https://httpbin.org/anything/repos/{}/commit",
+            key.repo
+        ));
+        if let Some(commit) = cx.version() {
+            request = request.header("if-none-match", commit.as_str());
+        }
+        let response = request.send().await?;
+        match response.status().as_u16() {
+            304 => Ok(Tree::unchanged()),
+            200 => {
+                let commit = String::from_utf8(response.into_body())
+                    .map_err(|_| ProviderError::invalid_input("the commit is not UTF-8"))?;
+                let opened = cx
+                    .git()
+                    .open_repo(format!("https://fixture.test/{}.git", key.repo))
+                    .commit(&commit)
+                    .await?;
+                Ok(Tree::at(TreeRef::new(opened.tree), commit))
+            },
+            status => Err(ProviderError::network(format!(
+                "the commit of the repository answered status {status}"
+            ))),
+        }
+    }
+}
+
+#[omnifs_sdk::path_captures]
+struct RepoKey {
+    repo: String,
+}
+
+// ===========================================================================
 // Provider
 // ===========================================================================
 
@@ -532,10 +594,16 @@ async fn shelf_change(cx: Cx<State>) -> Result<FileProjection> {
     id = "test-provider",
     display_name = "A test provider with canned data",
     mount = "test",
-    capabilities(domain(
-        "httpbin.org",
-        "Synthetic fixture endpoint exercised by host guest-loader tests."
-    ),),
+    capabilities(
+        domain(
+            "httpbin.org",
+            "Synthetic fixture endpoint exercised by host guest-loader tests."
+        ),
+        git_repo(
+            "https://fixture.test/*",
+            "Fixture repositories whose trees host tests open."
+        ),
+    ),
     limits(memory_mb(16, "Canned-data fixture needs only a small heap."),),
     events(timer(60, Self::on_tick))
 )]
@@ -631,6 +699,13 @@ impl TestProvider {
         })?;
         r.file("/hello/shelf-log").handler(shelf_log)?;
         r.file("/hello/shelf-change").handler(shelf_change)?;
+
+        // A tree handoff at the commit the upstream of the repository answers.
+        r.object::<Repo>("/repos/{repo}", |o| {
+            o.stable();
+            o.dir("tree").tree(Repo::tree)?;
+            Ok(())
+        })?;
 
         r.dir("/scoped").handler(scoped)?;
         r.file("/scoped/item").handler(scoped_item)?;

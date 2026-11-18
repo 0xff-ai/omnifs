@@ -1,4 +1,4 @@
-package omnifs:provider@0.9.0;
+package omnifs:provider@0.10.0;
 
 // === Shared types ===
 
@@ -218,11 +218,11 @@ interface types {
 
     // --- Terminal payloads ---
 
-    /// Lookup-child result. `subtree(tree-ref)` answers the lookup/list
-    /// operation. It is result data, not itself the host mutation.
+    /// Lookup-child result. `subtree` answers the lookup/list operation. It
+    /// is result data, not itself the host mutation.
     variant lookup-child-result {
         entry(lookup-entry),
-        subtree(tree-ref),
+        subtree(subtree),
         not-found(option<logical-id>),
         /// The path is fed: the host serves it from the projection once the
         /// answering feed among these claims has answered.
@@ -237,12 +237,20 @@ interface types {
         exhaustive: bool,
     }
 
+    /// A Git tree handoff: the tree of an open and the commit it checked
+    /// out, which the host sends back as the `validator` of `list-children`
+    /// of the tree path once the tree is past its deadline.
+    record subtree {
+        tree: tree-ref,
+        commit: string,
+    }
+
     /// List-children result. `unchanged` answers a call with a `validator`:
     /// the cached page of that validator stands, with the seconds of the
-    /// interval of its upstream.
+    /// interval of its upstream, or the commit of the tree of the path does.
     variant list-children-result {
         entries(dir-listing),
-        subtree(tree-ref),
+        subtree(subtree),
         unchanged(option<u32>),
         feed(list<feed-claim>),
     }
@@ -373,9 +381,11 @@ interface types {
         value: string,
     }
 
+    /// Open a repository with `commit` checked out.
     record git-open-request {
         clone-url: string,
         reference: option<string>,
+        commit: string,
     }
 
     /// HTTP fetch that lands its response body in the host's disk-backed
@@ -449,7 +459,8 @@ interface namespace {
 
     lookup-child: async func(id: correlation-id, parent-path: string, name: string)
         -> tuple<result<lookup-child-result, provider-error>, effects>;
-    /// `validator` is the validator of the cached page of `cursor`.
+    /// `validator` is the validator of the cached page of `cursor`, or the
+    /// commit of the tree of `path`.
     list-children: async func(id: correlation-id, path: string, cursor: option<cursor>, validator: option<version-token>)
         -> tuple<result<list-children-result, provider-error>, effects>;
     read-file: async func(id: correlation-id, path: string, content-type: string, cached-canonical: option<canonical-input>)

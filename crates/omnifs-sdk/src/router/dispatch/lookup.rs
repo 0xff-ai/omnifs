@@ -3,7 +3,7 @@
 use crate::browse::Lookup;
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
-use crate::handler::DirIntent;
+use crate::handler::{DirIntent, Tree};
 use omnifs_core::path::{Path, Segment};
 
 use super::super::compiled::CompiledRouter;
@@ -32,7 +32,9 @@ impl<S> CompiledRouter<S> {
     ///    [`DirIntent::Lookup`] and resolve the name against its enumeration
     ///    merged with static siblings; this is how dynamically enumerated
     ///    children (which match no route of their own) resolve. A fed parent
-    ///    answers the claims of its feeds without a handler.
+    ///    answers the claims of its feeds without a handler, and a tree
+    ///    parent answers no child, since the host resolves its children in
+    ///    the tree.
     ///
     /// Static answers carry their sibling entries and an `exhaustive` flag
     /// that is false whenever a capture sibling exists at this depth, so the
@@ -70,9 +72,7 @@ impl<S> CompiledRouter<S> {
                     .await
                     .map_err(|error| error.with_context("lookup-child", &child_abs))?;
                     return match answer {
-                        super::super::handlers::DirAnswer::Tree(tree_ref) => {
-                            Ok(Lookup::subtree(tree_ref.tree_ref))
-                        },
+                        super::super::handlers::DirAnswer::Tree(tree) => tree_lookup(tree),
                         super::super::handlers::DirAnswer::Listing(listing) => Ok(shape
                             .projection_lookup(
                                 &parent_abs,
@@ -134,9 +134,11 @@ impl<S> CompiledRouter<S> {
             .await
             .map_err(|error| error.with_context("lookup-child", &child_abs))?;
             return match answer {
-                super::super::handlers::DirAnswer::Tree(tree_ref) => {
-                    Ok(Lookup::subtree(tree_ref.tree_ref))
-                },
+                // The handoff of the parent's tree is no answer for a child,
+                // which the host resolves in the tree.
+                super::super::handlers::DirAnswer::Tree(_) => Err(ProviderError::invalid_input(
+                    format!("{parent} hands its Git tree to the host, which resolves {name} in it"),
+                )),
                 super::super::handlers::DirAnswer::Listing(listing) => {
                     shape.projection_lookup(&parent_abs, name, &listing.into_dir_projection())
                 },
@@ -144,5 +146,16 @@ impl<S> CompiledRouter<S> {
         }
 
         Ok(Lookup::not_found())
+    }
+}
+
+/// The handoff of a tree a lookup asked for. A lookup carries no validator,
+/// so no commit of it can stand.
+fn tree_lookup(tree: Tree) -> Result<Lookup> {
+    match tree {
+        Tree::At { tree, commit } => Ok(Lookup::subtree(tree.tree_ref, commit)),
+        Tree::Unchanged => Err(ProviderError::internal(
+            "a tree answered unchanged to a lookup, which carries no validator",
+        )),
     }
 }

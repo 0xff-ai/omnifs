@@ -38,7 +38,7 @@ There is one route API. `file` and `dir` are the nouns; the *face* you put under
 | Are the bytes large or host-cacheable, and should never cross the WIT boundary (a PR diff, a PDF)? | yes | **Blob face** `o.file(..).blob(method)` returning `BlobFile<F>` |
 | Is the leaf ranged or `Live` (pod logs, `tail -f`)? | yes | **Stream face** `o.file(..).stream(method)`; the only face that may be `Live` |
 | Does a directory list child objects (repos under an owner, issues, comments)? | yes | **Collection face** `o.dir(name).collection::<C>(method)` returning `Collection<C, Cur>`; `C` must be its own `r.object::<C>` |
-| Is the subtree a real tree the host can materialize wholesale (such as a git repo)? | yes | **Tree face** `o.dir(name).tree(method)` returning `TreeRef`, or raw `r.treeref(t).handler(..)` |
+| Is the subtree a real tree the host can materialize wholesale (such as a git repo)? | yes | **Tree face** `o.dir(name).tree(method)` answering `Tree::at(tree_ref, commit)` or `Tree::unchanged()`, or raw `r.treeref(t).handler(..)` |
 | Is the same object reachable at a second path (by-name and by-id)? | yes | `let h = r.object::<O>(..)?; r.alias(other_template, &h)?;` |
 | Does the upstream report changes since a token, so one check can keep many paths current (GitHub issues `since`)? | yes | **Feed**: `o.feed(method).starts([..])` plus `.fed()` faces (`o.file(..).fed()`, `o.dir(..).fed()`, `o.fed()`); the method writes facts through `FeedCx` and answers `Feed::part(token)` or `Feed::unchanged()` |
 | Tempted to add an object so something gets cached? | stop | An object earns canonical storage only with a `canonical` face. No canonical payload means a direct face or raw handler, not a fake object |

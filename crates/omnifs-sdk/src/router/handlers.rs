@@ -9,7 +9,7 @@ use super::pattern::Pattern;
 use crate::captures::{CaptureDescriptor, Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::Result;
-use crate::handler::{DirCx, DirIntent, TreeRef};
+use crate::handler::{DirCx, DirIntent, Tree};
 use crate::projection::{DirListing, FileProjection};
 use std::future::Future;
 use std::pin::Pin;
@@ -24,7 +24,7 @@ type HandlerFuture<T> = Pin<Box<dyn Future<Output = Result<T>>>>;
 /// typed key at call time.
 pub(super) type BoxedDirHandler<S> = Arc<dyn Fn(DirCx<S>, Captures) -> HandlerFuture<DirListing>>;
 pub(super) type BoxedFileHandler<S> = Arc<dyn Fn(Cx<S>, Captures) -> HandlerFuture<FileProjection>>;
-pub(super) type BoxedTreeHandler<S> = Arc<dyn Fn(Cx<S>, Captures) -> HandlerFuture<TreeRef>>;
+pub(super) type BoxedTreeHandler<S> = Arc<dyn Fn(Cx<S>, Captures) -> HandlerFuture<Tree>>;
 
 /// A per-route capture validator derived from the handler's key type.
 ///
@@ -239,7 +239,7 @@ pub(super) enum DirHandler<S> {
 
 pub(super) enum DirAnswer {
     Listing(DirListing),
-    Tree(TreeRef),
+    Tree(Tree),
 }
 
 impl<S> DirEntry<S> {

@@ -92,7 +92,7 @@ impl<S> Clone for FeedDeclaration<S> {
 
 /// One tree face: the relative dir name and the boxed tree handler. The
 /// handler parses `O::Key` from the dir-path captures and runs the typed tree
-/// method, lowering to a [`crate::handler::TreeRef`] (the host resolves the
+/// method, answering a [`crate::handler::Tree`] (the host resolves the
 /// git-open callout the method issues).
 pub(in crate::router) struct TreeFaceEntry<S> {
     pub name: &'static str,
@@ -797,13 +797,16 @@ impl<'a, O: Object> DirFace<'a, O> {
     /// A subtree handoff registered as an object dir face so it reads in
     /// `start()`. The face becomes a tree-capable directory route at
     /// `template/name`, so a lookup or list there returns the subtree handoff
-    /// after the host runs the git-open callout the method issues.
+    /// after the host runs the git-open callout the method issues. The method
+    /// answers [`crate::handler::Tree::at`] with the tree of its open, or
+    /// [`crate::handler::Tree::unchanged`] while the commit of
+    /// [`Cx::version`], the validator of `list-children`, stands.
     pub fn tree<Fut>(
         self,
         method: fn(Cx<O::State>, O::Key) -> Fut,
     ) -> Result<&'a mut ObjectBlock<O>>
     where
-        Fut: Future<Output = Result<crate::handler::TreeRef>> + 'static,
+        Fut: Future<Output = Result<crate::handler::Tree>> + 'static,
         O: 'static,
         O::State: 'static,
     {
@@ -818,7 +821,7 @@ impl<'a, O: Object> DirFace<'a, O> {
                 Box::pin(async move {
                     let key = O::Key::from_captures(&caps)?;
                     method(cx, key).await
-                }) as Pin<Box<dyn Future<Output = Result<crate::handler::TreeRef>>>>
+                }) as Pin<Box<dyn Future<Output = Result<crate::handler::Tree>>>>
             });
         self.block.tree_faces.push(TreeFaceEntry {
             name: self.name,

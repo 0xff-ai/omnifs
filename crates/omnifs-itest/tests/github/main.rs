@@ -1,6 +1,7 @@
 #![cfg(not(target_os = "wasi"))]
 
 mod feeds;
+mod repo;
 mod support;
 
 use omnifs_engine::Namespace;

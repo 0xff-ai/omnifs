@@ -1,4 +1,4 @@
-//! Handler context, pagination cursor, subtree handles, and ranged-read session types.
+//! Handler context, pagination cursor, tree answers, and ranged-read session types.
 
 use crate::cx::Cx;
 use crate::error::Result;
@@ -197,21 +197,10 @@ impl OpenedFile {
     }
 }
 
-/// The subtree handoff token a tree-capable directory handler returns: a
-/// host-issued tree handle from a git-open callout that the host
-/// resolves to a bind-mounted directory. Provider dispatch stops at the
-/// handoff point; paths below it never reach the provider.
-///
-/// ```ignore
-/// async fn tree(cx: Cx, key: RepoKey) -> Result<TreeRef> {
-///     let opened = cx
-///         .git()
-///         .open_repo("git@github.com:o/r.git".to_string())
-///         .send()
-///         .await?;
-///     Ok(TreeRef::new(opened.tree))
-/// }
-/// ```
+/// The subtree handoff token of a [`Tree`]: a host-issued tree handle from a
+/// git-open callout that the host resolves to a bind-mounted directory.
+/// Provider dispatch stops at the handoff point; paths below it never reach
+/// the provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TreeRef {
     pub tree_ref: u64,
@@ -220,5 +209,45 @@ pub struct TreeRef {
 impl TreeRef {
     pub fn new(tree_ref: u64) -> Self {
         Self { tree_ref }
+    }
+}
+
+/// The answer of a tree method: the tree of its open with the commit the
+/// open checked out, or, while the commit of [`Cx::version`] stands,
+/// unchanged. Past the deadline of the tree path, the host asks again with
+/// the commit as the validator of `list-children`; a lookup carries none.
+///
+/// ```ignore
+/// async fn tree(cx: Cx, key: RepoKey) -> Result<Tree> {
+///     let commit = upstream_head(&cx, &key).await?;
+///     if cx.version().is_some_and(|version| version.as_str() == commit) {
+///         return Ok(Tree::unchanged());
+///     }
+///     let opened = cx
+///         .git()
+///         .open_repo("git@github.com:o/r.git")
+///         .commit(&commit)
+///         .await?;
+///     Ok(Tree::at(TreeRef::new(opened.tree), commit))
+/// }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Tree {
+    At { tree: TreeRef, commit: String },
+    Unchanged,
+}
+
+impl Tree {
+    /// The tree of an open, with the commit the open checked out.
+    pub fn at(tree: TreeRef, commit: impl Into<String>) -> Self {
+        Self::At {
+            tree,
+            commit: commit.into(),
+        }
+    }
+
+    /// The commit of the validator of the call stands.
+    pub fn unchanged() -> Self {
+        Self::Unchanged
     }
 }

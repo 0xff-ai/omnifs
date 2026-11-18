@@ -19,7 +19,7 @@ use omnifs_sdk::collection::{Collection, CollectionEntry, ListCx, NoCursor, Page
 use omnifs_sdk::cx::Cx;
 use omnifs_sdk::error::{ProviderError, Result};
 use omnifs_sdk::file_attrs::{FileSize, Stability, VersionToken};
-use omnifs_sdk::handler::{DirCx, MemoryRangeReader};
+use omnifs_sdk::handler::{DirCx, MemoryRangeReader, Tree, TreeRef};
 use omnifs_sdk::identity::{Facet, IdentityCaptures};
 use omnifs_sdk::object::{
     Canonical, FacetAxis, FacetMetadata, Key, Load, Object, ObjectEntry, ObjectKind, Validator,
@@ -1178,9 +1178,23 @@ async fn bare_live(_cx: Cx<()>, key: ItemKey) -> Result<FileProjection> {
 // Tree face (FIX A): an object dir tree face dispatches the subtree handoff
 // ===========================================================================
 
-/// A tree dir face's method: hand a host-resolved subtree off.
-async fn repo_tree(_cx: Cx<()>, _key: RepoKey) -> Result<omnifs_sdk::handler::TreeRef> {
-    Ok(omnifs_sdk::handler::TreeRef::new(7))
+const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// A tree dir face's method: hand a host-resolved subtree off at its commit,
+/// unchanged while the commit of the call stands.
+async fn repo_tree(cx: Cx<()>, _key: RepoKey) -> Result<Tree> {
+    if cx
+        .version()
+        .is_some_and(|version| version.as_str() == COMMIT)
+    {
+        return Ok(Tree::unchanged());
+    }
+    Ok(Tree::at(TreeRef::new(7), COMMIT))
+}
+
+/// Whether `subtree` hands off tree 7 at its commit.
+fn is_handoff(subtree: &wit_types::Subtree) -> bool {
+    subtree.tree == 7 && subtree.commit == COMMIT
 }
 
 fn tree_face_router() -> CompiledRouter<()> {
@@ -1206,7 +1220,7 @@ fn object_tree_face_lookup_returns_subtree_handoff() {
     let lookup = drive(&cx, r.lookup_child(&cx, "/torvalds/linux", "repo"));
     let (out, _effects) = lookup.into_result_and_effects();
     assert!(
-        matches!(out, wit_types::LookupChildResult::Subtree(7)),
+        matches!(&out, wit_types::LookupChildResult::Subtree(handoff) if is_handoff(handoff)),
         "the tree face must dispatch a subtree handoff, got {out:?} (FIX A)"
     );
 }
@@ -1218,8 +1232,29 @@ fn object_tree_face_list_returns_subtree_handoff() {
     let list = drive(&cx, r.list_children(&cx, "/torvalds/linux/repo", None));
     let (out, _effects) = list.into_result_and_effects();
     assert!(
-        matches!(out, wit_types::ListChildrenResult::Subtree(7)),
+        matches!(&out, wit_types::ListChildrenResult::Subtree(handoff) if is_handoff(handoff)),
         "listing the tree path returns the subtree handoff, got {out:?} (FIX A)"
+    );
+}
+
+/// The commit of the validator of `list-children` stands as `unchanged`; a
+/// lookup carries no validator, so a tree answering it unchanged errs.
+#[test]
+fn object_tree_face_answers_unchanged_for_the_commit_of_the_call() {
+    let r = tree_face_router();
+    let cx = cx().with_version(Some(VersionToken::from(COMMIT)));
+    let list = drive(&cx, r.list_children(&cx, "/torvalds/linux/repo", None));
+    let (out, _effects) = list.into_result_and_effects();
+    assert!(
+        matches!(out, wit_types::ListChildrenResult::Unchanged(None)),
+        "the commit of the call stands, got {out:?}"
+    );
+
+    let error = drive_result(&cx, r.lookup_child(&cx, "/torvalds/linux", "repo"))
+        .expect_err("a lookup takes no unchanged tree");
+    assert!(
+        error.to_string().contains("carries no validator"),
+        "{error}"
     );
 }
 
@@ -1229,14 +1264,18 @@ fn aliased_object_tree_face_replays_lookup_and_list_handoff() {
     let cx = cx();
     let lookup = drive(&cx, r.lookup_child(&cx, "/torvalds/mirrorlinux", "repo"));
     let (lookup, _) = lookup.into_result_and_effects();
-    assert!(matches!(lookup, wit_types::LookupChildResult::Subtree(7)));
+    assert!(
+        matches!(&lookup, wit_types::LookupChildResult::Subtree(handoff) if is_handoff(handoff))
+    );
 
     let list = drive(
         &cx,
         r.list_children(&cx, "/torvalds/mirrorlinux/repo", None),
     );
     let (list, _) = list.into_result_and_effects();
-    assert!(matches!(list, wit_types::ListChildrenResult::Subtree(7)));
+    assert!(
+        matches!(&list, wit_types::ListChildrenResult::Subtree(handoff) if is_handoff(handoff))
+    );
 }
 
 // ===========================================================================

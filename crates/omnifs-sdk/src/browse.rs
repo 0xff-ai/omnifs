@@ -439,6 +439,7 @@ pub enum Lookup {
     Entry(LookupEntry),
     Subtree {
         tree: u64,
+        commit: String,
     },
     NotFound {
         id: Option<LogicalId>,
@@ -467,11 +468,11 @@ impl Lookup {
         })
     }
 
-    /// Hand the child off as a host-resolved subtree (a git clone, an
-    /// `tree` is the handle a tree-opening callout
-    /// returned; dispatch below this point belongs to the host.
-    pub fn subtree(tree: u64) -> Self {
-        Self::Subtree { tree }
+    /// Hand the child off as a host-resolved subtree: `tree` is the handle a
+    /// tree-opening callout returned and `commit` the commit it checked out;
+    /// dispatch below this point belongs to the host.
+    pub fn subtree(tree: u64, commit: String) -> Self {
+        Self::Subtree { tree, commit }
     }
 
     pub fn not_found() -> Self {
@@ -542,7 +543,10 @@ impl Lookup {
                 }),
                 entry.effects,
             ),
-            Self::Subtree { tree } => (wit_types::LookupChildResult::Subtree(tree), Effects::new()),
+            Self::Subtree { tree, commit } => (
+                wit_types::LookupChildResult::Subtree(wit_types::Subtree { tree, commit }),
+                Effects::new(),
+            ),
             Self::NotFound { id } => (
                 wit_types::LookupChildResult::NotFound(id.map(Into::into)),
                 Effects::new(),
@@ -561,14 +565,15 @@ impl From<Lookup> for wit_types::LookupChildResult {
     }
 }
 
-/// A list result: a listing, a subtree handoff, the cached page of the
-/// validator of the call standing, with the seconds of the interval of its
-/// upstream, or the feeds that answer for a fed listing.
+/// A list result: a listing, a subtree handoff, the cached page or tree of
+/// the validator of the call standing, with the seconds of the interval of
+/// the upstream of a page, or the feeds that answer for a fed listing.
 #[derive(Clone, Debug)]
 pub enum List {
     Entries(Listing),
     Subtree {
         tree: u64,
+        commit: String,
     },
     Unchanged {
         interval: Option<u32>,
@@ -582,8 +587,8 @@ impl List {
         Self::Entries(listing)
     }
 
-    pub fn subtree(tree: u64) -> Self {
-        Self::Subtree { tree }
+    pub fn subtree(tree: u64, commit: String) -> Self {
+        Self::Subtree { tree, commit }
     }
 
     pub fn unchanged(interval: Option<u32>, effects: Effects) -> Self {
@@ -597,9 +602,10 @@ impl List {
                 let (listing, effects) = listing.into_parts();
                 (wit_types::ListChildrenResult::Entries(listing), effects)
             },
-            Self::Subtree { tree } => {
-                (wit_types::ListChildrenResult::Subtree(tree), Effects::new())
-            },
+            Self::Subtree { tree, commit } => (
+                wit_types::ListChildrenResult::Subtree(wit_types::Subtree { tree, commit }),
+                Effects::new(),
+            ),
             Self::Unchanged { interval, effects } => {
                 (wit_types::ListChildrenResult::Unchanged(interval), effects)
             },

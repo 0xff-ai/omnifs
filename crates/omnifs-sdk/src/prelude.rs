@@ -16,7 +16,7 @@ pub use crate::file_attrs::{
     FileAttrs, FileSize, MAX_PROJECTED_BYTES, MAX_VERSION_TOKEN_BYTES, Stability, VersionToken,
 };
 pub use crate::handler::{
-    Cursor, DirCx, DirIntent, FileChunk, MemoryRangeReader, RangeReader, TreeRef,
+    Cursor, DirCx, DirIntent, FileChunk, MemoryRangeReader, RangeReader, Tree, TreeRef,
 };
 pub use crate::identity::{Facet, IdentityCaptures, LogicalId};
 pub use crate::invalidation::Invalidation;

@@ -113,7 +113,7 @@ pub(crate) enum TestSignal {
 }
 
 /// Test-only capture channel for provider integration tests that inspect
-/// outbound HTTP/blob imports before answering them.
+/// outbound HTTP, blob, and Git imports before answering them.
 #[derive(Clone)]
 pub(crate) struct TestCallouts {
     tx: mpsc::Sender<TestSignal>,
@@ -248,12 +248,7 @@ impl CalloutHost {
     }
 
     async fn run(&self, callout: &wit_types::Callout, op_id: u64) -> wit_types::CalloutResult {
-        if let Some(test_callouts) = &self.test_callouts
-            && matches!(
-                callout,
-                wit_types::Callout::Fetch(_) | wit_types::Callout::FetchBlob(_)
-            )
-        {
+        if let Some(test_callouts) = &self.test_callouts {
             return test_callouts.run(op_id, callout.clone()).await;
         }
         match callout {

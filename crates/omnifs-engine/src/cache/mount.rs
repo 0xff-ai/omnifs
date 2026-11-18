@@ -105,10 +105,13 @@ pub(crate) struct BlobFact {
     pub metadata: BlobMetadata,
 }
 
+/// The Git tree of a path: its clone, its relative path in the clone, and
+/// the commit of its last handoff.
 #[derive(Debug, Clone)]
 pub(crate) struct GitFact {
     pub id: GitId,
     pub relative_path: String,
+    pub commit: String,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +126,7 @@ pub(crate) struct GitWrite {
     pub path: Path,
     pub id: GitId,
     pub relative_path: String,
+    pub commit: String,
 }
 
 #[derive(Debug, Clone)]
@@ -329,6 +333,7 @@ enum DurableFact {
     Git {
         id: GitId,
         relative_path: String,
+        commit: String,
     },
 }
 
@@ -864,6 +869,7 @@ impl MountResources {
                     DurableFact::Git {
                         id: git.id,
                         relative_path: git.relative_path.clone(),
+                        commit: git.commit.clone(),
                     },
                 ))
             })
@@ -1284,13 +1290,22 @@ impl MountResources {
         let Some(bytes) = self.projection.get(&git_key(path))? else {
             return Ok(None);
         };
-        let DurableFact::Git { id, relative_path } = postcard::from_bytes(&bytes)? else {
+        let DurableFact::Git {
+            id,
+            relative_path,
+            commit,
+        } = postcard::from_bytes(&bytes)?
+        else {
             return Err(ProjectionError::Inconsistent(
                 "Git fact key contains a non-Git fact".into(),
             ));
         };
         validate_git_relative(&relative_path)?;
-        Ok(Some(GitFact { id, relative_path }))
+        Ok(Some(GitFact {
+            id,
+            relative_path,
+            commit,
+        }))
     }
 
     /// The state of the feed of the object `id`.
@@ -2151,6 +2166,8 @@ fn read_dirents_fact(
 mod tests {
     use super::*;
 
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
     fn open_store(mount: &str) -> (tempfile::TempDir, Arc<Caches>, Arc<MountResources>) {
         let dir = tempfile::tempdir().unwrap();
         let caches = Caches::open(dir.path()).unwrap();
@@ -2378,6 +2395,7 @@ mod tests {
                         path: leaf.clone(),
                         id: GitId::new("m", "https://example.test/repo.git", None),
                         relative_path: "tree".into(),
+                        commit: COMMIT.into(),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2519,6 +2537,7 @@ mod tests {
                         path: invalidated,
                         id: GitId::new("m", "https://example.test/repo.git", None),
                         relative_path: "tree".into(),
+                        commit: COMMIT.into(),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2773,6 +2792,7 @@ mod tests {
                         path: stale_git.clone(),
                         id: GitId::new("m", "https://example.test/repo.git", None),
                         relative_path: String::new(),
+                        commit: COMMIT.into(),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2808,6 +2828,7 @@ mod tests {
                         path: stale_git.clone(),
                         id: GitId::new("m", "https://example.test/repo.git", None),
                         relative_path: String::new(),
+                        commit: COMMIT.into(),
                     }],
                     ..ProjectionTransition::default()
                 },

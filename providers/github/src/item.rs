@@ -842,14 +842,33 @@ impl PullRequest {
 }
 
 impl Repo {
-    pub(crate) async fn tree(cx: Cx, key: RepoKey) -> Result<TreeRef> {
+    /// The tree of the last commit of the default branch. `commits/HEAD` with
+    /// the `sha` media type answers that commit and takes the commit of the
+    /// tree in quotes as its `ETag`: `304` keeps the tree, and `200` names the
+    /// commit the clone checks out.
+    pub(crate) async fn tree(cx: Cx, key: RepoKey) -> Result<Tree> {
         let repo_id = RepoId::new(&key.owner, &key.repo);
+        let etag = cx
+            .version()
+            .map(|commit| VersionToken::from(format!("\"{}\"", commit.as_str())));
+        let head = cx
+            .endpoint(GitHubApi)
+            .get(format!("/repos/{repo_id}/commits/HEAD"))
+            .header("Accept", "application/vnd.github.sha")
+            .maybe_if_none_match(etag.as_ref())
+            .send_checked()
+            .await?;
+        if head.status() == 304 {
+            return Ok(Tree::unchanged());
+        }
+        let commit = std::str::from_utf8(head.body())
+            .map_err(|_| ProviderError::invalid_input("the commit of HEAD is not UTF-8"))?;
         let opened = cx
             .git()
             .open_repo(format!("git@github.com:{repo_id}.git"))
-            .send()
+            .commit(commit)
             .await?;
-        Ok(TreeRef::new(opened.tree))
+        Ok(Tree::at(TreeRef::new(opened.tree), commit))
     }
 }
 

@@ -221,13 +221,22 @@ impl<'a> EffectApplier<'a> {
                             .map_err(|error| error.to_string())
                     })
                     .map_err(anyhow::Error::msg)?;
-                    let kind = match &candidate.kind {
-                        wit_types::EntryKind::Directory => {
-                            wit_types::FsKind::Directory(wit_types::ListingWrite::Partial)
+                    // The target is the answer of this lookup; a sibling
+                    // directory gets no lookup fact, since only its own lookup
+                    // tells a provider directory from a Git tree handoff.
+                    let target = candidate.name == entry.target.name;
+                    match &candidate.kind {
+                        wit_types::EntryKind::File(file) => self.add_entry_records(
+                            &mut transition,
+                            &path,
+                            &meta,
+                            &wit_types::FsKind::File(file.clone()),
+                        )?,
+                        wit_types::EntryKind::Directory if target => {
+                            add_lookup_records(&mut transition, &path, &meta);
                         },
-                        wit_types::EntryKind::File(file) => wit_types::FsKind::File(file.clone()),
-                    };
-                    self.add_entry_records(&mut transition, &path, &meta, &kind)?;
+                        wit_types::EntryKind::Directory => {},
+                    }
                     if let Some(id) = &candidate.id {
                         transition.objects.push(ObjectMutation::Index {
                             id: ObjectId::from_wit(id).as_bytes().to_vec(),
@@ -238,7 +247,7 @@ impl<'a> EffectApplier<'a> {
                         name: candidate.name.clone(),
                         meta: meta.clone(),
                     });
-                    if candidate.name == entry.target.name {
+                    if target {
                         target_meta = Some(meta);
                     }
                 }
@@ -255,19 +264,11 @@ impl<'a> EffectApplier<'a> {
                     LookupOutcome::Entry(LookupEntry::new(child.clone(), meta))
                 })
             },
-            wit_types::LookupChildResult::Subtree(tree) => {
+            wit_types::LookupChildResult::Subtree(subtree) => {
+                let tree = subtree.tree;
                 let id = resolve_tree(tree)
                     .ok_or_else(|| anyhow::anyhow!("unresolved Git tree handle {tree}"))?;
-                transition.git.push(GitWrite {
-                    path: child.clone(),
-                    id,
-                    relative_path: String::new(),
-                });
-                transition.records.push(RecordWrite {
-                    path: child.clone(),
-                    aux: None,
-                    fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
-                });
+                add_subtree_records(&mut transition, child, id, subtree.commit, now_millis);
                 LookupOutcome::Subtree(tree)
             },
             wit_types::LookupChildResult::NotFound(id) => {
@@ -297,7 +298,9 @@ impl<'a> EffectApplier<'a> {
     // The asked page lowers by its request: a first page without a validator
     // replaces the listing, a later page without one appends to it, and a
     // page asked for with its validator replaces or renews that cached page.
-    // A page with a validator has the deadline of its interval.
+    // A page with a validator has the deadline of its interval. An
+    // `unchanged` answer for a path with a Git fact renews the deadline of
+    // its tree.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn lower_list(
         &self,
@@ -319,13 +322,16 @@ impl<'a> EffectApplier<'a> {
                             .map_err(|error| error.to_string())
                     })
                     .map_err(anyhow::Error::msg)?;
-                    let kind = match &entry.kind {
-                        wit_types::EntryKind::Directory => {
-                            wit_types::FsKind::Directory(wit_types::ListingWrite::Partial)
-                        },
-                        wit_types::EntryKind::File(file) => wit_types::FsKind::File(file.clone()),
-                    };
-                    self.add_entry_records(&mut transition, &child, &meta, &kind)?;
+                    // A listed directory gets no lookup fact: only its own
+                    // lookup tells a provider directory from a Git tree handoff.
+                    if let wit_types::EntryKind::File(file) = &entry.kind {
+                        self.add_entry_records(
+                            &mut transition,
+                            &child,
+                            &meta,
+                            &wit_types::FsKind::File(file.clone()),
+                        )?;
+                    }
                     if let Some(id) = &entry.id {
                         transition.objects.push(ObjectMutation::Index {
                             id: ObjectId::from_wit(id).as_bytes().to_vec(),
@@ -398,28 +404,29 @@ impl<'a> EffectApplier<'a> {
                     next_cursor,
                 })
             },
-            wit_types::ListChildrenResult::Subtree(tree) => {
+            wit_types::ListChildrenResult::Subtree(subtree) => {
+                let tree = subtree.tree;
                 let id = resolve_tree(tree)
                     .ok_or_else(|| anyhow::anyhow!("unresolved Git tree handle {tree}"))?;
-                transition.git.push(GitWrite {
-                    path: path.clone(),
-                    id,
-                    relative_path: String::new(),
-                });
-                transition.records.push(RecordWrite {
-                    path: path.clone(),
-                    aux: None,
-                    fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
-                });
+                add_subtree_records(&mut transition, path, id, subtree.commit, now_millis);
                 ListOutcome::Subtree(tree)
             },
             wit_types::ListChildrenResult::Unchanged(interval) => {
-                transition.dirents.push(DirentsMutation::RenewPage {
-                    path: path.clone(),
-                    cursor: request.cursor.clone(),
-                    interval,
-                    now_millis,
-                });
+                if self
+                    .store
+                    .git_for_path(path)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                    .is_some()
+                {
+                    transition.freshness.push(tree_freshness(path, now_millis));
+                } else {
+                    transition.dirents.push(DirentsMutation::RenewPage {
+                        path: path.clone(),
+                        cursor: request.cursor.clone(),
+                        interval,
+                        now_millis,
+                    });
+                }
                 ListOutcome::Unchanged
             },
             wit_types::ListChildrenResult::Feed(claims) => ListOutcome::Feed(feed_claims(&claims)?),
@@ -587,6 +594,38 @@ impl<'a> EffectApplier<'a> {
             expires_at: freshness_expiry(attrs.stability(), crate::clock::now_millis()),
         });
         Ok((outcome, transition))
+    }
+}
+
+/// The facts of a subtree answer at `path`: its Git fact with the commit of
+/// the handoff, its directory lookup, and the deadline of its tree.
+fn add_subtree_records(
+    transition: &mut ProjectionTransition,
+    path: &Path,
+    id: GitId,
+    commit: String,
+    now_millis: u64,
+) {
+    transition.git.push(GitWrite {
+        path: path.clone(),
+        id,
+        relative_path: String::new(),
+        commit,
+    });
+    transition.records.push(RecordWrite {
+        path: path.clone(),
+        aux: None,
+        fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+    });
+    transition.freshness.push(tree_freshness(path, now_millis));
+}
+
+/// The deadline of the tree of `path`, `DYNAMIC_TTL_MILLIS` after its last
+/// answer.
+fn tree_freshness(path: &Path, now_millis: u64) -> Freshness {
+    Freshness {
+        path: path.clone(),
+        expires_at: Some(now_millis.saturating_add(DYNAMIC_TTL_MILLIS)),
     }
 }
 

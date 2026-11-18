@@ -129,7 +129,7 @@
 //! | [`endpoint`] | Declared HTTP endpoints: typed request builder, conditional loads, rate-limit breaker |
 //! | [`browse`] | Wire-facing results and [`browse::Effects`] |
 //! | [`feed`] | Object feeds: [`feed::FeedCx`] and the [`feed::Feed`] answer of a feed method |
-//! | [`handler`] | Dir intent/cursor types, ranged-read sessions, [`handler::TreeRef`] |
+//! | [`handler`] | Dir intent/cursor types, ranged-read sessions, [`handler::Tree`] answers |
 //! | [`blob`] / [`git`] | Host-side large bytes and git clones |
 //! | [`error`] | [`error::ProviderError`]: kinds, retryability, HTTP status mapping |
 //!

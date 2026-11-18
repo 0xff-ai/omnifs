@@ -232,7 +232,8 @@ pub struct DirListing {
 }
 
 /// The page a `list-children` call asks for: its cursor (`None` for the first
-/// page) and the validator of the cached page of that cursor.
+/// page) and the validator of the cached page of that cursor, or the commit
+/// of the tree of the path.
 #[derive(Debug, Clone)]
 pub(crate) struct PageRequest {
     pub cursor: Option<CachedCursor>,
@@ -243,7 +244,7 @@ pub(crate) struct PageRequest {
 pub enum ListOutcome {
     Entries(DirListing),
     Subtree(u64),
-    /// The cached page of the validator of the call stands.
+    /// The cached page or tree of the validator of the call stands.
     Unchanged,
     /// The listing is fed: the feeds that answer for it, the outer first.
     Feed(Vec<super::feed::FeedClaim>),
