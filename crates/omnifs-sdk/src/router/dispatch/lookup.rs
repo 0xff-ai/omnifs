@@ -21,16 +21,18 @@ impl<S> CompiledRouter<S> {
     /// 2. A dir route at the child path: answer statically, without running
     ///    the child's handler, unless a file route also matches with
     ///    strictly higher precedence (then the file claims the name).
-    /// 3. An object anchored at the child path: answer as a static directory.
+    /// 3. An object anchored at the child path: answer as a static directory,
+    ///    or with the claims of its feeds when its anchor is fed.
     /// 4. A representation or field leaf of an object anchored at the
-    ///    parent.
+    ///    parent; a fed leaf answers the claims of its feeds.
     /// 5. A file route at the child path: answer statically.
     /// 6. An auto-navigable literal prefix: a directory synthesized from the
     ///    route table alone.
     /// 7. Fallback: run the parent's dir handler with
     ///    [`DirIntent::Lookup`] and resolve the name against its enumeration
     ///    merged with static siblings; this is how dynamically enumerated
-    ///    children (which match no route of their own) resolve.
+    ///    children (which match no route of their own) resolve. A fed parent
+    ///    answers the claims of its feeds without a handler.
     ///
     /// Static answers carry their sibling entries and an `exhaustive` flag
     /// that is false whenever a capture sibling exists at this depth, so the
@@ -89,8 +91,17 @@ impl<S> CompiledRouter<S> {
                     > object_route.entry.pattern.precedence_key()
             });
             if !file_wins {
+                if let Some(claims) = &object_route.entry.anchor_claims {
+                    return Ok(Lookup::Feed(shape.feed_claims(claims, &child_abs, true)?));
+                }
                 return Ok(shape.static_dir_lookup(&parent_abs, name));
             }
+        }
+
+        if let Some(object_route) = shape.object_route(&parent_abs)
+            && let Some(claims) = object_route.entry.leaf_claims.get(name)
+        {
+            return Ok(Lookup::Feed(shape.feed_claims(claims, &child_abs, true)?));
         }
 
         let object_file_lookup = shape.object_leaf_lookup(&parent_abs, name);
@@ -107,6 +118,9 @@ impl<S> CompiledRouter<S> {
         }
 
         if let Some(route) = shape.dir_route(&parent_abs) {
+            if let Some(claims) = route.entry.fed_claims() {
+                return Ok(Lookup::Feed(shape.feed_claims(claims, &child_abs, false)?));
+            }
             let answer = super::route_future(
                 route.entry.pattern.template(),
                 Box::pin(route.entry.invoke(

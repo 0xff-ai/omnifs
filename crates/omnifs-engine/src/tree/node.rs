@@ -83,6 +83,9 @@ pub struct Node {
     path: Path,
     meta: EntryMeta,
     body: NodeBody,
+    /// The node's facts come from feeds: a renderer gets them with the zero
+    /// lifetime of dynamic entries, so each access asks the namespace again.
+    fed: bool,
 }
 
 impl Node {
@@ -92,7 +95,23 @@ impl Node {
             path,
             meta,
             body,
+            fed: false,
         }
+    }
+
+    /// A provider node whose facts come from feeds.
+    pub(crate) fn fed(mount: String, path: Path, meta: EntryMeta) -> Self {
+        Self {
+            mount,
+            path,
+            meta,
+            body: NodeBody::Provider,
+            fed: true,
+        }
+    }
+
+    pub(crate) fn is_fed(&self) -> bool {
+        self.fed
     }
 
     /// Construct a host-synthesized node (a pagination control or a mount-root
@@ -104,6 +123,7 @@ impl Node {
             path,
             meta,
             body: NodeBody::Synthetic(synthetic),
+            fed: false,
         }
     }
 
@@ -158,17 +178,36 @@ impl Node {
 pub struct Entry {
     pub name: String,
     pub meta: EntryMeta,
+    /// The child's facts come from feeds.
+    pub fed: bool,
 }
 
 impl Entry {
     /// A normal provider-projected child.
     pub(crate) fn provider(name: String, meta: EntryMeta) -> Self {
-        Self { name, meta }
+        Self {
+            name,
+            meta,
+            fed: false,
+        }
+    }
+
+    /// A child whose facts come from feeds.
+    pub(crate) fn fed(name: String, meta: EntryMeta) -> Self {
+        Self {
+            name,
+            meta,
+            fed: true,
+        }
     }
 
     /// A host-synthesized child surfaced by `Tree` and materialized by a
     /// filesystem through the namespace.
     pub(crate) fn synthetic(name: String, meta: EntryMeta) -> Self {
-        Self { name, meta }
+        Self {
+            name,
+            meta,
+            fed: false,
+        }
     }
 }

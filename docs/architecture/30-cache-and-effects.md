@@ -31,6 +31,10 @@ A listing revalidates by page, because a paged upstream answers each page with i
 
 Offline construction is non-creating and non-repairing at the Omnifs semantic layer. It requires the exact projection manifest, body root, database, and fact keyspace and creates no Omnifs directories, manifests, keyspaces, rows, bodies, or temporary files. Fjall has no read-only recovery mode, so opening an existing database may perform storage-engine journal recovery under its exclusivity lock; that maintenance does not authorize semantic cache repair or fallback identity selection.
 
+## Feeds
+
+A feed keeps a subtree of the projection current from an upstream that can report its changes since a token, so one cheap check answers for many paths instead of one request per path. Its facts are durable rows like any other, marked fed so other terminals leave them to the feed, and its token, first-answer state, and deadline sit beside them in the same keyspace and publish in the same transition as each part. A long first answer therefore survives a stop: every part it published stays served, and the next starting operation continues from the last token. Fed facts carry no deadline of their own because their freshness is the feed's, and they answer filesystems with zero lifetime so each access reaches the namespace that can ask the feed.
+
 ## Git handoff
 
 Durable Git facts store a `GitId` plus one validated relative path. The Git id binds the mount scope, canonical remote, and reference. Offline open validates the existing private clone binding and capability confinement without a Git subprocess or network access, then constructs the host tree from the selected relative directory. Process-local tree identity is the pair `(GitId, relative path)`, so two subtrees from the same clone remain distinct while the same selection deduplicates.

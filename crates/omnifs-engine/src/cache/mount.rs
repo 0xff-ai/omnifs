@@ -34,7 +34,7 @@ use crate::cache::memory::MemoryTier;
 use crate::object_id::ObjectId;
 use crate::view::{
     AttrPayload, ByteSource, CachedCursor, DirentsPage, DirentsPayload, EntryMeta, FileAttrsCache,
-    FilePayload, FileSize, LookupPayload,
+    FilePayload, FileSize, ListingWrite, LookupPayload,
 };
 use omnifs_core::ProviderId;
 
@@ -134,7 +134,7 @@ pub(crate) enum DirentsMutation {
     MergeHints {
         path: Path,
         entries: Vec<crate::view::DirentRecord>,
-        exhaustive: bool,
+        write: ListingWrite,
     },
     /// The next page of a listing, asked for with the listing's next cursor.
     AppendPage {
@@ -263,6 +263,12 @@ pub(crate) struct ProjectionTransition {
     pub invalidations: Vec<Invalidation>,
     pub blobs: Vec<BlobWrite>,
     pub git: Vec<GitWrite>,
+    /// Paths whose facts, with the facts beneath them, leave the projection;
+    /// each leaves its parent listing as complete as it was.
+    pub removals: Vec<Path>,
+    /// The answer of a feed: its records and listings are fed facts, and the
+    /// feed states it brought.
+    pub feed: Option<FeedWrite>,
 }
 
 impl ProjectionTransition {
@@ -274,7 +280,38 @@ impl ProjectionTransition {
             && self.invalidations.is_empty()
             && self.blobs.is_empty()
             && self.git.is_empty()
+            && self.removals.is_empty()
+            && self.feed.is_none()
     }
+}
+
+/// The state of a feed: the token of its last part, whether its first
+/// answer ended, and its deadline, after which an operation that does not
+/// start it asks it for an answer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FeedState {
+    pub token: String,
+    pub ended: bool,
+    pub deadline: u64,
+}
+
+/// The feed states one answer of a feed publishes: its own, renewed by an
+/// `unchanged` answer or advanced by a part, and the inner states the part
+/// brought, each a token whose first answer ended. Every state gets
+/// `deadline`.
+#[derive(Debug, Clone)]
+pub(crate) struct FeedWrite {
+    pub object: Vec<u8>,
+    pub part: Option<FeedPartWrite>,
+    pub inner: Vec<(Vec<u8>, String)>,
+    pub deadline: u64,
+}
+
+/// The token after a part, and whether more parts follow in its answer.
+#[derive(Debug, Clone)]
+pub(crate) struct FeedPartWrite {
+    pub token: String,
+    pub more: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -748,6 +785,8 @@ impl MountResources {
             invalidations,
             blobs,
             git,
+            removals: removed_paths,
+            feed,
         } = transition;
         // Bodies become immutable and addressable before the projection
         // transaction can publish a reference to them. This work intentionally
@@ -869,6 +908,7 @@ impl MountResources {
                 },
             }
         }
+        memory_prefixes.extend(removed_paths.iter().cloned());
 
         let next_epoch = if invalidations.is_empty() {
             None
@@ -910,7 +950,17 @@ impl MountResources {
                 }
             }
 
+            // A feed answer writes fed facts; any other transition leaves
+            // the fed facts of a path to its feeds.
+            let fed_answer = feed.is_some();
+            let mut written = Vec::with_capacity(prepared_records.len());
             for record in &prepared_records {
+                if fed_answer {
+                    tx.insert(facts, fed_key(&record.path), []);
+                } else if tx.get(facts, fed_key(&record.path))?.is_some() {
+                    continue;
+                }
+                written.push(record);
                 remove_negative_for_path(tx, facts, &record.path)?;
                 if matches!(&record.fact, DurableFact::Lookup(_))
                     && !transition_git_paths.contains(&record.path)
@@ -949,9 +999,21 @@ impl MountResources {
                 );
             }
             for mutation in &dirents {
-                apply_dirents(tx, facts, mutation)?;
+                if fed_answer {
+                    tx.insert(facts, fed_key(mutation.path()), []);
+                    apply_dirents(tx, facts, mutation)?;
+                } else {
+                    let mutation = with_fed_entries(tx, facts, mutation)?;
+                    apply_dirents(tx, facts, &mutation)?;
+                }
+            }
+            if let Some(feed) = &feed {
+                write_feed_states(tx, facts, feed)?;
             }
             for freshness in &freshness {
+                if !fed_answer && tx.get(facts, fed_key(&freshness.path))?.is_some() {
+                    continue;
+                }
                 let mut expiry = b"x:".to_vec();
                 expiry.extend_from_slice(freshness.path.as_str().as_bytes());
                 tx.insert(
@@ -961,7 +1023,7 @@ impl MountResources {
                 );
             }
             let mut reconciled_paths =
-                reconcile_listing_relations(tx, facts, &prepared_records, &dirents, &mut removals)?;
+                reconcile_listing_relations(tx, facts, &written, &dirents, &mut removals)?;
             // Apply invalidation scanners after all transition writes. Fjall's
             // transaction reads see those writes, so same-terminal aliases,
             // records, Git facts, and negative reverse rows are retired too.
@@ -987,6 +1049,12 @@ impl MountResources {
                         }
                     },
                     Invalidation::Object(_) => {},
+                }
+            }
+            for path in &removed_paths {
+                reconciled_paths.extend(remove_subtree_facts(tx, facts, path, &mut removals)?);
+                if let Some(parent) = remove_from_parent_listing(tx, facts, path)? {
+                    reconciled_paths.insert(parent);
                 }
             }
             for key in removals {
@@ -1225,6 +1293,19 @@ impl MountResources {
         Ok(Some(GitFact { id, relative_path }))
     }
 
+    /// The state of the feed of the object `id`.
+    pub(crate) fn feed_state(&self, id: &[u8]) -> Result<Option<FeedState>, ProjectionError> {
+        self.projection
+            .get(&feed_key(id))?
+            .map(|bytes| postcard::from_bytes(&bytes).map_err(ProjectionError::from))
+            .transpose()
+    }
+
+    /// Whether the facts of `path` are fed: they come from feeds alone.
+    pub(crate) fn is_fed(&self, path: &Path) -> Result<bool, ProjectionError> {
+        Ok(self.projection.get(&fed_key(path))?.is_some())
+    }
+
     /// Whether the indexed view leaf has reached its freshness deadline.
     pub(crate) fn view_expired(
         &self,
@@ -1375,6 +1456,161 @@ fn normalize_meta(meta: &EntryMeta, body: &BodyStore) -> Result<EntryMeta, Proje
         attrs.clone()
     };
     Ok(EntryMeta::file(attrs))
+}
+
+fn feed_key(id: &[u8]) -> Vec<u8> {
+    let mut key = b"e:".to_vec();
+    key.extend_from_slice(hex::encode(id).as_bytes());
+    key
+}
+
+fn fed_key(path: &Path) -> Vec<u8> {
+    let mut key = b"f:".to_vec();
+    key.extend_from_slice(path.as_str().as_bytes());
+    key
+}
+
+fn write_feed_states(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    feed: &FeedWrite,
+) -> Result<(), ProjectionError> {
+    let key = feed_key(&feed.object);
+    let previous = tx
+        .get(facts, &key)?
+        .map(|bytes| postcard::from_bytes::<FeedState>(&bytes))
+        .transpose()?;
+    let state = match (&feed.part, previous) {
+        (Some(part), previous) => FeedState {
+            token: part.token.clone(),
+            ended: previous.is_some_and(|state| state.ended) || !part.more,
+            deadline: feed.deadline,
+        },
+        (None, Some(previous)) => FeedState {
+            deadline: feed.deadline,
+            ..previous
+        },
+        (None, None) => {
+            return Err(ProjectionError::Inconsistent(
+                "unchanged answer for a feed without a state".into(),
+            ));
+        },
+    };
+    tx.insert(facts, key, postcard::to_allocvec(&state)?);
+    for (id, token) in &feed.inner {
+        tx.insert(
+            facts,
+            feed_key(id),
+            postcard::to_allocvec(&FeedState {
+                token: token.clone(),
+                ended: true,
+                deadline: feed.deadline,
+            })?,
+        );
+    }
+    Ok(())
+}
+
+/// A listing mutation of a transition other than a feed answer, with the
+/// entries of fed children carrying their fed facts.
+fn with_fed_entries(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    mutation: &DirentsMutation,
+) -> Result<DirentsMutation, ProjectionError> {
+    let mut mutation = mutation.clone();
+    let parent = mutation.path().clone();
+    let entries: Vec<&mut crate::view::DirentRecord> = match &mut mutation {
+        DirentsMutation::Replace { value, .. } => value
+            .pages
+            .iter_mut()
+            .flat_map(|page| page.entries.iter_mut())
+            .collect(),
+        DirentsMutation::MergeHints { entries, .. } => entries.iter_mut().collect(),
+        DirentsMutation::AppendPage { page, .. } | DirentsMutation::ReplacePage { page, .. } => {
+            page.entries.iter_mut().collect()
+        },
+        DirentsMutation::RenewPage { .. } => Vec::new(),
+    };
+    for entry in entries {
+        let child = parent
+            .join(&entry.name)
+            .map_err(|error| ProjectionError::Inconsistent(error.to_string()))?;
+        if tx.get(facts, fed_key(&child))?.is_none() {
+            continue;
+        }
+        if let Some(bytes) = tx.get(facts, fact_key(child.as_str(), RecordKind::Lookup, None))?
+            && let DurableFact::Lookup(LookupPayload::Positive(meta)) =
+                postcard::from_bytes(&bytes)?
+        {
+            entry.meta = meta;
+        }
+    }
+    Ok(mutation)
+}
+
+/// Remove the facts of `root` and of every path beneath it, returning the
+/// paths whose facts left.
+fn remove_subtree_facts(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    root: &Path,
+    removals: &mut Vec<Vec<u8>>,
+) -> Result<HashSet<Path>, ProjectionError> {
+    let mut paths = HashSet::new();
+    for kind in RecordKind::ALL {
+        let prefix = fact_key(root.as_str(), kind, None);
+        for guard in tx.prefix(facts, prefix.as_slice()) {
+            let key = guard.key()?.to_vec();
+            let (path, _, _) = decode_fact_key(&key)?;
+            if path.has_prefix(root) {
+                paths.insert(path);
+            }
+        }
+    }
+    let git_prefix = git_key(root);
+    for guard in tx.prefix(facts, git_prefix.as_slice()) {
+        let key = guard.key()?.to_vec();
+        let path = Path::parse(
+            std::str::from_utf8(&key[2..])
+                .map_err(|_| ProjectionError::Inconsistent("Git fact path is not UTF-8".into()))?,
+        )
+        .map_err(|error| ProjectionError::Inconsistent(error.to_string()))?;
+        if path.has_prefix(root) {
+            paths.insert(path);
+        }
+    }
+    for path in &paths {
+        remove_path_facts(tx, facts, path, removals)?;
+    }
+    Ok(paths)
+}
+
+/// Remove `path` from its parent listing, which stays as complete as it was.
+fn remove_from_parent_listing(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    path: &Path,
+) -> Result<Option<Path>, ProjectionError> {
+    let Some((parent, name)) = path.parent_and_name() else {
+        return Ok(None);
+    };
+    let Some(mut listing) = read_dirents_fact(tx, facts, &parent)? else {
+        return Ok(None);
+    };
+    if !listing.entries().any(|entry| entry.name == name) {
+        return Ok(None);
+    }
+    listing.remove_entry(name);
+    apply_dirents(
+        tx,
+        facts,
+        &DirentsMutation::Replace {
+            path: parent.clone(),
+            value: listing,
+        },
+    )?;
+    Ok(Some(parent))
 }
 
 fn index_key(path: &Path) -> Vec<u8> {
@@ -1558,6 +1794,7 @@ fn remove_path_facts(
     expiry.extend_from_slice(path.as_str().as_bytes());
     removals.push(expiry);
     removals.push(git_key(path));
+    removals.push(fed_key(path));
     Ok(())
 }
 
@@ -1634,7 +1871,7 @@ fn invalidate_parent_listing(
 fn reconcile_listing_relations(
     tx: &mut fjall::OptimisticWriteTx,
     facts: &fjall::OptimisticTxKeyspace,
-    records: &[PreparedRecord],
+    records: &[&PreparedRecord],
     dirents: &[DirentsMutation],
     removals: &mut Vec<Vec<u8>>,
 ) -> Result<HashSet<Path>, ProjectionError> {
@@ -1662,7 +1899,7 @@ fn reconcile_listing_relations(
                         meta: meta.clone(),
                     },
                 );
-                listing = DirentsPayload::merged(Some(listing), entries, false);
+                listing = DirentsPayload::merged(Some(listing), entries, ListingWrite::Partial);
                 apply_dirents(
                     tx,
                     facts,
@@ -1800,7 +2037,7 @@ fn apply_dirents(
         DirentsMutation::MergeHints {
             path,
             entries,
-            exhaustive,
+            write,
         } => {
             let current = read_dirents_fact(tx, facts, path)?;
             let map = entries
@@ -1808,7 +2045,7 @@ fn apply_dirents(
                 .cloned()
                 .map(|entry| (entry.name.clone(), entry))
                 .collect();
-            (path, DirentsPayload::merged(current, map, *exhaustive))
+            (path, DirentsPayload::merged(current, map, *write))
         },
         DirentsMutation::AppendPage {
             path,
@@ -2579,6 +2816,129 @@ mod tests {
             .unwrap();
         publish_negative(&store, &stale_git, None, 40_000);
         assert!(store.git_for_path(&stale_git).unwrap().is_none());
+    }
+
+    fn fed_dir(path: &Path, children: &[&str], write: ListingWrite) -> ProjectionTransition {
+        let mut records = vec![RecordWrite {
+            path: path.clone(),
+            aux: None,
+            fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+        }];
+        let entries = children
+            .iter()
+            .map(|name| {
+                records.push(RecordWrite {
+                    path: path.join(name).unwrap(),
+                    aux: None,
+                    fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+                });
+                crate::view::DirentRecord {
+                    name: (*name).to_string(),
+                    meta: EntryMeta::directory(),
+                }
+            })
+            .collect();
+        ProjectionTransition {
+            records,
+            dirents: vec![DirentsMutation::MergeHints {
+                path: path.clone(),
+                entries,
+                write,
+            }],
+            feed: Some(FeedWrite {
+                object: b"feed".to_vec(),
+                part: Some(FeedPartWrite {
+                    token: "token".into(),
+                    more: false,
+                }),
+                inner: Vec::new(),
+                deadline: 1_000,
+            }),
+            ..ProjectionTransition::default()
+        }
+    }
+
+    #[test]
+    fn fed_listings_stay_complete_through_reconciliation_and_removals() {
+        let (_dir, _caches, store) = open_store("m");
+        let books = p("/shelf/books");
+
+        // A partial part, then a complete one whose child joins the listing
+        // and whose lookup reconciliation keeps it complete.
+        store
+            .publish(
+                fed_dir(&books, &["1"], ListingWrite::Partial),
+                store.current_epoch(),
+            )
+            .unwrap();
+        assert!(!store.dirents_payload(&books).unwrap().unwrap().exhaustive);
+        store
+            .publish(
+                fed_dir(&books, &["2"], ListingWrite::Complete),
+                store.current_epoch(),
+            )
+            .unwrap();
+        let listing = store.dirents_payload(&books).unwrap().unwrap();
+        assert!(listing.is_complete_offline());
+        assert_eq!(listing.entries().count(), 2);
+        assert!(store.is_fed(&books).unwrap());
+        assert_eq!(
+            store.feed_state(b"feed").unwrap(),
+            Some(FeedState {
+                token: "token".into(),
+                ended: true,
+                deadline: 1_000,
+            })
+        );
+
+        // A removal retracts the child and its subtree and leaves the
+        // listing as complete as it was.
+        store
+            .publish(
+                ProjectionTransition {
+                    removals: vec![p("/shelf/books/1")],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        let listing = store.dirents_payload(&books).unwrap().unwrap();
+        assert!(listing.is_complete_offline());
+        assert_eq!(
+            listing
+                .entries()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["2"]
+        );
+        assert!(
+            store
+                .lookup_payload(&p("/shelf/books/1"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!store.is_fed(&p("/shelf/books/1")).unwrap());
+
+        // Another terminal leaves the fed facts of a path to its feeds.
+        store
+            .publish(
+                ProjectionTransition {
+                    records: vec![RecordWrite {
+                        path: p("/shelf/books/2"),
+                        aux: None,
+                        fact: FactPayload::Lookup(LookupPayload::Positive(
+                            EntryMeta::file_without_attrs(),
+                        )),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.lookup_payload(&p("/shelf/books/2")).unwrap(),
+            Some(LookupPayload::Positive(meta)) if meta.is_directory()
+        ));
     }
 
     #[test]

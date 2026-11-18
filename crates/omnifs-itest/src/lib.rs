@@ -200,9 +200,11 @@ impl ReadFileOpExt for TestOp<'_, ReadFileOutcome> {
     fn into_read_file(self) -> Result<ReadFileResult, EngineError> {
         match self.into_result()?.map_err(EngineError::ProviderError)? {
             ReadFileOutcome::Found(result) => Ok(result),
-            other @ ReadFileOutcome::NotFound(_) => Err(EngineError::ProviderProtocol(format!(
-                "expected found read-file result, got {other:?}"
-            ))),
+            other @ (ReadFileOutcome::NotFound(_) | ReadFileOutcome::Feed(_)) => {
+                Err(EngineError::ProviderProtocol(format!(
+                    "expected found read-file result, got {other:?}"
+                )))
+            },
         }
     }
 }

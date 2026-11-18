@@ -74,7 +74,9 @@ fn partial_discovery_stays_open_qualifies_groups_and_retries_unknown_types() {
             names.sort();
             assert_eq!(names, vec!["bars.example.io", "legacies.example.io"]);
         },
-        other @ (ListChildrenResult::Subtree(_) | ListChildrenResult::Unchanged(_)) => {
+        other @ (ListChildrenResult::Subtree(_)
+        | ListChildrenResult::Unchanged(_)
+        | ListChildrenResult::Feed(_)) => {
             panic!("expected partial type entries, got {other:?}")
         },
     }

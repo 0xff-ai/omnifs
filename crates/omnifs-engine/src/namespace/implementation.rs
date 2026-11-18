@@ -52,16 +52,28 @@ fn entry_kind_from_meta(meta: &EntryMeta) -> EntryKind {
     }
 }
 
-fn attrs_from_cache(kind: EntryKind, attrs: Option<&FileAttrsCache>, change: u64) -> Attrs {
-    let ttl = attrs.map_or(TTL_STATIC, |attrs| {
-        if matches!(attrs.size(), FileSize::Exact(_))
-            && matches!(attrs.stability(), view_types::Stability::Stable)
-        {
-            TTL_STATIC
-        } else {
-            TTL_DYNAMIC
-        }
-    });
+/// Policied attrs for an entry. A fed entry has the zero lifetime of dynamic
+/// entries, so each access asks the namespace, which asks its feeds once they
+/// are past their deadline.
+fn attrs_from_cache(
+    kind: EntryKind,
+    attrs: Option<&FileAttrsCache>,
+    change: u64,
+    fed: bool,
+) -> Attrs {
+    let ttl = if fed {
+        TTL_DYNAMIC
+    } else {
+        attrs.map_or(TTL_STATIC, |attrs| {
+            if matches!(attrs.size(), FileSize::Exact(_))
+                && matches!(attrs.stability(), view_types::Stability::Stable)
+            {
+                TTL_STATIC
+            } else {
+                TTL_DYNAMIC
+            }
+        })
+    };
     let stability = attrs.map_or(Stability::Stable, FileAttrsCache::stability);
     let read_style = if attrs.is_some_and(FileAttrsCache::is_deferred_ranged) {
         ReadStyle::Ranged
@@ -546,7 +558,6 @@ impl EngineNamespace {
         let exact_paths: Vec<Path> = report
             .paths
             .iter()
-            .chain(report.changed_dirs.iter())
             .map(|rel| mount_full_path(mount, rel))
             .collect();
         let prefix_paths: Vec<Path> = report
@@ -609,6 +620,35 @@ impl EngineNamespace {
             // Evicting the handle closes it and aborts its pump (Drop).
             let _ = self.events.send(NsEvent::InvalidateSubtree { path: id });
         }
+
+        // A changed listing keeps the identity of its directory and of the
+        // nodes below it: its change counter moves, and filesystems drop their
+        // answers for it in place.
+        for rel in &report.changed_dirs {
+            let dir = mount_full_path(mount, rel);
+            if !unique.insert(dir.clone()) {
+                continue;
+            }
+            self.node_epochs.insert(dir.clone(), epoch);
+            let fed = match self
+                .configured_entry(mount)
+                .map(|entry| entry.resources().is_fed(rel))
+                .transpose()
+            {
+                Ok(fed) => fed.is_some_and(|fed| fed),
+                Err(error) => {
+                    tracing::warn!(path = %dir, error = %error, "changed listing has no readable fed marker");
+                    continue;
+                },
+            };
+            let attrs = attrs_from_cache(
+                EntryKind::Directory,
+                None,
+                change_counter_parts(&dir, None, epoch),
+                fed,
+            );
+            let _ = self.events.send(NsEvent::AttrsChanged { path: dir, attrs });
+        }
     }
 
     fn sweep_idle_handles(&self) {
@@ -647,6 +687,7 @@ impl EngineNamespace {
             entry_kind_from_node(node),
             attrs,
             self.root_aware_change(id, node, attrs, epoch),
+            node.is_fed(),
         )
     }
 
@@ -736,7 +777,7 @@ impl EngineNamespace {
             .learned_attrs
             .unwrap_or_else(|| handle.attrs().clone());
         self.store_learned(id, learned.clone());
-        let attrs = self.attrs_for_read(id, EntryKind::File, Some(&learned));
+        let attrs = self.attrs_for_read(id, EntryKind::File, Some(&learned), false);
         Ok(ReadAnswer {
             bytes: chunk.bytes,
             eof: chunk.eof,
@@ -761,14 +802,25 @@ impl EngineNamespace {
         let end = start.saturating_add(len as usize).min(data.len());
         let bytes = data[start..end].to_vec();
         let eof = end >= data.len();
-        let attrs = self.attrs_for_read(id, entry_kind_from_node(node), attrs.as_ref());
+        let attrs = self.attrs_for_read(
+            id,
+            entry_kind_from_node(node),
+            attrs.as_ref(),
+            node.is_fed(),
+        );
         Ok(ReadAnswer { bytes, eof, attrs })
     }
 
     /// Compute `Attrs` for a read answer, folding in the size the read learned.
-    fn attrs_for_read(&self, id: &Path, kind: EntryKind, attrs: Option<&FileAttrsCache>) -> Attrs {
+    fn attrs_for_read(
+        &self,
+        id: &Path,
+        kind: EntryKind,
+        attrs: Option<&FileAttrsCache>,
+        fed: bool,
+    ) -> Attrs {
         let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
-        attrs_from_cache(kind, attrs, change_counter_parts(id, attrs, epoch))
+        attrs_from_cache(kind, attrs, change_counter_parts(id, attrs, epoch), fed)
     }
 
     fn store_learned(&self, id: &Path, learned: FileAttrsCache) {
@@ -829,6 +881,7 @@ impl EngineNamespace {
                 EntryKind::File,
                 Some(&grown),
                 change_counter_parts(&id, Some(&grown), node_epoch),
+                false,
             );
             let _ = events.send(NsEvent::AttrsChanged {
                 path: id.clone(),
@@ -917,7 +970,7 @@ impl EngineNamespace {
             let entries = listing
                 .entries
                 .iter()
-                .map(|entry| self.dir_entry(&parent_full, &entry.name, &entry.meta))
+                .map(|entry| self.dir_entry(&parent_full, &entry.name, &entry.meta, entry.fed))
                 .collect();
             let tree_next = listing.next_cursor.map(|c| c.0);
             Ok(dir_page_with_budget(entries, tree_next, budget, false))
@@ -929,7 +982,7 @@ impl EngineNamespace {
     }
 
     /// Turn a listing child into a `DirEntry`, allocating its id.
-    fn dir_entry(&self, parent_full: &Path, name: &str, meta: &EntryMeta) -> DirEntry {
+    fn dir_entry(&self, parent_full: &Path, name: &str, meta: &EntryMeta, fed: bool) -> DirEntry {
         let full = parent_full
             .join(name)
             .unwrap_or_else(|_| parent_full.clone());
@@ -953,6 +1006,7 @@ impl EngineNamespace {
             kind.clone(),
             merged.as_ref(),
             change_counter_parts(&id, merged.as_ref(), epoch),
+            fed,
         );
         DirEntry {
             attrs,

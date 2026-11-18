@@ -115,8 +115,15 @@ impl EngineNamespace {
             self.drain_invalidations(node.mount());
         }
         let offline = entry.runtime().is_none();
-        if let Some(dirents) =
-            consult_authoritative_listing(resources, entry.runtime().as_deref(), path)?
+        // A fed listing is served once its feeds have answered, so it asks
+        // the provider for their claims.
+        let fed = !offline
+            && resources
+                .is_fed(path)
+                .map_err(|error| TreeError::internal(error.to_string()))?;
+        if !fed
+            && let Some(dirents) =
+                consult_authoritative_listing(resources, entry.runtime().as_deref(), path)?
         {
             let dirents = match entry.runtime() {
                 Some(runtime)
@@ -130,8 +137,8 @@ impl EngineNamespace {
             };
             crate::inspector::cache_event(CacheKind::BrowseHit);
             return Ok(ListOutcome::Listing(listing_from_dirents(
-                node, &dirents, offline,
-            )));
+                resources, node, &dirents, offline,
+            )?));
         }
 
         let runtime = entry.runtime().ok_or_else(|| {
@@ -173,9 +180,12 @@ impl EngineNamespace {
                     runtime.record_dir_changed(path);
                 },
                 Ok(crate::ops::namespace::ListOutcome::Unchanged) => {},
-                Ok(crate::ops::namespace::ListOutcome::Subtree(_)) => {
+                Ok(
+                    crate::ops::namespace::ListOutcome::Subtree(_)
+                    | crate::ops::namespace::ListOutcome::Feed(_),
+                ) => {
                     return Err(TreeError::internal(
-                        "revalidated listing page resolved to a host-tree handoff",
+                        "revalidated listing page answered no page",
                     ));
                 },
                 Err(error) if error.is_provider_rate_limited() => return Ok(dirents),
@@ -217,13 +227,14 @@ impl EngineNamespace {
                     .and_then(|dirents| dirents.page(page_cursor.as_ref()))
                     .ok_or_else(|| TreeError::internal("unchanged page is no longer cached"))?;
                 Ok(Listing {
-                    entries: cached_entries(path, page.entries.iter()),
+                    entries: cached_entries(&runtime.resources, path, page.entries.iter())?,
                     next_cursor: next_cursor.cloned().map(Cursor),
                 })
             },
-            crate::ops::namespace::ListOutcome::Subtree(_) => Err(TreeError::internal(
-                "list continuation resolved to a host-tree handoff",
-            )),
+            crate::ops::namespace::ListOutcome::Subtree(_)
+            | crate::ops::namespace::ListOutcome::Feed(_) => {
+                Err(TreeError::internal("list continuation answered no page"))
+            },
         }
     }
 
@@ -249,15 +260,30 @@ impl EngineNamespace {
 
         match result {
             Ok(crate::ops::namespace::ListOutcome::Entries(listing)) => Ok(ListOutcome::Listing(
-                snapshot_from_provider_listing(node, &listing),
+                snapshot_from_provider_listing(&runtime.resources, node, &listing)?,
             )),
             Ok(crate::ops::namespace::ListOutcome::Unchanged) => {
                 let dirents = cached_dirents(&runtime.resources, path)?.ok_or_else(|| {
                     TreeError::internal("unchanged first page is no longer cached")
                 })?;
                 Ok(ListOutcome::Listing(listing_from_dirents(
-                    node, &dirents, false,
-                )))
+                    &runtime.resources,
+                    node,
+                    &dirents,
+                    false,
+                )?))
+            },
+            Ok(crate::ops::namespace::ListOutcome::Feed(claims)) => {
+                super::feed::answer_claims(runtime, path, super::feed::FedFact::Listing, &claims)
+                    .await?;
+                let dirents = cached_dirents(&runtime.resources, path)?
+                    .ok_or_else(|| TreeError::not_found(path.as_str()))?;
+                Ok(ListOutcome::Listing(listing_from_dirents(
+                    &runtime.resources,
+                    node,
+                    &dirents,
+                    false,
+                )?))
             },
             Ok(crate::ops::namespace::ListOutcome::Subtree(tref)) => {
                 runtime
@@ -275,8 +301,11 @@ impl EngineNamespace {
                 // Serve stale so `ls` survives upstream throttling.
                 if rate_limited && let Some(dirents) = cached {
                     return Ok(ListOutcome::Listing(listing_from_dirents(
-                        node, &dirents, false,
-                    )));
+                        &runtime.resources,
+                        node,
+                        &dirents,
+                        false,
+                    )?));
                 }
                 Err(error.into())
             },
@@ -289,7 +318,11 @@ impl EngineNamespace {
 /// included when paged, and never stripped back out even after the feed later
 /// exhausts, so they survive a later cached serve and control-name resolution),
 /// and surface the synthetic control / ignore entries.
-fn snapshot_from_provider_listing(node: &Node, listing: &ProviderListing) -> Listing {
+fn snapshot_from_provider_listing(
+    resources: &MountResources,
+    node: &Node,
+    listing: &ProviderListing,
+) -> Result<Listing> {
     let path = node.path();
     let mut dirent_records = Vec::with_capacity(listing.entries.len());
     for e in &listing.entries {
@@ -309,14 +342,34 @@ fn snapshot_from_provider_listing(node: &Node, listing: &ProviderListing) -> Lis
 
     let next_cursor = listing.next_cursor.clone();
     let paginated = next_cursor.is_some();
-    let mut entries: Vec<Entry> = dirent_records
+    let mut entries = dirent_records
         .into_iter()
-        .map(|r| Entry::provider(r.name, r.meta))
-        .collect();
+        .map(|r| listed_entry(resources, path, r.name, r.meta))
+        .collect::<Result<Vec<_>>>()?;
     entries.extend(synthetic_entries_for(node, paginated));
-    Listing {
+    Ok(Listing {
         entries,
         next_cursor: next_cursor.map(Cursor),
+    })
+}
+
+/// A listed child, marked fed when its facts come from feeds.
+fn listed_entry(
+    resources: &MountResources,
+    parent: &omnifs_core::path::Path,
+    name: String,
+    meta: EntryMeta,
+) -> Result<Entry> {
+    let child = parent
+        .join(&name)
+        .map_err(|error| TreeError::internal(error.to_string()))?;
+    if resources
+        .is_fed(&child)
+        .map_err(|error| TreeError::internal(error.to_string()))?
+    {
+        Ok(Entry::fed(name, meta))
+    } else {
+        Ok(Entry::provider(name, meta))
     }
 }
 
@@ -354,8 +407,13 @@ fn provider_entries(path: &omnifs_core::path::Path, entries: &[ProviderEntry]) -
 /// Offline serving suppresses those provider-dependent controls and the
 /// continuation cursor because cache-only traversal must terminate after the
 /// known snapshot.
-fn listing_from_dirents(node: &Node, dirents: &DirentsPayload, offline: bool) -> Listing {
-    let mut entries = cached_entries(node.path(), dirents.entries());
+fn listing_from_dirents(
+    resources: &MountResources,
+    node: &Node,
+    dirents: &DirentsPayload,
+    offline: bool,
+) -> Result<Listing> {
+    let mut entries = cached_entries(resources, node.path(), dirents.entries())?;
 
     let mut synthetic_entries = Vec::new();
     if !offline && dirents.next_cursor.is_some() {
@@ -366,27 +424,28 @@ fn listing_from_dirents(node: &Node, dirents: &DirentsPayload, offline: bool) ->
     }
     entries.extend(synthetic_entries);
 
-    Listing {
+    Ok(Listing {
         entries,
         next_cursor: (!offline)
             .then(|| dirents.next_cursor.clone())
             .flatten()
             .map(Cursor),
-    }
+    })
 }
 
 /// Cached records as provider entries, without the reserved-`@` control
 /// records and, at the mount root, the host-owned ignore files.
 fn cached_entries<'a>(
+    resources: &MountResources,
     path: &omnifs_core::path::Path,
     records: impl Iterator<Item = &'a DirentRecord>,
-) -> Vec<Entry> {
+) -> Result<Vec<Entry>> {
     records
         .filter(|record| {
             !(synthetic::is_reserved_provider_leaf(&record.name)
                 || path.is_root() && synthetic::is_root_ignore_name(&record.name))
         })
-        .map(|record| Entry::provider(record.name.clone(), record.meta.clone()))
+        .map(|record| listed_entry(resources, path, record.name.clone(), record.meta.clone()))
         .collect()
 }
 

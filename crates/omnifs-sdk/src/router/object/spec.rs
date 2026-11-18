@@ -66,6 +66,28 @@ pub(in crate::router) struct ObjectDefinition<O: Object> {
     pub(super) tree_faces: std::rc::Rc<Vec<TreeFaceEntry<O::State>>>,
     /// Choices faces declared on dir faces (`o.dir(name).choices(names)`).
     pub(super) choices_faces: std::rc::Rc<Vec<ChoicesFace>>,
+    /// Whether the anchor's own lookup is fed (`o.fed()`).
+    pub(super) fed_anchor: bool,
+    /// Dir faces whose listing is fed (`o.dir(name).fed()`).
+    pub(super) fed_dirs: std::rc::Rc<Vec<&'static str>>,
+    /// The feed of the object (`o.feed(method).starts([...])`).
+    pub(super) feed: Option<FeedDeclaration<O::State>>,
+}
+
+/// An object's feed: its boxed method and its starting paths, relative to
+/// the object (`""` for the anchor itself).
+pub(in crate::router) struct FeedDeclaration<S> {
+    pub handler: std::rc::Rc<crate::feed::FeedHandlerFn<S>>,
+    pub starts: Vec<&'static str>,
+}
+
+impl<S> Clone for FeedDeclaration<S> {
+    fn clone(&self) -> Self {
+        Self {
+            handler: self.handler.clone(),
+            starts: self.starts.clone(),
+        }
+    }
 }
 
 /// One tree face: the relative dir name and the boxed tree handler. The
@@ -127,6 +149,9 @@ impl<O: Object> Clone for ObjectDefinition<O> {
             collections: self.collections.clone(),
             tree_faces: self.tree_faces.clone(),
             choices_faces: self.choices_faces.clone(),
+            fed_anchor: self.fed_anchor,
+            fed_dirs: self.fed_dirs.clone(),
+            feed: self.feed.clone(),
         }
     }
 }
@@ -147,6 +172,12 @@ impl<O: Object> ObjectHandle<O> {
     /// routes at mount time.
     pub(in crate::router) fn choices_faces(&self) -> &[ChoicesFace] {
         &self.definition.choices_faces
+    }
+
+    /// The dir faces whose listing is fed, registered as fed dir routes at
+    /// mount time.
+    pub(in crate::router) fn fed_dirs(&self) -> &[&'static str] {
+        &self.definition.fed_dirs
     }
 
     /// The canonical and representation leaves that a mounted face exposes
@@ -197,6 +228,9 @@ pub struct ObjectBlock<O: Object> {
     /// fixed finite child names, registered as an exhaustive dir route at mount
     /// time so a readdir lists those names.
     choices_faces: Vec<ChoicesFace>,
+    fed_anchor: bool,
+    fed_dirs: Vec<&'static str>,
+    feed: Option<FeedDeclaration<O::State>>,
     /// The single allowed file-object face name (file shape only).
     file_face_seen: bool,
 }
@@ -216,8 +250,37 @@ impl<O: Object> ObjectBlock<O> {
             collections: Vec::new(),
             tree_faces: Vec::new(),
             choices_faces: Vec::new(),
+            fed_anchor: false,
+            fed_dirs: Vec::new(),
+            feed: None,
             file_face_seen: false,
         })
+    }
+
+    /// Feed the anchor's own lookup: whether the object exists comes from
+    /// its feeds alone, and listing the anchor lists its faces without a
+    /// load of the object.
+    pub fn fed(&mut self) -> &mut Self {
+        self.fed_anchor = true;
+        self
+    }
+
+    /// Declare the feed of this object; finish with [`FeedFace::starts`].
+    /// The feed answers for the fed faces of the object's subtree.
+    pub fn feed<Fut>(
+        &mut self,
+        method: fn(crate::feed::FeedCx<O::Key, O::State>) -> Fut,
+    ) -> FeedFace<'_, O>
+    where
+        Fut: Future<Output = Result<crate::feed::Feed>> + 'static,
+        O: 'static,
+        O::Key: Key + 'static,
+        O::State: 'static,
+    {
+        FeedFace {
+            block: self,
+            handler: crate::feed::feed_handler::<O, Fut>(method),
+        }
     }
 
     /// Begin a file face under the anchor. `name` is a literal leaf (it may
@@ -371,7 +434,39 @@ impl<O: Object> ObjectBlock<O> {
             collections: std::rc::Rc::new(self.collections),
             tree_faces: std::rc::Rc::new(self.tree_faces),
             choices_faces: std::rc::Rc::new(self.choices_faces),
+            fed_anchor: self.fed_anchor,
+            fed_dirs: std::rc::Rc::new(self.fed_dirs),
+            feed: self.feed,
         })
+    }
+}
+
+/// A pending feed declared with [`ObjectBlock::feed`].
+pub struct FeedFace<'a, O: Object> {
+    block: &'a mut ObjectBlock<O>,
+    handler: std::rc::Rc<crate::feed::FeedHandlerFn<O::State>>,
+}
+
+impl<'a, O: Object> FeedFace<'a, O> {
+    /// The starting paths of the feed, relative to the object (`""` for the
+    /// anchor itself): an operation on one of them without its fact in the
+    /// projection starts an answer of the feed. Each must name a fed face of
+    /// the object's subtree, which [`super::super::Router::compile`] checks.
+    pub fn starts(
+        self,
+        starts: impl IntoIterator<Item = &'static str>,
+    ) -> Result<&'a mut ObjectBlock<O>> {
+        if self.block.feed.is_some() {
+            return Err(ProviderError::invalid_input(format!(
+                "object route {} declares more than one feed",
+                self.block.template
+            )));
+        }
+        self.block.feed = Some(FeedDeclaration {
+            handler: self.handler,
+            starts: starts.into_iter().collect(),
+        });
+        Ok(self.block)
     }
 }
 
@@ -564,6 +659,21 @@ impl<'a, O: Object> FileFace<'a, O> {
         Ok(self.block)
     }
 
+    /// A fed face: the file's lookup and its bytes come from feeds alone, in
+    /// place of a computed, canonical, or other face.
+    pub fn fed(self) -> Result<&'a mut ObjectBlock<O>> {
+        if self.block.shape == AnchorShape::File {
+            return Err(ProviderError::invalid_input(format!(
+                "file-object {} cannot have a fed face",
+                self.block.template
+            )));
+        }
+        self.block.validate_leaf_path(self.name)?;
+        let leaf_name = self.leaf_name();
+        self.block.leaves.push(ObjectLeaf::Fed { leaf_name });
+        Ok(self.block)
+    }
+
     /// An object face: the leaf is backed by a CHILD object `C` with its own
     /// load/decode/canonical contract. The child's key is computed from the
     /// parent route captures.
@@ -715,6 +825,20 @@ impl<'a, O: Object> DirFace<'a, O> {
             handler,
             validator: captures_validator::<O::Key>(),
         });
+        Ok(self.block)
+    }
+
+    /// A fed dir face: its listing comes from feeds alone, in place of a
+    /// collection. The mount registers a fed dir route at `template/name`.
+    pub fn fed(self) -> Result<&'a mut ObjectBlock<O>> {
+        if self.name.starts_with('@') {
+            return Err(ProviderError::invalid_input(format!(
+                "object route {}: fed dir {:?} uses the reserved @ namespace",
+                self.block.template, self.name
+            )));
+        }
+        self.block.validate_leaf_path(self.name)?;
+        self.block.fed_dirs.push(self.name);
         Ok(self.block)
     }
 

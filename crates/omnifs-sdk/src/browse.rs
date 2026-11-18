@@ -65,7 +65,7 @@ impl From<Entry> for wit_types::DirEntry {
 /// Terminal host mutations staged with an accepted provider return: the
 /// only way a provider writes host state.
 ///
-/// Three channels, applied only if the operation succeeds:
+/// Four channels, applied only if the operation succeeds:
 ///
 /// - `canonical` ([`Self::canonical_store`]): store verbatim upstream bytes
 ///   against a logical object id, durable across restarts.
@@ -76,20 +76,24 @@ impl From<Entry> for wit_types::DirEntry {
 ///   [`Self::invalidate_listing_path`], [`Self::invalidate_listing_prefix`]):
 ///   evict stale state, typically from event handlers. This is the
 ///   freshness mechanism; there are no TTLs.
+/// - `removals` ([`Self::remove`]): paths whose facts, with the facts
+///   beneath them, leave the projection, each leaving its parent listing as
+///   complete as it was. A feed retracts what it no longer finds upstream
+///   this way.
 ///
 /// Preload discipline: any resource you already hold beyond the one
 /// requested travels here as extra `canonical`/`fs` entries. If a payload
 /// in hand contains sibling leaves, project them now instead of forcing a
 /// refetch later.
 ///
-/// The three WIT effect blocks are kept as separate typed vecs so the
-/// channels never alias; [`Self::into_wit`] assembles the WIT `effects`
-/// record.
+/// The WIT effect blocks are kept as separate typed vecs so the channels
+/// never alias; [`Self::into_wit`] assembles the WIT `effects` record.
 #[derive(Clone, Debug, Default)]
 pub struct Effects {
     canonical: Vec<wit_types::CanonicalStore>,
     fs: Vec<wit_types::FsWrite>,
     invalidations: Vec<wit_types::Invalidation>,
+    removals: Vec<String>,
 }
 
 impl Effects {
@@ -102,12 +106,7 @@ impl Effects {
     /// Paths here and on every other `project_*` method are
     /// mount-absolute; a missing leading `/` is tolerated and prefixed.
     pub fn project_dir(&mut self, path: impl AsRef<str>) -> Result<&mut Self> {
-        self.fs.push(wit_types::FsWrite {
-            id: None,
-            path: wire_path(path.as_ref())?.into(),
-            kind: wit_types::FsKind::Directory(false),
-        });
-        Ok(self)
+        self.directory(path.as_ref(), ListingWrite::Partial)
     }
 
     /// Project a directory whose children appearing in the same effects
@@ -115,11 +114,40 @@ impl Effects {
     /// resulting dirents record exhaustive so subsequent readdirs serve
     /// from cache without re-invoking `list_children`.
     pub fn project_dir_exhaustive(&mut self, path: impl AsRef<str>) -> Result<&mut Self> {
+        self.directory(path.as_ref(), ListingWrite::Exhaustive)
+    }
+
+    pub(crate) fn directory(&mut self, path: &str, write: ListingWrite) -> Result<&mut Self> {
         self.fs.push(wit_types::FsWrite {
             id: None,
-            path: wire_path(path.as_ref())?.into(),
-            kind: wit_types::FsKind::Directory(true),
+            path: wire_path(path)?.into(),
+            kind: wit_types::FsKind::Directory(write.into()),
         });
+        Ok(self)
+    }
+
+    /// A fed file: stable inline bytes, which a feed part writes as a fact
+    /// of its feed. Fed files are not eager preloads, so they carry no
+    /// preload cap.
+    pub(crate) fn fed_file(&mut self, path: &str, bytes: Vec<u8>) -> Result<&mut Self> {
+        let size = u64::try_from(bytes.len())
+            .map_err(|_| ProviderError::too_large("fed file length does not fit u64"))?;
+        self.fs.push(wit_types::FsWrite {
+            id: None,
+            path: wire_path(path)?.into(),
+            kind: wit_types::FsKind::File(wit_types::FileOut {
+                content_type: None,
+                attrs: FileAttrs::new(FileSize::Exact(size), Stability::Stable).into(),
+                bytes: wit_types::ByteSource::Inline(bytes),
+            }),
+        });
+        Ok(self)
+    }
+
+    /// Retract the facts of `path` and of everything beneath it, leaving the
+    /// parent listing as complete as it was.
+    pub fn remove(&mut self, path: impl AsRef<str>) -> Result<&mut Self> {
+        self.removals.push(wire_path(path.as_ref())?.into());
         Ok(self)
     }
 
@@ -215,11 +243,15 @@ impl Effects {
         self.canonical.extend(other.canonical);
         self.fs.extend(other.fs);
         self.invalidations.extend(other.invalidations);
+        self.removals.extend(other.removals);
         self
     }
 
     pub fn is_empty(&self) -> bool {
-        self.canonical.is_empty() && self.fs.is_empty() && self.invalidations.is_empty()
+        self.canonical.is_empty()
+            && self.fs.is_empty()
+            && self.invalidations.is_empty()
+            && self.removals.is_empty()
     }
 
     #[doc(hidden)]
@@ -228,8 +260,57 @@ impl Effects {
             canonical: self.canonical,
             fs: self.fs,
             invalidations: self.invalidations,
+            removals: self.removals,
         }
     }
+}
+
+/// How the children of a directory write join its listing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListingWrite {
+    /// They join the listing, which stays as complete as it was unless they
+    /// add names to it.
+    Partial,
+    /// They are the whole listing.
+    Exhaustive,
+    /// They join the listing, which is complete after them.
+    Complete,
+}
+
+impl From<ListingWrite> for wit_types::ListingWrite {
+    fn from(write: ListingWrite) -> Self {
+        match write {
+            ListingWrite::Partial => Self::Partial,
+            ListingWrite::Exhaustive => Self::Exhaustive,
+            ListingWrite::Complete => Self::Complete,
+        }
+    }
+}
+
+/// A feed that answers for the path of an operation on a fed face: the
+/// logical id and the anchor path of its object, and whether the operation
+/// is on one of the feed's starting paths.
+#[derive(Clone, Debug)]
+pub struct FeedClaim {
+    pub(crate) id: LogicalId,
+    pub(crate) path: Path,
+    pub(crate) starts: bool,
+}
+
+impl From<FeedClaim> for wit_types::FeedClaim {
+    fn from(claim: FeedClaim) -> Self {
+        Self {
+            object: wit_types::FeedObject {
+                id: claim.id.into(),
+                path: claim.path.into(),
+            },
+            starts: claim.starts,
+        }
+    }
+}
+
+fn wit_claims(claims: Vec<FeedClaim>) -> Vec<wit_types::FeedClaim> {
+    claims.into_iter().map(Into::into).collect()
 }
 
 /// The validator of one listing page: the token the host sends back as the
@@ -356,8 +437,14 @@ impl From<Listing> for wit_types::DirListing {
 #[derive(Clone, Debug)]
 pub enum Lookup {
     Entry(LookupEntry),
-    Subtree { tree: u64 },
-    NotFound { id: Option<LogicalId> },
+    Subtree {
+        tree: u64,
+    },
+    NotFound {
+        id: Option<LogicalId>,
+    },
+    /// The child is fed: the feeds that answer for it, the outer first.
+    Feed(Vec<FeedClaim>),
 }
 
 /// The non-subtree, non-miss shape of a lookup: the found entry plus
@@ -460,6 +547,10 @@ impl Lookup {
                 wit_types::LookupChildResult::NotFound(id.map(Into::into)),
                 Effects::new(),
             ),
+            Self::Feed(claims) => (
+                wit_types::LookupChildResult::Feed(wit_claims(claims)),
+                Effects::new(),
+            ),
         }
     }
 }
@@ -470,9 +561,9 @@ impl From<Lookup> for wit_types::LookupChildResult {
     }
 }
 
-/// A list result: a listing, a subtree handoff, or the cached page of the
+/// A list result: a listing, a subtree handoff, the cached page of the
 /// validator of the call standing, with the seconds of the interval of its
-/// upstream.
+/// upstream, or the feeds that answer for a fed listing.
 #[derive(Clone, Debug)]
 pub enum List {
     Entries(Listing),
@@ -483,6 +574,7 @@ pub enum List {
         interval: Option<u32>,
         effects: Effects,
     },
+    Feed(Vec<FeedClaim>),
 }
 
 impl List {
@@ -511,6 +603,10 @@ impl List {
             Self::Unchanged { interval, effects } => {
                 (wit_types::ListChildrenResult::Unchanged(interval), effects)
             },
+            Self::Feed(claims) => (
+                wit_types::ListChildrenResult::Feed(wit_claims(claims)),
+                Effects::new(),
+            ),
         }
     }
 }
@@ -657,13 +753,15 @@ impl FileContent {
     }
 }
 
-/// A completed read-file terminal: found content, or a not-found
-/// optionally keyed to the logical object whose absence was established
-/// (so object invalidation clears the cached miss).
+/// A completed read-file terminal: found content, a not-found optionally
+/// keyed to the logical object whose absence was established (so object
+/// invalidation clears the cached miss), or the feeds that answer for a fed
+/// file.
 #[derive(Clone, Debug)]
 pub enum ReadOutcome {
     Found(FileContent),
     NotFound(Option<LogicalId>),
+    Feed(Vec<FeedClaim>),
 }
 
 impl ReadOutcome {
@@ -675,6 +773,10 @@ impl ReadOutcome {
                 wit_types::ReadFileOutcome::NotFound(id.map(Into::into)),
                 Effects::new(),
             ),
+            Self::Feed(claims) => (
+                wit_types::ReadFileOutcome::Feed(wit_claims(claims)),
+                Effects::new(),
+            ),
         }
     }
 }
@@ -684,8 +786,8 @@ impl From<FileContent> for wit_types::ReadFileResult {
         let (outcome, _) = result.into_read_outcome_and_effects();
         match outcome {
             wit_types::ReadFileOutcome::Found(found) => found,
-            wit_types::ReadFileOutcome::NotFound(_) => {
-                panic!("FileContent cannot lower to a not-found read outcome")
+            wit_types::ReadFileOutcome::NotFound(_) | wit_types::ReadFileOutcome::Feed(_) => {
+                panic!("FileContent lowers only to a found read outcome")
             },
         }
     }

@@ -40,6 +40,7 @@ There is one route API. `file` and `dir` are the nouns; the *face* you put under
 | Does a directory list child objects (repos under an owner, issues, comments)? | yes | **Collection face** `o.dir(name).collection::<C>(method)` returning `Collection<C, Cur>`; `C` must be its own `r.object::<C>` |
 | Is the subtree a real tree the host can materialize wholesale (such as a git repo)? | yes | **Tree face** `o.dir(name).tree(method)` returning `TreeRef`, or raw `r.treeref(t).handler(..)` |
 | Is the same object reachable at a second path (by-name and by-id)? | yes | `let h = r.object::<O>(..)?; r.alias(other_template, &h)?;` |
+| Does the upstream report changes since a token, so one check can keep many paths current (GitHub issues `since`)? | yes | **Feed**: `o.feed(method).starts([..])` plus `.fed()` faces (`o.file(..).fed()`, `o.dir(..).fed()`, `o.fed()`); the method writes facts through `FeedCx` and answers `Feed::part(token)` or `Feed::unchanged()` |
 | Tempted to add an object so something gets cached? | stop | An object earns canonical storage only with a `canonical` face. No canonical payload means a direct face or raw handler, not a fake object |
 
 Smell test from `providers/DESIGN.md`: repeated "load, derive field, build projection" handlers mean the route family wants an object face; a one-shot query wrapped in object machinery wants a direct face or raw handler.
@@ -170,10 +171,12 @@ async fn repos(self_key: OwnerKey, cx: ListCx<GhCursor, State>) -> Result<Collec
 
 A file-shaped object projects as a single file, not a directory: `r.file_object::<O>(template, |o| { o.dynamic(); o.canonical::<Json>()?; Ok(()) })?` declares exactly one canonical/representation/direct/blob face, and the path itself is the file.
 
+A feed method is `async fn feed(cx: FeedCx<K, State>) -> Result<Feed>`. `cx.path()` is the anchor path the host asked for; build the paths of facts from it, not from a key whose captures normalize. `cx.token()` is the token the host kept (`None` before the first part), `cx.start()` the declared starting path that started the answer, and `cx.listing(path, ListingForm::Count | Names)` the projection's listing of a path under the object. Write facts with `cx.file(path, bytes)`, `cx.dir(path, ListingWrite::Partial | Exhaustive | Complete)`, and `cx.remove(path)` at mount-absolute paths; answer `Feed::part(token).more(true).inner::<Issue>(&key, token).into()` while the answer continues, and `Feed::unchanged()` when the upstream reports no change since the token.
+
 ## HTTP, batching, pagination, rate limits
 
 - Conditional pages: `cx.version()` (`cx.validator()` in a collection) is the validator of the cached page a list call asks for. Send it with `.maybe_if_none_match(..)` and the `.page::<T>()` terminal, which gives `PageAnswer::Unchanged` for `304` and the decoded body with its `ETag` for `200`, both with the headers of the answer; a dir handler answers `DirListing::unchanged(interval)` or `.with_validator(..)`. Object loads get `since` handed to them.
-- Two terminal layers on the request builder: object-layer `.load::<T>()`/`conditional` (three-state) vs structural `.json::<T>()`/`.send_checked()` (two-state, errors on non-2xx). Pick deliberately.
+- Two terminal layers on the request builder: object-layer `.load::<T>()`/`conditional` (three-state) vs structural `.json::<T>()`/`.send_checked()` (two-state, errors on non-2xx). Pick deliberately. The raw `.send()` returns the response of any status, after the endpoint's classifier and breaker, for a route that reads statuses the others map, such as a `301` or a `410`.
 - Batch independent fetches with `join_all([f1, f2, ..])`: it polls the async host-import futures together and returns results in input order. There is no provider-managed resume batch or positional callout queue.
 - Pagination: for a raw dir listing return `DirListing::paged(entries, Cursor::Page(n + 1))`; for an object collection return `Collection::page(entries).next(cursor)`; the host echoes the cursor back on continuation.
 - Rate limits: a 429 arms a per-authority breaker (cooldown from `Retry-After` or the endpoint's `rate_limit` policy); further calls fast-fail without a callout until cooldown passes.
@@ -231,6 +234,6 @@ For any path-surface change, test whole-shell traversal in the live container, n
 - `crates/omnifs-sdk/tests/wit_boundary.rs`: canonical end-to-end usage examples (faces driven through the WIT boundary)
 - `providers/DESIGN.md`: route-API doctrine and per-provider classification
 - `providers/test/src/lib.rs`: SDK conformance fixture (every face exercised)
-- `providers/github`: object faces with collections, choices, tree, blob, direct; `providers/arxiv`: blob faces + version facets; `providers/oura`: file-shaped objects with preload; `providers/docker`, `providers/db`, `providers/dns`: direct faces and raw handlers
+- `providers/github`: object faces with collections, choices, tree, blob, direct, and feeds with fed faces; `providers/arxiv`: blob faces + version facets; `providers/oura`: file-shaped objects with preload; `providers/docker`, `providers/db`, `providers/dns`: direct faces and raw handlers
 - `crates/omnifs-wit/wit/provider.wit`: the wire contract underneath everything
 - AGENTS.md: repo-wide invariants (toolbox compatibility, caching model, build gates)

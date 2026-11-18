@@ -90,8 +90,9 @@ impl<S> Shape<'_, S> {
     }
 
     /// A directory answer synthesized from the route table: no handler runs.
-    /// Carries the parent's other static entries as siblings (one host
-    /// round trip warms the whole directory) and is exhaustive only when no
+    /// Carries the parent's other entries as siblings (one host round trip
+    /// warms the whole directory): its route-table children and, under an
+    /// object anchor, the object's leaves. It is exhaustive only when no
     /// capture sibling can bind further names at this depth.
     pub(super) fn static_dir_lookup(&self, parent_abs: &Path, name: &str) -> Lookup {
         self.static_lookup(parent_abs, name, Entry::dir(name))
@@ -111,12 +112,15 @@ impl<S> Shape<'_, S> {
     }
 
     fn static_lookup(&self, parent_abs: &Path, name: &str, target: Entry) -> Lookup {
-        let siblings = self
-            .static_entries_for_parent(parent_abs)
-            .into_iter()
-            .filter(|entry| entry.name() != name);
+        let siblings = match self.object_route(parent_abs) {
+            Some(route) => self
+                .object_dir_listing(route.entry, parent_abs, None)
+                .entries()
+                .to_vec(),
+            None => self.static_entries_for_parent(parent_abs),
+        };
         Lookup::entry(target)
-            .with_siblings(siblings)
+            .with_siblings(siblings.into_iter().filter(|entry| entry.name() != name))
             .exhaustive(!self.has_capture_child_under(parent_abs))
     }
 

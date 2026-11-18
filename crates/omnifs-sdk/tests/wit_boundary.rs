@@ -79,7 +79,9 @@ fn list_wit(list: List) -> (wit_types::ListChildrenResult, wit_types::Effects) {
 fn found(outcome: &wit_types::ReadFileOutcome) -> &wit_types::ReadFileResult {
     match outcome {
         wit_types::ReadFileOutcome::Found(result) => result,
-        wit_types::ReadFileOutcome::NotFound(_) => panic!("expected a found read outcome"),
+        wit_types::ReadFileOutcome::NotFound(_) | wit_types::ReadFileOutcome::Feed(_) => {
+            panic!("expected a found read outcome")
+        },
     }
 }
 

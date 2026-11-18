@@ -5,7 +5,7 @@ use super::super::pattern::{CaptureLocation, Pattern};
 use super::serve::ObjectRoute;
 use super::spec::{AnchorShape, CollectionHandler, ComputedFn, ObjectDefinition};
 use crate::browse::{CachedCanonical, Effects, ReadOutcome};
-use crate::captures::Captures;
+use crate::captures::{Captures, FromCaptures};
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::{Stability, VersionToken};
@@ -53,6 +53,8 @@ pub(super) enum ObjectLeaf<O: Object> {
         leaf_name: String,
         kind: LiveFaceKind,
     },
+    /// A fed file face: its lookup and its bytes come from feeds alone.
+    Fed { leaf_name: String },
 }
 
 impl<O: Object> Clone for ObjectLeaf<O> {
@@ -79,6 +81,9 @@ impl<O: Object> Clone for ObjectLeaf<O> {
                 leaf_name: leaf_name.clone(),
                 kind: *kind,
             },
+            Self::Fed { leaf_name } => Self::Fed {
+                leaf_name: leaf_name.clone(),
+            },
         }
     }
 }
@@ -89,7 +94,8 @@ impl<O: Object> ObjectLeaf<O> {
             Self::Canonical { leaf_name, .. }
             | Self::Representation { leaf_name, .. }
             | Self::Computed { leaf_name, .. }
-            | Self::Live { leaf_name, .. } => leaf_name,
+            | Self::Live { leaf_name, .. }
+            | Self::Fed { leaf_name } => leaf_name,
         }
     }
 
@@ -115,12 +121,14 @@ impl<O: Object> ObjectLeaf<O> {
                 LiveFaceKind::Stream => LeafKind::Stream,
                 LiveFaceKind::Object => LeafKind::Object,
             },
+            Self::Fed { .. } => LeafKind::Fed,
         }
     }
 }
 /// The mounted, type-erased object route the dispatch tables hold.
 pub(in crate::router) struct ObjectRouteEntry<S> {
     pub pattern: Pattern,
+    pub kind: ObjectKind,
     pub shape: AnchorShape,
     pub leaves: Vec<ListingLeaf>,
     pub read: BoxedObjectRead<S>,
@@ -133,6 +141,38 @@ pub(in crate::router) struct ObjectRouteEntry<S> {
     /// instead of getting a separate dir route.
     pub anchor_collection: Option<AnchorCollection<S>>,
     pub validator: RouteValidator,
+    /// The feed of the object, when it declares one.
+    pub feed: Option<ObjectFeed<S>>,
+    /// The claims of the anchor's own lookup when the anchor is fed
+    /// (`o.fed()`), resolved at compile time.
+    pub anchor_claims: Option<Vec<ClaimSpec>>,
+    /// The claims of each fed file face, by leaf name, resolved at compile
+    /// time.
+    pub leaf_claims: std::collections::BTreeMap<String, Vec<ClaimSpec>>,
+}
+
+/// The feed an object declares: its boxed method, the logical id of the
+/// object from its anchor captures, and its starting paths.
+pub(in crate::router) struct ObjectFeed<S> {
+    pub handler: std::rc::Rc<crate::feed::FeedHandlerFn<S>>,
+    pub id: fn(&Captures) -> Result<crate::identity::LogicalId>,
+    pub starts: Vec<StartPath>,
+}
+
+/// A declared starting path of a feed, relative to its object (`""` for the
+/// anchor itself), with the pattern of the full path it names.
+pub(in crate::router) struct StartPath {
+    pub declared: &'static str,
+    pub pattern: Pattern,
+}
+
+/// One feed that claims a fed face: the index of the claiming object route
+/// in the compiled object table, and whether the face is one of that feed's
+/// starting paths.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::router) struct ClaimSpec {
+    pub object: usize,
+    pub starts: bool,
 }
 
 /// An ANCHOR-topology collection attached to a parent object's anchor: the
@@ -195,6 +235,7 @@ pub(in crate::router) enum LeafKind {
     Direct,
     Stream,
     Object,
+    Fed,
 }
 
 /// A child name an object anchor lists, precomputed at mount time.
@@ -261,6 +302,8 @@ pub(in crate::router) enum ObjectReadTarget {
     Direct(String),
     /// A stream face by leaf name (served through `open_file`).
     Stream(String),
+    /// A fed face by leaf name: its read answers the claims of its feeds.
+    Fed(String),
 }
 
 /// Specialize an [`ObjectDefinition`] at a concrete mounted face.
@@ -284,8 +327,37 @@ where
 
     let route = ObjectRoute::for_mount(definition, pattern)?;
 
+    let feed = definition
+        .feed
+        .as_ref()
+        .map(|feed| {
+            let starts = feed
+                .starts
+                .iter()
+                .map(|declared| {
+                    let template = pattern.template();
+                    let full = if declared.is_empty() {
+                        template
+                    } else {
+                        format!("{}/{declared}", template.trim_end_matches('/'))
+                    };
+                    Ok(StartPath {
+                        declared,
+                        pattern: Pattern::parse(&full)?,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok::<_, ProviderError>(ObjectFeed {
+                handler: feed.handler.clone(),
+                id: anchor_id::<O>,
+                starts,
+            })
+        })
+        .transpose()?;
+
     let entry = ObjectRouteEntry {
         pattern: pattern.clone(),
+        kind: O::kind(),
         shape: definition.shape,
         leaves: listing_leaves,
         read: route.clone().read_handler(),
@@ -293,8 +365,20 @@ where
         face_handlers: definition.face_handlers.clone(),
         anchor_collection: None,
         validator: captures_validator::<O::Key>(),
+        feed,
+        anchor_claims: definition.fed_anchor.then(Vec::new),
+        leaf_claims: std::collections::BTreeMap::new(),
     };
     Ok(entry)
+}
+
+/// The logical id of an object from the captures of its anchor.
+fn anchor_id<O>(caps: &Captures) -> Result<crate::identity::LogicalId>
+where
+    O: Object,
+    O::Key: Key,
+{
+    Ok(O::Key::from_captures(caps)?.anchor(O::kind()))
 }
 // ===========================================================================
 // Facet expansion (unchanged)
@@ -428,26 +512,6 @@ impl ResolvedChildView {
         }
     }
 
-    /// Render the child template into a concrete anchor base from a complete
-    /// capture map (identity captures plus a default value for every facet
-    /// segment, which facet expansion later overwrites).
-    fn render_anchor_base(&self, captures: &std::collections::BTreeMap<&str, String>) -> String {
-        let mut out = String::new();
-        for raw in self.child_template.split('/').skip(1) {
-            out.push('/');
-            let segment = if let Some(name) = capture_name_of(raw) {
-                captures.get(name).cloned().map_or_else(
-                    || raw.to_string(),
-                    |value| render_template_segment(raw, &value),
-                )
-            } else {
-                raw.to_string()
-            };
-            out.push_str(&segment);
-        }
-        out
-    }
-
     /// Compute the dir-entry name, child anchor base, child logical id, and
     /// facet-expanded canonical-view leaf paths for one listed entry, from its
     /// identity captures and its key's facet axes.
@@ -456,21 +520,7 @@ impl ResolvedChildView {
         identity_captures: &[(&'static str, String)],
         facet_axes: &[FacetAxis],
     ) -> Result<EntryView> {
-        // A full capture map: identity captures verbatim, facets at their first
-        // choice (facet expansion rewrites those segments across all choices).
-        let mut captures: std::collections::BTreeMap<&str, String> = identity_captures
-            .iter()
-            .map(|(n, v)| (*n, v.clone()))
-            .collect();
-        for axis in facet_axes {
-            if let Some(first) = axis.choices.first() {
-                captures
-                    .entry(axis.capture_name)
-                    .or_insert_with(|| (*first).to_string());
-            }
-        }
-
-        let anchor_base = self.render_anchor_base(&captures);
+        let anchor_base = anchor_path(&self.child_template, identity_captures, facet_axes);
 
         // The dir-entry name is the segment(s) of the child anchor beyond the
         // collection dir path.
@@ -505,6 +555,41 @@ pub(crate) struct EntryView {
     pub id: crate::identity::LogicalId,
     pub view_leaves: Vec<String>,
     pub anchor_base: String,
+}
+
+/// Render an object template into a concrete anchor path: identity captures
+/// verbatim, facets at their first choice (facet expansion rewrites those
+/// segments across all choices).
+pub(in crate::router) fn anchor_path(
+    template: &str,
+    identity_captures: &[(&'static str, String)],
+    facet_axes: &[FacetAxis],
+) -> String {
+    let mut captures: std::collections::BTreeMap<&str, String> = identity_captures
+        .iter()
+        .map(|(n, v)| (*n, v.clone()))
+        .collect();
+    for axis in facet_axes {
+        if let Some(first) = axis.choices.first() {
+            captures
+                .entry(axis.capture_name)
+                .or_insert_with(|| (*first).to_string());
+        }
+    }
+    let mut out = String::new();
+    for raw in template.split('/').skip(1) {
+        out.push('/');
+        let segment = if let Some(name) = capture_name_of(raw) {
+            captures.get(name).cloned().map_or_else(
+                || raw.to_string(),
+                |value| render_template_segment(raw, &value),
+            )
+        } else {
+            raw.to_string()
+        };
+        out.push_str(&segment);
+    }
+    out
 }
 
 /// The capture name of a template segment (`{name}` or `prefix{name}`), or
@@ -545,6 +630,7 @@ impl<S> ObjectRouteEntry<S> {
             // direct handler as a direct face.
             LeafKind::Direct | LeafKind::Object => ObjectReadTarget::Direct(name.to_string()),
             LeafKind::Stream => ObjectReadTarget::Stream(name.to_string()),
+            LeafKind::Fed => ObjectReadTarget::Fed(name.to_string()),
         })
     }
 

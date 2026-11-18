@@ -37,6 +37,7 @@ impl BodyId {
 pub const MAX_INLINE_PROJECTABLE_BYTES: usize = 64 * 1024;
 pub const MAX_EAGER_RESPONSE_BYTES: usize = 512 * 1024;
 pub const MAX_VERSION_TOKEN_BYTES: usize = 256;
+pub const MAX_FEED_TOKEN_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ByteSource {
@@ -782,12 +783,17 @@ impl DirentsPayload {
         }
     }
 
+    /// Merge `new_children` into a listing as `write` says: an exhaustive
+    /// write replaces the listing; a partial or complete write replaces
+    /// matching entries in place and appends the rest to the last page, a
+    /// partial one keeping the listing complete only without new names, a
+    /// complete one leaving it complete.
     pub fn merged(
         existing_record: Option<Self>,
         mut new_children: BTreeMap<String, DirentRecord>,
-        listing_exhaustive: bool,
+        write: ListingWrite,
     ) -> Self {
-        if listing_exhaustive {
+        if write == ListingWrite::Exhaustive {
             return Self::single_page(new_children.into_values().collect(), true, None);
         }
 
@@ -817,9 +823,23 @@ impl DirentsPayload {
                 entries: new_children.into_values().collect(),
             });
         }
-        payload.exhaustive &= !introduced;
+        payload.exhaustive = match write {
+            ListingWrite::Partial => payload.exhaustive && !introduced,
+            ListingWrite::Exhaustive | ListingWrite::Complete => true,
+        };
         payload
     }
+}
+
+/// How the children of a directory write join its listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListingWrite {
+    /// They join the listing, which stays complete only without new names.
+    Partial,
+    /// They are the whole listing.
+    Exhaustive,
+    /// They join the listing, which is complete after them.
+    Complete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -980,7 +1000,11 @@ mod tests {
             exhaustive: false,
             next_cursor: Some(CachedCursor::Page(2)),
         };
-        let result = DirentsPayload::merged(Some(existing), new_children(&["new-x"]), true);
+        let result = DirentsPayload::merged(
+            Some(existing),
+            new_children(&["new-x"]),
+            ListingWrite::Exhaustive,
+        );
         assert!(result.exhaustive);
         assert_eq!(names(&result), vec!["new-x"]);
         assert!(result.next_cursor.is_none());
@@ -1000,7 +1024,7 @@ mod tests {
             next_cursor: None,
         };
         let updated = new_children(&["gamma"]);
-        let result = DirentsPayload::merged(Some(existing), updated, false);
+        let result = DirentsPayload::merged(Some(existing), updated, ListingWrite::Partial);
         // Count unchanged: gamma was replaced in its page, not appended.
         assert_eq!(result.entries().count(), 3);
         assert_eq!(result.pages[1].entries.len(), 1);
@@ -1024,8 +1048,11 @@ mod tests {
             next_cursor: None,
         };
         // Introduce two new names; BTreeMap order is "delta" then "gamma".
-        let result =
-            DirentsPayload::merged(Some(existing), new_children(&["gamma", "delta"]), false);
+        let result = DirentsPayload::merged(
+            Some(existing),
+            new_children(&["gamma", "delta"]),
+            ListingWrite::Partial,
+        );
         assert!(!result.exhaustive);
         // Existing entries first, introductions appended in name (BTreeMap) order.
         assert_eq!(names(&result), vec!["alpha", "beta", "delta", "gamma"]);
@@ -1037,7 +1064,11 @@ mod tests {
     // appended in name order.
     #[test]
     fn merged_no_existing_record_appends_all_in_name_order() {
-        let result = DirentsPayload::merged(None, new_children(&["zed", "alpha", "mid"]), false);
+        let result = DirentsPayload::merged(
+            None,
+            new_children(&["zed", "alpha", "mid"]),
+            ListingWrite::Partial,
+        );
         // BTreeMap insertion order is alphabetical.
         assert_eq!(names(&result), vec!["alpha", "mid", "zed"]);
         assert!(!result.exhaustive);
@@ -1053,12 +1084,27 @@ mod tests {
             None,
         );
         // "b" is a replacement; "d" and "e" are introductions.
-        let result = DirentsPayload::merged(Some(existing), new_children(&["b", "e", "d"]), false);
+        let result = DirentsPayload::merged(
+            Some(existing),
+            new_children(&["b", "e", "d"]),
+            ListingWrite::Partial,
+        );
         assert_eq!(result.entries().count(), 5);
         // Existing order preserved for a, b, c; introductions d, e appended in name order.
         assert_eq!(names(&result), vec!["a", "b", "c", "d", "e"]);
         // Introduction occurred: exhaustive demoted.
         assert!(!result.exhaustive);
+    }
+
+    // A complete write keeps the existing entries, adds its children, and
+    // leaves the listing complete after them.
+    #[test]
+    fn merged_complete_adds_children_and_completes_the_listing() {
+        let existing = DirentsPayload::single_page(vec![dir_record("a")], false, None);
+        let result =
+            DirentsPayload::merged(Some(existing), new_children(&["b"]), ListingWrite::Complete);
+        assert_eq!(names(&result), vec!["a", "b"]);
+        assert!(result.exhaustive);
     }
 
     // A page is found by the cursor that asked for it, with the cursor of the

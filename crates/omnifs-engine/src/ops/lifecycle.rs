@@ -5,7 +5,7 @@ use crate::clock;
 use crate::effect_apply::EffectApplier;
 use crate::effect_apply::LookupOutcome;
 use crate::inspector;
-use crate::ops::namespace::{ChunkOutcome, ListOutcome, OpenOutcome, PageRequest, ReadOutcome};
+use crate::ops::namespace::{ChunkOutcome, ListOutcome, OpenOutcome, PageRequest, ReadReply};
 use crate::runtime::{EngineError, Result};
 use omnifs_api::events::InspectorOutcome;
 use omnifs_core::path::{Path, Segment};
@@ -138,7 +138,7 @@ impl Runtime {
         content_type: String,
         cached_canonical: Option<wit_types::CanonicalInput>,
         captured_epoch: u64,
-    ) -> Result<ReadOutcome> {
+    ) -> Result<ReadReply> {
         let id = self.next_operation_id();
         let span = inspector::provider_span(
             id,
@@ -172,16 +172,19 @@ impl Runtime {
             let result = match wire_result {
                 wit_types::ReadFileOutcome::Found(value) => {
                     let (result, result_transition) = applier
-                        .lower_read(
-                            path,
-                            wit_types::ReadFileOutcome::Found(value),
-                            &transition.objects,
-                        )
+                        .lower_read(path, value, &transition.objects)
                         .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
                     merge_transition(&mut transition, result_transition);
                     transition.blobs.extend(pending_blobs);
-                    result
+                    ReadReply::File(result)
                 },
+                wit_types::ReadFileOutcome::Feed(claims) => ReadReply::Feed(
+                    claims
+                        .iter()
+                        .map(crate::ops::feed::FeedClaim::from_wit)
+                        .collect::<anyhow::Result<Vec<_>>>()
+                        .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?,
+                ),
                 wit_types::ReadFileOutcome::NotFound(maybe_id) => {
                     drop(pending_blobs);
                     transition.records.push(crate::cache::RecordWrite {
@@ -410,7 +413,7 @@ impl Runtime {
         }
     }
 
-    fn provider_result<T>(
+    pub(super) fn provider_result<T>(
         &self,
         result: std::result::Result<T, wit_types::ProviderError>,
     ) -> Result<T> {
@@ -444,6 +447,21 @@ fn merge_transition(
     target.invalidations.append(&mut addition.invalidations);
     target.blobs.append(&mut addition.blobs);
     target.git.append(&mut addition.git);
+    target.removals.append(&mut addition.removals);
+}
+
+/// The listing write of two merged hint batches: an exhaustive batch
+/// replaces the listing, else a complete one completes it.
+fn stronger_write(
+    left: crate::view::ListingWrite,
+    right: crate::view::ListingWrite,
+) -> crate::view::ListingWrite {
+    use crate::view::ListingWrite;
+    match (left, right) {
+        (ListingWrite::Exhaustive, _) | (_, ListingWrite::Exhaustive) => ListingWrite::Exhaustive,
+        (ListingWrite::Complete, _) | (_, ListingWrite::Complete) => ListingWrite::Complete,
+        (ListingWrite::Partial, ListingWrite::Partial) => ListingWrite::Partial,
+    }
 }
 
 fn merge_hint_entries(
@@ -480,11 +498,11 @@ fn merge_dirents_mutation(
             crate::cache::DirentsMutation::MergeHints {
                 path,
                 mut entries,
-                exhaustive,
+                write,
             },
             crate::cache::DirentsMutation::MergeHints {
                 entries: additions,
-                exhaustive: addition_exhaustive,
+                write: addition_write,
                 ..
             },
         ) => {
@@ -492,7 +510,7 @@ fn merge_dirents_mutation(
             crate::cache::DirentsMutation::MergeHints {
                 path,
                 entries,
-                exhaustive: exhaustive || addition_exhaustive,
+                write: stronger_write(write, addition_write),
             }
         },
         (
@@ -569,7 +587,7 @@ fn merge_dirents_mutation(
     target.insert(index, merged);
 }
 
-fn inspect_result<T>(
+pub(super) fn inspect_result<T>(
     span: &tracing::Span,
     result: &std::result::Result<T, wit_types::ProviderError>,
 ) {

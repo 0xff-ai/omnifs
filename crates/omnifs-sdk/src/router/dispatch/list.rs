@@ -11,8 +11,10 @@ use super::super::compiled::CompiledRouter;
 impl<S> CompiledRouter<S> {
     /// List an absolute directory path.
     ///
-    /// Resolution order: a tree-capable directory handoff or a dir route run
-    /// [`DirIntent::List`] and the resume cursor; an object anchor
+    /// Resolution order: a fed dir route answers the claims of its feeds; a
+    /// tree-capable directory handoff or a dir route run
+    /// [`DirIntent::List`] and the resume cursor; an object anchor (a fed
+    /// anchor without a load of its object)
     /// (precomputed leaf names plus its optional cursor-bearing collection,
     /// with canonical-store and eager-preload effects attached); an
     /// auto-navigable literal prefix listed from the route table alone. File
@@ -45,6 +47,9 @@ impl<S> CompiledRouter<S> {
         let shape = self.shape();
 
         if let Some(route) = shape.dir_route(&abs) {
+            if let Some(claims) = route.entry.fed_claims() {
+                return Ok(List::Feed(shape.feed_claims(claims, &abs, true)?));
+            }
             let answer = super::route_future(
                 route.entry.pattern.template(),
                 Box::pin(route.entry.invoke(
@@ -66,13 +71,21 @@ impl<S> CompiledRouter<S> {
         }
 
         if let Some(route) = shape.object_route(&abs) {
-            let object_cx = cx.clone().with_version(None);
-            let out = super::route_future(
-                route.entry.pattern.template(),
-                (route.entry.list)(&object_cx, route.captures.clone(), path.to_string()),
-            )
-            .await
-            .map_err(|error| error.with_context("list-children", &abs))?;
+            // A fed anchor lists its faces without a load of its object.
+            let out = if route.entry.anchor_claims.is_some() {
+                super::super::object::ObjectListing {
+                    effects: crate::browse::Effects::new(),
+                    source: None,
+                }
+            } else {
+                let object_cx = cx.clone().with_version(None);
+                super::route_future(
+                    route.entry.pattern.template(),
+                    (route.entry.list)(&object_cx, route.captures.clone(), path.to_string()),
+                )
+                .await
+                .map_err(|error| error.with_context("list-children", &abs))?
+            };
             let listing = shape
                 .object_dir_listing(route.entry, &abs, out.source.as_ref())
                 .with_effects(out.effects);

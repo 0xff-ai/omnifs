@@ -118,37 +118,43 @@ impl Provider for GitHub {
             o.file("repo.json").canonical::<Json>()?;
             o.dir("repo").tree(Repo::tree)?;
             o.dir("issues").choices(StateFilter::choices())?;
-            o.dir("issues/{filter}").collection::<Issue>(Repo::issues)?;
+            o.dir("issues/{filter}").fed()?;
             o.dir("pulls").choices(StateFilter::choices())?;
-            o.dir("pulls/{filter}").collection::<PullRequest>(Repo::pulls)?;
+            o.dir("pulls/{filter}").fed()?;
             o.dir("actions/runs").collection::<WorkflowRun>(Repo::workflow_runs)?;
+            o.feed(Repo::feed).starts(["issues/{filter}", "pulls/{filter}"])?;
             Ok(())
         })?;
 
         r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
             o.dynamic();
+            o.fed();
             o.file("item.json").canonical::<Json>()?;
             o.file("item.md").representation::<Markdown>()?;
-            o.file("title.txt").computed(Issue::title)?;
-            o.file("body.md").lazy().computed(Issue::body_markdown)?;
-            o.file("state.txt").computed(Issue::state)?;
-            o.file("user.txt").computed(Issue::user)?;
-            o.dir("comments").collection::<Comment>(Issue::comments)?;
+            o.file("title").fed()?;
+            o.file("body").fed()?;
+            o.file("state").fed()?;
+            o.file("user").fed()?;
+            o.dir("comments").fed()?;
+            o.feed(Issue::feed).starts(["", "title", "body", "state", "user", "comments"])?;
             Ok(())
         })?;
 
         r.object::<PullRequest>("/{owner}/{repo}/pulls/{filter}/{number}", |o| {
             o.dynamic();
+            o.fed();
             o.file("item.json").canonical::<Json>()?;
             o.file("item.md").representation::<Markdown>()?;
-            o.file("title.txt").computed(PullRequest::title)?;
-            o.file("body.md").lazy().computed(PullRequest::body_markdown)?;
-            o.file("state.txt").computed(PullRequest::state)?;
-            o.file("user.txt").computed(PullRequest::user)?;
+            o.file("title").fed()?;
+            o.file("body").fed()?;
+            o.file("state").fed()?;
+            o.file("user").fed()?;
             o.file("diff")
                 .blob(PullRequest::diff)
                 .content_type("text/x-diff")?;
-            o.dir("comments").collection::<Comment>(PullRequest::comments)?;
+            o.dir("comments").fed()?;
+            o.feed(PullRequest::feed)
+                .starts(["", "title", "body", "state", "user", "comments"])?;
             Ok(())
         })?;
 
@@ -156,10 +162,11 @@ impl Provider for GitHub {
             "/{owner}/{repo}/{item_kind}/{filter}/{number}/comments/{comment_id}",
             |o| {
                 o.dynamic();
+                o.fed();
                 o.file("comment.json").canonical::<Json>()?;
                 o.file("comment.md").representation::<Markdown>()?;
-                o.file("body.md").computed(Comment::body_markdown)?;
-                o.file("author.txt").computed(Comment::author)?;
+                o.file("body.md").fed()?;
+                o.file("author").fed()?;
                 Ok(())
             },
         )?;
@@ -610,6 +617,34 @@ resume cursor exists, persists those controls with cached dirents, and treats
 reading a control file as a host action that advances or drains the listing.
 Provider listings must not emit names reserved under the host `@` namespace.
 
+## Feeds
+
+Some upstreams report their changes since a token (GitHub's issues `since`,
+event streams). For those, one feed per object keeps the facts of its fed faces
+in the host projection, so a check of the feed answers for many paths at once:
+
+```rust
+r.object::<Repo>("/{owner}/{repo}", |o| {
+    o.dynamic();
+    o.dir("issues/{filter}").fed()?;
+    o.feed(Repo::feed).starts(["issues/{filter}"])?;
+    Ok(())
+})?;
+```
+
+A fed face (`.fed()` on a file face, a dir face, or the anchor itself) has no
+handler: lookup, listing, and read answer with the claims of the feeds of its
+ancestry, and the host serves the path from its projection once the answering
+feed has answered. The feed method gets a `FeedCx` with the anchor path the
+host asked for, which the paths of its facts extend even where the key
+normalizes a capture, the key, the token the
+host kept, the declared starting path that started the answer, the projection
+listings of its subtree (`FeedCx::listing`), and writers for the facts of the
+part: `file` for a stable inline file, `dir` with a `ListingWrite`, and
+`remove`. It answers `Feed::unchanged()` or `Feed::part(token)`, with `more`
+while its answer continues and `inner::<O>(key, token)` for the tokens of inner
+feeds, such as an item from a page of rows.
+
 ## Object load prefetch and effects
 
 Collections are not the only place where preloading happens. Sometimes reading
@@ -653,8 +688,7 @@ should not exist.
 A direct full-file read may also preload sibling files when the same upstream
 payload already contains their bytes. This does not create object canonicals and
 does not make the route object-shaped. It is the right shape for Docker
-`inspect.json` projecting `state` and `summary.txt`, and for indexed GitHub
-comment listings projecting the comment files they just fetched.
+`inspect.json` projecting `state` and `summary.txt`.
 
 The preload channel accepts only file sources that lower to view projections:
 inline bytes and deferred reads. `Body`, `Ranged`, and `Blob` siblings do not
@@ -712,6 +746,8 @@ Reject:
 - a collection path that cannot compute the target object key;
 - a paged collection whose cursor type cannot round-trip through opaque bytes;
 - an alias missing captures required by the target key;
+- a feed starting path that names no fed face of its object's subtree;
+- a fed face without a feed in its ancestry;
 - path captures unused by the key or by route facets;
 - an object implementation that tries to register hidden paths;
 - `Live` on a non-stream face;
@@ -735,8 +771,21 @@ carry no in-crate route tests.
 GitHub is object-shaped with composed relative faces. Owner, repository, issue,
 pull request, comment, and workflow run are objects. `/{owner}` is both the
 `Owner` object directory and the directory that lists `Repo` children. The
-repository object declares relative collection directories for issues, pulls,
-and workflow runs, plus the `repo` tree handoff.
+repository object declares fed directories for issues and pulls, a relative
+collection directory for workflow runs, and the `repo` tree handoff.
+
+The feed of the repository keeps its issues, pull requests, and comments: the
+`title`, `body`, `state`, and `user` of each item under `{kind}/all/` and, while
+it is open, `{kind}/open/`, and the `author` and `body.md` of each comment. Its
+first full listing takes the rows of `GET /repos/{owner}/{repo}/issues` by
+`updated_at`, then the comments of the repository, then the GitHub GraphQL counts
+of the comments of each item, where an item with another count takes the ids of
+its comments. After it, each answer past the deadline is a check of the rows
+since the time of the last row, with the `ETag` of that time, and of the counts,
+where another count of a kind takes the numbers of its items. Before the first
+full listing ends, the feed of an item answers for it from
+`GET /repos/{owner}/{repo}/issues/{number}` and takes its comments at the first
+read of its `comments/`.
 
 A collection stores child canonical bytes only when the list payload satisfies
 the child object's canonical contract. Shallow fields can be eager computed
@@ -746,8 +795,8 @@ content type, and optional ETag/version evidence. Use a file-shaped object for a
 diff only if the provider needs to decode the diff and expose computed faces. Use
 direct only when every access really should call the upstream/provider again.
 Comments are `Comment` objects projected as `comments/{comment_id}` directories
-(one object keyed by the comment id, listed by the issue/PR comment collection),
-not indexed `comments/{idx}` files.
+(one object keyed by the comment id, whose fed faces the feeds keep), not
+indexed `comments/{idx}` files.
 
 The pull diff is a blob face, not a direct file. The exact return type can move,
 but the behavior must preserve host-resident bytes:
@@ -890,8 +939,9 @@ cannot be partitioned into replayable daily canonicals.
 The test provider is a conformance fixture. It should exercise scoped
 invalidation, deferred reads, ranged files, live files, paged directories,
 partial/open listings, aliases, collection preloading,
-object-load prefetch, registration errors, rate limits, and tree handoff. It
-should not be rewritten to match product provider aesthetics.
+object-load prefetch, object feeds with fed faces, registration errors, rate
+limits, and tree handoff. It should not be rewritten to match product provider
+aesthetics.
 
 ## Cross-provider rules
 

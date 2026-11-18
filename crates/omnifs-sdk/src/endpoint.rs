@@ -24,6 +24,9 @@
 //!   response `ETag` as the validator of the page. Pair it with
 //!   [`maybe_if_none_match`](RequestBuilder::maybe_if_none_match) and the
 //!   validator the host sends for a page past its deadline.
+//! - Raw: [`send`](RequestBuilder::send) returns the response of any status,
+//!   for a route that reads statuses the other terminals map, such as a
+//!   `301` or a `410`.
 //!
 //! Never set `Authorization` or any other credential header here. Auth is
 //! host-managed: the provider's `auth = ..` argument to `#[omnifs_sdk::provider]`
@@ -385,6 +388,14 @@ impl<'a, E: EndpointHooks, S> RequestBuilder<'a, E, S> {
     pub async fn send_checked(self) -> Result<HttpResponse> {
         let resp = self.send_raw().await?.error_for_status()?;
         Ok(HttpResponse { inner: resp })
+    }
+
+    /// Raw terminal: the response of any status, after the endpoint's
+    /// classifier and the rate-limit breaker.
+    pub async fn send(self) -> Result<HttpResponse> {
+        Ok(HttpResponse {
+            inner: self.send_raw().await?,
+        })
     }
 
     /// Convert into a blob fetch: the response body lands in the host's

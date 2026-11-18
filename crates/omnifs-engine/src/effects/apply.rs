@@ -4,17 +4,18 @@ use std::collections::BTreeMap;
 
 use crate::cache::identity::GitId;
 use crate::cache::{
-    DirentsMutation, FactPayload, Freshness, GitWrite, Invalidation, MountResources,
-    ObjectMutation, ProjectionTransition, RecordWrite,
+    DirentsMutation, FactPayload, FeedPartWrite, FeedWrite, Freshness, GitWrite, Invalidation,
+    MountResources, ObjectMutation, ProjectionTransition, RecordWrite,
 };
 use crate::clock::{DYNAMIC_TTL_MILLIS, freshness_expiry, page_deadline};
 use crate::object_id::ObjectId;
+use crate::ops::feed::{FeedChanges, FeedClaim, FeedObject, FeedOutcome};
 use crate::ops::namespace::{
     DirEntry, DirListing, ListOutcome, PageRequest, ReadBytes, ReadOutcome,
 };
 use crate::view::{
     AttrPayload, DirentRecord, DirentsPage, DirentsPayload, EntryMeta, FileAttrsCache, FilePayload,
-    LookupPayload, PageValidator, Stability,
+    ListingWrite, LookupPayload, PageValidator, Stability,
 };
 use crate::wit_protocol::{cached_cursor_from_wit, entry_meta_from_kind, stability_from_wit};
 use omnifs_core::path::Path;
@@ -25,6 +26,7 @@ pub enum LookupOutcome {
     Entry(LookupEntry),
     Subtree(u64),
     NotFound,
+    Feed(Vec<FeedClaim>),
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +63,18 @@ impl<'a> EffectApplier<'a> {
         effects: &wit_types::Effects,
         now_millis: u64,
     ) -> anyhow::Result<ProjectionTransition> {
+        self.lower_writes(effects, now_millis, false)
+    }
+
+    /// Lower the effects of a terminal. The writes of a feed part are fed
+    /// facts: a file is a stable file whose bytes the projection holds, and
+    /// no written path has a deadline.
+    fn lower_writes(
+        &self,
+        effects: &wit_types::Effects,
+        now_millis: u64,
+        fed: bool,
+    ) -> anyhow::Result<ProjectionTransition> {
         let mut transition = ProjectionTransition::default();
         for canonical in &effects.canonical {
             transition.objects.push(ObjectMutation::Canonical {
@@ -77,14 +91,23 @@ impl<'a> EffectApplier<'a> {
         }
 
         let mut children = BTreeMap::<Path, BTreeMap<String, DirentRecord>>::new();
-        let mut directory_exhaustive = BTreeMap::<Path, bool>::new();
+        let mut directory_writes = BTreeMap::<Path, ListingWrite>::new();
         for write in &effects.fs {
             let path = Path::parse(&write.path).map_err(anyhow::Error::from)?;
-            let meta = match &write.kind {
-                wit_types::FsKind::Directory(_) => EntryMeta::directory(),
-                wit_types::FsKind::File(file) => EntryMeta::file(self.file_meta(file)?),
+            let meta = match (&write.kind, fed) {
+                (wit_types::FsKind::Directory(_), _) => EntryMeta::directory(),
+                (wit_types::FsKind::File(file), true) => fed_file(&mut transition, &path, file)?,
+                (wit_types::FsKind::File(file), false) => EntryMeta::file(self.file_meta(file)?),
             };
-            self.add_entry_records(&mut transition, &path, &meta, &write.kind)?;
+            if fed {
+                add_lookup_records(&mut transition, &path, &meta);
+                transition.freshness.push(Freshness {
+                    path: path.clone(),
+                    expires_at: None,
+                });
+            } else {
+                self.add_entry_records(&mut transition, &path, &meta, &write.kind)?;
+            }
             if let Some((parent, name)) = path.parent_and_name() {
                 children.entry(parent).or_default().insert(
                     name.to_string(),
@@ -100,24 +123,31 @@ impl<'a> EffectApplier<'a> {
                     alias: path.clone(),
                 });
             }
-            if let wit_types::FsKind::Directory(exhaustive) = &write.kind {
-                directory_exhaustive.insert(path.clone(), *exhaustive);
-                transition.freshness.push(Freshness {
-                    path,
-                    expires_at: freshness_expiry(
-                        stability_from_wit(wit_types::Stability::Dynamic),
-                        now_millis,
-                    ),
-                });
+            if let wit_types::FsKind::Directory(write) = &write.kind {
+                directory_writes.insert(path.clone(), listing_write_from_wit(*write));
+                if !fed {
+                    transition.freshness.push(Freshness {
+                        path,
+                        expires_at: freshness_expiry(
+                            stability_from_wit(wit_types::Stability::Dynamic),
+                            now_millis,
+                        ),
+                    });
+                }
             }
         }
-        for (path, exhaustive) in directory_exhaustive {
+        for (path, write) in directory_writes {
             let entries = children.remove(&path).unwrap_or_default();
             transition.dirents.push(DirentsMutation::MergeHints {
                 path,
                 entries: entries.into_values().collect(),
-                exhaustive,
+                write,
             });
+        }
+        for removal in &effects.removals {
+            transition
+                .removals
+                .push(Path::parse(removal).map_err(anyhow::Error::from)?);
         }
         for invalidation in &effects.invalidations {
             transition.invalidations.push(match invalidation {
@@ -151,16 +181,7 @@ impl<'a> EffectApplier<'a> {
         meta: &EntryMeta,
         kind: &wit_types::FsKind,
     ) -> anyhow::Result<()> {
-        transition.records.push(RecordWrite {
-            path: path.clone(),
-            aux: None,
-            fact: FactPayload::Lookup(LookupPayload::Positive(meta.clone())),
-        });
-        transition.records.push(RecordWrite {
-            path: path.clone(),
-            aux: None,
-            fact: FactPayload::Attr(AttrPayload { meta: meta.clone() }),
-        });
+        add_lookup_records(transition, path, meta);
         if let wit_types::FsKind::File(file) = kind {
             let attrs = self.file_meta(file)?;
             if let Some(bytes) = attrs.inline_bytes()
@@ -201,7 +222,9 @@ impl<'a> EffectApplier<'a> {
                     })
                     .map_err(anyhow::Error::msg)?;
                     let kind = match &candidate.kind {
-                        wit_types::EntryKind::Directory => wit_types::FsKind::Directory(false),
+                        wit_types::EntryKind::Directory => {
+                            wit_types::FsKind::Directory(wit_types::ListingWrite::Partial)
+                        },
                         wit_types::EntryKind::File(file) => wit_types::FsKind::File(file.clone()),
                     };
                     self.add_entry_records(&mut transition, &path, &meta, &kind)?;
@@ -222,7 +245,11 @@ impl<'a> EffectApplier<'a> {
                 transition.dirents.push(DirentsMutation::MergeHints {
                     path: parent.clone(),
                     entries: hints,
-                    exhaustive: entry.exhaustive,
+                    write: if entry.exhaustive {
+                        ListingWrite::Exhaustive
+                    } else {
+                        ListingWrite::Partial
+                    },
                 });
                 target_meta.map_or(LookupOutcome::NotFound, |meta| {
                     LookupOutcome::Entry(LookupEntry::new(child.clone(), meta))
@@ -257,6 +284,9 @@ impl<'a> EffectApplier<'a> {
                 });
                 LookupOutcome::NotFound
             },
+            wit_types::LookupChildResult::Feed(claims) => {
+                LookupOutcome::Feed(feed_claims(&claims)?)
+            },
         };
         Ok((outcome, transition))
     }
@@ -290,7 +320,9 @@ impl<'a> EffectApplier<'a> {
                     })
                     .map_err(anyhow::Error::msg)?;
                     let kind = match &entry.kind {
-                        wit_types::EntryKind::Directory => wit_types::FsKind::Directory(false),
+                        wit_types::EntryKind::Directory => {
+                            wit_types::FsKind::Directory(wit_types::ListingWrite::Partial)
+                        },
                         wit_types::EntryKind::File(file) => wit_types::FsKind::File(file.clone()),
                     };
                     self.add_entry_records(&mut transition, &child, &meta, &kind)?;
@@ -390,19 +422,85 @@ impl<'a> EffectApplier<'a> {
                 });
                 ListOutcome::Unchanged
             },
+            wit_types::ListChildrenResult::Feed(claims) => ListOutcome::Feed(feed_claims(&claims)?),
         };
         Ok((outcome, transition))
+    }
+
+    /// Lower one answer of the feed of `object`: the facts of a part are fed,
+    /// and the feed states it brought publish with them. Returns the outcome
+    /// and what the answer changes.
+    pub(crate) fn lower_feed(
+        &self,
+        object: &FeedObject,
+        answer: wit_types::FeedAnswer,
+        effects: &wit_types::Effects,
+        now_millis: u64,
+    ) -> anyhow::Result<(FeedOutcome, ProjectionTransition, FeedChanges)> {
+        let mut transition = self.lower_writes(effects, now_millis, true)?;
+        let mut changes = FeedChanges::default();
+        for write in &effects.fs {
+            let path = Path::parse(&write.path).map_err(anyhow::Error::from)?;
+            if let Some((parent, _)) = path.parent_and_name() {
+                changes.listings.push(parent);
+            }
+            match write.kind {
+                wit_types::FsKind::Directory(_) => changes.listings.push(path),
+                wit_types::FsKind::File(_) => changes.paths.push(path),
+            }
+        }
+        for path in &transition.removals {
+            if let Some((parent, _)) = path.parent_and_name() {
+                changes.listings.push(parent);
+            }
+            changes.paths.push(path.clone());
+        }
+        for paths in [&mut changes.listings, &mut changes.paths] {
+            paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            paths.dedup();
+        }
+        let deadline = now_millis.saturating_add(DYNAMIC_TTL_MILLIS);
+        let (outcome, part) = match answer {
+            wit_types::FeedAnswer::Unchanged => (FeedOutcome::Unchanged, None),
+            wit_types::FeedAnswer::Part(part) => {
+                let inner = part
+                    .inner
+                    .iter()
+                    .map(|state| {
+                        (
+                            ObjectId::from_wit(&state.object.id).as_bytes().to_vec(),
+                            state.token.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    FeedOutcome::Part { more: part.more },
+                    Some((
+                        FeedPartWrite {
+                            token: part.token,
+                            more: part.more,
+                        },
+                        inner,
+                    )),
+                )
+            },
+        };
+        let (part, inner) = part.map_or((None, Vec::new()), |(part, inner)| (Some(part), inner));
+        transition.feed = Some(FeedWrite {
+            object: object.id.as_bytes().to_vec(),
+            part,
+            inner,
+            deadline,
+        });
+        Ok((outcome, transition, changes))
     }
 
     pub(crate) fn lower_read(
         &self,
         path: &Path,
-        result: wit_types::ReadFileOutcome,
+        value: wit_types::ReadFileResult,
         staged_objects: &[ObjectMutation],
     ) -> anyhow::Result<(ReadOutcome, ProjectionTransition)> {
-        let wit_types::ReadFileOutcome::Found(value) = result else {
-            anyhow::bail!("read-file result is not a found file")
-        };
         let outcome = ReadOutcome::from_wit(value, |handle| {
             self.store
                 .body_for_handle(handle)
@@ -490,4 +588,57 @@ impl<'a> EffectApplier<'a> {
         });
         Ok((outcome, transition))
     }
+}
+
+fn add_lookup_records(transition: &mut ProjectionTransition, path: &Path, meta: &EntryMeta) {
+    transition.records.push(RecordWrite {
+        path: path.clone(),
+        aux: None,
+        fact: FactPayload::Lookup(LookupPayload::Positive(meta.clone())),
+    });
+    transition.records.push(RecordWrite {
+        path: path.clone(),
+        aux: None,
+        fact: FactPayload::Attr(AttrPayload { meta: meta.clone() }),
+    });
+}
+
+/// A fed file: a stable file of its exact size whose bytes the projection
+/// holds in its file record, so a read serves it whole without the eager cap
+/// of an inline preload.
+fn fed_file(
+    transition: &mut ProjectionTransition,
+    path: &Path,
+    file: &wit_types::FileOut,
+) -> anyhow::Result<EntryMeta> {
+    let wit_types::ByteSource::Inline(bytes) = &file.bytes else {
+        anyhow::bail!("fed file {path} has no inline bytes");
+    };
+    let attrs = FileAttrsCache::deferred(
+        crate::view::FileSize::Exact(u64::try_from(bytes.len())?),
+        crate::view::ReadMode::Full,
+        Stability::Stable,
+        None,
+    )
+    .map_err(anyhow::Error::msg)?;
+    transition.records.push(RecordWrite {
+        path: path.clone(),
+        aux: None,
+        fact: FactPayload::File(
+            FilePayload::new(None, bytes.clone()).with_content_type(file.content_type.clone()),
+        ),
+    });
+    Ok(EntryMeta::file(attrs))
+}
+
+fn listing_write_from_wit(write: wit_types::ListingWrite) -> ListingWrite {
+    match write {
+        wit_types::ListingWrite::Partial => ListingWrite::Partial,
+        wit_types::ListingWrite::Exhaustive => ListingWrite::Exhaustive,
+        wit_types::ListingWrite::Complete => ListingWrite::Complete,
+    }
+}
+
+fn feed_claims(claims: &[wit_types::FeedClaim]) -> anyhow::Result<Vec<FeedClaim>> {
+    claims.iter().map(FeedClaim::from_wit).collect()
 }

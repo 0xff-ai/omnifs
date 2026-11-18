@@ -135,6 +135,7 @@ Allowed, but never as a side effect. Surface the tradeoff and get sign-off in th
 - The daemon runs on the host. The dev Docker filesystem carries `ai.0xff.omnifs.home` and `ai.0xff.omnifs.fs` labels. Detach it with `target/debug/omnifs fs detach --name dev-docker`.
 - `Dockerfile`'s `filesystem-dev` stage is the contributor image path. The image entrypoint is only `omnifs-thin`; the launcher passes the flat named arguments. Release image assembly uses `scripts/ci/build-filesystem-image.sh`.
 - A provider is one `#[omnifs_sdk::provider]` impl with synchronous `fn start` registering routes on a `Router`. `r.object::<O>` and `r.file_object::<O>` bind objects; `r.alias` mounts the same object at another template; `r.dir`, `r.file`, and `r.treeref` are the path-oriented face for non-object routes.
+- `o.feed(method).starts([...])` gives an object a feed, and `.fed()` on a file face, a dir face, or the anchor (`o.fed()`) makes that face's facts come from feeds alone. An operation on a fed path answers `feed(claims)`; the engine runs the answering feed through the `feed` export when the fact is missing for a starting path or the feed is past its deadline, and serves the path from the projection.
 - Provider namespace and notify exports are async component functions. SDK callout futures await host imports directly; the host uses Wasmtime component async with `run_concurrent` so one provider instance can have multiple filesystem operations in flight.
 
 ## Product contract

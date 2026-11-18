@@ -54,7 +54,7 @@ impl Runtime {
                     more,
                 }
             },
-            Ok(ListOutcome::Subtree(_) | ListOutcome::Unchanged) => {
+            Ok(ListOutcome::Subtree(_) | ListOutcome::Unchanged | ListOutcome::Feed(_)) => {
                 NextPageOutcome::Error("pagination target answered no next page".into())
             },
             Err(error) => NextPageOutcome::Error(error.to_string()),

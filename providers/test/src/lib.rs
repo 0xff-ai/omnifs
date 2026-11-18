@@ -5,7 +5,8 @@
 //! typed page cursor; scoped intent-tagged invalidation from `on_tick`;
 //! object-load prefetch via `preload_object`; an object alias; deferred, ranged,
 //! and live files; an object tree handoff; paged and partial listings, with
-//! and without page validators; rate limits; and object aliases.
+//! and without page validators; an object feed with fed faces; rate limits;
+//! and object aliases.
 //!
 //! It is the conformance fixture every host integration test drives, so every
 //! pinned behavior is preserved on the new surface: the root, hello, and items
@@ -38,6 +39,14 @@ struct State {
     /// Whether a revalidation of the first page of `hello/validated` has
     /// answered `unchanged`; the next one answers a changed page.
     validated_first_page_stood: bool,
+    /// Each call of a shelf or book feed as `object token start`, which
+    /// `shelf-log` reads.
+    shelf_log: Vec<String>,
+    /// The upstream version of the shelves, which a read of `shelf-change`
+    /// advances.
+    shelf_version: u64,
+    /// Whether the feed of the `flaky` shelf has stopped once.
+    flaky_stopped: bool,
 }
 
 const LARGE_RANGED_SIZE: u64 = 64 * 1024 * 1024 + 1;
@@ -351,6 +360,171 @@ async fn item_comments(
 }
 
 // ===========================================================================
+// Object family: `Shelf` and `Book`, fed by the feed of the shelf
+// ===========================================================================
+
+#[omnifs_sdk::object(kind = "test.shelf", key = ShelfKey)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Shelf {
+    name: String,
+}
+
+impl Shelf {
+    #[allow(clippy::unused_async)]
+    async fn load(
+        _cx: &Cx<State>,
+        key: &ShelfKey,
+        _since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        let bytes = format!(r#"{{"name":"{}"}}"#, key.shelf).into_bytes();
+        Ok(Load::fresh(
+            Self::decode(&bytes)?,
+            Canonical::new(bytes, None),
+        ))
+    }
+
+    /// The feed of a shelf: its first answer lists books 1 and 2 in two
+    /// parts, each with the inner token of its book, and a third part
+    /// completes `books`; the `flaky` shelf stops once before its second
+    /// part. After the first answer, an answer is `unchanged` until the
+    /// shelf version moves, and then renames book 1, adds book 3, removes
+    /// book 2, and records in `seen` the names the host listed for `books`.
+    #[allow(clippy::unused_async)]
+    async fn feed(cx: FeedCx<ShelfKey, State>) -> Result<Feed> {
+        let shelf = cx.key().shelf.clone();
+        let token = cx.token().map(str::to_owned);
+        let version = cx.state_mut(|state| {
+            state.shelf_log.push(format!(
+                "{shelf} {} {}",
+                token.as_deref().unwrap_or("-"),
+                cx.start().unwrap_or("-")
+            ));
+            state.shelf_version
+        });
+        let books = format!("/shelves/{shelf}/books");
+        let book = |number: u64, title: &str| -> Result<()> {
+            cx.dir(format!("{books}/{number}"), ListingWrite::Partial)?;
+            cx.file(format!("{books}/{number}/title"), title.as_bytes().to_vec())
+        };
+        let key = |number: u64| BookKey {
+            shelf: shelf.clone(),
+            book: number,
+        };
+        match token.as_deref() {
+            None => {
+                cx.dir(&books, ListingWrite::Partial)?;
+                book(1, "Book 1")?;
+                Ok(Feed::part("page-1")
+                    .more(true)
+                    .inner::<Book>(&key(1), "row-1")
+                    .into())
+            },
+            Some("page-1") => {
+                if shelf == "flaky"
+                    && !cx.state_mut(|state| std::mem::replace(&mut state.flaky_stopped, true))
+                {
+                    return Err(ProviderError::network("the shelf upstream stopped"));
+                }
+                cx.dir(&books, ListingWrite::Partial)?;
+                book(2, "Book 2")?;
+                Ok(Feed::part("page-2")
+                    .more(true)
+                    .inner::<Book>(&key(2), "row-2")
+                    .into())
+            },
+            Some("page-2") => {
+                cx.dir(&books, ListingWrite::Complete)?;
+                Ok(Feed::part(format!("version-{version}")).into())
+            },
+            Some(done) if done == format!("version-{version}") => Ok(Feed::unchanged()),
+            Some(_) => {
+                let seen = match cx.listing(&books, ListingForm::Names)? {
+                    Some(ListingFacts {
+                        entries: ListingEntries::Names(names),
+                        ..
+                    }) => names.join(","),
+                    other => {
+                        return Err(ProviderError::internal(format!("books listing {other:?}")));
+                    },
+                };
+                cx.file(format!("/shelves/{shelf}/seen"), seen.into_bytes())?;
+                cx.dir(&books, ListingWrite::Complete)?;
+                book(1, &format!("Book 1 v{version}"))?;
+                book(3, "Book 3")?;
+                cx.remove(format!("{books}/2"))?;
+                Ok(Feed::part(format!("version-{version}")).into())
+            },
+        }
+    }
+}
+
+#[omnifs_sdk::path_captures]
+struct ShelfKey {
+    shelf: String,
+}
+
+#[omnifs_sdk::object(kind = "test.book", key = BookKey)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Book {
+    book: u64,
+}
+
+impl Book {
+    #[allow(clippy::unused_async)]
+    async fn load(_cx: &Cx<State>, key: &BookKey, _since: Option<Validator>) -> Result<Load<Self>> {
+        let bytes = format!(r#"{{"book":{}}}"#, key.book).into_bytes();
+        Ok(Load::fresh(
+            Self::decode(&bytes)?,
+            Canonical::new(bytes, None),
+        ))
+    }
+
+    /// The feed of one book, answering for its title before the first answer
+    /// of its shelf ends: it rewrites the title from the book's own upstream.
+    #[allow(clippy::unused_async)]
+    async fn feed(cx: FeedCx<BookKey, State>) -> Result<Feed> {
+        let BookKey { shelf, book } = cx.key();
+        let token = cx.token().unwrap_or("-").to_owned();
+        cx.state_mut(|state| {
+            state.shelf_log.push(format!(
+                "{shelf}/{book} {token} {}",
+                cx.start().unwrap_or("-")
+            ));
+        });
+        cx.file(
+            format!("/shelves/{shelf}/books/{book}/title"),
+            format!("Book {book} (own)").into_bytes(),
+        )?;
+        Ok(Feed::part(format!("own-{book}")).into())
+    }
+}
+
+#[omnifs_sdk::path_captures]
+struct BookKey {
+    shelf: String,
+    book: u64,
+}
+
+/// The calls of the shelf and book feeds so far, one per line.
+async fn shelf_log(cx: Cx<State>) -> Result<FileProjection> {
+    let log = cx.state(|state| state.shelf_log.join("\n"));
+    Ok(FileProjection::body(format!("{log}\n").into_bytes())
+        .dynamic()
+        .build())
+}
+
+/// Advance the upstream version of the shelves.
+async fn shelf_change(cx: Cx<State>) -> Result<FileProjection> {
+    let version = cx.state_mut(|state| {
+        state.shelf_version += 1;
+        state.shelf_version
+    });
+    Ok(FileProjection::body(format!("{version}\n").into_bytes())
+        .dynamic()
+        .build())
+}
+
+// ===========================================================================
 // Provider
 // ===========================================================================
 
@@ -436,6 +610,27 @@ impl TestProvider {
         r.dir("/hello/snapshot").handler(snapshot)?;
         r.dir("/hello/snapshot/comments")
             .handler(snapshot_comments)?;
+
+        // Object feeds: the shelf feed answers for its books, the book feed
+        // for a title before the first answer of its shelf ends.
+        r.object::<Shelf>("/shelves/{shelf}", |o| {
+            o.stable();
+            o.file("shelf.json").canonical::<Json>()?;
+            o.file("seen").fed()?;
+            o.dir("books").fed()?;
+            o.feed(Shelf::feed).starts(["books"])?;
+            Ok(())
+        })?;
+        r.object::<Book>("/shelves/{shelf}/books/{book}", |o| {
+            o.stable();
+            o.fed();
+            o.file("book.json").canonical::<Json>()?;
+            o.file("title").fed()?;
+            o.feed(Book::feed).starts(["title"])?;
+            Ok(())
+        })?;
+        r.file("/hello/shelf-log").handler(shelf_log)?;
+        r.file("/hello/shelf-change").handler(shelf_change)?;
 
         r.dir("/scoped").handler(scoped)?;
         r.file("/scoped/item").handler(scoped_item)?;

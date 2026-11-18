@@ -37,7 +37,7 @@ impl From<anyhow::Error> for SharedError {
 }
 
 impl SharedError {
-    fn into_engine(self) -> EngineError {
+    pub(super) fn into_engine(self) -> EngineError {
         match self {
             Self::Provider(error) => EngineError::ProviderError(error),
             Self::Other(message) => EngineError::ProviderProtocol(message),
@@ -45,7 +45,7 @@ impl SharedError {
     }
 }
 
-type Shared<T> = std::result::Result<T, SharedError>;
+pub(super) type Shared<T> = std::result::Result<T, SharedError>;
 
 struct Flight<V> {
     state: Mutex<FlightState<V>>,
@@ -83,7 +83,7 @@ impl<V> Flight<V> {
     }
 }
 
-struct ExactFlights<K, V> {
+pub(super) struct ExactFlights<K, V> {
     slots: Mutex<HashMap<K, Arc<Flight<V>>>>,
 }
 
@@ -126,7 +126,7 @@ where
         })
     }
 
-    async fn run<R, RFut, F, Fut>(&self, key: K, reserve: R, work: F) -> Shared<V>
+    pub(super) async fn run<R, RFut, F, Fut>(&self, key: K, reserve: R, work: F) -> Shared<V>
     where
         R: FnOnce() -> RFut,
         RFut: Future,
@@ -203,7 +203,9 @@ enum ReadKey {
 pub(crate) struct NamespaceFlights {
     lookup: ExactFlights<Path, LookupOutcome>,
     list: ExactFlights<Path, ListOutcome>,
-    read: ExactFlights<ReadKey, ReadOutcome>,
+    read: ExactFlights<ReadKey, ReadReply>,
+    /// One answer per feed object id.
+    pub(super) feed: ExactFlights<ObjectId, ()>,
 }
 
 impl NamespaceFlights {
@@ -212,6 +214,7 @@ impl NamespaceFlights {
             lookup: ExactFlights::default(),
             list: ExactFlights::default(),
             read: ExactFlights::default(),
+            feed: ExactFlights::default(),
         }
     }
 }
@@ -242,6 +245,8 @@ pub enum ListOutcome {
     Subtree(u64),
     /// The cached page of the validator of the call stands.
     Unchanged,
+    /// The listing is fed: the feeds that answer for it, the outer first.
+    Feed(Vec<super::feed::FeedClaim>),
 }
 
 #[derive(Debug, Clone)]
@@ -256,6 +261,13 @@ pub struct ReadOutcome {
     pub attrs: FileAttrsCache,
     pub bytes: ReadBytes,
     pub content_type: Option<String>,
+}
+
+/// A read answer: the file, or the feeds that answer for a fed file.
+#[derive(Debug, Clone)]
+pub enum ReadReply {
+    File(ReadOutcome),
+    Feed(Vec<super::feed::FeedClaim>),
 }
 
 #[derive(Debug, Clone)]
@@ -360,7 +372,7 @@ impl Runtime {
         path: &Path,
         content_type: String,
         captured_epoch: u64,
-    ) -> Result<ReadOutcome> {
+    ) -> Result<ReadReply> {
         let now = now_millis();
         let cached_canonical = self
             .resources
@@ -387,7 +399,7 @@ impl Runtime {
         mode: ReadMode,
         cached_canonical: Option<crate::cache::CachedCanonical>,
         captured_epoch: u64,
-    ) -> Result<ReadOutcome> {
+    ) -> Result<ReadReply> {
         let now = now_millis();
         if self
             .resources

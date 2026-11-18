@@ -14,52 +14,23 @@ use crate::objects::{
     Review, ReviewComment, WorkflowRun,
 };
 use crate::{
-    CHECK_RUN_PAGE_SIZE, COMMENT_PAGE_SIZE, CheckRunsResponse, FILE_PAGE_SIZE, FilePath,
-    NOTIFICATION_PAGE_SIZE, OwnerKind, OwnerName, REVIEW_PAGE_SIZE, RepoId, RepoName, StateFilter,
-    ThreadId, WorkflowRunsResponse, resolve_owner_kind,
+    CHECK_RUN_PAGE_SIZE, CheckRunsResponse, FILE_PAGE_SIZE, FilePath, NOTIFICATION_PAGE_SIZE,
+    OwnerKind, OwnerName, REVIEW_PAGE_SIZE, RepoId, RepoName, StateFilter, ThreadId,
+    WorkflowRunsResponse, resolve_owner_kind,
 };
 
 /// Identity discriminator for the comment anchor's `{item_kind}` segment. A
 /// plain `PathSegment` capture (NOT a facet): an issue comment and a pull
 /// comment are distinct objects, so `item_kind` is part of identity.
 #[omnifs_sdk::path_segment]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ItemKind {
     #[strum(serialize = "issues")]
     Issues,
     #[strum(serialize = "pulls")]
     Pulls,
 }
-
-impl ItemKind {
-    const fn rest_resource(self) -> &'static str {
-        match self {
-            Self::Issues => "issues",
-            Self::Pulls => "pulls",
-        }
-    }
-
-    async fn list_page(
-        self,
-        cx: &Cx,
-        owner: &OwnerName,
-        repo: &RepoName,
-        filter: StateFilter,
-        page: u64,
-    ) -> Result<Vec<ItemData>> {
-        let resource = self.rest_resource();
-        let state = filter.rest_state();
-        cx.endpoint(GitHubApi)
-            .get(format!(
-                "/repos/{owner}/{repo}/{resource}?state={state}\
-                 &sort=created&direction=desc&per_page={ITEM_PAGE_SIZE}&page={page}"
-            ))
-            .json()
-            .await
-    }
-}
-
-const ITEM_PAGE_SIZE: u64 = 100;
 
 // ===========================================================================
 // Keys
@@ -176,17 +147,6 @@ pub(crate) struct RunKey {
 #[omnifs_sdk::path_captures]
 pub(crate) struct NotificationKey {
     pub(crate) thread_id: ThreadId,
-}
-
-/// The collection-dir key for `issues/{filter}` and `pulls/{filter}`: it
-/// carries the `{filter}` segment so the listing reads the real filter
-/// (`ls issues/all` lists closed/all items, not just open). The parent anchor
-/// key (`RepoKey`) has no filter; the collection method binds this instead.
-#[omnifs_sdk::path_captures]
-pub(crate) struct ItemListKey {
-    pub(crate) owner: OwnerName,
-    pub(crate) repo: RepoName,
-    pub(crate) filter: StateFilter,
 }
 
 // ===========================================================================
@@ -493,61 +453,6 @@ impl Owner {
 }
 
 impl Repo {
-    pub(crate) async fn issues(
-        key: ItemListKey,
-        cx: ListCx<PageCursor>,
-    ) -> Result<Collection<Issue, PageCursor>> {
-        let filter = key.filter;
-        let page = cx.cursor().map_or(1, |cursor| cursor.0);
-        let items = ItemKind::Issues
-            .list_page(&cx, &key.owner, &key.repo, filter, page)
-            .await?;
-        let len = items.len() as u64;
-        let entries = items
-            .iter()
-            .filter(|item| !item.is_pull_request())
-            .map(|item| {
-                CollectionEntry::computed(
-                    IssueKey {
-                        owner: key.owner.clone(),
-                        repo: key.repo.clone(),
-                        filter: Facet(filter),
-                        number: item.number,
-                    },
-                    item.eager_leaves(),
-                )
-            })
-            .collect::<Vec<_>>();
-        page_or_complete(entries, len, ITEM_PAGE_SIZE, PageCursor(page + 1))
-    }
-
-    pub(crate) async fn pulls(
-        key: ItemListKey,
-        cx: ListCx<PageCursor>,
-    ) -> Result<Collection<PullRequest, PageCursor>> {
-        let filter = key.filter;
-        let page = cx.cursor().map_or(1, |cursor| cursor.0);
-        let items = ItemKind::Pulls
-            .list_page(&cx, &key.owner, &key.repo, filter, page)
-            .await?;
-        let len = items.len() as u64;
-        let entries = items
-            .iter()
-            .map(|item| {
-                CollectionEntry::computed(
-                    PullKey {
-                        owner: key.owner.clone(),
-                        repo: key.repo.clone(),
-                        filter: Facet(filter),
-                        number: item.number,
-                    },
-                    item.eager_leaves(),
-                )
-            })
-            .collect::<Vec<_>>();
-        page_or_complete(entries, len, ITEM_PAGE_SIZE, PageCursor(page + 1))
-    }
-
     pub(crate) async fn workflow_runs(
         key: RepoKey,
         cx: ListCx<PageCursor>,
@@ -599,43 +504,7 @@ impl Repo {
     }
 }
 
-impl Issue {
-    pub(crate) async fn comments(
-        key: IssueKey,
-        cx: ListCx<PageCursor>,
-    ) -> Result<Collection<Comment, PageCursor>> {
-        let page = cx.cursor().map_or(1, |c| c.0);
-        comments_collection(
-            &cx,
-            &key.owner,
-            &key.repo,
-            ItemKind::Issues,
-            *key.filter,
-            key.number,
-            page,
-        )
-        .await
-    }
-}
-
 impl PullRequest {
-    pub(crate) async fn comments(
-        key: PullKey,
-        cx: ListCx<PageCursor>,
-    ) -> Result<Collection<Comment, PageCursor>> {
-        let page = cx.cursor().map_or(1, |c| c.0);
-        comments_collection(
-            &cx,
-            &key.owner,
-            &key.repo,
-            ItemKind::Pulls,
-            *key.filter,
-            key.number,
-            page,
-        )
-        .await
-    }
-
     pub(crate) async fn files(
         key: PullKey,
         cx: ListCx<PageCursor>,
@@ -1008,21 +877,6 @@ fn inline_text(s: &str) -> FileProjection {
     FileProjection::text(s, TextFormat::Raw).dynamic().build()
 }
 
-/// The shallow eager leaves an issue/PR listing row can fill without the
-/// single-item canonical: the tiny `title`/`state`/`user` fields. `body`,
-/// `item.md`, and `item.json` come from the canonical, which the lossy row
-/// cannot reproduce, so they load on first read.
-impl ItemData {
-    fn eager_leaves(&self) -> Vec<(String, FileProjection)> {
-        let login = self.user.as_ref().map_or("", |user| user.login.as_str());
-        vec![
-            ("title".to_string(), inline_text(&self.title)),
-            ("state".to_string(), inline_text(&self.state)),
-            ("user".to_string(), inline_text(login)),
-        ]
-    }
-}
-
 impl ChangedFile {
     fn eager_leaves(&self) -> Vec<(String, FileProjection)> {
         vec![
@@ -1068,20 +922,6 @@ impl CheckRun {
                 inline_text(self.conclusion.as_deref().unwrap_or("")),
             ),
         ]
-    }
-}
-
-/// The shallow eager leaves a comment listing row can fill from the lossy list
-/// payload: `author` and `body.md` render the same bytes from any source, so
-/// they preload at listing time. `comment.json`/`comment.md` come from the
-/// verbatim standalone GET, which the list response cannot reproduce, so they
-/// load on first read.
-impl Comment {
-    fn eager_leaves(&self, key: &CommentKey) -> Result<Vec<(String, FileProjection)>> {
-        Ok(vec![
-            ("author".to_string(), self.author(key)?),
-            ("body.md".to_string(), self.body_md(key)?),
-        ])
     }
 }
 
@@ -1196,46 +1036,6 @@ struct PullHeadResponse {
 #[derive(Debug, Deserialize)]
 struct PullHead {
     sha: String,
-}
-
-async fn comments_collection(
-    cx: &Cx,
-    owner: &OwnerName,
-    repo: &RepoName,
-    item_kind: ItemKind,
-    filter: StateFilter,
-    number: u64,
-    page: u64,
-) -> Result<Collection<Comment, PageCursor>> {
-    // The list response is a lossy view: serde_json would re-serialize each row
-    // key-sorted and compact, which is NOT byte-identical to the verbatim
-    // standalone comment GET that `Comment::load` stores. Storing that as the
-    // canonical would content-address `comment.json` inconsistently. So list
-    // only the eagerly-derivable leaves (author, body.md, which render the same
-    // from any source) and let `comment.json`/`comment.md` load from the
-    // verbatim GET on first read, mirroring issues/pulls/runs.
-    let comments: Vec<Comment> = cx
-        .endpoint(GitHubApi)
-        .get(format!(
-            "/repos/{owner}/{repo}/issues/{number}/comments?per_page={COMMENT_PAGE_SIZE}&page={page}"
-        ))
-        .json()
-        .await?;
-    let len = comments.len() as u64;
-    let mut entries = Vec::with_capacity(comments.len());
-    for comment in comments {
-        let key = CommentKey {
-            owner: owner.clone(),
-            repo: repo.clone(),
-            item_kind,
-            filter: Facet(filter),
-            number,
-            comment_id: comment.id,
-        };
-        let files = comment.eager_leaves(&key)?;
-        entries.push(CollectionEntry::computed(key, files));
-    }
-    page_or_complete(entries, len, COMMENT_PAGE_SIZE, PageCursor(page + 1))
 }
 
 pub(crate) fn unzip_logs(bytes: &[u8]) -> Vec<u8> {

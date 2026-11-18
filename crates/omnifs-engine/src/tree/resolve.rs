@@ -135,47 +135,22 @@ impl EngineNamespace {
         }
 
         let offline = entry.runtime().is_none();
-        let expired = !offline
+        // A fed fact is served once its feeds have answered, so its lookup
+        // asks the provider for their claims.
+        let fed = !offline
             && resources
-                .view_expired(&rel, crate::clock::now_millis())
+                .is_fed(&rel)
                 .map_err(|error| TreeError::internal(error.to_string()))?;
-        if let Some(node) = cached_lookup_node(
-            resources,
-            entry.trees(),
-            mount.as_str(),
-            &rel,
-            offline,
-            expired,
-        )? {
+        if !fed && let Some(node) = cached_child_node(entry, &mount, parent, name, &rel)? {
             return Ok(node);
-        }
-
-        let cached_parent = cached_dirents(resources, parent)?;
-        if let Some(meta) = cached_parent.as_ref().and_then(|dirents| {
-            dirents
-                .entries()
-                .find(|entry| entry.name == name)
-                .map(|entry| entry.meta.clone())
-        }) {
-            crate::inspector::cache_event(CacheKind::BrowseHit);
-            return Ok(Node::new(mount, rel, meta, NodeBody::Provider));
-        }
-
-        if offline {
-            if cached_parent
-                .as_ref()
-                .is_some_and(DirentsPayload::is_complete_offline)
-            {
-                return Err(TreeError::not_found(rel.as_str()));
-            }
-            return Err(TreeError::offline_miss(format!(
-                "offline lookup has no complete fact for {rel}"
-            )));
         }
 
         crate::inspector::cache_event(CacheKind::BrowseMiss);
         let runtime = entry.runtime().expect("online entry has a runtime");
         match runtime.lookup_child(parent, name).await? {
+            LookupOutcome::Entry(entry) if fed => {
+                Ok(Node::fed(mount, entry.path().clone(), entry.meta().clone()))
+            },
             LookupOutcome::Entry(entry) => Ok(Node::new(
                 mount,
                 entry.path().clone(),
@@ -204,6 +179,11 @@ impl EngineNamespace {
                     Some((meta, syn)) => Ok(Node::synthetic(mount, rel, meta, syn)),
                     None => Err(TreeError::not_found(rel.as_str())),
                 }
+            },
+            LookupOutcome::Feed(claims) => {
+                super::feed::answer_claims(&runtime, &rel, super::feed::FedFact::Lookup, &claims)
+                    .await?;
+                fed_lookup_node(resources, mount, rel)
             },
         }
     }
@@ -259,6 +239,71 @@ impl EngineNamespace {
             EntryMeta::directory(),
             NodeBody::Provider,
         ))
+    }
+}
+
+/// A child served from the cache without the provider: its cached lookup, or
+/// its entry in the parent's cached listing. Offline, a child the cache does
+/// not answer is not found under a complete listing and a miss otherwise.
+fn cached_child_node(
+    entry: &crate::registry::MountEntry,
+    mount: &str,
+    parent: &Path,
+    name: &str,
+    rel: &Path,
+) -> Result<Option<Node>> {
+    let resources = entry.resources();
+    let offline = entry.runtime().is_none();
+    let expired = !offline
+        && resources
+            .view_expired(rel, crate::clock::now_millis())
+            .map_err(|error| TreeError::internal(error.to_string()))?;
+    if let Some(node) = cached_lookup_node(resources, entry.trees(), mount, rel, offline, expired)?
+    {
+        return Ok(Some(node));
+    }
+
+    let cached_parent = cached_dirents(resources, parent)?;
+    if let Some(meta) = cached_parent.as_ref().and_then(|dirents| {
+        dirents
+            .entries()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.meta.clone())
+    }) {
+        crate::inspector::cache_event(CacheKind::BrowseHit);
+        return Ok(Some(Node::new(
+            mount.to_string(),
+            rel.clone(),
+            meta,
+            NodeBody::Provider,
+        )));
+    }
+
+    if offline {
+        if cached_parent
+            .as_ref()
+            .is_some_and(DirentsPayload::is_complete_offline)
+        {
+            return Err(TreeError::not_found(rel.as_str()));
+        }
+        return Err(TreeError::offline_miss(format!(
+            "offline lookup has no complete fact for {rel}"
+        )));
+    }
+    Ok(None)
+}
+
+/// A fed child served from the projection once its feeds have answered, or
+/// not found.
+fn fed_lookup_node(resources: &MountResources, mount: String, rel: Path) -> Result<Node> {
+    match resources
+        .lookup_payload(&rel)
+        .map_err(|error| TreeError::internal(error.to_string()))?
+    {
+        Some(crate::view::LookupPayload::Positive(meta)) => Ok(Node::fed(mount, rel, meta)),
+        Some(crate::view::LookupPayload::Negative { .. }) | None => {
+            Err(TreeError::not_found(rel.as_str()))
+        },
     }
 }
 

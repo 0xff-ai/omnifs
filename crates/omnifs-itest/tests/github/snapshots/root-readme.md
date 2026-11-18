@@ -17,6 +17,24 @@ The keying schema is the path grammar below. Literal segments are written as-is.
 - `/{owner}/{repo}/pulls` - directory
   - `{owner}`: `String`
   - `{repo}`: `String`
+- `/{owner}/{repo}/issues/{filter}` - directory
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
+  - `{filter}`: `StateFilter` choices `open`, `all`
+- `/{owner}/{repo}/pulls/{filter}` - directory
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
+  - `{filter}`: `StateFilter` choices `open`, `all`
+- `/{owner}/{repo}/issues/{filter}/{number}/comments` - directory
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
+  - `{filter}`: `StateFilter` choices `open`, `all`
+  - `{number}`: `u64`
+- `/{owner}/{repo}/pulls/{filter}/{number}/comments` - directory
+  - `{owner}`: `OwnerName`
+  - `{repo}`: `RepoName`
+  - `{filter}`: `StateFilter` choices `open`, `all`
+  - `{number}`: `u64`
 - `/notifications` - directory
 - `/{owner}` - object `github.owner`
   - `{owner}`: `OwnerName`
@@ -74,27 +92,9 @@ The keying schema is the path grammar below. Literal segments are written as-is.
 - `/{owner}/{repo}` - collection of `github.repo`
   - `{owner}`: `OwnerName`
   - `{repo}`: `String`
-- `/{owner}/{repo}/issues/{filter}` - collection of `github.issue`
-  - `{owner}`: `OwnerName`
-  - `{repo}`: `RepoName`
-  - `{filter}`: `StateFilter`
-- `/{owner}/{repo}/pulls/{filter}` - collection of `github.pull`
-  - `{owner}`: `OwnerName`
-  - `{repo}`: `RepoName`
-  - `{filter}`: `StateFilter`
 - `/{owner}/{repo}/actions/runs` - collection of `github.run`
   - `{owner}`: `OwnerName`
   - `{repo}`: `RepoName`
-- `/{owner}/{repo}/issues/{filter}/{number}/comments` - collection of `github.comment`
-  - `{owner}`: `OwnerName`
-  - `{repo}`: `RepoName`
-  - `{filter}`: `StateFilter` choices `open`, `all`
-  - `{number}`: `u64`
-- `/{owner}/{repo}/pulls/{filter}/{number}/comments` - collection of `github.comment`
-  - `{owner}`: `OwnerName`
-  - `{repo}`: `RepoName`
-  - `{filter}`: `StateFilter` choices `open`, `all`
-  - `{number}`: `u64`
 - `/{owner}/{repo}/pulls/{filter}/{number}/files` - collection of `github.pull_file`
   - `{owner}`: `OwnerName`
   - `{repo}`: `RepoName`
