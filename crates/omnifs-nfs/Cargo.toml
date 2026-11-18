@@ -20,6 +20,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }
 getrandom = "0.3"
+libc = { workspace = true }
 
 [dev-dependencies]
 omnifs-provider = { workspace = true }

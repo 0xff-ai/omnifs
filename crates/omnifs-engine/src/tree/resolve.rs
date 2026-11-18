@@ -230,15 +230,15 @@ impl EngineNamespace {
                         crate::view::LookupPayload::Positive(meta) if meta.is_directory()
                     )
                 });
+            // Git facts persist across a restart while open trees live only in
+            // memory, so a fact without an open tree falls through to the
+            // provider, which opens the repository again.
             if positive_directory
                 && let Some(git) = resources
                     .git_for_path(&rel)
                     .map_err(|error| TreeError::internal(error.to_string()))?
+                && let Some(tree_ref) = entry.trees().by_identity(&git.id, &git.relative_path)
             {
-                let tree_ref = entry
-                    .trees()
-                    .by_identity(&git.id, &git.relative_path)
-                    .ok_or_else(|| TreeError::internal("validated Git tree is not open"))?;
                 return Ok(Node::new(
                     mount,
                     rel,
@@ -284,9 +284,12 @@ fn cached_lookup_node(
                 .git_for_path(rel)
                 .map_err(|error| TreeError::internal(error.to_string()))?
             {
-                let tree_ref = trees
-                    .by_identity(&git.id, &git.relative_path)
-                    .ok_or_else(|| TreeError::internal("validated Git tree is not open"))?;
+                // Git facts persist across a restart while open trees live only
+                // in memory: without an open tree, the lookup is a miss, and the
+                // provider opens the repository again.
+                let Some(tree_ref) = trees.by_identity(&git.id, &git.relative_path) else {
+                    return Ok(None);
+                };
                 return Ok(Some(Node::new(
                     mount.to_string(),
                     rel.clone(),
@@ -319,4 +322,55 @@ fn cached_dirents(resources: &MountResources, parent: &Path) -> Result<Option<Di
     resources
         .dirents_payload(parent)
         .map_err(|error| TreeError::internal(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::identity::GitId;
+    use crate::cache::{
+        Caches, FactPayload, GitWrite, ProjectionId, ProjectionTransition, RecordWrite,
+    };
+    use crate::tree_refs::TreeRefs;
+    use crate::view::LookupPayload;
+    use omnifs_core::{MountName, ProviderId};
+
+    #[test]
+    fn a_git_fact_without_an_open_tree_is_a_lookup_miss() {
+        // A restart keeps the Git fact of a path but no open tree in memory.
+        let dir = tempfile::tempdir().unwrap();
+        let caches = Caches::open(dir.path()).unwrap();
+        let provider_id = ProviderId::from_wasm_bytes(b"m");
+        let resources = caches
+            .mount(
+                &MountName::new("m").unwrap(),
+                ProjectionId::new(b"m", provider_id),
+                provider_id,
+                b"m",
+            )
+            .unwrap();
+        let path = Path::parse("/owner/repo/repo").unwrap();
+        resources
+            .publish(
+                ProjectionTransition {
+                    records: vec![RecordWrite {
+                        path: path.clone(),
+                        aux: None,
+                        fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+                    }],
+                    git: vec![GitWrite {
+                        path: path.clone(),
+                        id: GitId::new("m", "https://example.test/repo.git", None),
+                        relative_path: String::new(),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                resources.current_epoch(),
+            )
+            .unwrap();
+
+        let node = cached_lookup_node(&resources, &TreeRefs::new(), "m", &path, false, false)
+            .expect("a Git fact without an open tree is no internal error");
+        assert!(node.is_none());
+    }
 }
