@@ -7,9 +7,9 @@
 
 use crate::browse::{List, Listing, Lookup};
 use crate::captures::Captures;
-use crate::error::Result;
+use crate::error::{ProviderError, Result};
 use crate::file_attrs::{FileProj, FileSize, ReadMode};
-use crate::projection::{DirProjection, Entry};
+use crate::projection::{DirPage, DirProjection, Entry};
 use omnifs_core::path::Path;
 
 use super::super::compiled::CompiledRouter;
@@ -168,33 +168,57 @@ impl<S> Shape<'_, S> {
         name: &str,
         projection: &DirProjection,
     ) -> Result<Lookup> {
-        let merged = self.merge_entries(parent_abs, projection.entries().iter().cloned());
+        let DirPage::Entries {
+            entries,
+            exhaustive,
+            ..
+        } = projection.page()
+        else {
+            return Err(ProviderError::internal(
+                "a lookup carries no validator for an unchanged listing to answer",
+            ));
+        };
+        let merged = self.merge_entries(parent_abs, entries.iter().cloned());
         let target = merged.iter().find(|entry| entry.name() == name).cloned();
         let siblings = merged.into_iter().filter(|entry| entry.name() != name);
         let lookup = target.map_or_else(Lookup::not_found, Lookup::entry);
         Ok(lookup
             .with_siblings(siblings)
             .with_effects(projection.project_effects()?)
-            .exhaustive(projection.exhaustive_flag()))
+            .exhaustive(*exhaustive))
     }
 
     /// Lower a [`DirProjection`] to the wire listing: merge with static
     /// siblings, honor the handler's exhaustive flag, and attach the
-    /// preload effects and resume cursor the projection carries.
+    /// preload effects, resume cursor, and validator the projection carries;
+    /// an `unchanged` projection lowers to the `unchanged` result.
     pub(super) fn dir_projection_into_list(
         &self,
         abs: &Path,
         projection: &DirProjection,
     ) -> Result<List> {
-        let merged = self.merge_entries(abs, projection.entries().iter().cloned());
-        let mut listing = if projection.exhaustive_flag() {
+        let effects = projection.project_effects()?;
+        let (entries, exhaustive, cursor, validator) = match projection.page() {
+            DirPage::Entries {
+                entries,
+                exhaustive,
+                cursor,
+                validator,
+            } => (entries, *exhaustive, cursor, validator),
+            DirPage::Unchanged { interval } => return Ok(List::unchanged(*interval, effects)),
+        };
+        let merged = self.merge_entries(abs, entries.iter().cloned());
+        let mut listing = if exhaustive {
             Listing::complete(merged)
         } else {
             Listing::partial(merged)
         };
-        listing = listing.with_effects(projection.project_effects()?);
-        if let Some(cursor) = projection.cursor().cloned() {
+        listing = listing.with_effects(effects);
+        if let Some(cursor) = cursor.clone() {
             listing = listing.with_cursor(cursor);
+        }
+        if let Some(validator) = validator.clone() {
+            listing = listing.with_validator(validator);
         }
         Ok(List::entries(listing))
     }
@@ -256,36 +280,47 @@ impl<S> Shape<'_, S> {
 /// into the parent anchor's listing. The collection enumerates child object
 /// names (and emits each fresh child's canonical store through its projection
 /// effects); those names become directory siblings of the parent's own leaves,
-/// the parent's own leaves winning name collisions.
+/// the parent's own leaves winning name collisions. The collection's cursor and
+/// validator are the page's; an `unchanged` collection answers `unchanged`
+/// with the anchor's effects.
 pub(in crate::router) fn merge_anchor_collection(
     listing: &Listing,
     projection: &DirProjection,
-) -> Result<Listing> {
-    let mut entries: Vec<Entry> = listing.entries().to_vec();
+) -> Result<List> {
     let mut effects = listing.effects().clone();
+    effects.extend(projection.project_effects()?);
+    let (collection_entries, collection_exhaustive, cursor, validator) = match projection.page() {
+        DirPage::Entries {
+            entries,
+            exhaustive,
+            cursor,
+            validator,
+        } => (entries, *exhaustive, cursor, validator),
+        DirPage::Unchanged { interval } => return Ok(List::unchanged(*interval, effects)),
+    };
+
+    let mut entries: Vec<Entry> = listing.entries().to_vec();
     let parent_names: std::collections::BTreeSet<String> =
         entries.iter().map(|e| e.name().to_string()).collect();
-
-    let mut all_exhaustive = listing.exhaustive();
-    for entry in projection.entries() {
+    for entry in collection_entries {
         if !parent_names.contains(entry.name()) {
             entries.push(entry.clone());
         }
     }
-    all_exhaustive &= projection.exhaustive_flag();
-    let next_cursor = projection.cursor().cloned();
-    effects.extend(projection.project_effects()?);
 
-    let mut merged = if all_exhaustive {
+    let mut merged = if listing.exhaustive() && collection_exhaustive {
         Listing::complete(entries)
     } else {
         Listing::partial(entries)
     }
     .with_effects(effects);
-    if let Some(cursor) = next_cursor {
+    if let Some(cursor) = cursor.clone() {
         merged = merged.with_cursor(cursor);
     }
-    Ok(merged)
+    if let Some(validator) = validator.clone() {
+        merged = merged.with_validator(validator);
+    }
+    Ok(List::entries(merged))
 }
 
 /// Listing shape for the verbatim source representation leaf: a full-deferred

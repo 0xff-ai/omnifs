@@ -19,7 +19,7 @@
 //! [`DirListing::preload_dir`], [`DirListing::store_canonical`]) and the
 //! host decides what to keep, evict, and invalidate.
 
-use crate::browse::Effects;
+use crate::browse::{Effects, PageValidator};
 use crate::error::{ProviderError, Result};
 use crate::file_attrs::{
     FileAttrs, FileProj, FileSize, ProjBytes, ReadMode, Stability, VersionToken,
@@ -334,11 +334,10 @@ impl<Src: Buildable> FileProjBuilder<Src> {
 /// consumes. Both the author-facing [`DirListing`] and
 /// [`crate::collection::Collection`] lower into this. `exhaustive` enumerates
 /// every child; `open` is capped/non-exhaustive with no cursor; `paged` is
-/// resumable.
+/// resumable; `unchanged` answers a `list-children` call whose validator
+/// still matches its page.
 pub(crate) struct DirProjection {
-    entries: Vec<Entry>,
-    exhaustive: bool,
-    cursor: Option<Cursor>,
+    page: DirPage,
     extra_files: Vec<(String, FileProjection)>,
     /// Preloaded directory entries: `(path, exhaustive)`. Lowered to the
     /// `project_dir`/`project_dir_exhaustive` effect so a listing can declare
@@ -356,6 +355,21 @@ struct ExtraCanonical {
     validator: Option<VersionToken>,
     bytes: Vec<u8>,
     leaves: Vec<String>,
+}
+
+/// The page a [`DirProjection`] answers.
+pub(crate) enum DirPage {
+    /// The entries of the page, with its completeness, resume cursor, and
+    /// validator.
+    Entries {
+        entries: Vec<Entry>,
+        exhaustive: bool,
+        cursor: Option<Cursor>,
+        validator: Option<PageValidator>,
+    },
+    /// The cached page of the validator of the call stands, with the seconds
+    /// of the interval of its upstream.
+    Unchanged { interval: Option<u32> },
 }
 
 impl DirProjection {
@@ -383,15 +397,41 @@ impl DirProjection {
         Self::from_entries(entries.into_iter().collect(), false, Some(cursor))
     }
 
+    /// The validator the host sent for this page still matches: its cached
+    /// page stands, with the seconds of the interval of its upstream.
+    pub fn unchanged(interval: Option<u32>) -> Self {
+        Self::from_page(DirPage::Unchanged { interval })
+    }
+
     fn from_entries(entries: Vec<Entry>, exhaustive: bool, cursor: Option<Cursor>) -> Self {
-        Self {
+        Self::from_page(DirPage::Entries {
             entries,
             exhaustive,
             cursor,
+            validator: None,
+        })
+    }
+
+    fn from_page(page: DirPage) -> Self {
+        Self {
+            page,
             extra_files: Vec::new(),
             extra_dirs: Vec::new(),
             extra_canonical: Vec::new(),
         }
+    }
+
+    /// Carry the validator of the enumerated page; an `unchanged` page keeps
+    /// the validator the host sent.
+    #[must_use]
+    pub fn with_validator(mut self, validator: PageValidator) -> Self {
+        if let DirPage::Entries {
+            validator: slot, ..
+        } = &mut self.page
+        {
+            *slot = Some(validator);
+        }
+        self
     }
 
     /// Preload a child file alongside the listing (the `project` effect).
@@ -410,7 +450,7 @@ impl DirProjection {
     #[must_use]
     pub fn preload_dir(mut self, path: impl Into<String>, child: DirProjection) -> Self {
         let path = path.into();
-        let exhaustive = child.exhaustive;
+        let exhaustive = child.exhaustive_flag();
         self.extra_dirs.push((path.clone(), exhaustive));
         for (subdir, subdir_exhaustive) in child.extra_dirs {
             self.extra_dirs
@@ -453,16 +493,20 @@ impl DirProjection {
         self
     }
 
-    pub(crate) fn entries(&self) -> &[Entry] {
-        &self.entries
+    pub(crate) fn page(&self) -> &DirPage {
+        &self.page
     }
 
+    /// Whether the page enumerates every child; an `unchanged` answer
+    /// enumerates nothing.
     pub(crate) fn exhaustive_flag(&self) -> bool {
-        self.exhaustive
-    }
-
-    pub(crate) fn cursor(&self) -> Option<&Cursor> {
-        self.cursor.as_ref()
+        matches!(
+            self.page,
+            DirPage::Entries {
+                exhaustive: true,
+                ..
+            }
+        )
     }
 
     /// Lower the carried extra-file preloads onto the browse [`Effects`]
@@ -506,7 +550,10 @@ impl DirProjection {
 /// listing surfaces.
 ///
 /// `exhaustive` enumerates every child; `open` is capped/non-exhaustive with no
-/// cursor; `paged` is resumable.
+/// cursor; `paged` is resumable. A page that carries a validator
+/// ([`Self::with_validator`]) is asked for again once it is past its deadline,
+/// with that validator as [`crate::cx::Cx::version`] of the call; `unchanged`
+/// answers that the page still stands.
 pub struct DirListing(DirProjection);
 
 impl DirListing {
@@ -532,6 +579,19 @@ impl DirListing {
     /// without one.
     pub fn paged(entries: impl IntoIterator<Item = Entry>, cursor: Cursor) -> Self {
         Self(DirProjection::paged(entries, cursor))
+    }
+
+    /// The validator of the call ([`crate::cx::Cx::version`]) still matches:
+    /// the cached page stands, with the seconds of the interval of its
+    /// upstream.
+    pub fn unchanged(interval: Option<u32>) -> Self {
+        Self(DirProjection::unchanged(interval))
+    }
+
+    /// Carry the validator of this page; see [`PageValidator`].
+    #[must_use]
+    pub fn with_validator(self, validator: PageValidator) -> Self {
+        Self(self.0.with_validator(validator))
     }
 
     /// Preload a child file alongside the listing (the `project` effect).

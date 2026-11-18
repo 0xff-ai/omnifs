@@ -7,12 +7,14 @@ use crate::cache::{
     DirentsMutation, FactPayload, Freshness, GitWrite, Invalidation, MountResources,
     ObjectMutation, ProjectionTransition, RecordWrite,
 };
-use crate::clock::{DYNAMIC_TTL_MILLIS, freshness_expiry};
+use crate::clock::{DYNAMIC_TTL_MILLIS, freshness_expiry, page_deadline};
 use crate::object_id::ObjectId;
-use crate::ops::namespace::{DirEntry, DirListing, ListOutcome, ReadBytes, ReadOutcome};
+use crate::ops::namespace::{
+    DirEntry, DirListing, ListOutcome, PageRequest, ReadBytes, ReadOutcome,
+};
 use crate::view::{
-    AttrPayload, DirentRecord, DirentsPayload, EntryMeta, FileAttrsCache, FilePayload,
-    LookupPayload, Stability,
+    AttrPayload, DirentRecord, DirentsPage, DirentsPayload, EntryMeta, FileAttrsCache, FilePayload,
+    LookupPayload, PageValidator, Stability,
 };
 use crate::wit_protocol::{cached_cursor_from_wit, entry_meta_from_kind, stability_from_wit};
 use omnifs_core::path::Path;
@@ -261,12 +263,18 @@ impl<'a> EffectApplier<'a> {
 
     // One typed provider terminal lowers into one coherent projection
     // transition; helper carriers would only duplicate that transactional state.
+    //
+    // The asked page lowers by its request: a first page without a validator
+    // replaces the listing, a later page without one appends to it, and a
+    // page asked for with its validator replaces or renews that cached page.
+    // A page with a validator has the deadline of its interval.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn lower_list(
         &self,
         path: &Path,
         result: wit_types::ListChildrenResult,
-        expected_cursor: Option<crate::view::CachedCursor>,
+        request: &PageRequest,
+        now_millis: u64,
         resolve_tree: impl Fn(u64) -> Option<GitId>,
     ) -> anyhow::Result<(ListOutcome, ProjectionTransition)> {
         let mut transition = ProjectionTransition::default();
@@ -298,29 +306,44 @@ impl<'a> EffectApplier<'a> {
                     });
                 }
                 let next_cursor = listing.next_cursor.clone().map(cached_cursor_from_wit);
-                let mut persisted_entries = entries.clone();
-                if expected_cursor.is_none() && next_cursor.is_some() {
-                    persisted_entries.extend(crate::tree::synthetic::control_entries());
+                let mut page_entries = entries.clone();
+                if request.cursor.is_none() && next_cursor.is_some() {
+                    page_entries.extend(crate::tree::synthetic::control_entries());
                 }
-                let value = DirentsPayload {
-                    entries: persisted_entries,
-                    exhaustive: listing.exhaustive && next_cursor.is_none(),
-                    paginated: next_cursor.is_some() || expected_cursor.is_some(),
-                    next_cursor: next_cursor.clone(),
+                let page = DirentsPage {
+                    cursor: request.cursor.clone(),
+                    validator: listing.validator.as_ref().map(|validator| PageValidator {
+                        token: validator.token.clone(),
+                        interval: validator.interval,
+                        deadline: page_deadline(validator.interval, now_millis),
+                    }),
+                    entries: page_entries,
                 };
-                transition.dirents.push(match expected_cursor {
-                    Some(expected_cursor) => DirentsMutation::AppendPage {
-                        path: path.clone(),
-                        expected_cursor,
-                        entries: entries.clone(),
-                        next_cursor: next_cursor.clone(),
-                        exhaustive: listing.exhaustive,
-                    },
-                    None => DirentsMutation::Replace {
-                        path: path.clone(),
-                        value,
-                    },
-                });
+                let exhaustive = listing.exhaustive && next_cursor.is_none();
+                transition
+                    .dirents
+                    .push(match (&request.cursor, &request.validator) {
+                        (_, Some(_)) => DirentsMutation::ReplacePage {
+                            path: path.clone(),
+                            page,
+                            next_cursor: next_cursor.clone(),
+                            exhaustive,
+                        },
+                        (None, None) => DirentsMutation::Replace {
+                            path: path.clone(),
+                            value: DirentsPayload {
+                                pages: vec![page],
+                                exhaustive,
+                                next_cursor: next_cursor.clone(),
+                            },
+                        },
+                        (Some(_), None) => DirentsMutation::AppendPage {
+                            path: path.clone(),
+                            page,
+                            next_cursor: next_cursor.clone(),
+                            exhaustive,
+                        },
+                    });
                 transition.freshness.push(Freshness {
                     path: path.clone(),
                     expires_at: freshness_expiry(
@@ -329,7 +352,7 @@ impl<'a> EffectApplier<'a> {
                         } else {
                             Stability::Dynamic
                         },
-                        crate::clock::now_millis(),
+                        now_millis,
                     ),
                 });
                 ListOutcome::Entries(DirListing {
@@ -357,6 +380,15 @@ impl<'a> EffectApplier<'a> {
                     fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
                 });
                 ListOutcome::Subtree(tree)
+            },
+            wit_types::ListChildrenResult::Unchanged(interval) => {
+                transition.dirents.push(DirentsMutation::RenewPage {
+                    path: path.clone(),
+                    cursor: request.cursor.clone(),
+                    interval,
+                    now_millis,
+                });
+                ListOutcome::Unchanged
             },
         };
         Ok((outcome, transition))

@@ -12,14 +12,11 @@
 //!
 //! [`PendingListings`] runs each listing once per directory as a detached task,
 //! lets a caller wait up to a small budget, and reports [`PendingOutcome::Pending`]
-//! past it. The task is never cancelled, so a slow listing runs to completion
-//! and writes its dirents into the namespace cache; the client's retry then
-//! re-resolves and hits that warm cache.
-//!
-//! This convergence holds only on the success path, which the namespace caches.
-//! An errored listing is not cached, so a slow, persistently failing listing
-//! re-runs on every retry until it succeeds or the upstream error maps to a
-//! terminal status. That is why this table backs `READDIR` and not `LOOKUP`.
+//! past it. The task is never cancelled, so a slow listing runs to completion,
+//! and a result that no caller took waits in its slot for the client's retry,
+//! which takes it: a retry that re-resolved would ask the namespace again,
+//! which asks the provider again for a listing past its deadline by then, past
+//! the budget again at every retry.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -45,20 +42,24 @@ pub(crate) enum PendingOutcome {
     Pending,
 }
 
-type SlotSender = watch::Sender<Option<Arc<ListResult>>>;
-type SlotKey = (Path, u64);
-type Slots = HashMap<SlotKey, SlotSender>;
+/// The slot of one directory: the serial of its listing task, which no other
+/// slot has, and the result of the task once it completes.
+struct Slot {
+    serial: u64,
+    sender: watch::Sender<Option<Arc<ListResult>>>,
+}
 
 struct ListingState {
-    generation: u64,
-    slots: Slots,
+    next_serial: u64,
+    slots: HashMap<Path, Slot>,
 }
 
 /// Per-directory detached work with a per-caller wait budget for NFS listings.
 ///
-/// The table retains only active slots. A completed result is delivered to the
-/// callers already waiting on that slot and then forgotten, so later retries
-/// return to the namespace rather than being served by an NFS-side cache.
+/// A completed result goes to the callers waiting on its slot, and a result
+/// that no caller took waits there for the next caller of the directory. The
+/// caller that takes a result removes its slot, so the next listing of the
+/// directory returns to the namespace.
 pub(crate) struct PendingListings {
     runtime: Handle,
     state: Arc<Mutex<ListingState>>,
@@ -69,55 +70,63 @@ impl PendingListings {
         Self {
             runtime,
             state: Arc::new(Mutex::new(ListingState {
-                generation: 0,
+                next_serial: 0,
                 slots: HashMap::new(),
             })),
         }
     }
 
-    pub(crate) fn resolve<F, Fut>(&self, path: Path, budget: Duration, make: F) -> PendingOutcome
+    pub(crate) fn resolve<F, Fut>(&self, path: &Path, budget: Duration, make: F) -> PendingOutcome
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = ListResult> + Send + 'static,
     {
-        let (receiver, leader, generation) = {
+        let (receiver, leader, serial) = {
             let mut state = lock_state(&self.state);
-            let generation = state.generation;
-            let key = (path.clone(), generation);
-            if let Some(sender) = state.slots.get(&key) {
-                (sender.subscribe(), false, generation)
+            if let Some(slot) = state.slots.get(path) {
+                (slot.sender.subscribe(), false, slot.serial)
             } else {
+                let serial = state.next_serial;
+                state.next_serial = serial.wrapping_add(1);
                 let (sender, receiver) = watch::channel::<Option<Arc<ListResult>>>(None);
-                state.slots.insert(key, sender.clone());
-                (receiver, true, generation)
+                state.slots.insert(path.clone(), Slot { serial, sender });
+                (receiver, true, serial)
             }
         };
 
         if leader {
             let state = Arc::clone(&self.state);
-            let runtime = self.runtime.clone();
-            runtime.spawn(async move {
+            let path = path.clone();
+            self.runtime.spawn(async move {
                 let result = Arc::new(make().await);
-                let mut state = lock_state(&state);
-                let key = (path, generation);
-                if let Some(sender) = state.slots.get(&key) {
-                    let _ = sender.send(Some(result));
+                if let Some(slot) = lock_state(&state).slots.get(&path)
+                    && slot.serial == serial
+                {
+                    slot.sender.send_replace(Some(result));
                 }
-                state.slots.remove(&key);
             });
         }
 
-        self.runtime.block_on(wait_for(receiver, budget))
+        let outcome = self.runtime.block_on(wait_for(receiver, budget));
+        if matches!(outcome, PendingOutcome::Ready(_)) {
+            let mut state = lock_state(&self.state);
+            if state
+                .slots
+                .get(path)
+                .is_some_and(|slot| slot.serial == serial)
+            {
+                state.slots.remove(path);
+            }
+        }
+        outcome
     }
 
-    /// Invalidate all pending work in `path`'s subtree and advance the token so
-    /// a detached completion cannot publish into a newly-created same-path slot.
+    /// Drop the slots in `path`'s subtree, pending or with a result that waits;
+    /// a detached completion publishes only into the slot of its own serial.
     pub(crate) fn reset(&self, path: &Path) {
-        let mut state = lock_state(&self.state);
-        state.generation = state.generation.wrapping_add(1);
-        state
+        lock_state(&self.state)
             .slots
-            .retain(|(slot_path, _), _| !slot_path.has_prefix(path));
+            .retain(|slot_path, _| !slot_path.has_prefix(path));
     }
 }
 
@@ -144,8 +153,9 @@ async fn wait_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{PendingListings, PendingOutcome};
+    use super::{ListResult, PendingListings, PendingOutcome};
     use crate::export::Status;
+    use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -172,7 +182,7 @@ mod tests {
         let node = path("/test/items");
 
         assert!(matches!(
-            listings.resolve(node.clone(), Duration::from_millis(40), {
+            listings.resolve(&node, Duration::from_millis(40), {
                 let calls = Arc::clone(&calls);
                 move || async move {
                     calls.fetch_add(1, Ordering::SeqCst);
@@ -186,7 +196,7 @@ mod tests {
         listings.reset(&node);
 
         assert!(matches!(
-            listings.resolve(node.clone(), Duration::from_millis(40), {
+            listings.resolve(&node, Duration::from_millis(40), {
                 let calls = Arc::clone(&calls);
                 move || async move {
                     calls.fetch_add(1, Ordering::SeqCst);
@@ -197,7 +207,7 @@ mod tests {
             PendingOutcome::Pending
         ));
 
-        match listings.resolve(node.clone(), Duration::from_secs(2), {
+        match listings.resolve(&node, Duration::from_secs(2), {
             let calls = Arc::clone(&calls);
             move || async move {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -217,7 +227,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let node = path("/test/items");
 
-        match listings.resolve(node.clone(), Duration::from_secs(2), {
+        match listings.resolve(&node, Duration::from_secs(2), {
             let calls = Arc::clone(&calls);
             move || async move {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -228,7 +238,7 @@ mod tests {
             PendingOutcome::Pending => panic!("expected the listing to finish"),
         }
 
-        match listings.resolve(node.clone(), Duration::from_secs(2), {
+        match listings.resolve(&node, Duration::from_secs(2), {
             let calls = Arc::clone(&calls);
             move || async move {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -239,5 +249,67 @@ mod tests {
             PendingOutcome::Pending => panic!("expected the retried listing to finish"),
         }
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// A listing of 100 ms, past the budget of its callers like one that asks
+    /// its provider again past its deadline.
+    fn slow_listing(
+        calls: &Arc<AtomicUsize>,
+    ) -> impl FnOnce() -> std::pin::Pin<Box<dyn Future<Output = ListResult> + Send>> + use<> {
+        let calls = Arc::clone(calls);
+        move || {
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(Vec::new())
+            })
+        }
+    }
+
+    #[test]
+    fn a_result_no_caller_took_waits_for_the_retry() {
+        let runtime = multi_thread_runtime();
+        let listings = PendingListings::new(runtime.handle().clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let node = path("/test/items");
+        let budget = Duration::from_millis(20);
+
+        assert!(matches!(
+            listings.resolve(&node, budget, slow_listing(&calls)),
+            PendingOutcome::Pending
+        ));
+        std::thread::sleep(Duration::from_millis(300));
+        match listings.resolve(&node, budget, slow_listing(&calls)) {
+            PendingOutcome::Ready(result) => assert!(result.is_ok()),
+            PendingOutcome::Pending => panic!("expected the retry to take the deferred result"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        match listings.resolve(&node, Duration::from_secs(2), slow_listing(&calls)) {
+            PendingOutcome::Ready(result) => assert!(result.is_ok()),
+            PendingOutcome::Pending => panic!("expected a new listing to finish"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_reset_of_another_directory_keeps_a_result_that_waits() {
+        let runtime = multi_thread_runtime();
+        let listings = PendingListings::new(runtime.handle().clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let node = path("/test/items");
+        let budget = Duration::from_millis(20);
+
+        assert!(matches!(
+            listings.resolve(&node, budget, slow_listing(&calls)),
+            PendingOutcome::Pending
+        ));
+        listings.reset(&path("/test/other"));
+        std::thread::sleep(Duration::from_millis(300));
+        match listings.resolve(&node, budget, slow_listing(&calls)) {
+            PendingOutcome::Ready(result) => assert!(result.is_ok()),
+            PendingOutcome::Pending => panic!("expected the retry to take the deferred result"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

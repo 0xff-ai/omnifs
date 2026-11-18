@@ -19,6 +19,11 @@
 //!   [`send_checked`](RequestBuilder::send_checked) return the value or error
 //!   on any 4xx/5xx, including 404. Use these when "missing" is not a
 //!   meaningful outcome for the route.
+//! - Listing pages, conditional: [`page`](RequestBuilder::page) maps 304 to
+//!   [`PageAnswer::Unchanged`] and 200 to [`PageAnswer::Fresh`] with the
+//!   response `ETag` as the validator of the page. Pair it with
+//!   [`maybe_if_none_match`](RequestBuilder::maybe_if_none_match) and the
+//!   validator the host sends for a page past its deadline.
 //!
 //! Never set `Authorization` or any other credential header here. Auth is
 //! host-managed: the provider's `auth = ..` argument to `#[omnifs_sdk::provider]`
@@ -349,8 +354,31 @@ impl<'a, E: EndpointHooks, S> RequestBuilder<'a, E, S> {
     /// there is no `Load` wrapper.
     pub async fn json<T: serde::de::DeserializeOwned>(self) -> Result<T> {
         let resp = self.send_raw().await?.error_for_status()?;
-        serde_json::from_slice::<T>(resp.body())
-            .map_err(|e| ProviderError::invalid_input(format!("json decode: {e}")))
+        decode_json_body(resp.body())
+    }
+
+    /// Conditional page terminal: 304 -> [`PageAnswer::Unchanged`], 200 ->
+    /// [`PageAnswer::Fresh`] with the JSON-decoded body and the response
+    /// `ETag` as its validator, other 4xx/5xx -> `Err`; both answers keep the
+    /// response headers. Pair it with
+    /// [`maybe_if_none_match`](Self::maybe_if_none_match) and the validator
+    /// of the call ([`crate::collection::ListCx::validator`] or
+    /// [`Cx::version`]).
+    pub async fn page<T: serde::de::DeserializeOwned>(self) -> Result<PageAnswer<T>> {
+        let resp = self.send_raw().await?;
+        if resp.status() == StatusCode::NOT_MODIFIED {
+            return Ok(PageAnswer::Unchanged {
+                headers: resp.into_parts().0.headers,
+            });
+        }
+        let resp = resp.error_for_status()?;
+        let validator = etag(&resp);
+        let (parts, body) = resp.into_parts();
+        Ok(PageAnswer::Fresh {
+            value: decode_json_body(&body)?,
+            validator,
+            headers: parts.headers,
+        })
     }
 
     /// A checked structural fetch returning the raw body.
@@ -451,11 +479,7 @@ fn load_from_response<T>(
             // The canonical is the raw response body verbatim (JSON, Atom, XML,
             // or opaque). `parse` only produces the in-memory value for
             // rendering; it does not define the stored bytes.
-            let version = resp
-                .headers()
-                .get("etag")
-                .and_then(|v| v.to_str().ok())
-                .map(VersionToken::from);
+            let version = etag(&resp);
             let bytes = resp.into_body();
             let value = parse(&bytes)?;
             let canonical = Canonical {
@@ -464,6 +488,40 @@ fn load_from_response<T>(
             };
             Ok(Load::fresh(value, canonical))
         },
+    }
+}
+
+/// The response `ETag`, the validator of the answered resource.
+fn etag(resp: &Response<Vec<u8>>) -> Option<VersionToken> {
+    resp.headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(VersionToken::from)
+}
+
+fn decode_json_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T> {
+    serde_json::from_slice::<T>(body)
+        .map_err(|e| ProviderError::invalid_input(format!("json decode: {e}")))
+}
+
+/// The answer to a conditional page request
+/// ([`RequestBuilder::page`]), with the headers of the response.
+pub enum PageAnswer<T> {
+    /// `304`: the page of the sent validator stands.
+    Unchanged { headers: HeaderMap },
+    /// `200`: the decoded body, with the response `ETag` as its validator.
+    Fresh {
+        value: T,
+        validator: Option<VersionToken>,
+        headers: HeaderMap,
+    },
+}
+
+impl<T> PageAnswer<T> {
+    /// A header of the response, for either answer.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let (Self::Unchanged { headers } | Self::Fresh { headers, .. }) = self;
+        headers.get(name).and_then(|value| value.to_str().ok())
     }
 }
 

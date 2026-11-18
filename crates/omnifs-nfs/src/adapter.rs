@@ -674,12 +674,11 @@ impl ReadOnlyExport for Export {
         drop(inode);
 
         let node = body.node().ok_or(Status::Stale)?;
-        // Proactive deferral only. On persistent failure the namespace does not
-        // cache the error, so each retry may re-defer until the listing succeeds
-        // or maps to a terminal `Status`.
+        // Proactive deferral only: the retry of a deferred `READDIR` takes the
+        // result of its listing, an error included.
         let outcome =
             self.delayed_lists
-                .resolve(node.clone(), NFS_INLINE_BUDGET, self.list_op(node.clone()));
+                .resolve(&node, NFS_INLINE_BUDGET, self.list_op(node.clone()));
         self.apply_pending_events();
         match outcome {
             PendingOutcome::Ready(result) => {

@@ -228,10 +228,20 @@ pub struct DirListing {
     pub next_cursor: Option<CachedCursor>,
 }
 
+/// The page a `list-children` call asks for: its cursor (`None` for the first
+/// page) and the validator of the cached page of that cursor.
+#[derive(Debug, Clone)]
+pub(crate) struct PageRequest {
+    pub cursor: Option<CachedCursor>,
+    pub validator: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum ListOutcome {
     Entries(DirListing),
     Subtree(u64),
+    /// The cached page of the validator of the call stands.
+    Unchanged,
 }
 
 #[derive(Debug, Clone)]
@@ -303,29 +313,23 @@ impl Runtime {
         Ok(result)
     }
 
+    /// Ask the provider for one page of `path`. A first page runs in the one
+    /// flight of its path; a later page runs under the publication permit of
+    /// its path.
     pub(crate) async fn list_children(
         &self,
         path: &Path,
-        cursor: Option<CachedCursor>,
+        request: PageRequest,
         captured_epoch: u64,
     ) -> Result<ListOutcome> {
-        let is_continuation = cursor.is_some();
         let runtime = self;
-        let result = if is_continuation {
+        let result = if request.cursor.is_some() {
             let _permit = runtime
                 .resources
                 .reserve(PublicationKey::Path(path.clone()))
                 .await;
-
             runtime
-                .run_list_children(
-                    path,
-                    cursor
-                        .clone()
-                        .map(crate::wit_protocol::cached_cursor_to_wit),
-                    cursor,
-                    captured_epoch,
-                )
+                .run_list_children(path, request, captured_epoch)
                 .await?
         } else {
             self.namespace_flights
@@ -339,12 +343,7 @@ impl Runtime {
                     },
                     || async {
                         let result = runtime
-                            .run_list_children(
-                                path,
-                                cursor.map(crate::wit_protocol::cached_cursor_to_wit),
-                                None,
-                                captured_epoch,
-                            )
+                            .run_list_children(path, request, captured_epoch)
                             .await
                             .map_err(SharedError::from)?;
                         Ok(result)

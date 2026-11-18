@@ -7,7 +7,7 @@
 //! traits while a host crate enables `host-bindings`.
 
 /// Package declaration from `wit/provider.wit`.
-pub const PROVIDER_WIT_PACKAGE: &str = "package omnifs:provider@0.7.0;";
+pub const PROVIDER_WIT_PACKAGE: &str = "package omnifs:provider@0.8.0;";
 
 #[cfg(test)]
 mod tests {

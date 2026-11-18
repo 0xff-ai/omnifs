@@ -27,6 +27,9 @@ impl<S> CompiledRouter<S> {
     /// capture sibling at the next depth can bind names that cannot be
     /// enumerated. Lookup remains the authority for names a listing omitted.
     ///
+    /// The validator of the cached page of `cursor` ([`Cx::version`]) reaches
+    /// a dir route and the collection of an object anchor, the owners of the
+    /// page, and never the anchor object's own load.
     pub async fn list_children(
         &self,
         cx: &Cx<S>,
@@ -63,16 +66,17 @@ impl<S> CompiledRouter<S> {
         }
 
         if let Some(route) = shape.object_route(&abs) {
+            let object_cx = cx.clone().with_version(None);
             let out = super::route_future(
                 route.entry.pattern.template(),
-                (route.entry.list)(cx, route.captures.clone(), path.to_string()),
+                (route.entry.list)(&object_cx, route.captures.clone(), path.to_string()),
             )
             .await
             .map_err(|error| error.with_context("list-children", &abs))?;
-            let mut listing = shape
+            let listing = shape
                 .object_dir_listing(route.entry, &abs, out.source.as_ref())
                 .with_effects(out.effects);
-            if let Some(projection) = super::route_future(
+            let Some(projection) = super::route_future(
                 route.entry.pattern.template(),
                 Box::pin(
                     route
@@ -82,10 +86,10 @@ impl<S> CompiledRouter<S> {
             )
             .await
             .map_err(|error| error.with_context("list-children", &abs))?
-            {
-                listing = super::route_shape::merge_anchor_collection(&listing, &projection)?;
-            }
-            return Ok(List::entries(listing));
+            else {
+                return Ok(List::entries(listing));
+            };
+            return super::route_shape::merge_anchor_collection(&listing, &projection);
         }
 
         if let Some(listing) = shape.implicit_dir_listing(&abs) {

@@ -164,7 +164,7 @@ async fn repos(self_key: OwnerKey, cx: ListCx<GhCursor, State>) -> Result<Collec
 }
 ```
 
-`CollectionEntry::fresh(key, value, canonical)` stores the child canonical at listing time (use only when the list row satisfies the child's canonical contract byte-for-byte); `::derived(key, files)` projects shallow eager leaves but no canonical; `::key(key)` is discovery only. `Collection::complete` is exhaustive, `::page(..).next(cursor)` has more, `::partial` is intentionally open with no cursor, `::unchanged` matched the listing validator. The list method's key `K` is parsed from the COLLECTION DIR PATH, so a collection under `o.dir("issues/{filter}")` reads `{filter}` from `K`.
+`CollectionEntry::fresh(key, value, canonical)` stores the child canonical at listing time (use only when the list row satisfies the child's canonical contract byte-for-byte); `::derived(key, files)` projects shallow eager leaves but no canonical; `::key(key)` is discovery only. `Collection::complete` is exhaustive, `::page(..).next(cursor)` has more, `::partial` is intentionally open with no cursor, `::unchanged(interval)` answers a call whose validator (`cx.validator()`) still matches its page. `.with_validator(PageValidator { token, interval })` gives a page the validator the host sends back once the page is past its deadline: the `ETag` of its answer, plus whatever asking for the page again needs (GitHub's `Owner::repos` adds the owner kind), and the seconds of the interval its upstream asks between requests. The list method's key `K` is parsed from the COLLECTION DIR PATH, so a collection under `o.dir("issues/{filter}")` reads `{filter}` from `K`.
 
 `Object::load` can also carry preloads when one fetch materializes siblings (Oura's date-range window): `Load::fresh(value, canonical).preload_object(ObjectEntry::fresh(sibling_key, sibling, sibling_canonical))` (same object type only) and `.preload_file(path, projection)` (inline/deferred sources only). Event handlers return a typed `Invalidation` (`Invalidation::new().listing_path(..).object::<O>(&key)`), which the macro lowers to invalidation effects.
 
@@ -172,7 +172,7 @@ A file-shaped object projects as a single file, not a directory: `r.file_object:
 
 ## HTTP, batching, pagination, rate limits
 
-- Conditional loads: `cx.version()` is the host-pushed validator for this anchor; map it with `.maybe_if_none_match(..)`. Object loads get `since` handed to them.
+- Conditional pages: `cx.version()` (`cx.validator()` in a collection) is the validator of the cached page a list call asks for. Send it with `.maybe_if_none_match(..)` and the `.page::<T>()` terminal, which gives `PageAnswer::Unchanged` for `304` and the decoded body with its `ETag` for `200`, both with the headers of the answer; a dir handler answers `DirListing::unchanged(interval)` or `.with_validator(..)`. Object loads get `since` handed to them.
 - Two terminal layers on the request builder: object-layer `.load::<T>()`/`conditional` (three-state) vs structural `.json::<T>()`/`.send_checked()` (two-state, errors on non-2xx). Pick deliberately.
 - Batch independent fetches with `join_all([f1, f2, ..])`: it polls the async host-import futures together and returns results in input order. There is no provider-managed resume batch or positional callout queue.
 - Pagination: for a raw dir listing return `DirListing::paged(entries, Cursor::Page(n + 1))`; for an object collection return `Collection::page(entries).next(cursor)`; the host echoes the cursor back on continuation.
@@ -181,7 +181,7 @@ A file-shaped object projects as a single file, not a directory: `r.file_object:
 
 ## Events and freshness
 
-`events(timer(n, Self::on_tick))` registers `async fn on_tick(cx: Cx<State>) -> Result<Invalidation>`, where `n` is a literal interval in seconds. Build the invalidation with `Invalidation::new().listing_path(..).listing_prefix(..).object::<O>(&key)`, which the macro lowers to the host invalidation channel. Non-timer provider events are currently swallowed. A provider that never invalidates and never sets validators serves stale data forever; pick at least one freshness mechanism per dynamic route family.
+`events(timer(n, Self::on_tick))` registers `async fn on_tick(cx: Cx<State>) -> Result<Invalidation>`, where `n` is a literal interval in seconds. Build the invalidation with `Invalidation::new().listing_path(..).listing_prefix(..).object::<O>(&key)`, which the macro lowers to the host invalidation channel. Non-timer provider events are currently swallowed. A provider that never invalidates and never sets validators serves stale data forever; pick at least one freshness mechanism per dynamic route family, such as page validators on its listings.
 
 ## Manifest (provider metadata)
 

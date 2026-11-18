@@ -5,7 +5,7 @@ use crate::clock;
 use crate::effect_apply::EffectApplier;
 use crate::effect_apply::LookupOutcome;
 use crate::inspector;
-use crate::ops::namespace::{ChunkOutcome, ListOutcome, OpenOutcome, ReadOutcome};
+use crate::ops::namespace::{ChunkOutcome, ListOutcome, OpenOutcome, PageRequest, ReadOutcome};
 use crate::runtime::{EngineError, Result};
 use omnifs_api::events::InspectorOutcome;
 use omnifs_core::path::{Path, Segment};
@@ -74,8 +74,7 @@ impl Runtime {
     pub(crate) async fn run_list_children(
         &self,
         path: &Path,
-        cursor: Option<wit_types::Cursor>,
-        expected_cursor: Option<crate::view::CachedCursor>,
+        request: PageRequest,
         captured_epoch: u64,
     ) -> Result<ListOutcome> {
         let id = self.next_operation_id();
@@ -90,22 +89,34 @@ impl Runtime {
         async {
             let (wire_result, effects) = self
                 .instance
-                .list_children(id, path.as_str().to_string(), cursor)
+                .list_children(
+                    id,
+                    path.as_str().to_string(),
+                    request
+                        .cursor
+                        .clone()
+                        .map(crate::wit_protocol::cached_cursor_to_wit),
+                    request.validator.clone(),
+                )
                 .await?;
-            crate::op_validate::validate_list(&wire_result, &effects, |tree| {
-                self.tree_ref(tree).is_some()
-            })
+            crate::op_validate::validate_list(
+                &wire_result,
+                &effects,
+                request.validator.is_some(),
+                |tree| self.tree_ref(tree).is_some(),
+            )
             .map_err(EngineError::ProviderProtocol)?;
             inspect_result(&span, &wire_result);
             let pending_blobs = blob_guard.take();
             let wire_result = self.provider_result(wire_result)?;
             let applier = EffectApplier::new(&self.resources);
+            let now_millis = clock::now_millis();
             let mut transition = applier
-                .lower_effects(&effects, clock::now_millis())
+                .lower_effects(&effects, now_millis)
                 .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
             transition.blobs.extend(pending_blobs);
             let (result, result_transition) = applier
-                .lower_list(path, wire_result, expected_cursor, |tree| {
+                .lower_list(path, wire_result, &request, now_millis, |tree| {
                     self.tree_ref(tree).map(|reference| reference.id)
                 })
                 .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
@@ -435,14 +446,6 @@ fn merge_transition(
     target.git.append(&mut addition.git);
 }
 
-fn dirents_path(mutation: &crate::cache::DirentsMutation) -> &Path {
-    match mutation {
-        crate::cache::DirentsMutation::Replace { path, .. }
-        | crate::cache::DirentsMutation::MergeHints { path, .. }
-        | crate::cache::DirentsMutation::AppendPage { path, .. } => path,
-    }
-}
-
 fn merge_hint_entries(
     base: &mut Vec<crate::view::DirentRecord>,
     additions: impl IntoIterator<Item = crate::view::DirentRecord>,
@@ -465,7 +468,7 @@ fn merge_dirents_mutation(
 ) {
     let Some(index) = target
         .iter()
-        .position(|existing| dirents_path(existing) == dirents_path(&addition))
+        .position(|existing| existing.path() == addition.path())
     else {
         target.push(addition);
         return;
@@ -500,15 +503,16 @@ fn merge_dirents_mutation(
             crate::cache::DirentsMutation::Replace { path, mut value },
             crate::cache::DirentsMutation::MergeHints { entries, .. },
         ) => {
-            merge_hint_entries(&mut value.entries, entries, false);
+            if let Some(page) = value.pages.last_mut() {
+                merge_hint_entries(&mut page.entries, entries, false);
+            }
             crate::cache::DirentsMutation::Replace { path, value }
         },
         (
             crate::cache::DirentsMutation::MergeHints { entries, .. },
             crate::cache::DirentsMutation::AppendPage {
                 path,
-                expected_cursor,
-                entries: mut page_entries,
+                mut page,
                 next_cursor,
                 exhaustive,
             },
@@ -516,18 +520,42 @@ fn merge_dirents_mutation(
         | (
             crate::cache::DirentsMutation::AppendPage {
                 path,
-                expected_cursor,
-                entries: mut page_entries,
+                mut page,
                 next_cursor,
                 exhaustive,
             },
             crate::cache::DirentsMutation::MergeHints { entries, .. },
         ) => {
-            merge_hint_entries(&mut page_entries, entries, false);
+            merge_hint_entries(&mut page.entries, entries, false);
             crate::cache::DirentsMutation::AppendPage {
                 path,
-                expected_cursor,
-                entries: page_entries,
+                page,
+                next_cursor,
+                exhaustive,
+            }
+        },
+        (
+            crate::cache::DirentsMutation::MergeHints { entries, .. },
+            crate::cache::DirentsMutation::ReplacePage {
+                path,
+                mut page,
+                next_cursor,
+                exhaustive,
+            },
+        )
+        | (
+            crate::cache::DirentsMutation::ReplacePage {
+                path,
+                mut page,
+                next_cursor,
+                exhaustive,
+            },
+            crate::cache::DirentsMutation::MergeHints { entries, .. },
+        ) => {
+            merge_hint_entries(&mut page.entries, entries, false);
+            crate::cache::DirentsMutation::ReplacePage {
+                path,
+                page,
                 next_cursor,
                 exhaustive,
             }

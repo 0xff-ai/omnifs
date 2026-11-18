@@ -232,6 +232,25 @@ impl Effects {
     }
 }
 
+/// The validator of one listing page: the token the host sends back as the
+/// `validator` of `list-children` for that page once the page is past its
+/// deadline, and the seconds of the interval its upstream asks between
+/// requests, which set that deadline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageValidator {
+    pub token: VersionToken,
+    pub interval: Option<u32>,
+}
+
+impl From<PageValidator> for wit_types::PageValidator {
+    fn from(validator: PageValidator) -> Self {
+        Self {
+            token: validator.token.0,
+            interval: validator.interval,
+        }
+    }
+}
+
 /// A directory listing with entries, exhaustiveness, and accepted-return
 /// projection effects for adjacent or nested paths.
 ///
@@ -246,6 +265,7 @@ pub struct Listing {
     exhaustive: bool,
     effects: Effects,
     next_cursor: Option<wit_types::Cursor>,
+    validator: Option<PageValidator>,
 }
 
 impl Listing {
@@ -257,6 +277,7 @@ impl Listing {
             exhaustive: true,
             effects: Effects::new(),
             next_cursor: None,
+            validator: None,
         }
     }
 
@@ -269,6 +290,7 @@ impl Listing {
             exhaustive: false,
             effects: Effects::new(),
             next_cursor: None,
+            validator: None,
         }
     }
 
@@ -283,6 +305,13 @@ impl Listing {
     #[must_use]
     pub fn with_cursor(mut self, cursor: crate::handler::Cursor) -> Self {
         self.next_cursor = Some(cursor.into());
+        self
+    }
+
+    /// Carry the validator of this page; see [`PageValidator`].
+    #[must_use]
+    pub fn with_validator(mut self, validator: PageValidator) -> Self {
+        self.validator = Some(validator);
         self
     }
 
@@ -304,6 +333,7 @@ impl Listing {
                 entries: self.entries.into_iter().map(Into::into).collect(),
                 exhaustive: self.exhaustive,
                 next_cursor: self.next_cursor,
+                validator: self.validator.map(Into::into),
             },
             self.effects,
         )
@@ -440,11 +470,19 @@ impl From<Lookup> for wit_types::LookupChildResult {
     }
 }
 
-/// A list result: a listing or a subtree handoff.
+/// A list result: a listing, a subtree handoff, or the cached page of the
+/// validator of the call standing, with the seconds of the interval of its
+/// upstream.
 #[derive(Clone, Debug)]
 pub enum List {
     Entries(Listing),
-    Subtree { tree: u64 },
+    Subtree {
+        tree: u64,
+    },
+    Unchanged {
+        interval: Option<u32>,
+        effects: Effects,
+    },
 }
 
 impl List {
@@ -456,6 +494,10 @@ impl List {
         Self::Subtree { tree }
     }
 
+    pub fn unchanged(interval: Option<u32>, effects: Effects) -> Self {
+        Self::Unchanged { interval, effects }
+    }
+
     #[doc(hidden)]
     pub fn into_result_and_effects(self) -> (wit_types::ListChildrenResult, Effects) {
         match self {
@@ -465,6 +507,9 @@ impl List {
             },
             Self::Subtree { tree } => {
                 (wit_types::ListChildrenResult::Subtree(tree), Effects::new())
+            },
+            Self::Unchanged { interval, effects } => {
+                (wit_types::ListChildrenResult::Unchanged(interval), effects)
             },
         }
     }

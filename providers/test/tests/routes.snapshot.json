@@ -59,6 +59,12 @@
     "captures": []
   },
   {
+    "template": "/hello/validated",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": []
+  },
+  {
     "template": "/hello/unbounded",
     "kind": "Dir",
     "object_kind": null,
@@ -180,6 +186,12 @@
   },
   {
     "template": "/hello/live-log",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/validated-calls",
     "kind": "File",
     "object_kind": null,
     "captures": []

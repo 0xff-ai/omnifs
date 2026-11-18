@@ -158,6 +158,8 @@ async fn test_read_file_sibling_projections_do_not_erase_parent_dirents() {
             "throttled",
             "unbounded",
             "unknown-ranged",
+            "validated",
+            "validated-calls",
             "volatile-tail"
         ]
     );

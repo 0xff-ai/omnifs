@@ -59,9 +59,12 @@ where
         Ok(())
     }
 
+    /// `validated` says whether the call carried the validator of a cached
+    /// page, the only call `unchanged` can answer.
     pub(crate) fn list(
         &mut self,
         result: &std::result::Result<wit_types::ListChildrenResult, wit_types::ProviderError>,
+        validated: bool,
     ) -> std::result::Result<(), String> {
         let Ok(result) = result else { return Ok(()) };
         match result {
@@ -70,8 +73,18 @@ where
                     Self::segment_name(&entry.name)?;
                     self.entry(&entry.kind)?;
                 }
+                if let Some(validator) = &listing.validator {
+                    Self::version_token(&validator.token)
+                        .map_err(|error| format!("page validator: {error}"))?;
+                }
             },
             wit_types::ListChildrenResult::Subtree(tree) => self.subtree_tree(*tree)?,
+            wit_types::ListChildrenResult::Unchanged(_) if !validated => {
+                return Err(
+                    "list-children answered unchanged to a call without a validator".into(),
+                );
+            },
+            wit_types::ListChildrenResult::Unchanged(_) => {},
         }
         Ok(())
     }
@@ -288,15 +301,20 @@ where
     }
 
     fn file_attrs_metadata(attrs: &wit_types::FileAttrs) -> std::result::Result<(), String> {
-        if let Some(token) = &attrs.version_token {
-            if token.is_empty() {
-                return Err("version token must not be empty".to_string());
-            }
-            if token.len() > MAX_VERSION_TOKEN_BYTES {
-                return Err(format!(
-                    "version token exceeds {MAX_VERSION_TOKEN_BYTES} bytes"
-                ));
-            }
+        attrs
+            .version_token
+            .as_deref()
+            .map_or(Ok(()), Self::version_token)
+    }
+
+    fn version_token(token: &str) -> std::result::Result<(), String> {
+        if token.is_empty() {
+            return Err("version token must not be empty".to_string());
+        }
+        if token.len() > MAX_VERSION_TOKEN_BYTES {
+            return Err(format!(
+                "version token exceeds {MAX_VERSION_TOKEN_BYTES} bytes"
+            ));
         }
         Ok(())
     }
@@ -329,13 +347,14 @@ where
 pub(crate) fn validate_list<F>(
     result: &std::result::Result<wit_types::ListChildrenResult, wit_types::ProviderError>,
     effects: &wit_types::Effects,
+    validated: bool,
     tree_exists: F,
 ) -> std::result::Result<(), String>
 where
     F: Fn(u64) -> bool,
 {
     let mut v = ReturnValidator::common(result, effects, tree_exists)?;
-    v.list(result)
+    v.list(result, validated)
 }
 pub(crate) fn validate_read<F>(
     result: &std::result::Result<wit_types::ReadFileOutcome, wit_types::ProviderError>,
@@ -469,9 +488,10 @@ mod tests {
                 )],
                 exhaustive: true,
                 next_cursor: None,
+                validator: None,
             },
         ));
-        let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+        let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
         assert!(error.contains("inline bytes require FileSize::Exact"));
     }
 
@@ -489,9 +509,10 @@ mod tests {
                 )],
                 exhaustive: true,
                 next_cursor: None,
+                validator: None,
             },
         ));
-        let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+        let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
         assert!(error.contains("Stability::Live requires"));
     }
 
@@ -569,10 +590,38 @@ mod tests {
                 )],
                 exhaustive: true,
                 next_cursor: None,
+                validator: None,
             },
         ));
-        let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+        let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
         assert!(error.contains("version token must not be empty"));
+    }
+
+    #[test]
+    fn unchanged_answers_only_a_validated_call_and_page_validators_are_version_tokens() {
+        let unchanged = Ok(wit_types::ListChildrenResult::Unchanged(Some(60)));
+        let error = validate_list(&unchanged, &effects(), false, |_| true).unwrap_err();
+        assert!(error.contains("without a validator"));
+        validate_list(&unchanged, &effects(), true, |_| true).unwrap();
+
+        for (token, message) in [
+            (String::new(), "must not be empty"),
+            ("v".repeat(MAX_VERSION_TOKEN_BYTES + 1), "exceeds"),
+        ] {
+            let result = Ok(wit_types::ListChildrenResult::Entries(
+                wit_types::DirListing {
+                    entries: vec![entry("child")],
+                    exhaustive: true,
+                    next_cursor: None,
+                    validator: Some(wit_types::PageValidator {
+                        token,
+                        interval: None,
+                    }),
+                },
+            ));
+            let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
+            assert!(error.contains("page validator") && error.contains(message));
+        }
     }
 
     #[test]
@@ -641,9 +690,10 @@ mod tests {
                 entries: vec![entry("nested/name")],
                 exhaustive: true,
                 next_cursor: None,
+                validator: None,
             },
         ));
-        let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+        let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
         assert!(error.contains("nested/name"));
 
         for control in ["@next", "@all"] {
@@ -652,9 +702,10 @@ mod tests {
                     entries: vec![entry(control)],
                     exhaustive: true,
                     next_cursor: None,
+                    validator: None,
                 },
             ));
-            let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+            let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
             assert!(error.contains(control));
         }
 
@@ -663,8 +714,9 @@ mod tests {
                 entries: vec![entry("@cloudflare")],
                 exhaustive: true,
                 next_cursor: None,
+                validator: None,
             },
         ));
-        validate_list(&result, &effects(), |_| true).unwrap();
+        validate_list(&result, &effects(), false, |_| true).unwrap();
     }
 }

@@ -33,6 +33,10 @@ Route dispatch has one owner for precedence. Lookup, listing, read, and open mus
 
 Keep `r.dir`, `r.file`, and `r.treeref` as the path-oriented face for non-object routes. Use typed `omnifs_core::path::Path` or parsed segments after parse boundaries. Split and join provider paths as strings only at WIT or display boundaries.
 
+### Page validators
+
+A listing page may carry a `PageValidator`: an opaque token, such as the `ETag` of its upstream answer, with the seconds of the interval its upstream asks between requests. A collection gives it with `Collection::with_validator` and a dir handler with `DirListing::with_validator`. Once the page is past its deadline, the host sends the token back as the `validator` of `list-children` for the cursor of that page; a collection reads it with `ListCx::validator` and a dir handler with `DirCx::version`, and each answers `Collection::unchanged` or `DirListing::unchanged` while the upstream still matches it. The validator reaches only the owners of a page, a dir route and the collection of an object anchor, never the anchor object's own load. `RequestBuilder::page` is the conditional terminal of a page: `304` answers unchanged, and `200` the decoded body with the `ETag` of the answer as its validator, both with the headers of the answer.
+
 ### Provider metadata
 
 Provider manifests are generated from `#[omnifs_sdk::provider]` annotations, each `#[omnifs_sdk::config]` type's static config dialect, and a literal wire-shaped auth JSON declaration. `capabilities(...)` declares authority needs only; scalar ceilings use `limits(...)`. The provider macro assembles one JSON byte array at compile time and emits it as the `omnifs.provider-metadata.v1` custom section. The final component is self-describing before host instantiation, and the host parser owns validation and conversion into `ProviderManifest`.
@@ -111,5 +115,5 @@ Each lifecycle, namespace, and notify export returns only its operation-specific
 - `just build providers`
 - `just validate providers`
 - Provider initialization/compilation tests after route-surface changes.
-- WIT-boundary tests for object, collection, file-object, preload, effects, `ByteSource`, `DirListing`, and canonical `view_leaves` changes.
+- WIT-boundary tests for object, collection, file-object, preload, effects, `ByteSource`, `DirListing`, page validator, and canonical `view_leaves` changes.
 - Manifest schema generation/checks when provider config metadata changes.

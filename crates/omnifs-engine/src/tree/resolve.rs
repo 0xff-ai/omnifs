@@ -153,8 +153,7 @@ impl EngineNamespace {
         let cached_parent = cached_dirents(resources, parent)?;
         if let Some(meta) = cached_parent.as_ref().and_then(|dirents| {
             dirents
-                .entries
-                .iter()
+                .entries()
                 .find(|entry| entry.name == name)
                 .map(|entry| entry.meta.clone())
         }) {

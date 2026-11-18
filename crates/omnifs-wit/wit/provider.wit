@@ -1,4 +1,4 @@
-package omnifs:provider@0.7.0;
+package omnifs:provider@0.8.0;
 
 // === Shared types ===
 
@@ -221,9 +221,13 @@ interface types {
         exhaustive: bool,
     }
 
+    /// List-children result. `unchanged` answers a call with a `validator`:
+    /// the cached page of that validator stands, with the seconds of the
+    /// interval of its upstream.
     variant list-children-result {
         entries(dir-listing),
         subtree(tree-ref),
+        unchanged(option<u32>),
     }
 
     /// A directory listing returned by a provider, pairing child entries
@@ -234,6 +238,17 @@ interface types {
         /// Resume token for a paged (non-exhaustive) listing; the host
         /// echoes it back as the `cursor` argument to continue.
         next-cursor: option<cursor>,
+        /// The validator of this page: once the page is past its deadline,
+        /// the host asks for it again with the token as the `validator` of
+        /// `list-children`.
+        validator: option<page-validator>,
+    }
+
+    /// The validator of a listing page, with the seconds of the interval of
+    /// its upstream, which set the deadline of the page.
+    record page-validator {
+        token: version-token,
+        interval: option<u32>,
     }
 
     /// Completed full-read result: the materialized bytes for the requested
@@ -355,11 +370,12 @@ interface lifecycle {
 interface namespace {
     use types.{canonical-input, correlation-id, cursor, effects, file-handle,
         list-children-result, lookup-child-result, open-file-result, provider-error,
-        read-chunk-result, read-file-outcome};
+        read-chunk-result, read-file-outcome, version-token};
 
     lookup-child: async func(id: correlation-id, parent-path: string, name: string)
         -> tuple<result<lookup-child-result, provider-error>, effects>;
-    list-children: async func(id: correlation-id, path: string, cursor: option<cursor>)
+    /// `validator` is the validator of the cached page of `cursor`.
+    list-children: async func(id: correlation-id, path: string, cursor: option<cursor>, validator: option<version-token>)
         -> tuple<result<list-children-result, provider-error>, effects>;
     read-file: async func(id: correlation-id, path: string, content-type: string, cached-canonical: option<canonical-input>)
         -> tuple<result<read-file-outcome, provider-error>, effects>;

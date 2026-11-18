@@ -4,8 +4,8 @@
 //! representation, and computed faces; a child-object `comments` collection with a
 //! typed page cursor; scoped intent-tagged invalidation from `on_tick`;
 //! object-load prefetch via `preload_object`; an object alias; deferred, ranged,
-//! and live files; an object tree handoff; paged and partial listings with
-//! validators; rate limits; and object aliases.
+//! and live files; an object tree handoff; paged and partial listings, with
+//! and without page validators; rate limits; and object aliases.
 //!
 //! It is the conformance fixture every host integration test drives, so every
 //! pinned behavior is preserved on the new surface: the root, hello, and items
@@ -32,6 +32,12 @@ struct Config {
 #[derive(Clone, Default)]
 struct State {
     fresh_full_reads: u64,
+    /// Calls of the `hello/validated` listing, which `hello/validated-calls`
+    /// reads.
+    validated_calls: u64,
+    /// Whether a revalidation of the first page of `hello/validated` has
+    /// answered `unchanged`; the next one answers a changed page.
+    validated_first_page_stood: bool,
 }
 
 const LARGE_RANGED_SIZE: u64 = 64 * 1024 * 1024 + 1;
@@ -423,6 +429,8 @@ impl TestProvider {
         r.file("/hello/live-log").ranged().handler(live_log)?;
         r.dir("/hello/bundle").handler(bundle)?;
         r.dir("/hello/feed").handler(feed)?;
+        r.dir("/hello/validated").handler(validated)?;
+        r.file("/hello/validated-calls").handler(validated_calls)?;
         r.dir("/hello/unbounded").handler(unbounded_feed)?;
         r.dir("/hello/throttled").handler(throttled)?;
         r.dir("/hello/snapshot").handler(snapshot)?;
@@ -650,6 +658,49 @@ async fn feed(cx: DirCx<State>) -> Result<DirListing> {
     } else {
         Ok(DirListing::paged(entries, Cursor::Page(page + 1)))
     }
+}
+
+/// Two pages with validators and an interval of one second: the first lists
+/// `v-0` and `v-1` with a cursor, the second `v-2`, complete. A call with the
+/// validator of its page answers `unchanged`, except the second revalidation
+/// of the first page, which answers a changed page with `v-1b` in place of
+/// `v-1` and the same cursor.
+async fn validated(cx: DirCx<State>) -> Result<DirListing> {
+    if !matches!(cx.intent(), DirIntent::List { .. }) {
+        return Ok(DirListing::exhaustive([]));
+    }
+    cx.state_mut(|state| state.validated_calls += 1);
+    let page = |names: &[&str], token: &str| {
+        let entries = names.iter().map(|name| Entry::dir(*name));
+        let listing = match cx.cursor() {
+            None => DirListing::paged(entries, Cursor::Page(1)),
+            Some(_) => DirListing::exhaustive(entries),
+        };
+        listing.with_validator(PageValidator {
+            token: VersionToken::from(token),
+            interval: Some(1),
+        })
+    };
+    let first_page_stood = cx.state(|state| state.validated_first_page_stood);
+    match (cx.cursor(), cx.version().map(VersionToken::as_str)) {
+        (None, None) => Ok(page(&["v-0", "v-1"], "first-v1")),
+        (None, Some("first-v1")) if !first_page_stood => {
+            cx.state_mut(|state| state.validated_first_page_stood = true);
+            Ok(DirListing::unchanged(Some(1)))
+        },
+        (None, Some("first-v1")) => Ok(page(&["v-0", "v-1b"], "first-v2")),
+        (Some(Cursor::Page(1)), None) => Ok(page(&["v-2"], "second-v1")),
+        (_, Some(_)) => Ok(DirListing::unchanged(Some(1))),
+        (Some(_), None) => Err(ProviderError::not_found("hello/validated has two pages")),
+    }
+}
+
+/// The calls of the `hello/validated` listing so far.
+async fn validated_calls(cx: Cx<State>) -> Result<FileProjection> {
+    let calls = cx.state(|state| state.validated_calls);
+    Ok(FileProjection::body(format!("{calls}\n").into_bytes())
+        .dynamic()
+        .build())
 }
 
 async fn unbounded_feed(cx: DirCx<State>) -> Result<DirListing> {

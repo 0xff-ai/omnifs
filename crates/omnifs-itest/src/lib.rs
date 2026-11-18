@@ -129,16 +129,19 @@ impl RuntimeHarness {
     }
 
     pub fn list(&self, path: &str) -> Result<TestOp<'_, ListChildrenResult>, EngineError> {
-        self.list_with_cursor(path, None)
+        self.list_page(path, None, None)
     }
 
-    pub fn list_with_cursor(
+    /// List the page of `cursor`, with `validator` as the validator of its
+    /// cached page.
+    pub fn list_page(
         &self,
         path: &str,
         cursor: Option<&omnifs_wit::host::types::Cursor>,
+        validator: Option<&str>,
     ) -> Result<TestOp<'_, ListChildrenResult>, EngineError> {
         let path = parse_path(path);
-        self.runtime.start_list_children(&path, cursor)
+        self.runtime.start_list_children(&path, cursor, validator)
     }
 
     pub fn read(&self, path: &str) -> Result<TestOp<'_, ReadFileOutcome>, EngineError> {
