@@ -57,7 +57,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Show daemon, mount, and auth status
-    Status,
+    Status(commands::status::StatusArgs),
 
     /// Stop the daemon and clean up
     ///
@@ -140,7 +140,7 @@ impl Cli {
 impl Commands {
     fn labels(&self) -> (Option<&'static str>, &'static str) {
         match self {
-            Self::Status => (Some("status"), "status"),
+            Self::Status(_) => (Some("status"), "status"),
             Self::Down => (Some("down"), "down"),
             Self::Logs(_) => (Some("logs"), "logs"),
             Self::Inspect(_) => (Some("inspect"), "inspect"),
@@ -202,7 +202,7 @@ impl Commands {
                 let verdict = commands::doctor::run(output).await?;
                 Ok(exit_for_verdict(verdict))
             },
-            Self::Status => commands::status::run(output).await,
+            Self::Status(args) => commands::status::run(args, output).await,
             Self::Down => commands::down::run(output).await,
             Self::Logs(args) => args.run(&output).await.map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),

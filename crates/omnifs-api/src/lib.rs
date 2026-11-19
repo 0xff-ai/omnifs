@@ -166,6 +166,15 @@ pub enum DaemonPhase {
     RecoveryRequired,
 }
 
+/// A phase of the daemon in its `WatchPhase` stream: a daemon that requires
+/// recovery has the error of its recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhaseEvent {
+    Starting,
+    Ready,
+    RecoveryRequired { error: String },
+}
+
 /// The daemon's runtime facts, loaded mounts, and non-secret operational health.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

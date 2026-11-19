@@ -189,6 +189,18 @@ async fn test_daemon_with_limits(
     preface_timeout: std::time::Duration,
     lease: Duration,
 ) -> TestRuntime {
+    let runtime = test_runtime(dir, connection_limit, preface_timeout, lease).await;
+    runtime.control.set_ready(Arc::clone(&runtime.daemon));
+    runtime
+}
+
+/// A daemon whose control is `Starting` until the test sets it ready.
+async fn test_runtime(
+    dir: &tempfile::TempDir,
+    connection_limit: usize,
+    preface_timeout: std::time::Duration,
+    lease: Duration,
+) -> TestRuntime {
     let _ = dir;
     let context = Arc::new(crate::context::DaemonContext::resolve().unwrap());
     context.prepare_startup_dirs().unwrap();
@@ -242,7 +254,6 @@ async fn test_daemon_with_limits(
         connection_limit,
         preface_timeout,
     );
-    control.set_ready(Arc::clone(&daemon));
     let control_task = tokio::spawn(Arc::clone(&control).run(listener));
     TestRuntime {
         daemon,
@@ -460,6 +471,108 @@ async fn tonic_followed_log_stream_ends_cleanly_when_daemon_stops() {
     ));
     runtime.shutdown().await;
     assert!(stream.next().await.is_none());
+}
+
+/// The next phase of a `WatchPhase` stream.
+async fn next_phase(phases: &mut tonic::Streaming<wire::PhaseEvent>) -> omnifs_api::PhaseEvent {
+    grpc::phase_event(&phases.next().await.unwrap().unwrap()).unwrap()
+}
+
+/// `WatchPhase` gives a starting daemon as `starting`, then its readiness
+/// once, however often the daemon sets it, and ends with the daemon.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(unsafe_code)]
+async fn watch_phase_gives_a_starting_daemon_then_its_readiness_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::ENV_LOCK.lock().await;
+    let home = std::fs::canonicalize(dir.path()).unwrap();
+    unsafe {
+        std::env::set_var("OMNIFS_HOME", &home);
+    }
+    let runtime = test_runtime(
+        &dir,
+        CONTROL_CONNECTION_LIMIT,
+        CONTROL_PREFACE_TIMEOUT,
+        Duration::from_secs(30),
+    )
+    .await;
+    let mut c = client(&home.join("control.sock")).await;
+    let mut phases = c.watch_phase(wire::Empty {}).await.unwrap().into_inner();
+    assert_eq!(
+        next_phase(&mut phases).await,
+        omnifs_api::PhaseEvent::Starting
+    );
+    runtime.control.set_ready(Arc::clone(&runtime.daemon));
+    assert_eq!(next_phase(&mut phases).await, omnifs_api::PhaseEvent::Ready);
+    runtime.control.set_ready(Arc::clone(&runtime.daemon));
+    runtime.shutdown().await;
+    assert!(phases.next().await.is_none());
+}
+
+/// `WatchPhase` gives a ready daemon as `ready` at the subscription.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(unsafe_code)]
+async fn watch_phase_gives_a_ready_daemon_at_the_subscription() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::ENV_LOCK.lock().await;
+    let home = std::fs::canonicalize(dir.path()).unwrap();
+    unsafe {
+        std::env::set_var("OMNIFS_HOME", &home);
+    }
+    let runtime = test_daemon(&dir).await;
+    let mut c = client(&home.join("control.sock")).await;
+    let mut phases = c.watch_phase(wire::Empty {}).await.unwrap().into_inner();
+    assert_eq!(next_phase(&mut phases).await, omnifs_api::PhaseEvent::Ready);
+    runtime.shutdown().await;
+    assert!(phases.next().await.is_none());
+}
+
+/// `WatchPhase` gives a daemon that requires recovery with the error that
+/// the store health of its recovery reports.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(unsafe_code)]
+async fn watch_phase_gives_a_recovering_daemon_with_its_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let _guard = crate::ENV_LOCK.lock().await;
+    let home = std::fs::canonicalize(dir.path()).unwrap();
+    unsafe {
+        std::env::set_var("OMNIFS_HOME", &home);
+    }
+    let context = Arc::new(crate::context::DaemonContext::resolve().unwrap());
+    context.prepare_startup_dirs().unwrap();
+    let listener = context.bind_control_socket().unwrap();
+    let (shutdown, _) = tokio::sync::watch::channel(false);
+    let (control, _repairs) = super::ControlServer::new(
+        Arc::clone(&context),
+        Arc::new(super::EmbeddedProviders::default()),
+        shutdown.clone(),
+    );
+    let task = tokio::spawn(Arc::clone(&control).run(listener));
+    let mut c = client(&context.control_socket()).await;
+    let mut phases = c.watch_phase(wire::Empty {}).await.unwrap().into_inner();
+    assert_eq!(
+        next_phase(&mut phases).await,
+        omnifs_api::PhaseEvent::Starting
+    );
+    let error = "control store could not be opened: file is not a database";
+    control.set_recovery(DaemonRecovery {
+        phase: DaemonPhase::RecoveryRequired,
+        durable_revision: None,
+        serving_revision: None,
+        failed_mutation: None,
+        store_health: HealthReport::new(HealthState::Unhealthy, error),
+        repair: None,
+    });
+    assert_eq!(
+        next_phase(&mut phases).await,
+        omnifs_api::PhaseEvent::RecoveryRequired {
+            error: error.to_owned()
+        }
+    );
+    control.set_shutting_down();
+    let _ = shutdown.send(true);
+    task.await.unwrap().unwrap();
+    assert!(phases.next().await.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

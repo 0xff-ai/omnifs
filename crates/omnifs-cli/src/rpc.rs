@@ -7,7 +7,7 @@ use omnifs_api::grpc::{self, wire};
 use omnifs_api::{
     CONTROL_LOG_TAIL_MAX_LINES, CONTROL_MUTATION_TIMEOUT_SECS, CONTROL_REQUEST_TIMEOUT_SECS,
     CONTROL_SHUTDOWN_TIMEOUT_SECS, CONTROL_STREAM_PAYLOAD_MAX_BYTES, CredentialKey,
-    CredentialStatus, DaemonInventory, MountRecord, MutationOp, MutationOpResult,
+    CredentialStatus, DaemonInventory, MountRecord, MutationOp, MutationOpResult, PhaseEvent,
     ProviderImportReceipt, ProviderMetadata, ServingOutcome,
 };
 use omnifs_bootstrap::{Bootstrap, Client};
@@ -16,6 +16,7 @@ use prost::Message as _;
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::sync::OnceCell;
+use tokio_stream::StreamExt as _;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Request};
 
@@ -42,7 +43,7 @@ macro_rules! bounded_unary {
                 .await?
                 .$method(unary($request, timeout))
                 .await
-                .map_err(status_error)
+                .map_err(|status| status_error(&status))
         })
         .await
         .context("daemon control request timed out")
@@ -159,7 +160,7 @@ impl RpcClient {
                 .await?
                 .stream_logs(Request::new(wire::StreamLogsRequest { follow, tail_lines }))
                 .await
-                .map_err(status_error)?;
+                .map_err(|status| status_error(&status))?;
             let mut stream = response.into_inner();
             let first = stream
                 .message()
@@ -174,6 +175,25 @@ impl RpcClient {
         .await
         .context("timed out starting daemon log stream")
         .with_exit_code(ExitCode::DaemonUnavailable)?
+    }
+
+    /// Waits for the daemon to be ready or to require recovery, as its
+    /// `WatchPhase` stream gives it, up to the end of the daemon; without a
+    /// daemon to answer, it returns at once.
+    pub(crate) async fn settled_phase(&self) -> anyhow::Result<()> {
+        let Ok(mut client) = self.client().await else {
+            return Ok(());
+        };
+        let phases = client
+            .watch_phase(Request::new(wire::Empty {}))
+            .await
+            .map_err(|status| status_error(&status))?
+            .into_inner();
+        settle(phases.map(|item| match item {
+            Ok(event) => grpc::phase_event(&event).map_err(anyhow::Error::from),
+            Err(status) => Err(status_error(&status)),
+        }))
+        .await
     }
 
     pub(crate) async fn list_mounts(&self) -> anyhow::Result<Vec<MountRecord>> {
@@ -261,7 +281,7 @@ impl RpcClient {
                 .await?
                 .import_provider(Request::new(tokio_stream::iter(requests)))
                 .await
-                .map_err(status_error)?
+                .map_err(|status| status_error(&status))?
                 .into_inner();
             grpc::provider_import_receipt(
                 response
@@ -473,7 +493,22 @@ fn lease_conflict_sentence(code: omnifs_api::ControlErrorCode) -> Option<&'stati
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn status_error(status: tonic::Status) -> anyhow::Error {
+/// Takes `phases` up to a ready daemon, one that requires recovery, or their
+/// end with the daemon.
+async fn settle(
+    phases: impl tokio_stream::Stream<Item = anyhow::Result<PhaseEvent>>,
+) -> anyhow::Result<()> {
+    let mut phases = std::pin::pin!(phases);
+    while let Some(phase) = phases.next().await {
+        match phase? {
+            PhaseEvent::Starting => {},
+            PhaseEvent::Ready | PhaseEvent::RecoveryRequired { .. } => return Ok(()),
+        }
+    }
+    Ok(())
+}
+
+fn status_error(status: &tonic::Status) -> anyhow::Error {
     if let Ok(detail) = wire::ErrorDetail::decode(status.details())
         && let Ok(error) = grpc::error_detail(&detail)
     {
@@ -511,6 +546,56 @@ mod tests {
     use super::*;
     use crate::error::exit_code;
 
+    /// The phases of a stream that stays open after `phases`.
+    fn open_phases(
+        phases: Vec<PhaseEvent>,
+    ) -> impl tokio_stream::Stream<Item = anyhow::Result<PhaseEvent>> {
+        tokio_stream::iter(phases.into_iter().map(Ok)).chain(tokio_stream::pending())
+    }
+
+    /// `settle` takes a starting daemon up to its readiness or its recovery,
+    /// takes a ready daemon at once, and waits on a daemon that starts.
+    #[tokio::test]
+    async fn settle_waits_for_a_starting_daemon_to_be_ready_or_to_require_recovery() {
+        settle(open_phases(vec![PhaseEvent::Starting, PhaseEvent::Ready]))
+            .await
+            .unwrap();
+        settle(open_phases(vec![PhaseEvent::Ready])).await.unwrap();
+        settle(open_phases(vec![
+            PhaseEvent::Starting,
+            PhaseEvent::RecoveryRequired {
+                error: "control store could not be opened".into(),
+            },
+        ]))
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                settle(open_phases(vec![PhaseEvent::Starting]))
+            )
+            .await
+            .is_err(),
+            "a starting daemon settles"
+        );
+    }
+
+    /// `settle` ends with the stream of a daemon that ends, and stops at an
+    /// error of the stream.
+    #[tokio::test]
+    async fn settle_ends_with_the_daemon_and_stops_at_an_error() {
+        settle(tokio_stream::iter([Ok(PhaseEvent::Starting)]))
+            .await
+            .unwrap();
+        let error = settle(tokio_stream::iter([
+            Ok(PhaseEvent::Starting),
+            Err(anyhow::anyhow!("the daemon stream failed")),
+        ]))
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "the daemon stream failed");
+    }
+
     #[test]
     fn mutation_in_progress_humanizes_the_top_level_message_and_keeps_the_daemon_detail() {
         let daemon_message = "mutation deadbeef is already in progress; its lease expires at 123";
@@ -523,7 +608,7 @@ mod tests {
             "fallback message",
             detail.encode_to_vec().into(),
         );
-        let error = status_error(status);
+        let error = status_error(&status);
         // The top-level message is a human sentence, not the daemon's raw
         // hex-id-and-unix-ms wire message.
         assert_eq!(
@@ -565,7 +650,7 @@ mod tests {
                 "fallback",
                 detail.encode_to_vec().into(),
             );
-            let error = status_error(status);
+            let error = status_error(&status);
             assert_eq!(error.to_string(), expected);
             assert_eq!(
                 crate::error::hints(&error),
@@ -586,7 +671,7 @@ mod tests {
             "fallback message",
             detail.encode_to_vec().into(),
         );
-        let error = status_error(status);
+        let error = status_error(&status);
 
         assert_eq!(error.to_string(), "busy detail");
         assert_eq!(exit_code(&error), ExitCode::DaemonUnavailable);
@@ -599,7 +684,7 @@ mod tests {
             Code::Unavailable,
             Code::DeadlineExceeded,
         ] {
-            let error = status_error(tonic::Status::new(code, "transient"));
+            let error = status_error(&tonic::Status::new(code, "transient"));
             assert_eq!(exit_code(&error), ExitCode::DaemonUnavailable);
             assert_eq!(crate::error::hints(&error), vec!["omnifs logs".to_owned()]);
         }

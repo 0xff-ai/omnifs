@@ -23,6 +23,7 @@ service Control {
   rpc GetCredentialStatus(GetCredentialStatusRequest) returns (GetCredentialStatusResponse);
   rpc SubscribeInspector(InspectorRequest) returns (stream InspectorStreamItem);
   rpc StreamLogs(StreamLogsRequest) returns (stream LogStreamItem);
+  rpc WatchPhase(Empty) returns (stream PhaseEvent);
 }
 
 message Empty {}
@@ -118,6 +119,10 @@ message LogStreamItem {
   }
 }
 message LogsReady { string instance_id = 1; }
+
+// The phase of the daemon at the subscription and at each change, up to the
+// end of the daemon; `error` is the error of a daemon that requires recovery.
+message PhaseEvent { DaemonPhase phase = 1; optional string error = 2; }
 
 message ProviderReference { bytes id = 1; string name = 2; optional string version = 3; }
 message ProviderMetadata { ProviderReference reference = 1; bytes manifest = 2; }
