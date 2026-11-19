@@ -84,7 +84,10 @@ where
                     "list-children answered unchanged to a call without a validator".into(),
                 );
             },
-            wit_types::ListChildrenResult::Unchanged(_) => {},
+            wit_types::ListChildrenResult::Unchanged(validator) => {
+                Self::version_token(&validator.token)
+                    .map_err(|error| format!("page validator: {error}"))?;
+            },
         }
         Ok(())
     }
@@ -613,18 +616,22 @@ mod tests {
             (String::new(), "must not be empty"),
             ("v".repeat(MAX_VERSION_TOKEN_BYTES + 1), "exceeds"),
         ] {
+            let validator = wit_types::PageValidator {
+                token,
+                interval: None,
+            };
             let result = Ok(wit_types::ListChildrenResult::Entries(
                 wit_types::DirListing {
                     entries: vec![entry("child")],
                     exhaustive: true,
                     next_cursor: None,
-                    validator: Some(wit_types::PageValidator {
-                        token,
-                        interval: None,
-                    }),
+                    validator: Some(validator.clone()),
                 },
             ));
             let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
+            assert!(error.contains("page validator") && error.contains(message));
+            let unchanged = Ok(wit_types::ListChildrenResult::Unchanged(validator));
+            let error = validate_list(&unchanged, &effects(), true, |_| true).unwrap_err();
             assert!(error.contains("page validator") && error.contains(message));
         }
     }
