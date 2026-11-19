@@ -28,8 +28,15 @@ const MAX_INFLIGHT_RPCS: usize = 128;
 pub struct RunningNfsServer {
     addr: SocketAddr,
     shutdown: Arc<AtomicBool>,
-    workers: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
+    workers: Arc<Mutex<Vec<Connection>>>,
     thread: Option<thread::JoinHandle<()>>,
+}
+
+/// The worker of one client connection, with the connection, which a stop of
+/// the server shuts down so that the worker ends while its client stays.
+struct Connection {
+    worker: thread::JoinHandle<()>,
+    stream: TcpStream,
 }
 
 impl RunningNfsServer {
@@ -42,6 +49,9 @@ impl Drop for RunningNfsServer {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         let _ = TcpStream::connect(self.addr);
+        for connection in self.workers.lock().expect("workers lock").iter() {
+            let _ = connection.stream.shutdown(std::net::Shutdown::Both);
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -107,6 +117,15 @@ pub fn start_server(
                         ));
                         continue;
                     }
+                    let connection = match stream.try_clone() {
+                        Ok(connection) => connection,
+                        Err(error) => {
+                            trace.line(&format!(
+                                "connection_config_error peer={peer:?} err={error}"
+                            ));
+                            continue;
+                        },
+                    };
                     let export = Arc::clone(&export);
                     let slots = Arc::clone(&slots);
                     let trace = trace.clone();
@@ -118,7 +137,13 @@ pub fn start_server(
                             trace.line(&format!("connection_closed peer={peer:?} err={error}"));
                         }
                     });
-                    thread_workers.lock().expect("workers lock").push(worker);
+                    thread_workers
+                        .lock()
+                        .expect("workers lock")
+                        .push(Connection {
+                            worker,
+                            stream: connection,
+                        });
                 },
                 Err(error) => {
                     if thread_shutdown.load(Ordering::Acquire) {
@@ -310,23 +335,23 @@ impl Drop for ConnectionPermit {
     }
 }
 
-fn prune_finished_workers(workers: &Mutex<Vec<thread::JoinHandle<()>>>) {
+fn prune_finished_workers(workers: &Mutex<Vec<Connection>>) {
     let mut workers = workers.lock().expect("workers lock");
     let mut index = 0;
     while index < workers.len() {
-        if workers[index].is_finished() {
-            let worker = workers.swap_remove(index);
-            let _ = worker.join();
+        if workers[index].worker.is_finished() {
+            let connection = workers.swap_remove(index);
+            let _ = connection.worker.join();
         } else {
             index += 1;
         }
     }
 }
 
-fn join_workers(workers: &Mutex<Vec<thread::JoinHandle<()>>>) {
+fn join_workers(workers: &Mutex<Vec<Connection>>) {
     let workers = std::mem::take(&mut *workers.lock().expect("workers lock"));
-    for worker in workers {
-        let _ = worker.join();
+    for connection in workers {
+        let _ = connection.worker.join();
     }
 }
 

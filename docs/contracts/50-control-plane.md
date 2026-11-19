@@ -23,6 +23,8 @@ The daemon listens on the profile's fixed `control.sock`. The profile directory 
 
 The process identity is diagnostic metadata only. RPC status and inventory are authoritative when reachable. Doctor owns stale process and filesystem cleanup and requires a stopped daemon, consent, and fresh exact identity proof before destructive repair.
 
+The daemon and each host instance of a filesystem take the BLAKE3 digest of the bytes of their executable at their start, as the program they run: `DaemonInfo` of the inventory carries the program of the daemon, and the runner record of a host instance carries its own. `omnifs status` gives, for the daemon and for each host instance, whether it runs the program of the command, `current_program`, so that a new build of `omnifs` finds the processes of an earlier one.
+
 `WatchPhase` streams the phase of the daemon: `starting`, `ready`, or `recovery_required` with the error of its recovery, which the store health of the recovery reports. It gives the phase at the subscription and each change of it once, in each phase before teardown, and ends with the daemon. `omnifs status --ready` gives the status of the daemon once its `WatchPhase` stream gives `ready` or `recovery_required`, or ends with the daemon; without a daemon to answer, it gives the status at once and starts none.
 
 ## Command grammar
@@ -38,7 +40,7 @@ Global `--output human|json|jsonl`, `--quiet`, `--no-input`, and `--yes` apply t
 
 `omnifs setup` starts the daemon, lists every embedded provider with an honest auth label, then offers two quick-start confirms: mount every provider that needs no sign-in in one atomic batch, and attach the platform's recommended filesystem. It never selects providers on the caller's behalf and never starts an OAuth flow; a provider that needs a sign-in or a config value is left for `omnifs mount add`. There is no `omnifs up`, `omnifs apply`, or offline product mode.
 
-`omnifs down` sends `Shutdown { stop_filesystems: true }`, waits for the bounded drain, reports busy attachments, and then stops the daemon. Daemon spawn and replacement never launch or stop filesystem runners implicitly.
+`omnifs down` sends `Shutdown { stop_filesystems: true }`, waits for the bounded drain, reports busy attachments, and then stops the daemon. `omnifs down --keep-filesystems` sends `Shutdown { stop_filesystems: false }`, as `SIGTERM` does: the attached filesystems stay and reconnect to the next daemon. Daemon spawn and replacement never launch or stop filesystem runners implicitly.
 
 ## Mounts, providers, and credentials
 
@@ -55,6 +57,8 @@ Credentials live in the daemon's SQLite store. The CLI owns browser, device, and
 `omnifs_core::fs` owns validated filesystem IDs, protocol, runtime, and resolved location. The CLI stores strict specs under `client/filesystems/specs`, per-ID state under `client/filesystems/state`, host logs under `client/cache/filesystem-<id>.log`, and launch roots under `client/filesystems/runtime`. `fs create` resolves defaults once without launching. Host locations are absolute; Docker and libkrun use `/omnifs`.
 
 The CLI owns host process, Docker, and libkrun launch and teardown. Each runner attaches to the daemon's shared `omnifs_vfs::Namespace` and carries no provider or credential state. Attach rejects an existing confirmed instance. Detach proves mount absence and runtime exit. Remove never detaches an uncertain or running instance. `fs shell` selects only the stored runtime and ID.
+
+`fs restart` starts a new instance of a filesystem. The host instance of an active NFS mount that answers `Ping` with `Restart` gets `Restart`, at which it writes its filehandle table, stops its server and ends without an unmount; the new instance serves the mount at the address of its state with that table, so the mount and its open files stay. An instance of a build without `Restart`, and any other instance, ends at `Stop`, as before, and a filesystem without an instance gets one with its mount, as at `fs attach`.
 
 `VfsServer` owns listener tasks, readiness, reconnect, server-pushed stop, and attachment records. Wire handshakes carry the exact resolved filesystem spec and daemon instance. A reconnect is accepted only for the same ID and exact spec. A failed reconnect past its deadline enters filesystem-owned teardown.
 

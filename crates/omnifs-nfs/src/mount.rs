@@ -98,17 +98,33 @@ pub fn mount_blocking(
     rt: Handle,
     options: &NfsMountOptions,
 ) -> Result<(), NfsFilesystemError> {
-    mount_blocking_cancellable(mount_point, namespace, rt, options, &AtomicBool::new(false))
+    mount_blocking_cancellable(
+        mount_point,
+        namespace,
+        rt,
+        options,
+        &AtomicBool::new(false),
+        &AtomicBool::new(false),
+    )
 }
 
+/// Serves the mount until it exits. `cancelled` stops a startup; `released`
+/// stops the server without an unmount, keeping the state of the mount and
+/// writing the filehandle table for the next process, which serves the mount
+/// at the same address by the restart path.
 pub fn mount_blocking_cancellable(
     mount_point: &Path,
     namespace: Arc<dyn Namespace>,
     rt: Handle,
     options: &NfsMountOptions,
     cancelled: &AtomicBool,
+    released: &AtomicBool,
 ) -> Result<(), NfsFilesystemError> {
-    std::fs::create_dir_all(mount_point)?;
+    // A stat of an active mount whose server is down blocks: only a mount
+    // point without a mount is created.
+    if !mount_is_active_checked(mount_point)? {
+        std::fs::create_dir_all(mount_point)?;
+    }
     ensure_private_state_dir(&options.state_dir)?;
     let bind = options.bind_for_mount(mount_point)?;
 
@@ -157,7 +173,7 @@ pub fn mount_blocking_cancellable(
                 error = %unmount_error,
                 "NFS mount completed while cancellation won; keeping the server alive until teardown succeeds"
             );
-            wait_for_mount_exit(mount_point);
+            wait_for_mount_exit(mount_point, &AtomicBool::new(false));
         }
         return Err(NfsFilesystemError::Mount(
             "mount startup was canceled".to_owned(),
@@ -172,7 +188,7 @@ pub fn mount_blocking_cancellable(
                 %error,
                 "NFS startup cancellation could not unmount; keeping the server alive until teardown succeeds"
             );
-            wait_for_mount_exit(mount_point);
+            wait_for_mount_exit(mount_point, &AtomicBool::new(false));
         }
         return Err(NfsFilesystemError::Mount(
             "mount startup was canceled".to_owned(),
@@ -187,9 +203,23 @@ pub fn mount_blocking_cancellable(
         "NFS loopback mount established"
     );
 
-    wait_for_mount_exit(mount_point);
+    if wait_for_mount_exit(mount_point, released) == MountExit::Released {
+        state_file.keep();
+        tracing::info!(
+            mount = %mount_point.display(),
+            "NFS server released the mount without an unmount"
+        );
+    }
     drop(server);
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MountExit {
+    /// The mount is no longer active.
+    Exited,
+    /// The process released the mount, which stays active.
+    Released,
 }
 
 pub fn unmount(mount_point: &Path) -> Result<(), NfsFilesystemError> {
@@ -657,12 +687,15 @@ fn normalize_mount_path(path: &Path) -> PathBuf {
     path.components().collect()
 }
 
-fn wait_for_mount_exit(mount_point: &Path) {
+fn wait_for_mount_exit(mount_point: &Path, released: &AtomicBool) -> MountExit {
     loop {
+        if released.load(Ordering::Acquire) {
+            return MountExit::Released;
+        }
         match mount_is_active_checked(mount_point) {
             Ok(false) => {
                 tracing::info!("NFS mount exited");
-                return;
+                return MountExit::Exited;
             },
             Ok(true) => {},
             Err(error) => {

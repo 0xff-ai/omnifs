@@ -63,7 +63,9 @@ pub enum Commands {
     ///
     /// Asks attached filesystems to stop, drains them for a bounded time, then
     /// stops the daemon. Busy stragglers are reported for `omnifs doctor`.
-    Down,
+    /// With `--keep-filesystems`, the filesystems stay attached and reconnect
+    /// to the next daemon.
+    Down(commands::down::DownArgs),
     /// Tail the daemon log
     Logs(commands::logs::LogsArgs),
     /// Stream FUSE, provider, and callout events
@@ -141,7 +143,7 @@ impl Commands {
     fn labels(&self) -> (Option<&'static str>, &'static str) {
         match self {
             Self::Status(_) => (Some("status"), "status"),
-            Self::Down => (Some("down"), "down"),
+            Self::Down(_) => (Some("down"), "down"),
             Self::Logs(_) => (Some("logs"), "logs"),
             Self::Inspect(_) => (Some("inspect"), "inspect"),
             Self::Mount(args) => (
@@ -203,7 +205,7 @@ impl Commands {
                 Ok(exit_for_verdict(verdict))
             },
             Self::Status(args) => commands::status::run(args, output).await,
-            Self::Down => commands::down::run(output).await,
+            Self::Down(args) => commands::down::run(args, output).await,
             Self::Logs(args) => args.run(&output).await.map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),
             Self::Mount(args) => args.run(output).await,
@@ -476,6 +478,7 @@ mod tests {
             state: crate::inventory::FilesystemState::Failed,
             mount_count: 0,
             fix: Some("omnifs logs (container exited)".to_owned()),
+            current_program: None,
         };
         let inventory = crate::inventory::Inventory::test(
             crate::inventory::DaemonHealth::Running,

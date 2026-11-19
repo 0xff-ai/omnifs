@@ -26,8 +26,17 @@ pub enum RunnerPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, tag = "kind", rename_all = "snake_case")]
 enum RunnerRequest {
-    Ping { instance_id: String },
-    Stop { instance_id: String },
+    Ping {
+        instance_id: String,
+    },
+    Stop {
+        instance_id: String,
+    },
+    /// Write the filehandle table, stop the server and end without an
+    /// unmount, so that a new instance serves the mount in place.
+    Restart {
+        instance_id: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,9 +54,22 @@ struct RunnerRequestEnvelope {
     rename_all = "snake_case"
 )]
 enum RunnerReply {
-    Pong,
+    /// The answer of a runner of a build before `Restart` has none.
+    Pong(Option<PongAnswer>),
     Stop(StopOutcome),
-    Error { message: String },
+    /// The runner released its mount and ends.
+    Restart,
+    Error {
+        message: String,
+    },
+}
+
+/// What a runner answers to `Ping` beyond its phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PongAnswer {
+    /// Whether the runner answers `Restart`.
+    restart: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +93,9 @@ pub enum StopOutcome {
 pub struct RunnerState {
     pub instance_id: String,
     pub phase: RunnerPhase,
+    /// Whether the runner answers `Restart`, which a runner of a build before
+    /// it does not.
+    pub restart: bool,
 }
 
 pub(crate) struct StopRequest {
@@ -83,6 +108,29 @@ impl StopRequest {
         let _ = self.outcome.send(outcome);
         let _ = self.flushed.await;
     }
+}
+
+/// A `Restart` for the owner of the mount, which completes it once the server
+/// has stopped and the filehandle table is written.
+pub(crate) struct RestartRequest {
+    outcome: oneshot::Sender<Result<(), String>>,
+    flushed: oneshot::Receiver<()>,
+}
+
+impl RestartRequest {
+    pub(crate) async fn complete(self, outcome: Result<(), String>) {
+        let _ = self.outcome.send(outcome);
+        let _ = self.flushed.await;
+    }
+}
+
+/// The lifecycle requests that the control of a runner hands to the owner of
+/// its mount.
+#[derive(Clone)]
+pub(crate) struct ControlRequests {
+    pub(crate) stop: mpsc::Sender<StopRequest>,
+    /// The `Restart` of a runner that answers it; none for one that does not.
+    pub(crate) restart: Option<mpsc::Sender<RestartRequest>>,
 }
 
 pub(crate) struct HostControl {
@@ -118,7 +166,7 @@ impl HostControl {
         &mut self,
         instance_id: String,
         phase: watch::Receiver<RunnerPhase>,
-        stop: mpsc::Sender<StopRequest>,
+        requests: ControlRequests,
     ) -> tokio::task::JoinHandle<()> {
         let listener = self.listener.take().expect("host control starts once");
         tokio::spawn(async move {
@@ -128,11 +176,11 @@ impl HostControl {
                 };
                 let instance_id = instance_id.clone();
                 let phase = phase.clone();
-                let stop = stop.clone();
+                let requests = requests.clone();
                 tokio::spawn(async move {
                     let _ = tokio::time::timeout(
                         RUNNER_CONTROL_TIMEOUT,
-                        handle_connection(stream, instance_id, phase, stop),
+                        handle_connection(stream, instance_id, phase, requests),
                     )
                     .await;
                 });
@@ -151,7 +199,7 @@ async fn handle_connection(
     stream: UnixStream,
     instance_id: String,
     phase: watch::Receiver<RunnerPhase>,
-    stop: mpsc::Sender<StopRequest>,
+    requests: ControlRequests,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let request: RunnerRequestEnvelope = read_line(reader).await?;
@@ -168,7 +216,9 @@ async fn handle_connection(
         .await;
     }
     let requested_id = match &request.request {
-        RunnerRequest::Ping { instance_id } | RunnerRequest::Stop { instance_id } => instance_id,
+        RunnerRequest::Ping { instance_id }
+        | RunnerRequest::Stop { instance_id }
+        | RunnerRequest::Restart { instance_id } => instance_id,
     };
     if requested_id != &instance_id {
         let current_phase = phase.borrow().clone();
@@ -185,17 +235,31 @@ async fn handle_connection(
     match request.request {
         RunnerRequest::Ping { .. } => {
             let current_phase = phase.borrow().clone();
-            write_reply(&mut writer, &instance_id, current_phase, RunnerReply::Pong).await
+            let answer = PongAnswer {
+                restart: requests.restart.is_some(),
+            };
+            write_reply(
+                &mut writer,
+                &instance_id,
+                current_phase,
+                RunnerReply::Pong(Some(answer)),
+            )
+            .await
+        },
+        RunnerRequest::Restart { .. } => {
+            answer_restart(&mut writer, &instance_id, &phase, requests.restart).await
         },
         RunnerRequest::Stop { .. } => {
             let (outcome, outcome_rx) = oneshot::channel();
             let (flushed, flushed_rx) = oneshot::channel();
-            stop.send(StopRequest {
-                outcome,
-                flushed: flushed_rx,
-            })
-            .await
-            .map_err(|_| anyhow::anyhow!("filesystem stop owner exited"))?;
+            requests
+                .stop
+                .send(StopRequest {
+                    outcome,
+                    flushed: flushed_rx,
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("filesystem stop owner exited"))?;
             let outcome = outcome_rx
                 .await
                 .map_err(|_| anyhow::anyhow!("filesystem stop result was lost"))?;
@@ -211,6 +275,48 @@ async fn handle_connection(
             result
         },
     }
+}
+
+/// Hands a `Restart` to the owner of the mount, and answers once its server
+/// has stopped; a runner without a restart in place answers with an error.
+async fn answer_restart(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    instance_id: &str,
+    phase: &watch::Receiver<RunnerPhase>,
+    restart: Option<mpsc::Sender<RestartRequest>>,
+) -> anyhow::Result<()> {
+    let Some(restart) = restart else {
+        let current_phase = phase.borrow().clone();
+        return write_reply(
+            writer,
+            instance_id,
+            current_phase,
+            RunnerReply::Error {
+                message: "this filesystem does not restart in place".to_owned(),
+            },
+        )
+        .await;
+    };
+    let (outcome, outcome_rx) = oneshot::channel();
+    let (flushed, flushed_rx) = oneshot::channel();
+    restart
+        .send(RestartRequest {
+            outcome,
+            flushed: flushed_rx,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("filesystem restart owner exited"))?;
+    let outcome = outcome_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("filesystem restart result was lost"))?;
+    let current_phase = phase.borrow().clone();
+    let reply = match outcome {
+        Ok(()) => RunnerReply::Restart,
+        Err(message) => RunnerReply::Error { message },
+    };
+    let result = write_reply(writer, instance_id, current_phase, reply).await;
+    let _ = flushed.send(());
+    result
 }
 
 async fn read_line(
@@ -273,31 +379,47 @@ impl RunnerControlClient {
             })
             .await?;
         match reply.reply {
-            RunnerReply::Pong => Ok(RunnerState {
+            RunnerReply::Pong(answer) => Ok(RunnerState {
                 instance_id: reply.instance_id,
                 phase: reply.phase,
+                restart: answer.is_some_and(|answer| answer.restart),
             }),
             RunnerReply::Error { message } => Err(anyhow::anyhow!(message)),
-            RunnerReply::Stop(_) => anyhow::bail!("unexpected stop reply to ping"),
+            RunnerReply::Stop(_) | RunnerReply::Restart => {
+                anyhow::bail!("unexpected lifecycle reply to ping")
+            },
         }
     }
 
-    pub async fn stop(&self) -> anyhow::Result<(RunnerState, StopOutcome)> {
+    /// Asks the runner to write its filehandle table, stop its server and end
+    /// without an unmount; it answers once its server has stopped.
+    pub async fn restart(&self) -> anyhow::Result<()> {
+        let reply = self
+            .request(RunnerRequest::Restart {
+                instance_id: self.instance_id.clone(),
+            })
+            .await?;
+        match reply.reply {
+            RunnerReply::Restart => Ok(()),
+            RunnerReply::Error { message } => Err(anyhow::anyhow!(message)),
+            RunnerReply::Pong(_) | RunnerReply::Stop(_) => {
+                anyhow::bail!("unexpected reply to restart")
+            },
+        }
+    }
+
+    pub async fn stop(&self) -> anyhow::Result<StopOutcome> {
         let reply = self
             .request(RunnerRequest::Stop {
                 instance_id: self.instance_id.clone(),
             })
             .await?;
         match reply.reply {
-            RunnerReply::Stop(outcome) => Ok((
-                RunnerState {
-                    instance_id: reply.instance_id,
-                    phase: reply.phase,
-                },
-                outcome,
-            )),
+            RunnerReply::Stop(outcome) => Ok(outcome),
             RunnerReply::Error { message } => Err(anyhow::anyhow!(message)),
-            RunnerReply::Pong => anyhow::bail!("unexpected ping reply to stop"),
+            RunnerReply::Pong(_) | RunnerReply::Restart => {
+                anyhow::bail!("unexpected reply to stop")
+            },
         }
     }
 
@@ -369,9 +491,17 @@ mod tests {
             async move {
                 for _ in 0..2 {
                     let (stream, _) = listener.accept().await.unwrap();
-                    handle_connection(stream, instance.clone(), phase_rx.clone(), stop_tx.clone())
-                        .await
-                        .unwrap();
+                    handle_connection(
+                        stream,
+                        instance.clone(),
+                        phase_rx.clone(),
+                        ControlRequests {
+                            stop: stop_tx.clone(),
+                            restart: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
                 }
             }
         });
@@ -388,6 +518,7 @@ mod tests {
             )
             .unwrap(),
             control_socket: socket,
+            program: None,
         };
         let client = RunnerControlClient::new(&record);
         assert_eq!(client.ping().await.unwrap().phase, RunnerPhase::Mounted);
@@ -400,12 +531,102 @@ mod tests {
                 .complete(StopOutcome::Stopped)
                 .await;
         });
-        let (state, outcome) = client.stop().await.unwrap();
-        assert_eq!(state.instance_id, instance);
-        assert_eq!(outcome, StopOutcome::Stopped);
+        assert_eq!(client.stop().await.unwrap(), StopOutcome::Stopped);
         completion.await.unwrap();
         server.await.unwrap();
         drop(phase_tx);
+    }
+
+    fn record(socket: PathBuf, instance: &str) -> RunnerRecord {
+        RunnerRecord {
+            version: RunnerRecord::VERSION,
+            instance_id: instance.to_owned(),
+            pid: 42,
+            process_group: 42,
+            spec: fs::Spec::new(
+                fs::Id::new("main").unwrap(),
+                fs::Protocol::Nfs,
+                fs::Runtime::Host,
+                PathBuf::from("/mnt/omnifs"),
+            )
+            .unwrap(),
+            control_socket: socket,
+            program: None,
+        }
+    }
+
+    /// A runner of an NFS mount answers `Ping` with its `Restart`, and answers
+    /// `Restart` once the owner of its mount has released it.
+    #[tokio::test]
+    async fn a_runner_answers_ping_with_its_restart_and_restarts() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("control.sock");
+        let instance = "0123456789abcdef0123456789abcdef";
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (_phase_tx, phase_rx) = watch::channel(RunnerPhase::Mounted);
+        let (stop_tx, _stop_rx) = mpsc::channel(1);
+        let (restart_tx, mut restart_rx) = mpsc::channel(1);
+        let server = tokio::spawn({
+            let instance = instance.to_owned();
+            async move {
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    handle_connection(
+                        stream,
+                        instance.clone(),
+                        phase_rx.clone(),
+                        ControlRequests {
+                            stop: stop_tx.clone(),
+                            restart: Some(restart_tx.clone()),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+        let client = RunnerControlClient::new(&record(socket, instance));
+        assert!(client.ping().await.unwrap().restart);
+
+        let completion = tokio::spawn(async move {
+            restart_rx.recv().await.unwrap().complete(Ok(())).await;
+        });
+        client.restart().await.unwrap();
+        completion.await.unwrap();
+        server.await.unwrap();
+    }
+
+    /// The `Pong` of a runner of a build before `Restart` reads without it.
+    #[tokio::test]
+    async fn the_pong_of_a_runner_before_restart_reads_without_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("control.sock");
+        let instance = "0123456789abcdef0123456789abcdef";
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn({
+            let instance = instance.to_owned();
+            async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                read_line(reader).await.unwrap();
+                writer
+                    .write_all(
+                        format!(
+                            "{{\"version\":1,\"instance_id\":\"{instance}\",\"phase\":\"mounted\",\"reply\":{{\"kind\":\"pong\"}}}}\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let state = RunnerControlClient::new(&record(socket, instance))
+            .ping()
+            .await
+            .unwrap();
+        assert_eq!(state.phase, RunnerPhase::Mounted);
+        assert!(!state.restart);
+        server.await.unwrap();
     }
 
     #[test]

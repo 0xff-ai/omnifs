@@ -218,6 +218,7 @@ pub fn daemon_info(v: &wire::DaemonInfo) -> Result<DaemonInfo, FromGrpcError> {
             .as_deref()
             .map(|x| x.parse().map_err(|_| FromGrpcError::Invalid("attach tcp")))
             .transpose()?,
+        program: v.program.clone(),
     })
 }
 pub fn to_daemon_info(v: &DaemonInfo) -> wire::DaemonInfo {
@@ -228,6 +229,7 @@ pub fn to_daemon_info(v: &DaemonInfo) -> wire::DaemonInfo {
         executable: path_bytes(&v.executable).into(),
         attach_unix: v.attach_unix.as_ref().map(|x| path_bytes(x).into()),
         attach_tcp: v.attach_tcp.map(|x| x.to_string()),
+        program: v.program.clone(),
     }
 }
 fn recovery_offer(v: &wire::RecoveryOffer) -> Result<RecoveryOffer, FromGrpcError> {
@@ -1493,6 +1495,9 @@ mod tests {
             executable: PathBuf::from("/bin/omnifs"),
             attach_unix: Some(PathBuf::from("/tmp/omnifs.sock")),
             attach_tcp: Some("127.0.0.1:1234".parse().unwrap()),
+            program: Some(
+                "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262".into(),
+            ),
         };
         let active_mutation = ActiveMutation {
             mutation_id: MutationId::from_bytes([7; 16]),

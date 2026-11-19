@@ -10,13 +10,23 @@ use crate::daemon_teardown::DaemonTeardown;
 use crate::error::ExitCode;
 use crate::inventory::Inventory;
 use crate::ui::output::Output;
+use clap::Args;
 use omnifs_bootstrap::{Bootstrap, Client};
 
-pub async fn run(output: Output) -> anyhow::Result<ExitCode> {
+#[derive(Args, Debug, Clone, Default)]
+#[command(after_help = "Examples:\n  omnifs down\n  omnifs down --keep-filesystems")]
+pub struct DownArgs {
+    /// Stop the daemon alone, as `SIGTERM` does: the attached filesystems stay
+    /// and reconnect to the next daemon.
+    #[arg(long)]
+    pub keep_filesystems: bool,
+}
+
+pub async fn run(args: DownArgs, output: Output) -> anyhow::Result<ExitCode> {
     let endpoint = Bootstrap::<Client>::for_client()?;
     let inventory = Inventory::collect_rpc().await?;
 
-    let teardown = DaemonTeardown::with_inventory(endpoint, inventory);
+    let teardown = DaemonTeardown::with_inventory(endpoint, inventory, !args.keep_filesystems);
     let exit = if output.is_structured() {
         // The receipt is the whole story: a failed row already conveys the
         // failure, so this returns a non-zero exit code rather than an

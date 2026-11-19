@@ -1,4 +1,6 @@
-use crate::host_control::{HostControl, RunnerPhase, StopOutcome, StopRequest};
+use crate::host_control::{
+    ControlRequests, HostControl, RestartRequest, RunnerPhase, StopOutcome, StopRequest,
+};
 use omnifs_core::fs;
 use omnifs_vfs::{TeardownOutcome, TeardownRequest};
 use std::path::{Path, PathBuf};
@@ -13,10 +15,14 @@ const STOP_ATTEMPT_WAIT: Duration = Duration::from_secs(2);
 
 pub(crate) struct Lifecycle {
     pub(crate) cancelled: Arc<AtomicBool>,
+    /// Set by a `Restart`: the owner of the mount stops its server without an
+    /// unmount.
+    pub(crate) released: Arc<AtomicBool>,
     pub(crate) phase: watch::Sender<RunnerPhase>,
     pub(crate) wire_teardown_tx: mpsc::Sender<TeardownRequest>,
     pub(crate) wire_teardown_rx: mpsc::Receiver<TeardownRequest>,
     pub(crate) host_stop_rx: mpsc::Receiver<StopRequest>,
+    pub(crate) host_restart_rx: mpsc::Receiver<RestartRequest>,
     pub(crate) host_control: Option<HostControl>,
 }
 
@@ -41,6 +47,7 @@ impl Lifecycle {
         let (phase, _) = watch::channel(RunnerPhase::Preflight);
         let (wire_teardown_tx, wire_teardown_rx) = mpsc::channel(1);
         let (host_stop_tx, host_stop_rx) = mpsc::channel(1);
+        let (host_restart_tx, host_restart_rx) = mpsc::channel(1);
         let host_control = match spec.runtime() {
             fs::Runtime::Host => {
                 let state_dir = state_dir
@@ -54,10 +61,27 @@ impl Lifecycle {
                     instance_id,
                     socket,
                 } = runner_control;
-                let record =
-                    omnifs_mtab::RunnerRecord::new(instance_id.clone(), spec.clone(), socket)?;
+                let program = omnifs_core::executable_program().map_err(|error| {
+                    anyhow::anyhow!("read the executable of the runner: {error}")
+                })?;
+                let record = omnifs_mtab::RunnerRecord::new(
+                    instance_id.clone(),
+                    spec.clone(),
+                    socket,
+                    program,
+                )?;
                 let mut control = HostControl::bind(state_dir, &record)?;
-                control.spawn(instance_id, phase.subscribe(), host_stop_tx);
+                // An NFS mount restarts in place: a new instance serves it at
+                // the address of its state with its filehandle table.
+                let restart = (spec.protocol() == fs::Protocol::Nfs).then_some(host_restart_tx);
+                control.spawn(
+                    instance_id,
+                    phase.subscribe(),
+                    ControlRequests {
+                        stop: host_stop_tx,
+                        restart,
+                    },
+                );
                 Some(control)
             },
             fs::Runtime::Docker | fs::Runtime::Libkrun => {
@@ -70,10 +94,12 @@ impl Lifecycle {
         };
         Ok(Self {
             cancelled: Arc::new(AtomicBool::new(false)),
+            released: Arc::new(AtomicBool::new(false)),
             phase,
             wire_teardown_tx,
             wire_teardown_rx,
             host_stop_rx,
+            host_restart_rx,
             host_control,
         })
     }
@@ -81,8 +107,10 @@ impl Lifecycle {
 
 pub(crate) fn preflight(spec: &fs::Spec, state_dir: Option<&Path>) -> anyhow::Result<()> {
     let mount_point = spec.location();
-    std::fs::create_dir_all(mount_point)?;
+    // An active mount is never touched: a mount whose server is down, as an
+    // NFS mount between two instances of a restart in place, blocks a stat.
     if !omnifs_nfs::mount_is_active_checked(mount_point)? {
+        std::fs::create_dir_all(mount_point)?;
         return Ok(());
     }
     anyhow::ensure!(
@@ -190,6 +218,10 @@ impl<'a> MountCoordinator<'a> {
                         return Ok(());
                     }
                 }
+                request = self.lifecycle.host_restart_rx.recv(), if host_control && await_mount && !self.stopping => {
+                    let Some(request) = request else { continue; };
+                    return self.release(request).await;
+                }
                 signal = self.signals.recv() => {
                     if signal.is_none() {
                         continue;
@@ -207,6 +239,23 @@ impl<'a> MountCoordinator<'a> {
                 }
             }
         }
+    }
+
+    /// Stops the server of a mount that a new instance serves in place: the
+    /// owner of the mount stops its server without an unmount and writes its
+    /// filehandle table, and the runner ends.
+    async fn release(&mut self, request: RestartRequest) -> anyhow::Result<()> {
+        self.lifecycle.phase.send_replace(RunnerPhase::Stopping);
+        self.lifecycle.released.store(true, Ordering::Release);
+        let result = (&mut self.mount_done)
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("mount owner exited without a result")));
+        let outcome = match &result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(format!("{error:#}")),
+        };
+        request.complete(outcome).await;
+        result
     }
 
     fn observe_mount(&mut self) {

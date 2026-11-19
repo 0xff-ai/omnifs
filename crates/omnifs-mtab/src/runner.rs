@@ -35,6 +35,9 @@ pub struct RunnerRecord {
     pub process_group: u32,
     pub spec: fs::Spec,
     pub control_socket: PathBuf,
+    /// The program of the runner, the BLAKE3 digest of the bytes of its
+    /// executable at its start; none in the record of a build without it.
+    pub program: Option<String>,
 }
 
 impl RunnerRecord {
@@ -44,6 +47,7 @@ impl RunnerRecord {
         instance_id: String,
         spec: fs::Spec,
         control_socket: PathBuf,
+        program: String,
     ) -> Result<Self, RunnerRecordError> {
         let pid = std::process::id();
         let process_group = process_group_id()?;
@@ -54,6 +58,7 @@ impl RunnerRecord {
             process_group,
             spec,
             control_socket,
+            program: Some(program),
         };
         record.validate()?;
         Ok(record)
@@ -237,6 +242,7 @@ mod tests {
             )
             .unwrap(),
             control_socket: PathBuf::from("/tmp/control.sock"),
+            program: None,
         }
     }
 
@@ -281,5 +287,21 @@ mod tests {
             record("bad", "main", "/mnt").validate(),
             Err(RunnerRecordError::InvalidInstance)
         ));
+    }
+
+    /// The record of a runner of a build before the program of a runner reads
+    /// without its program.
+    #[test]
+    fn a_record_without_its_program_reads_without_a_program() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join(RUNNER_RECORD),
+            r#"{"version":1,"instance_id":"00112233445566778899aabbccddeeff","pid":1,"process_group":1,"spec":{"id":"main","protocol":"nfs","runtime":"host","location":"/mnt"},"control_socket":"/tmp/c"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            RunnerRecord::read(temp.path()).unwrap().unwrap().program,
+            None
+        );
     }
 }

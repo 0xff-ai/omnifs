@@ -67,6 +67,9 @@ pub struct DaemonInfo {
     pub executable: PathBuf,
     pub attach_unix: Option<PathBuf>,
     pub attach_tcp: Option<SocketAddr>,
+    /// The program of the daemon, the BLAKE3 digest of the bytes of its
+    /// executable at its start; none from a daemon of a build without it.
+    pub program: Option<String>,
 }
 
 /// Opaque identity of one daemon recovery offer.
@@ -351,6 +354,7 @@ mod tests {
             executable: PathBuf::from("/usr/local/bin/omnifs"),
             attach_unix: Some(PathBuf::from("/tmp/omnifs-local.sock")),
             attach_tcp: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9000)),
+            program: None,
         };
         let info_json = serde_json::to_value(&info).unwrap();
         assert!(info_json.get("config_dir").is_none());

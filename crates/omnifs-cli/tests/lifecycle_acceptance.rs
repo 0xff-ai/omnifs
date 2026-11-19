@@ -593,6 +593,86 @@ async fn provenance_converges_for_committed_and_not_committed_batches() {
     daemon.stop().await;
 }
 
+/// `status` gives whether the daemon and the host instance of a filesystem
+/// run the program of the command: the instance of a record with the program
+/// of `omnifs` runs it, and one of a record without a program does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_gives_the_program_of_the_daemon_and_of_a_host_instance() {
+    let fixture = Fixture::new();
+    let location = fixture.home_path().join("mount-point");
+    std::fs::create_dir_all(&location).expect("mount point");
+    let location_arg = location.to_string_lossy().into_owned();
+    #[cfg(target_os = "macos")]
+    let protocol = "nfs";
+    #[cfg(not(target_os = "macos"))]
+    let protocol = "fuse";
+    let create = fixture.run(&[
+        "--output",
+        "json",
+        "fs",
+        "create",
+        "--name",
+        "kept",
+        "--protocol",
+        protocol,
+        "--runtime",
+        "host",
+        "--location",
+        &location_arg,
+    ]);
+    assert_success(&create, "fs create");
+    let mut daemon = fixture.start_daemon().await;
+    let program = blake3::hash(&std::fs::read(omnifs_bin()).expect("read omnifs"))
+        .to_hex()
+        .to_string();
+    let state_dir = fixture.home_path().join("client/filesystems/state/kept");
+    std::fs::create_dir_all(&state_dir).expect("state folder");
+    let record = |program: Option<&str>| {
+        serde_json::json!({
+            "version": 1,
+            "instance_id": "0123456789abcdef0123456789abcdef",
+            "pid": 42,
+            "process_group": 42,
+            "spec": {
+                "id": "kept",
+                "protocol": protocol,
+                "runtime": "host",
+                "location": location_arg,
+            },
+            "control_socket": state_dir.join("control.sock"),
+            "program": program,
+        })
+    };
+    let status = || {
+        let status = fixture.run(&["--output", "json", "status"]);
+        serde_json::from_slice::<serde_json::Value>(&status.stdout)
+            .expect("status --output json must produce JSON")["result"]
+            .clone()
+    };
+
+    std::fs::write(
+        state_dir.join("runner.json"),
+        record(Some(&program)).to_string(),
+    )
+    .expect("write the record of a host instance");
+    let current = status();
+    assert_eq!(current["daemon"]["current_program"], true, "{current}");
+    assert_eq!(
+        current["filesystems"][0]["current_program"], true,
+        "{current}"
+    );
+
+    std::fs::write(state_dir.join("runner.json"), record(None).to_string())
+        .expect("write the record of a host instance");
+    let earlier = status();
+    assert_eq!(
+        earlier["filesystems"][0]["current_program"], false,
+        "{earlier}"
+    );
+    std::fs::remove_file(state_dir.join("runner.json")).expect("remove the record");
+    daemon.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn down_stops_daemon_but_keeps_cli_filesystem_specs() {
     let fixture = Fixture::new();

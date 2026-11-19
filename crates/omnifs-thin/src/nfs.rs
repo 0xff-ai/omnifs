@@ -67,6 +67,7 @@ pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     options.persist_filehandles = true;
     options.bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let cancelled = Arc::clone(&lifecycle.cancelled);
+    let released = Arc::clone(&lifecycle.released);
     let mount_point_owned = mount_point.clone();
     let namespace_dyn = Arc::clone(&namespace) as Arc<dyn Namespace>;
     let (mount_done_tx, mount_done_rx) = tokio::sync::oneshot::channel();
@@ -80,6 +81,7 @@ pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
                 handle,
                 &options,
                 &cancelled,
+                &released,
             )
             .context("serve the NFS mount");
             let _ = mount_done_tx.send(result);
