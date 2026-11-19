@@ -153,8 +153,8 @@ impl<T: Object> CollectionEntry<T> {
 /// - `Partial`: intentionally open or truncated with no cursor; lookup remains
 ///   authoritative for navigable names.
 /// - `Unchanged`: the validator of the call ([`ListCx::validator`]) still
-///   matches; the cached page stands, with the seconds of the interval of its
-///   upstream.
+///   matches; the cached page stands, with the validator it keeps from then
+///   on.
 ///
 /// The first three may carry the validator of their page
 /// ([`Self::with_validator`]).
@@ -173,7 +173,7 @@ pub enum Collection<T: Object, C = NoCursor> {
         validator: Option<PageValidator>,
     },
     Unchanged {
-        interval: Option<u32>,
+        validator: PageValidator,
     },
 }
 
@@ -203,13 +203,13 @@ impl<T: Object, C: Cursor> Collection<T, C> {
     }
 
     /// The validator of the call still matches: the cached page stands, with
-    /// the seconds of the interval of its upstream.
-    pub fn unchanged(interval: Option<u32>) -> Self {
-        Self::Unchanged { interval }
+    /// `validator` from then on, such as that of the call with the interval of
+    /// its upstream.
+    pub fn unchanged(validator: PageValidator) -> Self {
+        Self::Unchanged { validator }
     }
 
-    /// Carry the validator of this page; an `Unchanged` page keeps the
-    /// validator the host sent.
+    /// Carry the validator of this page; an `Unchanged` page carries its own.
     #[must_use]
     pub fn with_validator(mut self, validator: PageValidator) -> Self {
         match &mut self {
@@ -253,7 +253,7 @@ impl<T: Object, C: Cursor> Collection<T, C> {
                 next,
                 validator,
             } => (entries, Some(encode_cursor(&next)), false, validator),
-            Self::Unchanged { interval } => return Ok(DirProjection::unchanged(interval)),
+            Self::Unchanged { validator } => return Ok(DirProjection::unchanged(validator)),
         };
 
         let mut fresh_stores: Vec<(crate::router::EntryView, Canonical)> = Vec::new();

@@ -562,8 +562,8 @@ impl From<Lookup> for wit_types::LookupChildResult {
 }
 
 /// A list result: a listing, a subtree handoff, the cached page of the
-/// validator of the call standing, with the seconds of the interval of its
-/// upstream, or the feeds that answer for a fed listing.
+/// validator of the call standing, with the validator it keeps from then on,
+/// or the feeds that answer for a fed listing.
 #[derive(Clone, Debug)]
 pub enum List {
     Entries(Listing),
@@ -571,7 +571,7 @@ pub enum List {
         tree: u64,
     },
     Unchanged {
-        interval: Option<u32>,
+        validator: PageValidator,
         effects: Effects,
     },
     Feed(Vec<FeedClaim>),
@@ -586,8 +586,8 @@ impl List {
         Self::Subtree { tree }
     }
 
-    pub fn unchanged(interval: Option<u32>, effects: Effects) -> Self {
-        Self::Unchanged { interval, effects }
+    pub fn unchanged(validator: PageValidator, effects: Effects) -> Self {
+        Self::Unchanged { validator, effects }
     }
 
     #[doc(hidden)]
@@ -600,9 +600,10 @@ impl List {
             Self::Subtree { tree } => {
                 (wit_types::ListChildrenResult::Subtree(tree), Effects::new())
             },
-            Self::Unchanged { interval, effects } => {
-                (wit_types::ListChildrenResult::Unchanged(interval), effects)
-            },
+            Self::Unchanged { validator, effects } => (
+                wit_types::ListChildrenResult::Unchanged(validator.into()),
+                effects,
+            ),
             Self::Feed(claims) => (
                 wit_types::ListChildrenResult::Feed(wit_claims(claims)),
                 Effects::new(),

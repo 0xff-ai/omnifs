@@ -209,7 +209,9 @@ impl<S> Shape<'_, S> {
                 cursor,
                 validator,
             } => (entries, *exhaustive, cursor, validator),
-            DirPage::Unchanged { interval } => return Ok(List::unchanged(*interval, effects)),
+            DirPage::Unchanged { validator } => {
+                return Ok(List::unchanged(validator.clone(), effects));
+            },
         };
         let merged = self.merge_entries(abs, entries.iter().cloned());
         let mut listing = if exhaustive {
@@ -300,7 +302,7 @@ pub(in crate::router) fn merge_anchor_collection(
             cursor,
             validator,
         } => (entries, *exhaustive, cursor, validator),
-        DirPage::Unchanged { interval } => return Ok(List::unchanged(*interval, effects)),
+        DirPage::Unchanged { validator } => return Ok(List::unchanged(validator.clone(), effects)),
     };
 
     let mut entries: Vec<Entry> = listing.entries().to_vec();
