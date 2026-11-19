@@ -681,22 +681,7 @@ fn github_owner_listing_tracks_browsed_repos() {
     let mut first_again = harness
         .list_page("/octocat", None, Some(validator))
         .unwrap();
-    let owner_reload = first_again.expect_single_fetch();
-    assert!(owner_reload.url.ends_with("/users/octocat"));
-    assert!(
-        !owner_reload
-            .headers
-            .iter()
-            .any(|header| header.name.eq_ignore_ascii_case("if-none-match")),
-        "the owner object loads without the validator of the page"
-    );
-    first_again
-        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
-            status: 200,
-            headers: Vec::<Header>::new(),
-            body: br#"{"login":"octocat","type":"User"}"#.to_vec(),
-        })])
-        .unwrap();
+    // The unchanged page answers without a load of the owner object.
     let repos_again = first_again.expect_single_fetch();
     assert!(
         repos_again
