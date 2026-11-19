@@ -1,13 +1,14 @@
 //! The feeds of the issues, pull requests, and comments of a repository.
 //!
-//! The feed of a repository takes its first full listing a page at a time:
-//! the rows of its issues and pull requests by `updated_at`, then its
-//! comments, then the GitHub GraphQL counts of the comments of each item.
-//! After it, each answer is a check of the changes since the time of its last
-//! row, a part for each of its requests. Before the first full listing ends,
-//! the feed of an item answers for that item from
-//! `GET /repos/{owner}/{repo}/issues/{number}`, a later answer a part for each
-//! of its requests.
+//! The feed of a repository takes its first full listing a part for each of
+//! its requests: the rows of its issues and pull requests by `updated_at`,
+//! then its comments, then the GitHub GraphQL counts of the comments of each
+//! item, with the IDs of an item with another count. After it, each answer is
+//! a check of the changes since the time of its last row, a part for each of
+//! its requests. Before the first full listing ends, the feed of an item
+//! answers for that item from `GET /repos/{owner}/{repo}/issues/{number}`, a
+//! later answer a part for each of its requests. Each comment that the IDs of
+//! an item bring comes by its ID in a part of its own.
 //!
 //! The facts of an issue or a pull request live once, under its folder in
 //! `all/`, which its entry in `open/` shares while it is open.
@@ -57,6 +58,24 @@ enum Stage {
     Counts {
         connection: ItemKind,
         cursor: Option<String>,
+    },
+    /// The IDs of the items of a page of the counts with another count than
+    /// their `comments/`, an item at a time from the first: the page of its
+    /// ids after `after`, none for its first page, with the ids before it;
+    /// then the stage `then`, none at the end of the first full listing.
+    Ids {
+        kind: ItemKind,
+        items: BTreeSet<u64>,
+        after: Option<String>,
+        seen: BTreeSet<u64>,
+        then: Option<Box<Stage>>,
+    },
+    /// The comments of an item that its ids brought, by their IDs, then the
+    /// stage `then`, none at the end of the first full listing.
+    Fetch {
+        item: ItemRef,
+        ids: BTreeSet<u64>,
+        then: Option<Box<Stage>>,
     },
     /// A check, at its next request.
     Check(Box<Check>),
@@ -115,6 +134,11 @@ enum CheckRequest {
     Counts,
     /// The next page of the ids of a changed item.
     Ids { number: u64 },
+    /// The comments that the ids of the changed items brought, by their IDs
+    /// under the numbers of their items.
+    Fetch {
+        comments: BTreeMap<u64, BTreeSet<u64>>,
+    },
     /// A page of the numbers of a kind, with the numbers before it.
     Numbers {
         kind: ItemKind,
@@ -158,6 +182,12 @@ enum ItemRequest {
         after: Option<String>,
         brought: BTreeSet<u64>,
         seen: BTreeSet<u64>,
+    },
+    /// The comments that its ids brought, by their IDs, then the next page
+    /// of its ids; none after their last page.
+    Fetch {
+        ids: BTreeSet<u64>,
+        then: Option<Box<ItemRequest>>,
     },
 }
 
@@ -529,7 +559,7 @@ async fn graphql<T: DeserializeOwned>(
         .any(|error| error.kind.as_deref() == Some("RATE_LIMITED"))
     {
         return Err(ProviderError::rate_limited(message())
-            .with_retry_after(crate::api::retry_window(|name| response.header(name))));
+            .with_retry_after(crate::api::retry_window(|name| response.header(name))?));
     }
     if errors
         .iter()
@@ -606,12 +636,31 @@ fn alias(item: ItemRef) -> String {
     format!("i{}", item.number)
 }
 
-/// `GET /repos/{owner}/{repo}/issues/comments/{id}`.
-async fn comment<K>(cx: &FeedCx<K>, repo: &Repository, id: u64) -> Result<Comment> {
-    cx.endpoint(GitHubApi)
+/// Take a comment of an item by its ID with
+/// `GET /repos/{owner}/{repo}/issues/comments/{id}`: the comment, its
+/// `comments/` joined as `write` says, or the removal of a comment that left
+/// its item, `404`.
+async fn fetch_comment<K>(
+    cx: &FeedCx<K>,
+    repo: &Repository,
+    item: ItemRef,
+    id: u64,
+    write: ListingWrite,
+) -> Result<()> {
+    let response = cx
+        .endpoint(GitHubApi)
         .get(format!("/repos/{}/issues/comments/{id}", repo.id))
-        .json()
-        .await
+        .send()
+        .await?;
+    match response.status() {
+        200 => {
+            let comment = serde_json::from_slice(response.body())
+                .map_err(|error| ProviderError::invalid_input(format!("json decode: {error}")))?;
+            write_comment(cx, repo, item, write, &comment)
+        },
+        404 => cx.remove(format!("{}/{id}", comments_path(repo, item))),
+        status => Err(ProviderError::from_http_status(status)),
+    }
 }
 
 /// A page of the ids of the comments of an item, none for an item that left
@@ -785,56 +834,46 @@ fn listed<K>(cx: &FeedCx<K>, path: &str) -> Result<BTreeSet<u64>> {
         .collect()
 }
 
-/// Take the IDs of an item: the pages of the ids of its comments from GitHub
-/// GraphQL, from `page` when the answer has the first one;
-/// `GET /repos/{owner}/{repo}/issues/comments/{id}` for each comment that is
-/// not in `brought`, the comments the lists of the answer brought, and that
-/// `known`, the comments of the item in the projection, lacks or that was
-/// updated at or after `time`; and the removal of each other comment. The
-/// `comments/` of the item is complete after them. Returns whether the item
-/// stands: GitHub GraphQL cannot resolve an item that left the repository.
-async fn take_ids<K>(
+/// The IDs of a page of the ids of the comments of an item that come by their
+/// IDs: each that `brought`, the comments the lists of the answer brought,
+/// lacks, and that `known`, the comments of the item in the projection, lacks
+/// or that was updated at or after `time`. `seen` takes each id of the page.
+fn ids_to_fetch(
+    page: &[CommentId],
+    known: &BTreeSet<u64>,
+    brought: &BTreeSet<u64>,
+    time: Option<OffsetDateTime>,
+    seen: &mut BTreeSet<u64>,
+) -> BTreeSet<u64> {
+    let mut fetch = BTreeSet::new();
+    for id in page {
+        seen.insert(id.database_id);
+        if !brought.contains(&id.database_id)
+            && (!known.contains(&id.database_id) || time.is_none_or(|time| id.updated_at >= time))
+        {
+            fetch.insert(id.database_id);
+        }
+    }
+    fetch
+}
+
+/// The end of the IDs of an item after their last page: its `comments/`
+/// complete, without each comment of `known` and `brought` that `seen`, the
+/// ids of its pages, lacks.
+fn complete_ids<K>(
     cx: &FeedCx<K>,
     repo: &Repository,
     item: ItemRef,
     known: &BTreeSet<u64>,
-    time: Option<OffsetDateTime>,
     brought: &BTreeSet<u64>,
-    page: Option<Connection<CommentId>>,
-) -> Result<bool> {
-    let page = match page {
-        Some(page) => Some(page),
-        None => ids_page(cx, repo, item, None).await?,
-    };
-    let Some(mut page) = page else {
-        return Ok(false);
-    };
-    let mut ids = Vec::new();
-    loop {
-        let next = page.page_info.next()?;
-        ids.extend(page.nodes);
-        let Some(after) = next else { break };
-        let Some(next) = ids_page(cx, repo, item, Some(after)).await? else {
-            return Ok(false);
-        };
-        page = next;
-    }
-    for id in &ids {
-        if brought.contains(&id.database_id) {
-            continue;
-        }
-        if !known.contains(&id.database_id) || time.is_none_or(|time| id.updated_at >= time) {
-            let comment = comment(cx, repo, id.database_id).await?;
-            write_comment(cx, repo, item, ListingWrite::Complete, &comment)?;
-        }
-    }
-    let ids = ids.iter().map(|id| id.database_id).collect::<BTreeSet<_>>();
+    seen: &BTreeSet<u64>,
+) -> Result<()> {
     let comments = comments_path(repo, item);
     cx.dir(&comments, ListingWrite::Complete)?;
-    for id in known.iter().chain(brought).filter(|id| !ids.contains(id)) {
+    for id in known.iter().chain(brought).filter(|id| !seen.contains(id)) {
         cx.remove(format!("{comments}/{id}"))?;
     }
-    Ok(true)
+    Ok(())
 }
 
 // ===========================================================================
@@ -875,6 +914,14 @@ impl Repo {
             Some(Stage::Counts { connection, cursor }) => {
                 feed.listing_counts(connection, cursor).await
             },
+            Some(Stage::Ids {
+                kind,
+                items,
+                after,
+                seen,
+                then,
+            }) => feed.listing_ids(kind, items, after, seen, then).await,
+            Some(Stage::Fetch { item, ids, then }) => feed.listing_fetch(item, ids, then).await,
             Some(Stage::Check(check)) => feed.check_step(*check).await,
             None => feed.check().await,
         }
@@ -1007,10 +1054,9 @@ impl RepoFeed<'_> {
         Ok(repo_part(self.time, self.etag.clone(), Some(stage))?.into())
     }
 
-    /// A page of the counts of the first full listing: an item with another
-    /// count than its `comments/` in the projection takes its IDs, and each
-    /// `comments/` becomes complete; the last part completes the four
-    /// folders.
+    /// A page of the counts of the first full listing: the `comments/` of an
+    /// item with the count of its `comments/` in the projection becomes
+    /// complete, and the items with another count take their IDs next.
     async fn listing_counts(&self, connection: ItemKind, cursor: Option<String>) -> Result<Feed> {
         let Paged::<Counted> { page } = graphql(
             self.cx,
@@ -1019,6 +1065,7 @@ impl RepoFeed<'_> {
             json!({ "after": cursor }),
         )
         .await?;
+        let mut items = BTreeSet::new();
         for node in page.nodes {
             let item = ItemRef {
                 kind: connection,
@@ -1031,24 +1078,11 @@ impl RepoFeed<'_> {
             };
             if count == node.comments.total_count {
                 self.cx.dir(&comments, ListingWrite::Complete)?;
-                continue;
-            }
-            let known = listed(self.cx, &comments)?;
-            if !take_ids(
-                self.cx,
-                &self.repo,
-                item,
-                &known,
-                self.time,
-                &BTreeSet::new(),
-                None,
-            )
-            .await?
-            {
-                remove_item(self.cx, &self.repo, item)?;
+            } else {
+                items.insert(node.number);
             }
         }
-        let stage = match (page.page_info.next()?, connection) {
+        let then = match (page.page_info.next()?, connection) {
             (Some(cursor), _) => Some(Stage::Counts {
                 connection,
                 cursor: Some(cursor),
@@ -1059,6 +1093,81 @@ impl RepoFeed<'_> {
             }),
             (None, ItemKind::Pulls) => None,
         };
+        self.listing_part(items_stage(connection, items, then))
+    }
+
+    /// A page of the ids of the first of `items` in the first full listing:
+    /// its comments that come by their IDs next, and after its last page its
+    /// `comments/` complete without the other comments; an item that GitHub
+    /// GraphQL cannot resolve leaves the repository.
+    async fn listing_ids(
+        &self,
+        kind: ItemKind,
+        mut items: BTreeSet<u64>,
+        after: Option<String>,
+        mut seen: BTreeSet<u64>,
+        then: Option<Box<Stage>>,
+    ) -> Result<Feed> {
+        let number = *items.first().ok_or_else(|| {
+            ProviderError::invalid_input("the first full listing takes the IDs of no item")
+        })?;
+        let item = ItemRef { kind, number };
+        let Some(page) = ids_page(self.cx, &self.repo, item, after).await? else {
+            remove_item(self.cx, &self.repo, item)?;
+            items.remove(&number);
+            return self.listing_part(items_stage(kind, items, then.map(|then| *then)));
+        };
+        let known = listed(self.cx, &comments_path(&self.repo, item))?;
+        let fetch = ids_to_fetch(&page.nodes, &known, &BTreeSet::new(), self.time, &mut seen);
+        let next = if let Some(after) = page.page_info.next()? {
+            Some(Stage::Ids {
+                kind,
+                items,
+                after: Some(after),
+                seen,
+                then,
+            })
+        } else {
+            complete_ids(self.cx, &self.repo, item, &known, &BTreeSet::new(), &seen)?;
+            items.remove(&number);
+            items_stage(kind, items, then.map(|then| *then))
+        };
+        if fetch.is_empty() {
+            return self.listing_part(next);
+        }
+        self.listing_part(Some(Stage::Fetch {
+            item,
+            ids: fetch,
+            then: next.map(Box::new),
+        }))
+    }
+
+    /// A comment of the first full listing by its ID, its `comments/` as
+    /// complete as it is.
+    async fn listing_fetch(
+        &self,
+        item: ItemRef,
+        mut ids: BTreeSet<u64>,
+        then: Option<Box<Stage>>,
+    ) -> Result<Feed> {
+        let id = ids.pop_first().ok_or_else(|| {
+            ProviderError::invalid_input("the first full listing fetches no comment")
+        })?;
+        let write = if complete(self.cx, &comments_path(&self.repo, item))? {
+            ListingWrite::Complete
+        } else {
+            ListingWrite::Partial
+        };
+        fetch_comment(self.cx, &self.repo, item, id, write).await?;
+        if ids.is_empty() {
+            return self.listing_part(then.map(|then| *then));
+        }
+        self.listing_part(Some(Stage::Fetch { item, ids, then }))
+    }
+
+    /// A part of the first full listing with its next stage; the last part,
+    /// without one, completes the four folders.
+    fn listing_part(&self, stage: Option<Stage>) -> Result<Feed> {
         if stage.is_none() {
             for kind in [ItemKind::Issues, ItemKind::Pulls] {
                 for filter in [StateFilter::All, StateFilter::Open] {
@@ -1145,7 +1254,13 @@ impl RepoFeed<'_> {
                     return self.check_part(check);
                 }
             },
-            CheckRequest::Counts => self.take_counts(&mut check).await?,
+            CheckRequest::Counts => {
+                let comments = self.take_counts(&mut check).await?;
+                if !comments.is_empty() {
+                    check.next = CheckRequest::Fetch { comments };
+                    return self.check_part(check);
+                }
+            },
             CheckRequest::Ids { number } => {
                 let changed = check.changed.get(&number).ok_or_else(|| {
                     ProviderError::invalid_input(format!("item {number} is not a changed item"))
@@ -1156,8 +1271,48 @@ impl RepoFeed<'_> {
                 };
                 let after = changed.ids.as_ref().map(|ids| ids.after.clone());
                 match ids_page(self.cx, &self.repo, item, after).await? {
-                    Some(page) => self.take_ids_page(&mut check, item, page).await?,
+                    Some(page) => {
+                        let ids = self.take_ids_page(&mut check, item, page)?;
+                        if !ids.is_empty() {
+                            check.next = CheckRequest::Fetch {
+                                comments: BTreeMap::from([(number, ids)]),
+                            };
+                            return self.check_part(check);
+                        }
+                    },
                     None => self.remove_changed(&mut check, item)?,
+                }
+            },
+            CheckRequest::Fetch { mut comments } => {
+                let mut entry = comments
+                    .first_entry()
+                    .ok_or_else(|| ProviderError::invalid_input("the check fetches no comment"))?;
+                let number = *entry.key();
+                let id = entry.get_mut().pop_first().ok_or_else(|| {
+                    ProviderError::invalid_input(format!(
+                        "the check fetches no comment of {number}"
+                    ))
+                })?;
+                if entry.get().is_empty() {
+                    entry.remove();
+                }
+                let changed = check.changed.get(&number).ok_or_else(|| {
+                    ProviderError::invalid_input(format!("item {number} is not a changed item"))
+                })?;
+                let item = ItemRef {
+                    kind: changed.kind,
+                    number,
+                };
+                // The `comments/` of an item whose IDs are taken is complete.
+                let write = if changed.taken {
+                    ListingWrite::Complete
+                } else {
+                    ListingWrite::Partial
+                };
+                fetch_comment(self.cx, &self.repo, item, id, write).await?;
+                if !comments.is_empty() {
+                    check.next = CheckRequest::Fetch { comments };
+                    return self.check_part(check);
                 }
             },
             CheckRequest::Numbers {
@@ -1227,8 +1382,10 @@ impl RepoFeed<'_> {
     /// The `POST` of the counts, while the check lacks them, with the first
     /// page of the ids of the next changed items with a count `comments`
     /// other than `0` whose IDs it lacks, a page of items: the IDs of each,
-    /// and the removal of each that GitHub GraphQL cannot resolve.
-    async fn take_counts(&self, check: &mut Check) -> Result<()> {
+    /// and the removal of each that GitHub GraphQL cannot resolve. Returns
+    /// the IDs of the comments that come by their IDs next, under the
+    /// numbers of their items.
+    async fn take_counts(&self, check: &mut Check) -> Result<BTreeMap<u64, BTreeSet<u64>>> {
         let asked = check
             .changed
             .iter()
@@ -1256,29 +1413,35 @@ impl RepoFeed<'_> {
             });
             counts.items
         };
+        let mut comments = BTreeMap::new();
         for item in asked {
             match items.remove(&alias(item)).ok_or_else(|| {
                 ProviderError::invalid_input(format!("the counts lack the item {}", item.number))
             })? {
-                Some(commented) => self.take_ids_page(check, item, commented.comments).await?,
+                Some(commented) => {
+                    let ids = self.take_ids_page(check, item, commented.comments)?;
+                    if !ids.is_empty() {
+                        comments.insert(item.number, ids);
+                    }
+                },
                 None => self.remove_changed(check, item)?,
             }
         }
-        Ok(())
+        Ok(comments)
     }
 
-    /// A page of the ids of a changed item: `GET` of each comment that its
-    /// list did not bring and that the projection lacks or that was updated at
-    /// or after the time of the check; after its last page, the removal of
-    /// each other comment, and its `comments/` complete.
-    async fn take_ids_page(
+    /// A page of the ids of a changed item: after its last page, the removal
+    /// of each other comment, and its `comments/` complete. Returns the IDs of
+    /// the comments that its list did not bring and that the projection lacks
+    /// or that were updated at or after the time of the check, which come by
+    /// their IDs next.
+    fn take_ids_page(
         &self,
         check: &mut Check,
         item: ItemRef,
         page: Connection<CommentId>,
-    ) -> Result<()> {
-        let comments = comments_path(&self.repo, item);
-        let known = listed(self.cx, &comments)?;
+    ) -> Result<BTreeSet<u64>> {
+        let known = listed(self.cx, &comments_path(&self.repo, item))?;
         let next = page.page_info.next()?;
         let changed = check.changed.get_mut(&item.number).ok_or_else(|| {
             ProviderError::internal(format!("item {} is not a changed item", item.number))
@@ -1287,30 +1450,14 @@ impl RepoFeed<'_> {
             Some(ids) => ids.seen,
             None => BTreeSet::new(),
         };
-        for id in &page.nodes {
-            seen.insert(id.database_id);
-            if !changed.brought.contains(&id.database_id)
-                && (!known.contains(&id.database_id)
-                    || self.time.is_none_or(|time| id.updated_at >= time))
-            {
-                let comment = comment(self.cx, &self.repo, id.database_id).await?;
-                write_comment(self.cx, &self.repo, item, ListingWrite::Partial, &comment)?;
-            }
-        }
+        let fetch = ids_to_fetch(&page.nodes, &known, &changed.brought, self.time, &mut seen);
         if let Some(after) = next {
             changed.ids = Some(IdsPage { after, seen });
-            return Ok(());
+        } else {
+            complete_ids(self.cx, &self.repo, item, &known, &changed.brought, &seen)?;
+            changed.taken = true;
         }
-        self.cx.dir(&comments, ListingWrite::Complete)?;
-        for id in known
-            .iter()
-            .chain(&changed.brought)
-            .filter(|id| !seen.contains(id))
-        {
-            self.cx.remove(format!("{comments}/{id}"))?;
-        }
-        changed.taken = true;
-        Ok(())
+        Ok(fetch)
     }
 
     /// The removal of a changed item that GitHub GraphQL cannot resolve.
@@ -1451,6 +1598,21 @@ fn repo_part(
 ) -> Result<FeedPart> {
     let more = stage.is_some();
     Ok(Feed::part(encode(&RepoToken { time, etag, stage })?).more(more))
+}
+
+/// The stage of the first full listing that takes the IDs of `items` from
+/// their first page, then `then`; `then` without items.
+fn items_stage(kind: ItemKind, items: BTreeSet<u64>, then: Option<Stage>) -> Option<Stage> {
+    if items.is_empty() {
+        return then;
+    }
+    Some(Stage::Ids {
+        kind,
+        items,
+        after: None,
+        seen: BTreeSet::new(),
+        then: then.map(Box::new),
+    })
 }
 
 fn unconditional_304(what: &str) -> ProviderError {
@@ -1603,9 +1765,10 @@ enum ItemStep {
 /// One request of the comments of an item: a page of its comments since a
 /// time, then its IDs; a page of all of its comments, a complete
 /// `comments/` without the comments they lack for the count of its token,
-/// else its IDs; a page of its IDs, with `GET` of each comment that no list
-/// brought and that the projection lacks or that was updated at or after the
-/// time, and after the last page the removal of each other comment.
+/// else its IDs; a page of its IDs, then each comment that no list brought
+/// and that the projection lacks or that was updated at or after the time by
+/// its ID, and after the last page the removal of each other comment; a
+/// comment by its ID.
 async fn take_item_request<K>(
     cx: &FeedCx<K>,
     repo: &Repository,
@@ -1676,30 +1839,45 @@ async fn take_item_request<K>(
                 return Ok(ItemStep::Left);
             };
             let known = listed(cx, &comments)?;
-            let next = page.page_info.next()?;
-            for id in &page.nodes {
-                seen.insert(id.database_id);
-                if !brought.contains(&id.database_id)
-                    && (!known.contains(&id.database_id) || id.updated_at >= time)
-                {
-                    let comment = comment(cx, repo, id.database_id).await?;
-                    write_comment(cx, repo, item, ListingWrite::Partial, &comment)?;
-                }
-            }
-            if let Some(after) = next {
-                return Ok(ItemStep::Next(ItemRequest::Ids {
+            let fetch = ids_to_fetch(&page.nodes, &known, &brought, Some(time), &mut seen);
+            let then = if let Some(after) = page.page_info.next()? {
+                Some(Box::new(ItemRequest::Ids {
                     time,
                     after: Some(after),
                     brought,
                     seen,
-                }));
-            }
-            cx.dir(&comments, ListingWrite::Complete)?;
-            for id in known.iter().chain(&brought).filter(|id| !seen.contains(id)) {
-                cx.remove(format!("{comments}/{id}"))?;
-            }
-            Ok(ItemStep::Done)
+                }))
+            } else {
+                complete_ids(cx, repo, item, &known, &brought, &seen)?;
+                None
+            };
+            Ok(fetch_then(fetch, then))
         },
+        ItemRequest::Fetch { mut ids, then } => {
+            let id = ids
+                .pop_first()
+                .ok_or_else(|| ProviderError::invalid_input("the item fetches no comment"))?;
+            // Its `comments/` is complete after the last page of its ids.
+            let write = if then.is_some() {
+                ListingWrite::Partial
+            } else {
+                ListingWrite::Complete
+            };
+            fetch_comment(cx, repo, item, id, write).await?;
+            Ok(fetch_then(ids, then))
+        },
+    }
+}
+
+/// The request of an item after a request of its ids: the comments of `ids`
+/// by their IDs, then `then`, its end without it.
+fn fetch_then(ids: BTreeSet<u64>, then: Option<Box<ItemRequest>>) -> ItemStep {
+    if !ids.is_empty() {
+        return ItemStep::Next(ItemRequest::Fetch { ids, then });
+    }
+    match then {
+        Some(then) => ItemStep::Next(*then),
+        None => ItemStep::Done,
     }
 }
 
