@@ -77,10 +77,14 @@ pub(crate) fn retry_window<'a>(
     let Some(reset) = seconds("x-ratelimit-reset")? else {
         return Ok(None);
     };
+    // The reset is a second of the epoch: the window counts whole seconds to
+    // it, so that it never ends before the reset.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| ProviderError::internal(format!("the clock: {error}")))?;
-    Ok(Some(Duration::from_secs(reset).saturating_sub(now)))
+    Ok(Some(Duration::from_secs(
+        reset.saturating_sub(now.as_secs()),
+    )))
 }
 
 fn is_rate_limited(resp: &Response<Vec<u8>>) -> bool {
