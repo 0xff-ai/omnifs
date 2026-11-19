@@ -318,8 +318,9 @@ interface types {
         inner: list<feed-state>,
     }
 
+    /// The token of an inner feed, keyed by the logical id of its object.
     record feed-state {
-        object: feed-object,
+        id: logical-id,
         token: feed-token,
     }
 

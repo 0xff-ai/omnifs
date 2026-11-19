@@ -469,7 +469,7 @@ impl<'a> EffectApplier<'a> {
                     .iter()
                     .map(|state| {
                         (
-                            ObjectId::from_wit(&state.object.id).as_bytes().to_vec(),
+                            ObjectId::from_wit(&state.id).as_bytes().to_vec(),
                             state.token.clone(),
                         )
                     })

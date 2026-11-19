@@ -29,7 +29,7 @@ pub use spec::{DirFace, FeedFace, FileFace, ObjectBlock, ObjectHandle, object};
 
 pub(super) use dispatch::{
     AnchorCollection, ClaimSpec, CollectionTopology, FacetExpansion, LeafKind, ObjectListing,
-    ObjectReadTarget, ObjectRouteEntry, SourceLeafAttrs, anchor_path, mount_object,
+    ObjectReadTarget, ObjectRouteEntry, SourceLeafAttrs, mount_object,
 };
 pub(crate) use dispatch::{EntryView, ResolvedChildView};
 pub(super) use spec::{CollectionHandler, file_object};

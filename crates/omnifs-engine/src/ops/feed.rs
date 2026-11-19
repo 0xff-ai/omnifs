@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::EngineError;
 use crate::Runtime;
-use crate::cache::MountResources;
+use crate::cache::{FeedState, MountResources};
 use crate::clock;
 use crate::effect_apply::EffectApplier;
 use crate::inspector;
@@ -143,9 +143,10 @@ impl ProjectionReads {
             .filter(|entry| !crate::tree::synthetic::is_reserved_provider_leaf(&entry.name))
             .map(|entry| entry.name.clone());
         let entries = match form {
-            wit_types::ListingForm::Count => {
-                wit_types::ListingEntries::Count(u64::try_from(names.count()).unwrap_or(u64::MAX))
-            },
+            wit_types::ListingForm::Count => wit_types::ListingEntries::Count(
+                u64::try_from(names.count())
+                    .map_err(|error| refusal(wit_types::ErrorKind::Internal, error.to_string()))?,
+            ),
             wit_types::ListingForm::Names => wit_types::ListingEntries::Names(names.collect()),
         };
         Ok(Some(wit_types::ListingFacts {
@@ -166,10 +167,17 @@ fn refusal(kind: wit_types::ErrorKind, message: impl Into<String>) -> wit_types:
 
 impl Runtime {
     /// Run one answer of the feed of `object`, started by the operation at
-    /// `start`, in one flight per object id. Returns whether this caller ran
-    /// the answer; a caller that waited on another answer of the same feed
-    /// gets its result and decides again.
-    pub(crate) async fn feed(&self, object: &FeedObject, start: Option<&Path>) -> Result<bool> {
+    /// `start`, in one flight per object id, while the state of the feed is
+    /// still `seen`, the state the caller decided on. Returns whether this
+    /// caller ran the answer; a caller that waited on another answer of the
+    /// same feed, or whose state another answer moved before its flight, gets
+    /// that answer and decides again.
+    pub(crate) async fn feed(
+        &self,
+        object: &FeedObject,
+        start: Option<&Path>,
+        seen: Option<&FeedState>,
+    ) -> Result<bool> {
         let led = AtomicBool::new(false);
         let runtime = self;
         self.namespace_flights
@@ -178,6 +186,13 @@ impl Runtime {
                 object.id.clone(),
                 || std::future::ready(()),
                 || async {
+                    let state = runtime
+                        .resources
+                        .feed_state(object.id.as_bytes())
+                        .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
+                    if state.as_ref() != seen {
+                        return Ok(());
+                    }
                     led.store(true, Ordering::Relaxed);
                     runtime
                         .run_feed_answer(object, start)
@@ -249,7 +264,11 @@ impl Runtime {
             transition.blobs.extend(pending_blobs);
             self.publish_transition(transition, captured_epoch)?;
             for listing in &changes.listings {
-                self.record_dir_changed(listing);
+                let fed = self
+                    .resources
+                    .is_fed(listing)
+                    .map_err(|error| EngineError::ProviderProtocol(error.to_string()))?;
+                self.record_dir_changed(listing, fed);
             }
             self.record_view_invalidations(Vec::new(), changes.paths);
             inspector::record_outcome(&span, InspectorOutcome::Ok);

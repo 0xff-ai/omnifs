@@ -52,6 +52,18 @@ fn entry_kind_from_meta(meta: &EntryMeta) -> EntryKind {
     }
 }
 
+/// Compute `Attrs` for a read answer at `id` with the `epoch` of its
+/// changes, folding in the size the read learned.
+fn read_attrs(
+    id: &Path,
+    kind: EntryKind,
+    attrs: Option<&FileAttrsCache>,
+    fed: bool,
+    epoch: u64,
+) -> Attrs {
+    attrs_from_cache(kind, attrs, change_counter_parts(id, attrs, epoch), fed)
+}
+
 /// Policied attrs for an entry. A fed entry has the zero lifetime of dynamic
 /// entries, so each access asks the namespace, which asks its feeds once they
 /// are past their deadline.
@@ -624,28 +636,17 @@ impl EngineNamespace {
         // A changed listing keeps the identity of its directory and of the
         // nodes below it: its change counter moves, and filesystems drop their
         // answers for it in place.
-        for rel in &report.changed_dirs {
+        for (rel, fed) in &report.changed_dirs {
             let dir = mount_full_path(mount, rel);
             if !unique.insert(dir.clone()) {
                 continue;
             }
             self.node_epochs.insert(dir.clone(), epoch);
-            let fed = match self
-                .configured_entry(mount)
-                .map(|entry| entry.resources().is_fed(rel))
-                .transpose()
-            {
-                Ok(fed) => fed.is_some_and(|fed| fed),
-                Err(error) => {
-                    tracing::warn!(path = %dir, error = %error, "changed listing has no readable fed marker");
-                    continue;
-                },
-            };
             let attrs = attrs_from_cache(
                 EntryKind::Directory,
                 None,
                 change_counter_parts(&dir, None, epoch),
-                fed,
+                *fed,
             );
             let _ = self.events.send(NsEvent::AttrsChanged { path: dir, attrs });
         }
@@ -682,13 +683,23 @@ impl EngineNamespace {
         node: &crate::Node,
         attrs: Option<&FileAttrsCache>,
     ) -> Attrs {
-        let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
+        let epoch = self.node_epoch(id, node);
         attrs_from_cache(
             entry_kind_from_node(node),
             attrs,
             self.root_aware_change(id, node, attrs, epoch),
             node.is_fed(),
         )
+    }
+
+    /// The epoch of the changes of `node` at `id`: that of its fact, which a
+    /// fed node of another facet of its object shares with the node of the
+    /// first facet.
+    fn node_epoch(&self, id: &Path, node: &crate::Node) -> u64 {
+        let fact = node.fact().map(|fact| mount_full_path(node.mount(), fact));
+        self.node_epochs
+            .get(fact.as_ref().unwrap_or(id))
+            .map_or(0, |epoch| *epoch)
     }
 
     /// The change counter for a node, folding the served-mount set into the
@@ -777,7 +788,8 @@ impl EngineNamespace {
             .learned_attrs
             .unwrap_or_else(|| handle.attrs().clone());
         self.store_learned(id, learned.clone());
-        let attrs = self.attrs_for_read(id, EntryKind::File, Some(&learned), false);
+        let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
+        let attrs = read_attrs(id, EntryKind::File, Some(&learned), false, epoch);
         Ok(ReadAnswer {
             bytes: chunk.bytes,
             eof: chunk.eof,
@@ -802,25 +814,14 @@ impl EngineNamespace {
         let end = start.saturating_add(len as usize).min(data.len());
         let bytes = data[start..end].to_vec();
         let eof = end >= data.len();
-        let attrs = self.attrs_for_read(
+        let attrs = read_attrs(
             id,
             entry_kind_from_node(node),
             attrs.as_ref(),
             node.is_fed(),
+            self.node_epoch(id, node),
         );
         Ok(ReadAnswer { bytes, eof, attrs })
-    }
-
-    /// Compute `Attrs` for a read answer, folding in the size the read learned.
-    fn attrs_for_read(
-        &self,
-        id: &Path,
-        kind: EntryKind,
-        attrs: Option<&FileAttrsCache>,
-        fed: bool,
-    ) -> Attrs {
-        let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
-        attrs_from_cache(kind, attrs, change_counter_parts(id, attrs, epoch), fed)
     }
 
     fn store_learned(&self, id: &Path, learned: FileAttrsCache) {

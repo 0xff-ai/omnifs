@@ -719,6 +719,8 @@ it needs independent retrieval, it is not an alias.
 Use facets for route context that must not split object identity: filters,
 aliases, version selectors, and team aliases. A GitHub issue under
 `issues/open/7` and `issues/all/7` is the same object if `filter` is a facet.
+The facts of a fed object live once, under its anchor with its facets at their
+first choice, and the host serves every other facet from them.
 
 ## Errors and control results
 
@@ -776,14 +778,16 @@ repository object declares fed directories for issues and pulls, a relative
 collection directory for workflow runs, and the `repo` tree handoff.
 
 The feed of the repository keeps its issues, pull requests, and comments: the
-`title`, `body`, `state`, and `user` of each item under `{kind}/all/` and, while
-it is open, `{kind}/open/`, and the `author` and `body.md` of each comment. Its
-first full listing takes the rows of `GET /repos/{owner}/{repo}/issues` by
-`updated_at`, then the comments of the repository, then the GitHub GraphQL counts
-of the comments of each item, where an item with another count takes the ids of
-its comments. After it, each answer past the deadline is a check of the rows
-since the time of the last row, with the `ETag` of that time, and of the counts,
-where another count of a kind takes the numbers of its items. Before the first
+`title`, `body`, `state`, and `user` of each item under `{kind}/all/`, which its
+entry in `{kind}/open/` shares while it is open, and the `author` and `body.md`
+of each comment. Its first full listing takes the rows of
+`GET /repos/{owner}/{repo}/issues` by `updated_at`, then the comments of the
+repository, then the GitHub GraphQL counts of the comments of each item, where
+an item with another count takes the ids of its comments. After it, each answer
+past the deadline is a check of each page of the rows since the time of the last
+row, the first with the `ETag` of that time, and of the counts, where another
+count of a kind takes the numbers of its items, and an item that GitHub GraphQL
+cannot resolve leaves. Before the first
 full listing ends, the feed of an item answers for it from
 `GET /repos/{owner}/{repo}/issues/{number}` and takes its comments at the first
 read of its `comments/`.

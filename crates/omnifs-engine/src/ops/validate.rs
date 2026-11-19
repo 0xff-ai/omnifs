@@ -66,10 +66,15 @@ where
         Ok(())
     }
 
-    fn feed_object(object: &wit_types::FeedObject) -> std::result::Result<(), String> {
-        if object.id.kind.is_empty() {
+    fn object_id(id: &wit_types::LogicalId) -> std::result::Result<(), String> {
+        if id.kind.is_empty() {
             return Err("feed object id.kind must not be empty".to_string());
         }
+        Ok(())
+    }
+
+    fn feed_object(object: &wit_types::FeedObject) -> std::result::Result<(), String> {
+        Self::object_id(&object.id)?;
         Path::parse(&object.path).map(|_| ()).map_err(|_| {
             format!(
                 "feed object path {:?} is not a valid protocol path",
@@ -103,7 +108,7 @@ where
             wit_types::FeedAnswer::Part(part) => {
                 Self::feed_token(&part.token)?;
                 for state in &part.inner {
-                    Self::feed_object(&state.object)?;
+                    Self::object_id(&state.id)?;
                     Self::feed_token(&state.token)?;
                 }
                 Ok(())

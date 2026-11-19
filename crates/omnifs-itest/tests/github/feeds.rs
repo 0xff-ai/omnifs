@@ -3,7 +3,7 @@
 //! it, and the feed of an item before it ends.
 
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use omnifs_core::path::Path;
 use omnifs_engine::{DirCursor, LookupAnswer, Namespace, NsError};
@@ -11,7 +11,7 @@ use omnifs_itest::RuntimeHarness;
 use omnifs_wit::host::types::{Header, HttpRequest, HttpResponse};
 use serde_json::{Value, json};
 
-use super::support::{answering, github_harness, request_header};
+use super::support::{answering, github_harness, not_modified, request_header};
 
 /// Past the deadline of a feed, `DYNAMIC_TTL_MILLIS` after its last answer.
 const PAST_DEADLINE: Duration = Duration::from_millis(3_200);
@@ -175,9 +175,10 @@ fn ids(ids: &[(u64, &str)], next: Option<&str>) -> Value {
 /// comments by page, then the counts of the issues and of the pull requests.
 /// An item with another count than its `comments/` takes its IDs: a comment
 /// that a deletion moved past a page comes by its ID, and the deleted comment
-/// leaves. The four folders are complete after the last part. The facts live
-/// under the owner as the paths name it, `OctoCat`, while the requests name
-/// the owner of the key, `octocat`.
+/// leaves. The four folders are complete after the last part, and `open/`
+/// shares the facts of `all/`. The facts live under the owner as the paths
+/// name it, `OctoCat`, while the requests name the owner of the key,
+/// `octocat`.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn the_first_full_listing_takes_the_rows_then_the_comments_then_the_counts() {
@@ -336,6 +337,19 @@ async fn the_first_full_listing_takes_the_rows_then_the_comments_then_the_counts
             .unwrap()
             .is_missing()
     );
+    let faces = served(&harness, names(&harness, "OctoCat/hello/issues/open/1"))
+        .await
+        .unwrap();
+    assert!(faces.contains(&"title".to_string()), "{faces:?}");
+    assert_eq!(
+        served(
+            &harness,
+            read(&harness, "OctoCat/hello/issues/open/1/title")
+        )
+        .await
+        .unwrap(),
+        "One"
+    );
 }
 
 /// A first full listing that stops at a rate limit gives each read of the
@@ -466,7 +480,7 @@ async fn an_item_from_a_page_of_rows_is_asked_for_with_if_modified_since() {
     let (title, requests) = answering(
         &harness,
         read(&harness, "octocat/hello/issues/all/1/title"),
-        vec![empty(304, &[])],
+        vec![not_modified()],
     )
     .await;
     assert_eq!(title.unwrap(), "One");
@@ -478,13 +492,15 @@ async fn an_item_from_a_page_of_rows_is_asked_for_with_if_modified_since() {
     assert_eq!(request_header(&requests[0], "if-none-match"), None);
 }
 
-/// The first full listing of the check tests: the open issues 4, without
-/// comments, and 1, with comments 10 and 12.
+/// The first full listing of a check test: one page of `rows`, one of
+/// `comments`, and the counts of the comments of the issues and of the pull
+/// requests.
 async fn first_full_listing(
     harness: &RuntimeHarness,
     rows: &Value,
     comments: &Value,
-    counts: &[(u64, usize)],
+    issues: &[(u64, usize)],
+    pulls: &[(u64, usize)],
 ) {
     let (listing, _) = answering(
         harness,
@@ -492,8 +508,8 @@ async fn first_full_listing(
         vec![
             ok(rows),
             ok(comments),
-            graphql(&counted(counts)),
-            graphql(&counted(&[])),
+            graphql(&counted(issues)),
+            graphql(&counted(pulls)),
         ],
     )
     .await;
@@ -503,8 +519,10 @@ async fn first_full_listing(
 /// Past the deadline of the first full listing, a check takes the rows since
 /// its time, the comments since that time, and the counts with the IDs of the
 /// changed items: a comment updated since that no list brought comes by its
-/// ID, a deleted comment leaves, and a count of the issues other than that of
-/// `issues/all/` takes the numbers, which remove the missing issue.
+/// ID, a deleted comment leaves, a changed item with the count `comments` `0`
+/// has an empty `comments/` without its IDs, and a count of the issues other
+/// than that of `issues/all/` with the new ones takes the numbers, which
+/// remove the missing issue.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn a_check_takes_the_rows_and_the_comments_since_its_time_and_the_ids_of_the_changed_items() {
@@ -520,6 +538,7 @@ async fn a_check_takes_the_rows_and_the_comments_since_its_time_and_the_ids_of_t
             comment(12, 1, false, "second")
         ]),
         &[(1, 2), (4, 0)],
+        &[],
     )
     .await;
 
@@ -541,7 +560,6 @@ async fn a_check_takes_the_rows_and_the_comments_since_its_time_and_the_ids_of_t
                 "issues": { "totalCount": 2 },
                 "pullRequests": { "totalCount": 0 },
                 "i1": ids(&[(11, "2026-11-18T11:00:00Z"), (12, "2026-11-18T10:30:00Z")], None),
-                "i5": ids(&[], None),
             })),
             ok(&comment(12, 1, false, "second, edited")),
             graphql(&json!({
@@ -575,10 +593,7 @@ async fn a_check_takes_the_rows_and_the_comments_since_its_time_and_the_ids_of_t
         query.contains("i1: issueOrPullRequest(number: 1)"),
         "{query}"
     );
-    assert!(
-        query.contains("i5: issueOrPullRequest(number: 5)"),
-        "{query}"
-    );
+    assert!(!query.contains("(number: 5)"), "{query}");
     assert_eq!(
         requests[3].url,
         api("/repos/octocat/hello/issues/comments/12")
@@ -636,7 +651,7 @@ async fn a_check_takes_the_rows_and_the_comments_since_its_time_and_the_ids_of_t
 async fn a_check_with_304_asks_for_the_counts_alone() {
     let harness = github_harness();
     let one = || item(1, "One", "open", "2026-11-18T09:00:00Z", 0, false);
-    first_full_listing(&harness, &json!([one()]), &json!([]), &[(1, 0)]).await;
+    first_full_listing(&harness, &json!([one()]), &json!([]), &[(1, 0)], &[]).await;
 
     tokio::time::sleep(PAST_DEADLINE).await;
     answering(
@@ -648,7 +663,6 @@ async fn a_check_with_304_asks_for_the_counts_alone() {
             graphql(&json!({
                 "issues": { "totalCount": 1 },
                 "pullRequests": { "totalCount": 0 },
-                "i1": ids(&[], None),
             })),
         ],
     )
@@ -661,7 +675,7 @@ async fn a_check_with_304_asks_for_the_counts_alone() {
         &harness,
         names(&harness, "octocat/hello/issues/all"),
         vec![
-            empty(304, &[]),
+            not_modified(),
             graphql(&json!({
                 "issues": { "totalCount": 1 },
                 "pullRequests": { "totalCount": 0 },
@@ -690,10 +704,11 @@ async fn a_check_with_304_asks_for_the_counts_alone() {
 
 /// Before the first full listing ends, an item takes its own answers: `200`
 /// with its facts, `304` with the `ETag` of its token, `301`, `404`, and
-/// `410` with its removal, an item of the other kind is not found, and its
-/// `comments/` takes the pages of its comments with its IDs for another count
-/// than that of its token. Without the state of the item, the comments go to
-/// `all` and the folder of the operation.
+/// `410` with its removal, and an item of the other kind is not found. Its
+/// `comments/` takes the pages of its comments with its IDs for another
+/// count than that of its token; a changed answer takes the comments since
+/// the `updated_at` of the previous one with the IDs, or empties `comments/`
+/// for the count `0` without a request. `open/` shares the facts of `all/`.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn an_item_before_the_end_of_the_first_full_listing_takes_its_own_answers() {
@@ -781,22 +796,21 @@ async fn an_item_before_the_end_of_the_first_full_listing_takes_its_own_answers(
         requests[2].url,
         api("/repos/octocat/hello/issues/comments/31")
     );
-    let (comments, _) = answering(
-        &harness,
-        names(&harness, "octocat/hello/issues/open/3/comments"),
-        vec![ok(&json!([
-            comment(30, 3, false, "first"),
-            comment(31, 3, false, "second")
-        ]))],
-    )
-    .await;
-    assert_eq!(comments.unwrap(), ["30", "31"]);
+    assert_eq!(
+        served(
+            &harness,
+            names(&harness, "octocat/hello/issues/open/3/comments")
+        )
+        .await
+        .unwrap(),
+        ["30", "31"]
+    );
 
     tokio::time::sleep(PAST_DEADLINE).await;
     let (title, requests) = answering(
         &harness,
         read(&harness, "octocat/hello/issues/all/7/title"),
-        vec![empty(304, &[])],
+        vec![not_modified()],
     )
     .await;
     assert_eq!(title.unwrap(), "Item 7");
@@ -831,12 +845,12 @@ async fn an_item_before_the_end_of_the_first_full_listing_takes_its_own_answers(
                     "Item 7 closed",
                     "closed",
                     "2026-11-18T10:00:00Z",
-                    0,
+                    1,
                     false,
                 ),
             ),
-            ok(&json!([])),
-            graphql(&json!({ "item": ids(&[], None) })),
+            ok(&json!([comment(70, 7, false, "late")])),
+            graphql(&json!({ "item": ids(&[(70, "2026-11-18T10:00:00Z")], None) })),
         ],
     )
     .await;
@@ -848,10 +862,43 @@ async fn an_item_before_the_end_of_the_first_full_listing_takes_its_own_answers(
         )
     );
     assert_eq!(graphql_of(&requests[2]).1["number"], 7);
+    assert_eq!(
+        served(
+            &harness,
+            read(&harness, "octocat/hello/issues/all/7/comments/70/body.md")
+        )
+        .await
+        .unwrap(),
+        "late"
+    );
+    let (title, requests) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/3/title"),
+        vec![answer(
+            200,
+            &[("ETag", r#""item-3b""#)],
+            &item(3, "Item 3", "open", "2026-11-18T10:00:00Z", 0, false),
+        )],
+    )
+    .await;
+    assert_eq!(title.unwrap(), "Item 3");
+    assert_eq!(
+        request_header(&requests[0], "if-none-match"),
+        Some(r#""item-3""#)
+    );
+    assert!(
+        served(
+            &harness,
+            names(&harness, "octocat/hello/issues/open/3/comments")
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
     let (open, requests) = answering(
         &harness,
         lookup(&harness, "octocat/hello/issues/open/7"),
-        vec![empty(304, &[])],
+        vec![not_modified()],
     )
     .await;
     assert!(
@@ -861,5 +908,172 @@ async fn an_item_before_the_end_of_the_first_full_listing_takes_its_own_answers(
     assert_eq!(
         request_header(&requests[0], "if-none-match"),
         Some(r#""item-7b""#)
+    );
+}
+
+/// A check takes each page of its rows by the link `next` of the previous
+/// one, and a count of the pull requests other than that of `pulls/all/`
+/// with the new ones takes the numbers of the pull requests, which remove
+/// the missing pull request.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_takes_each_page_of_its_rows_and_the_numbers_of_the_pull_requests() {
+    let harness = github_harness();
+    first_full_listing(
+        &harness,
+        &json!([
+            item(2, "Two", "open", "2026-11-18T08:00:00Z", 0, true),
+            item(1, "One", "open", "2026-11-18T09:00:00Z", 0, false),
+        ]),
+        &json!([]),
+        &[(1, 0)],
+        &[(2, 0)],
+    )
+    .await;
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let (listing, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/pulls/all"),
+        vec![
+            answer(
+                200,
+                &[("Link", NEXT)],
+                &json!([item(
+                    1,
+                    "One again",
+                    "open",
+                    "2026-11-18T10:00:00Z",
+                    0,
+                    false
+                )]),
+            ),
+            ok(&json!([item(
+                3,
+                "Three",
+                "open",
+                "2026-11-18T11:00:00Z",
+                0,
+                true
+            )])),
+            ok(&json!([])),
+            graphql(&json!({
+                "issues": { "totalCount": 1 },
+                "pullRequests": { "totalCount": 1 },
+            })),
+            graphql(&json!({
+                "page": {
+                    "nodes": [{ "number": 3 }],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                },
+            })),
+        ],
+    )
+    .await;
+    assert_eq!(listing.unwrap(), ["3"]);
+    assert_eq!(
+        requests[0].url,
+        api(&format!("{ROWS}&since=2026-11-18T09:00:00Z"))
+    );
+    assert_eq!(
+        requests[1].url,
+        api("/repositories/1/issues?state=all&page=2")
+    );
+    assert_eq!(
+        requests[2].url,
+        api(
+            "/repos/octocat/hello/issues/comments?sort=created&direction=asc&per_page=100\
+             &since=2026-11-18T09:00:00Z&page=1"
+        )
+    );
+    let (query, _) = graphql_of(&requests[3]);
+    assert!(!query.contains("issueOrPullRequest"), "{query}");
+    let (query, _) = graphql_of(&requests[4]);
+    assert!(
+        query.contains("page: pullRequests(first: 100, after: $after) { nodes { number }"),
+        "{query}"
+    );
+    assert_eq!(
+        served(&harness, read(&harness, "octocat/hello/issues/all/1/title"))
+            .await
+            .unwrap(),
+        "One again"
+    );
+    assert_eq!(
+        served(&harness, names(&harness, "octocat/hello/pulls/open"))
+            .await
+            .unwrap(),
+        ["3"]
+    );
+    assert!(
+        served(&harness, lookup(&harness, "octocat/hello/pulls/all/2"))
+            .await
+            .unwrap()
+            .is_missing()
+    );
+}
+
+/// A `RATE_LIMITED` answer of GitHub GraphQL fails the check with the window
+/// of its `x-ratelimit-reset`, in which a read asks GitHub nothing and the
+/// files serve; the first read after the window checks again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rate_limited_answer_of_github_graphql_stops_the_check_until_its_reset() {
+    let harness = github_harness();
+    let one = || item(1, "One", "open", "2026-11-18T09:00:00Z", 0, false);
+    first_full_listing(&harness, &json!([one()]), &json!([]), &[(1, 0)], &[]).await;
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let reset = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap() + Duration::from_secs(2))
+        .as_secs()
+        .to_string();
+    let (stopped, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![
+            ok(&json!([one()])),
+            ok(&json!([])),
+            answer(
+                200,
+                &[("x-ratelimit-reset", &reset)],
+                &json!({
+                    "data": null,
+                    "errors": [{ "type": "RATE_LIMITED", "message": "API rate limit exceeded" }],
+                }),
+            ),
+        ],
+    )
+    .await;
+    let Err(NsError::RateLimited { retry_after }) = stopped else {
+        panic!("{stopped:?}");
+    };
+    assert!(
+        retry_after.is_some_and(|window| window <= Duration::from_secs(2)),
+        "{retry_after:?}"
+    );
+    graphql_of(&requests[2]);
+    assert_eq!(
+        served(&harness, read(&harness, "octocat/hello/issues/all/1/title"))
+            .await
+            .unwrap(),
+        "One"
+    );
+
+    tokio::time::sleep(Duration::from_millis(2_200)).await;
+    let (listing, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![
+            ok(&json!([one()])),
+            ok(&json!([])),
+            graphql(&json!({
+                "issues": { "totalCount": 1 },
+                "pullRequests": { "totalCount": 0 },
+            })),
+        ],
+    )
+    .await;
+    assert_eq!(listing.unwrap(), ["1"]);
+    assert_eq!(
+        requests[0].url,
+        api(&format!("{ROWS}&since=2026-11-18T09:00:00Z"))
     );
 }

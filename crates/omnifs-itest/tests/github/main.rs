@@ -544,6 +544,8 @@ fn github_provider_missing_item_resources_validate_on_lookup() {
 
     // An issue anchor answers the claims of the feeds of the repository and
     // of the issue without a request: its existence comes from the feeds.
+    // The claim of the issue has its anchor in `all/`, the first facet, where
+    // its facts live for `open/` too.
     let harness = github_harness();
 
     let lookup = harness
@@ -560,7 +562,7 @@ fn github_provider_missing_item_resources_validate_on_lookup() {
                 claims,
                 [
                     ("/octocat/Hello-World", false),
-                    ("/octocat/Hello-World/issues/open/999999999", true),
+                    ("/octocat/Hello-World/issues/all/999999999", true),
                 ]
             );
         },
@@ -624,7 +626,7 @@ fn github_pr_lookup_is_fed_and_exposes_diff() {
         Ok(LookupChildResult::Feed(claims)) => {
             assert_eq!(claims.len(), 2);
             assert_eq!(claims[1].object.id.kind, "github.pull");
-            assert_eq!(claims[1].object.path, "/octocat/Hello-World/pulls/open/7");
+            assert_eq!(claims[1].object.path, "/octocat/Hello-World/pulls/all/7");
         },
         other => panic!("expected the claims of the PR anchor, got {other:?}"),
     }
@@ -764,8 +766,8 @@ fn github_pr_files_list_and_read_changed_file_objects() {
             assert_eq!(
                 preloaded,
                 vec![
-                    "/octocat/Hello-World/pulls/open/7/files/src%2Flib.rs/filename",
-                    "/octocat/Hello-World/pulls/open/7/files/src%2Flib.rs/status",
+                    "/octocat/Hello-World/pulls/all/7/files/src%2Flib.rs/filename",
+                    "/octocat/Hello-World/pulls/all/7/files/src%2Flib.rs/status",
                 ]
             );
             assert!(
@@ -851,7 +853,7 @@ fn github_pr_reviews_and_review_comments_list_and_read_objects() {
             let effects = reviews.effects().unwrap();
             assert!(
                 project_paths(effects)
-                    .contains(&"/octocat/Hello-World/pulls/open/7/reviews/80/state"),
+                    .contains(&"/octocat/Hello-World/pulls/all/7/reviews/80/state"),
                 "missing review state preload"
             );
             assert!(

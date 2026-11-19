@@ -13,7 +13,8 @@ use crate::EngineNamespace;
 pub struct InvalidationReport {
     pub paths: Vec<Path>,
     pub prefixes: Vec<Path>,
-    pub changed_dirs: Vec<Path>,
+    /// Each changed listing, with whether it is fed.
+    pub changed_dirs: Vec<(Path, bool)>,
 }
 
 impl InvalidationReport {

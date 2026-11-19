@@ -137,7 +137,11 @@ impl EngineNamespace {
             };
             crate::inspector::cache_event(CacheKind::BrowseHit);
             return Ok(ListOutcome::Listing(listing_from_dirents(
-                resources, node, &dirents, offline,
+                resources,
+                node,
+                node.path(),
+                &dirents,
+                offline,
             )?));
         }
 
@@ -177,7 +181,7 @@ impl EngineNamespace {
             crate::inspector::cache_event(CacheKind::BrowseMiss);
             match runtime.list_children(path, request, captured_epoch).await {
                 Ok(crate::ops::namespace::ListOutcome::Entries(_)) => {
-                    runtime.record_dir_changed(path);
+                    runtime.record_dir_changed(path, false);
                 },
                 Ok(crate::ops::namespace::ListOutcome::Unchanged) => {},
                 Ok(
@@ -268,18 +272,25 @@ impl EngineNamespace {
                 Ok(ListOutcome::Listing(listing_from_dirents(
                     &runtime.resources,
                     node,
+                    node.path(),
                     &dirents,
                     false,
                 )?))
             },
             Ok(crate::ops::namespace::ListOutcome::Feed(claims)) => {
-                super::feed::answer_claims(runtime, path, super::feed::FedFact::Listing, &claims)
-                    .await?;
-                let dirents = cached_dirents(&runtime.resources, path)?
+                let (fact, _) = super::feed::answer_claims(
+                    runtime,
+                    path,
+                    super::feed::FedFact::Listing,
+                    &claims,
+                )
+                .await?;
+                let dirents = cached_dirents(&runtime.resources, &fact)?
                     .ok_or_else(|| TreeError::not_found(path.as_str()))?;
                 Ok(ListOutcome::Listing(listing_from_dirents(
                     &runtime.resources,
                     node,
+                    &fact,
                     &dirents,
                     false,
                 )?))
@@ -302,6 +313,7 @@ impl EngineNamespace {
                     return Ok(ListOutcome::Listing(listing_from_dirents(
                         &runtime.resources,
                         node,
+                        node.path(),
                         &dirents,
                         false,
                     )?));
@@ -398,8 +410,9 @@ fn provider_entries(path: &omnifs_core::path::Path, entries: &[ProviderEntry]) -
         .collect()
 }
 
-/// Build a `Listing` from an accumulated/cached dirents record (the
-/// cache-hit and rate-limit-stale paths). The cached record
+/// Build a `Listing` from an accumulated/cached dirents record at `records`
+/// (the cache-hit, fed, and rate-limit-stale paths), each entry fed when its
+/// record under `records` is. The cached record
 /// keeps the `@next`/`@all` control records for the directory's whole
 /// paginated lifetime (`pagination.rs` never strips them, even at exhaustion,
 /// so a name a consumer resolved from an earlier listing keeps resolving).
@@ -409,10 +422,11 @@ fn provider_entries(path: &omnifs_core::path::Path, entries: &[ProviderEntry]) -
 fn listing_from_dirents(
     resources: &MountResources,
     node: &Node,
+    records: &omnifs_core::path::Path,
     dirents: &DirentsPayload,
     offline: bool,
 ) -> Result<Listing> {
-    let mut entries = cached_entries(resources, node.path(), dirents.entries())?;
+    let mut entries = cached_entries(resources, records, dirents.entries())?;
 
     let mut synthetic_entries = Vec::new();
     if !offline && dirents.next_cursor.is_some() {

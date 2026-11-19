@@ -43,19 +43,23 @@ impl EndpointHooks for GitHubApi {
 /// seconds for the whole (up to ~1h) primary-limit window instead of waiting
 /// out the real reset.
 fn parse_github_retry(resp: &Response<Vec<u8>>) -> Option<Duration> {
-    if let Some(secs) = header_u64(resp, "retry-after") {
-        return Some(Duration::from_secs(secs));
-    }
-    let reset_epoch = header_u64(resp, "x-ratelimit-reset")?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    reset_epoch.checked_sub(now).map(Duration::from_secs)
+    retry_window(|header| {
+        resp.headers()
+            .get(header)
+            .and_then(|value| value.to_str().ok())
+    })
 }
 
-fn header_u64(resp: &Response<Vec<u8>>, header: &str) -> Option<u64> {
-    resp.headers()
-        .get(header)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
+/// The backoff window of a rate-limited answer from its headers, which
+/// `header` gives by name: `Retry-After`, else `x-ratelimit-reset` minus now.
+pub(crate) fn retry_window<'a>(header: impl Fn(&str) -> Option<&'a str>) -> Option<Duration> {
+    let seconds = |name| header(name).and_then(|value| value.trim().parse::<u64>().ok());
+    if let Some(secs) = seconds("retry-after") {
+        return Some(Duration::from_secs(secs));
+    }
+    let reset_epoch = seconds("x-ratelimit-reset")?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    reset_epoch.checked_sub(now).map(Duration::from_secs)
 }
 
 fn is_rate_limited(resp: &Response<Vec<u8>>) -> bool {

@@ -146,7 +146,7 @@ impl Effects {
 
     /// Retract the facts of `path` and of everything beneath it, leaving the
     /// parent listing as complete as it was.
-    pub fn remove(&mut self, path: impl AsRef<str>) -> Result<&mut Self> {
+    pub(crate) fn remove(&mut self, path: impl AsRef<str>) -> Result<&mut Self> {
         self.removals.push(wire_path(path.as_ref())?.into());
         Ok(self)
     }

@@ -86,6 +86,9 @@ pub struct Node {
     /// The node's facts come from feeds: a renderer gets them with the zero
     /// lifetime of dynamic entries, so each access asks the namespace again.
     fed: bool,
+    /// The path of the facts of a fed node in the projection, which a node of
+    /// another facet of its object shares with the node of the first facet.
+    fact: Option<Path>,
 }
 
 impl Node {
@@ -96,22 +99,30 @@ impl Node {
             meta,
             body,
             fed: false,
+            fact: None,
         }
     }
 
-    /// A provider node whose facts come from feeds.
-    pub(crate) fn fed(mount: String, path: Path, meta: EntryMeta) -> Self {
+    /// A provider node whose facts come from feeds, with them at `fact` in
+    /// the projection.
+    pub(crate) fn fed(mount: String, path: Path, fact: Path, meta: EntryMeta) -> Self {
         Self {
             mount,
             path,
             meta,
             body: NodeBody::Provider,
             fed: true,
+            fact: Some(fact),
         }
     }
 
     pub(crate) fn is_fed(&self) -> bool {
         self.fed
+    }
+
+    /// The path of the facts of a fed node in the projection.
+    pub(crate) fn fact(&self) -> Option<&Path> {
+        self.fact.as_ref()
     }
 
     /// Construct a host-synthesized node (a pagination control or a mount-root
@@ -124,6 +135,7 @@ impl Node {
             meta,
             body: NodeBody::Synthetic(synthetic),
             fed: false,
+            fact: None,
         }
     }
 

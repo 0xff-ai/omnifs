@@ -128,7 +128,6 @@ impl<O: Object> ObjectLeaf<O> {
 /// The mounted, type-erased object route the dispatch tables hold.
 pub(in crate::router) struct ObjectRouteEntry<S> {
     pub pattern: Pattern,
-    pub kind: ObjectKind,
     pub shape: AnchorShape,
     pub leaves: Vec<ListingLeaf>,
     pub read: BoxedObjectRead<S>,
@@ -156,6 +155,9 @@ pub(in crate::router) struct ObjectRouteEntry<S> {
 pub(in crate::router) struct ObjectFeed<S> {
     pub handler: std::rc::Rc<crate::feed::FeedHandlerFn<S>>,
     pub id: fn(&Captures) -> Result<crate::identity::LogicalId>,
+    /// The facets of the route, whose first choices give the anchor path of
+    /// the feed, where its facts live for every facet.
+    pub facets: FacetExpansion,
     pub starts: Vec<StartPath>,
 }
 
@@ -350,6 +352,7 @@ where
             Ok::<_, ProviderError>(ObjectFeed {
                 handler: feed.handler.clone(),
                 id: anchor_id::<O>,
+                facets: FacetExpansion::for_pattern::<O::Key>(pattern)?,
                 starts,
             })
         })
@@ -357,7 +360,6 @@ where
 
     let entry = ObjectRouteEntry {
         pattern: pattern.clone(),
-        kind: O::kind(),
         shape: definition.shape,
         leaves: listing_leaves,
         read: route.clone().read_handler(),
@@ -402,6 +404,17 @@ impl FacetExpansion {
             .map(|axis| FacetExpansionAxis::for_pattern(pattern, axis))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self { axes })
+    }
+
+    /// `path`, an anchor of the pattern, with each facet at its first choice.
+    pub(in crate::router) fn first_choices(&self, path: &str) -> Result<String> {
+        let mut path = path.to_string();
+        for axis in &self.axes {
+            if let Some(first) = axis.choices.first() {
+                path = axis.substitute(&path, first)?;
+            }
+        }
+        Ok(path)
     }
 
     pub(in crate::router) fn expand_view_leaves(&self, read_path: &str) -> Result<Vec<String>> {
