@@ -35,7 +35,7 @@ Every attached filesystem has a separate process, container, or VM. Host filesys
 
 `NsError::OfflineMiss` is a terminal daemon-lifetime cache-only miss, distinct from `NotFound` and from retryable upstream errors. FUSE maps it to `EIO`; NFS maps it to `NFS4ERR_IO`.
 
-Disconnects and broadcast lag are represented by a root reset on the same event stream as ordinary subtree invalidations. FUSE keeps one background event owner and settles each namespace operation before publishing protocol state. NFS preserves path-backed filehandles, opens, stateids, leases, and clients across root refresh while resetting derived sizes, its bounded protocol reply cache, and its listing state. `PendingListings` and the reply cache advance local generations on every subtree invalidation, so a late completion cannot populate fresh state.
+Disconnects and broadcast lag are represented by a root reset on the same event stream as ordinary subtree invalidations. FUSE keeps one background event owner and settles each namespace operation before publishing protocol state. NFS preserves path-backed filehandles, opens, stateids, leases, and clients across root refresh while resetting derived sizes and its bounded protocol reply cache. The reply cache advances its generation on every subtree invalidation, so a late completion cannot populate fresh state.
 
 The public identity is the persisted, fully resolved `fs::Spec`: ID, protocol, runtime, and location. Every launcher supplies all four through named flags. Transport never infers identity. Mount and filesystem commands start the daemon when needed. Explicit `down` asks the daemon to stop and drain attached filesystems before it exits, while preserving every client-owned spec.
 

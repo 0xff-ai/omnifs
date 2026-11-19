@@ -110,9 +110,13 @@ impl RuntimeHarness {
             .map(|config| (*config).to_owned())
             .collect();
         let registry = Arc::new(registry);
-        let runtime = registry
-            .get(&selected_mount)
-            .ok_or_else(|| BuildError::InvalidConfig("test mount did not load".to_string()))?;
+        let runtime = registry.get(&selected_mount).ok_or_else(|| {
+            let availability = registry
+                .selected_entries()
+                .find(|(name, ..)| name.as_str() == selected_mount)
+                .map(|(_, _, availability, _)| availability);
+            BuildError::InvalidConfig(format!("test mount did not load: {availability:?}"))
+        })?;
         let namespace = EngineNamespace::online(Arc::clone(&registry), handle);
 
         Ok(Self {

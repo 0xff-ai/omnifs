@@ -175,8 +175,8 @@ fn ids(ids: &[(u64, &str)], next: Option<&str>) -> Value {
 /// The first full listing takes the rows by their link `next`, then the
 /// comments by page, then the counts of the issues and of the pull requests.
 /// An item with another count than its `comments/` takes its IDs: a comment
-/// that a deletion moved past a page comes by its ID, and the deleted comment
-/// leaves. The four folders are complete after the last part, and `open/`
+/// that a deletion moved past a page comes by its ID before the next page of
+/// the IDs, and the deleted comment leaves. The four folders are complete after the last part, and `open/`
 /// shares the facts of `all/`. The facts live under the owner as the paths
 /// name it, `OctoCat`, while the requests name the owner of the key,
 /// `octocat`.
@@ -224,8 +224,8 @@ async fn the_first_full_listing_takes_the_rows_then_the_comments_then_the_counts
             ok(&json!([comment(102, 1, false, "comment 102")])),
             graphql(&counted(&[(1, 101), (3, 0)])),
             graphql(&json!({ "item": ids(&ids_of_1[..100], Some("ids-2")) })),
-            graphql(&json!({ "item": ids(&ids_of_1[100..], None) })),
             ok(&comment(101, 1, false, "comment 101")),
+            graphql(&json!({ "item": ids(&ids_of_1[100..], None) })),
             graphql(&counted(&[(2, 0)])),
             graphql(&json!({ "item": ids(&[], None) })),
         ],
@@ -252,7 +252,7 @@ async fn the_first_full_listing_takes_the_rows_then_the_comments_then_the_counts
         "{query}"
     );
     assert_eq!(variables["after"], Value::Null);
-    for (request, after) in [(&requests[5], Value::Null), (&requests[6], json!("ids-2"))] {
+    for (request, after) in [(&requests[5], Value::Null), (&requests[7], json!("ids-2"))] {
         let (query, variables) = graphql_of(request);
         assert!(
             query.contains("item: issueOrPullRequest(number: $number)"),
@@ -262,7 +262,7 @@ async fn the_first_full_listing_takes_the_rows_then_the_comments_then_the_counts
         assert_eq!(variables["after"], after);
     }
     assert_eq!(
-        requests[7].url,
+        requests[6].url,
         api("/repos/octocat/hello/issues/comments/101")
     );
     let (query, _) = graphql_of(&requests[8]);
@@ -1234,6 +1234,463 @@ async fn a_check_asks_github_graphql_for_a_hundred_changed_items_a_post() {
         .unwrap(),
         ["1101"]
     );
+}
+
+/// An answer of GitHub GraphQL about the repository with `null` for each item
+/// it cannot resolve, with an error of the type `NOT_FOUND`.
+fn graphql_not_found(repository: &Value) -> HttpResponse {
+    ok(&json!({
+        "data": { "repository": repository },
+        "errors": [{
+            "type": "NOT_FOUND",
+            "message": "Could not resolve to an issue or pull request.",
+        }],
+    }))
+}
+
+/// A first full listing that stops at a comment by its ID continues from that
+/// comment at the next read of its folders, without a request before it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_full_listing_stopped_at_a_comment_by_its_id_continues_from_it() {
+    let harness = github_harness();
+    let (stopped, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![
+            ok(&json!([item(
+                1,
+                "One",
+                "open",
+                "2026-11-18T09:00:00Z",
+                3,
+                false
+            )])),
+            ok(&json!([comment(10, 1, false, "first")])),
+            graphql(&counted(&[(1, 3)])),
+            graphql(&json!({
+                "item": ids(
+                    &[
+                        (10, "2026-11-18T08:00:00Z"),
+                        (11, "2026-11-18T08:10:00Z"),
+                        (12, "2026-11-18T08:20:00Z"),
+                    ],
+                    None,
+                ),
+            })),
+            ok(&comment(11, 1, false, "second")),
+            empty(502, &[]),
+        ],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+    for (request, id) in [(&requests[4], 11), (&requests[5], 12)] {
+        assert_eq!(
+            request.url,
+            api(&format!("/repos/octocat/hello/issues/comments/{id}"))
+        );
+    }
+
+    let (listing, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![ok(&comment(12, 1, false, "third")), graphql(&counted(&[]))],
+    )
+    .await;
+    assert_eq!(listing.unwrap(), ["1"]);
+    assert_eq!(
+        requests[0].url,
+        api("/repos/octocat/hello/issues/comments/12")
+    );
+    assert!(
+        graphql_of(&requests[1])
+            .0
+            .contains("page: pullRequests(first: 100, after: $after)")
+    );
+    assert_eq!(
+        served(
+            &harness,
+            names(&harness, "octocat/hello/issues/all/1/comments")
+        )
+        .await
+        .unwrap(),
+        ["10", "11", "12"]
+    );
+    assert_eq!(
+        served(
+            &harness,
+            read(&harness, "octocat/hello/issues/all/1/comments/12/body.md")
+        )
+        .await
+        .unwrap(),
+        "third"
+    );
+}
+
+/// A check that stops at a comment by its ID continues from that comment
+/// alone at the next read. A comment that left its item before its ID was
+/// asked, `404`, does not join the item.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_stopped_at_a_comment_by_its_id_continues_from_it() {
+    let harness = github_harness();
+    first_full_listing(
+        &harness,
+        &json!([item(1, "One", "open", "2026-11-18T09:00:00Z", 1, false)]),
+        &json!([comment(10, 1, false, "first")]),
+        &[(1, 1)],
+        &[],
+    )
+    .await;
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let (stopped, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![
+            ok(&json!([item(
+                1,
+                "One again",
+                "open",
+                "2026-11-18T10:00:00Z",
+                4,
+                false
+            )])),
+            ok(&json!([])),
+            graphql(&json!({
+                "issues": { "totalCount": 1 },
+                "pullRequests": { "totalCount": 0 },
+                "i1": ids(
+                    &[
+                        (10, "2026-11-18T08:00:00Z"),
+                        (11, "2026-11-18T09:30:00Z"),
+                        (12, "2026-11-18T09:40:00Z"),
+                        (13, "2026-11-18T09:50:00Z"),
+                    ],
+                    None,
+                ),
+            })),
+            ok(&comment(11, 1, false, "second")),
+            empty(502, &[]),
+        ],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+    for (request, id) in [(&requests[3], 11), (&requests[4], 12)] {
+        assert_eq!(
+            request.url,
+            api(&format!("/repos/octocat/hello/issues/comments/{id}"))
+        );
+    }
+
+    let (listing, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![ok(&comment(12, 1, false, "third")), empty(404, &[])],
+    )
+    .await;
+    assert_eq!(listing.unwrap(), ["1"]);
+    for (request, id) in [(&requests[0], 12), (&requests[1], 13)] {
+        assert_eq!(
+            request.url,
+            api(&format!("/repos/octocat/hello/issues/comments/{id}"))
+        );
+    }
+    assert_eq!(
+        served(
+            &harness,
+            names(&harness, "octocat/hello/issues/all/1/comments")
+        )
+        .await
+        .unwrap(),
+        ["10", "11", "12"]
+    );
+    for (file, expected) in [
+        ("issues/all/1/title", "One again"),
+        ("issues/all/1/comments/11/body.md", "second"),
+        ("issues/open/1/comments/12/body.md", "third"),
+    ] {
+        assert_eq!(
+            served(&harness, read(&harness, &format!("octocat/hello/{file}")))
+                .await
+                .unwrap(),
+            expected,
+            "{file}"
+        );
+    }
+}
+
+/// A later answer of an item that stops at a comment by its ID continues from
+/// that comment at the next read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_answer_of_an_item_stopped_at_a_comment_by_its_id_continues_from_it() {
+    let harness = github_harness();
+    let (title, _) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/7/title"),
+        vec![answer(
+            200,
+            &[("ETag", r#""item-7""#)],
+            &item(7, "Seven", "open", "2026-11-18T09:00:00Z", 0, false),
+        )],
+    )
+    .await;
+    assert_eq!(title.unwrap(), "Seven");
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let (stopped, requests) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/7/title"),
+        vec![
+            answer(
+                200,
+                &[("ETag", r#""item-7b""#)],
+                &item(7, "Seven again", "open", "2026-11-18T10:00:00Z", 2, false),
+            ),
+            ok(&json!([])),
+            graphql(&json!({
+                "item": ids(
+                    &[(71, "2026-11-18T09:30:00Z"), (72, "2026-11-18T09:40:00Z")],
+                    None,
+                ),
+            })),
+            ok(&comment(71, 7, false, "first")),
+            empty(502, &[]),
+        ],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+    for (request, id) in [(&requests[3], 71), (&requests[4], 72)] {
+        assert_eq!(
+            request.url,
+            api(&format!("/repos/octocat/hello/issues/comments/{id}"))
+        );
+    }
+
+    let (title, requests) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/7/title"),
+        vec![ok(&comment(72, 7, false, "second"))],
+    )
+    .await;
+    assert_eq!(title.unwrap(), "Seven again");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        api("/repos/octocat/hello/issues/comments/72")
+    );
+    assert_eq!(
+        served(
+            &harness,
+            names(&harness, "octocat/hello/issues/all/7/comments")
+        )
+        .await
+        .unwrap(),
+        ["71", "72"]
+    );
+}
+
+/// The first full listing removes an item with another count than its
+/// `comments/` that GitHub GraphQL cannot resolve at its IDs, `null` with an
+/// error of the type `NOT_FOUND`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_full_listing_removes_an_item_that_github_graphql_cannot_resolve() {
+    let harness = github_harness();
+    let (listing, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![
+            ok(&json!([
+                item(1, "One", "open", "2026-11-18T08:00:00Z", 2, false),
+                item(2, "Two", "open", "2026-11-18T09:00:00Z", 0, false),
+            ])),
+            ok(&json!([comment(10, 1, false, "first")])),
+            graphql(&counted(&[(1, 2), (2, 0)])),
+            graphql_not_found(&json!({ "item": null })),
+            graphql(&counted(&[])),
+        ],
+    )
+    .await;
+    assert_eq!(listing.unwrap(), ["2"]);
+    assert_eq!(graphql_of(&requests[3]).1["number"], 1);
+    for path in ["issues/all/1", "issues/open/1"] {
+        assert!(
+            served(&harness, lookup(&harness, &format!("octocat/hello/{path}")))
+                .await
+                .unwrap()
+                .is_missing(),
+            "{path}"
+        );
+    }
+}
+
+/// A check removes a changed item that GitHub GraphQL cannot resolve, `null`
+/// with an error of the type `NOT_FOUND`, in the `POST` of the counts and at
+/// a later page of its IDs, and counts it as removed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_removes_a_changed_item_that_github_graphql_cannot_resolve() {
+    let harness = github_harness();
+    first_full_listing(
+        &harness,
+        &json!([
+            item(1, "One", "open", "2026-11-18T08:00:00Z", 1, false),
+            item(2, "Two", "open", "2026-11-18T08:30:00Z", 1, false),
+            item(3, "Three", "open", "2026-11-18T09:00:00Z", 0, false),
+        ]),
+        &json!([
+            comment(10, 1, false, "first"),
+            comment(20, 2, false, "second")
+        ]),
+        &[(1, 1), (2, 1), (3, 0)],
+        &[],
+    )
+    .await;
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let (listing, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![
+            ok(&json!([
+                item(1, "One", "open", "2026-11-18T10:00:00Z", 2, false),
+                item(2, "Two", "open", "2026-11-18T10:30:00Z", 2, false),
+            ])),
+            ok(&json!([])),
+            graphql_not_found(&json!({
+                "issues": { "totalCount": 1 },
+                "pullRequests": { "totalCount": 0 },
+                "i1": null,
+                "i2": ids(&[(20, "2026-11-18T08:30:00Z")], Some("ids-2")),
+            })),
+            graphql_not_found(&json!({ "item": null })),
+        ],
+    )
+    .await;
+    assert_eq!(listing.unwrap(), ["3"]);
+    assert_eq!(requests.len(), 4);
+    let (_, variables) = graphql_of(&requests[3]);
+    assert_eq!(variables["number"], 2);
+    assert_eq!(variables["after"], "ids-2");
+    for path in [
+        "issues/all/1",
+        "issues/open/1",
+        "issues/all/2",
+        "issues/open/2",
+    ] {
+        assert!(
+            served(&harness, lookup(&harness, &format!("octocat/hello/{path}")))
+                .await
+                .unwrap()
+                .is_missing(),
+            "{path}"
+        );
+    }
+}
+
+/// A later answer of an item removes it when GitHub GraphQL cannot resolve it
+/// at its IDs, `null` with an error of the type `NOT_FOUND`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_answer_of_an_item_removes_it_when_github_graphql_cannot_resolve_it() {
+    let harness = github_harness();
+    let (title, _) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/8/title"),
+        vec![answer(
+            200,
+            &[("ETag", r#""item-8""#)],
+            &item(8, "Eight", "open", "2026-11-18T09:00:00Z", 0, false),
+        )],
+    )
+    .await;
+    assert_eq!(title.unwrap(), "Eight");
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let (found, requests) = answering(
+        &harness,
+        lookup(&harness, "octocat/hello/issues/all/8"),
+        vec![
+            answer(
+                200,
+                &[("ETag", r#""item-8b""#)],
+                &item(8, "Eight again", "open", "2026-11-18T10:00:00Z", 1, false),
+            ),
+            ok(&json!([])),
+            graphql_not_found(&json!({ "item": null })),
+        ],
+    )
+    .await;
+    assert!(found.unwrap().is_missing());
+    assert_eq!(
+        request_header(&requests[0], "if-none-match"),
+        Some(r#""item-8""#)
+    );
+    assert_eq!(graphql_of(&requests[2]).1["number"], 8);
+}
+
+/// A rate limit of GitHub whose window does not parse fails as an invalid
+/// answer, at the REST API and at GitHub GraphQL, and one whose reset passed
+/// has a window of zero.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rate_limit_whose_window_does_not_parse_fails_as_an_invalid_answer() {
+    let harness = github_harness();
+    let (stopped, _) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![empty(
+            403,
+            &[("x-ratelimit-remaining", "0"), ("retry-after", "soon")],
+        )],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Invalid)), "{stopped:?}");
+
+    let rate_limited = |reset: &str| {
+        answer(
+            200,
+            &[("x-ratelimit-reset", reset)],
+            &json!({
+                "data": null,
+                "errors": [{ "type": "RATE_LIMITED", "message": "API rate limit exceeded" }],
+            }),
+        )
+    };
+    let (stopped, _) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![
+            ok(&json!([item(
+                1,
+                "One",
+                "open",
+                "2026-11-18T09:00:00Z",
+                0,
+                false
+            )])),
+            ok(&json!([])),
+            rate_limited("later"),
+        ],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Invalid)), "{stopped:?}");
+
+    let passed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .checked_sub(Duration::from_secs(60))
+        .unwrap()
+        .as_secs()
+        .to_string();
+    let (stopped, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![rate_limited(&passed)],
+    )
+    .await;
+    assert_eq!(
+        stopped,
+        Err(NsError::RateLimited {
+            retry_after: Some(Duration::ZERO)
+        })
+    );
+    graphql_of(&requests[0]);
 }
 
 /// `open/` of a mount without its provider serves the facts of `all/` from
