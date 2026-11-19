@@ -48,6 +48,9 @@ struct State {
     shelf_version: u64,
     /// Whether the feed of the `flaky` shelf has stopped once.
     flaky_stopped: bool,
+    /// Whether a later answer of the feed of the `wobbly` shelf has stopped
+    /// once.
+    wobbly_stopped: bool,
 }
 
 const LARGE_RANGED_SIZE: u64 = 64 * 1024 * 1024 + 1;
@@ -391,8 +394,10 @@ impl Shelf {
     /// parts, each with the inner token of its book, and a third part
     /// completes `books`; the `flaky` shelf stops once before its second
     /// part. After the first answer, an answer is `unchanged` until the
-    /// shelf version moves, and then renames book 1, adds book 3, removes
-    /// book 2, and records in `seen` the names the host listed for `books`.
+    /// shelf version moves, and then renames book 1, adds book 3, and records
+    /// in `seen` the names the host listed for `books` in a part, and removes
+    /// book 2 in its last part; the `wobbly` shelf stops once at a rate limit
+    /// of a second before that last part.
     #[allow(clippy::unused_async)]
     async fn feed(cx: FeedCx<ShelfKey, State>) -> Result<Feed> {
         let shelf = cx.key().shelf.clone();
@@ -441,6 +446,17 @@ impl Shelf {
                 Ok(Feed::part(format!("version-{version}")).into())
             },
             Some(done) if done == format!("version-{version}") => Ok(Feed::unchanged()),
+            Some(change) if change == format!("change-{version}") => {
+                if shelf == "wobbly"
+                    && !cx.state_mut(|state| std::mem::replace(&mut state.wobbly_stopped, true))
+                {
+                    return Err(ProviderError::rate_limited("the shelf upstream is busy")
+                        .with_retry_after(Some(core::time::Duration::from_secs(1))));
+                }
+                cx.dir(&books, ListingWrite::Complete)?;
+                cx.remove(format!("{books}/2"))?;
+                Ok(Feed::part(format!("version-{version}")).into())
+            },
             Some(_) => {
                 let seen = match cx.listing(&books, ListingForm::Names)? {
                     Some(ListingFacts {
@@ -455,8 +471,7 @@ impl Shelf {
                 cx.dir(&books, ListingWrite::Complete)?;
                 book(1, &format!("Book 1 v{version}"))?;
                 book(3, "Book 3")?;
-                cx.remove(format!("{books}/2"))?;
-                Ok(Feed::part(format!("version-{version}")).into())
+                Ok(Feed::part(format!("change-{version}")).more(true).into())
             },
         }
     }

@@ -625,7 +625,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn unavailable_provider_keeps_mount_root_without_starting_runtime() {
+    async fn unavailable_provider_serves_its_projection_without_starting_runtime() {
         let root = tempfile::tempdir().expect("temp root");
         let path = test_provider_wasm_path();
         assert!(path.exists(), "build providers before the host fixture");
@@ -651,10 +651,13 @@ mod tests {
             .lookup(omnifs_core::path::Path::root(), "test")
             .await
             .expect("configured mount root");
-        assert!(matches!(
-            namespace.readdir(mount.path, DirCursor::start(), 0).await,
-            Err(NsError::Internal { message }) if message.contains("provider is unavailable")
-        ));
+        assert_eq!(
+            namespace
+                .readdir(mount.path, DirCursor::start(), 0)
+                .await
+                .unwrap_err(),
+            NsError::OfflineMiss
+        );
     }
 
     #[test]

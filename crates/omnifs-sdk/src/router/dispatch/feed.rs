@@ -87,10 +87,42 @@ impl<S> CompiledRouter<S> {
                         token: state.token,
                     })
                     .collect();
-                wit_types::FeedAnswer::Part(wit_types::FeedPart { token, more, inner })
+                wit_types::FeedAnswer::Part(wit_types::FeedPart {
+                    token,
+                    more,
+                    inner,
+                    anchors: shape.facet_anchors(&effects)?,
+                })
             },
         };
         Ok((answer, effects))
+    }
+}
+
+impl<S> Shape<'_, S> {
+    /// Each directory that `effects` write at an anchor of an object of a
+    /// feed with a facet at another choice than the first, with the anchor of
+    /// its claim.
+    fn facet_anchors(&self, effects: &Effects) -> Result<Vec<wit_types::FacetAnchor>> {
+        let mut anchors = std::collections::BTreeMap::new();
+        for directory in effects.directories() {
+            let path = Path::parse(directory)
+                .map_err(|error| ProviderError::internal(error.to_string()))?;
+            let Some(feed) = self
+                .object_route(&path)
+                .and_then(|route| route.entry.feed.as_ref())
+            else {
+                continue;
+            };
+            let anchor = feed.facets.first_choices(path.as_str())?;
+            if anchor != path.as_str() {
+                anchors.insert(directory.to_owned(), anchor);
+            }
+        }
+        Ok(anchors
+            .into_iter()
+            .map(|(path, anchor)| wit_types::FacetAnchor { path, anchor })
+            .collect())
     }
 }
 

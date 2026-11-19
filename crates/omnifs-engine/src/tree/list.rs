@@ -66,12 +66,14 @@ impl EngineNamespace {
     /// (coalesced, cache-consulted, and carrying the host-synthesized control /
     /// ignore entries as synthetic `Entry` origins); `Some(cursor)` continues
     /// pagination as a raw page drain. Returns the internal listing outcome.
+    /// A node under an anchor of another facet lists the path of its facts.
     pub(crate) async fn list(
         &self,
         node: &Node,
         cursor: Option<Cursor>,
         _ctx: &RequestCtx,
     ) -> Result<ListOutcome> {
+        let node = &node.at_fact();
         if node.host().is_some() {
             return Ok(ListOutcome::Host);
         }

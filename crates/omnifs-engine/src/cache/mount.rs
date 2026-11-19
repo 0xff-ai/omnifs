@@ -274,6 +274,9 @@ pub(crate) struct ProjectionTransition {
     /// The answer of a feed: its records and listings are fed facts, and the
     /// feed states it brought.
     pub feed: Option<FeedWrite>,
+    /// A part of a later answer of a feed, kept apart from the facts until
+    /// the part that ends its answer.
+    pub kept: Option<KeptWrite>,
 }
 
 impl ProjectionTransition {
@@ -287,6 +290,7 @@ impl ProjectionTransition {
             && self.git.is_empty()
             && self.removals.is_empty()
             && self.feed.is_none()
+            && self.kept.is_none()
     }
 }
 
@@ -301,15 +305,26 @@ pub(crate) struct FeedState {
 }
 
 /// The feed states one answer of a feed publishes: its own, renewed by an
-/// `unchanged` answer or advanced by a part, and the inner states the part
-/// brought, each a token whose first answer ended. Every state gets
-/// `deadline`.
+/// `unchanged` answer or advanced by a part, which drops its kept parts, and
+/// the inner states the part brought, each a token whose first answer ended.
+/// Every state gets `deadline`. `anchors` pairs each anchor of another facet
+/// that the part writes with the anchor of the claim of its object.
 #[derive(Debug, Clone)]
 pub(crate) struct FeedWrite {
     pub object: Vec<u8>,
     pub part: Option<FeedPartWrite>,
     pub inner: Vec<(Vec<u8>, String)>,
+    pub anchors: Vec<(Path, Path)>,
     pub deadline: u64,
+}
+
+/// A part of a later answer of the feed of `object`, encoded by its feed
+/// operation, which the projection keeps in order until the part that ends
+/// the answer publishes it.
+#[derive(Debug, Clone)]
+pub(crate) struct KeptWrite {
+    pub object: Vec<u8>,
+    pub part: Vec<u8>,
 }
 
 /// The token after a part, and whether more parts follow in its answer.
@@ -793,6 +808,7 @@ impl MountResources {
             git,
             removals: removed_paths,
             feed,
+            kept,
         } = transition;
         // Bodies become immutable and addressable before the projection
         // transaction can publish a reference to them. This work intentionally
@@ -1016,6 +1032,11 @@ impl MountResources {
             }
             if let Some(feed) = &feed {
                 write_feed_states(tx, facts, feed)?;
+            }
+            if let Some(kept) = &kept {
+                let prefix = kept_prefix(&kept.object);
+                let next = tx.prefix(facts, prefix.as_slice()).count();
+                tx.insert(facts, kept_key(&kept.object, next), kept.part.as_slice());
             }
             for freshness in &freshness {
                 if !fed_answer && tx.get(facts, fed_key(&freshness.path))?.is_some() {
@@ -1322,6 +1343,38 @@ impl MountResources {
         Ok(self.projection.get(&fed_key(path))?.is_some())
     }
 
+    /// Whether the feed of the object `id` has kept parts of a later answer.
+    pub(crate) fn has_kept_parts(&self, id: &[u8]) -> Result<bool, ProjectionError> {
+        Ok(!self.projection.read_prefix(&kept_prefix(id))?.is_empty())
+    }
+
+    /// The kept parts of the later answer of the feed of the object `id`, in
+    /// their order.
+    pub(crate) fn kept_parts(&self, id: &[u8]) -> Result<Vec<Vec<u8>>, ProjectionError> {
+        let mut keys = self.projection.read_prefix(&kept_prefix(id))?;
+        keys.sort();
+        keys.iter()
+            .map(|key| {
+                self.projection.get(key)?.ok_or_else(|| {
+                    ProjectionError::Inconsistent("a kept part left during its read".into())
+                })
+            })
+            .collect()
+    }
+
+    /// The anchor of the claim of the object whose anchor of another facet is
+    /// `path`.
+    pub(crate) fn facet_anchor(&self, path: &Path) -> Result<Option<Path>, ProjectionError> {
+        self.projection
+            .get(&anchor_key(path))?
+            .map(|bytes| {
+                let anchor: String = postcard::from_bytes(&bytes)?;
+                Path::parse(&anchor)
+                    .map_err(|error| ProjectionError::Inconsistent(error.to_string()))
+            })
+            .transpose()
+    }
+
     /// Whether the indexed view leaf has reached its freshness deadline.
     pub(crate) fn view_expired(
         &self,
@@ -1486,6 +1539,30 @@ fn fed_key(path: &Path) -> Vec<u8> {
     key
 }
 
+/// The key of the anchor of the claim of the object whose anchor of another
+/// facet is `path`.
+fn anchor_key(path: &Path) -> Vec<u8> {
+    let mut key = b"a:".to_vec();
+    key.extend_from_slice(path.as_str().as_bytes());
+    key
+}
+
+/// The prefix of the keys of the kept parts of the feed of the object `id`.
+fn kept_prefix(id: &[u8]) -> Vec<u8> {
+    let mut key = b"k:".to_vec();
+    key.extend_from_slice(hex::encode(id).as_bytes());
+    key.push(b':');
+    key
+}
+
+/// The key of the kept part `index` of the feed of the object `id`, which
+/// sorts in the order of the parts.
+fn kept_key(id: &[u8], index: usize) -> Vec<u8> {
+    let mut key = kept_prefix(id);
+    key.extend_from_slice(format!("{index:08x}").as_bytes());
+    key
+}
+
 fn write_feed_states(
     tx: &mut fjall::OptimisticWriteTx,
     facts: &fjall::OptimisticTxKeyspace,
@@ -1513,6 +1590,23 @@ fn write_feed_states(
         },
     };
     tx.insert(facts, key, postcard::to_allocvec(&state)?);
+    if feed.part.is_some() {
+        let prefix = kept_prefix(&feed.object);
+        let kept = tx
+            .prefix(facts, prefix.as_slice())
+            .map(|guard| Ok(guard.key()?.to_vec()))
+            .collect::<Result<Vec<_>, ProjectionError>>()?;
+        for key in kept {
+            tx.remove(facts, key);
+        }
+    }
+    for (path, anchor) in &feed.anchors {
+        tx.insert(
+            facts,
+            anchor_key(path),
+            postcard::to_allocvec(anchor.as_str())?,
+        );
+    }
     for (id, token) in &feed.inner {
         tx.insert(
             facts,
@@ -1811,6 +1905,7 @@ fn remove_path_facts(
     removals.push(expiry);
     removals.push(git_key(path));
     removals.push(fed_key(path));
+    removals.push(anchor_key(path));
     Ok(())
 }
 
@@ -2874,6 +2969,7 @@ mod tests {
                     more: false,
                 }),
                 inner: Vec::new(),
+                anchors: Vec::new(),
                 deadline: 1_000,
             }),
             ..ProjectionTransition::default()

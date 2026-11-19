@@ -131,8 +131,10 @@ impl EngineNamespace {
     ///
     /// The renderer still owns its kernel-side handle caches (the per-`fh` whole
     /// buffer FUSE keeps, the inode size promotion) and kernel offset/size
-    /// slicing; the internal read path returns the whole rendered file.
+    /// slicing; the internal read path returns the whole rendered file. A node
+    /// under an anchor of another facet reads the path of its facts.
     pub(crate) async fn read(&self, node: &Node, _ctx: &RequestCtx) -> Result<ReadResult> {
+        let node = &node.at_fact();
         // A host-synthesized node (a mount-root ignore file or a `@next`/`@all`
         // pagination control) is served by `Tree`, never the provider. The
         // renderer materializes the result into a per-handle buffer so a partial

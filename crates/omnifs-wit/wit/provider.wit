@@ -318,12 +318,22 @@ interface types {
     }
 
     /// One part of an answer: the token after it, whether more parts follow
-    /// in the same answer, and the tokens of the objects of inner feeds it
-    /// brought, as the items of a page of rows.
+    /// in the same answer, the tokens of the objects of inner feeds it
+    /// brought, as the items of a page of rows, and each anchor of another
+    /// facet of an object that it writes.
     record feed-part {
         token: feed-token,
         more: bool,
         inner: list<feed-state>,
+        anchors: list<facet-anchor>,
+    }
+
+    /// An anchor of an object at another choice of a facet than the first,
+    /// and the anchor of the claim of the object, with each facet at its first
+    /// choice, where the facts of the object live.
+    record facet-anchor {
+        path: string,
+        anchor: string,
     }
 
     /// The token of an inner feed, keyed by the logical id of its object.

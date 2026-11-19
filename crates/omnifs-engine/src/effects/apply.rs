@@ -9,7 +9,7 @@ use crate::cache::{
 };
 use crate::clock::{DYNAMIC_TTL_MILLIS, freshness_expiry, page_deadline};
 use crate::object_id::ObjectId;
-use crate::ops::feed::{FeedChanges, FeedClaim, FeedObject, FeedOutcome};
+use crate::ops::feed::{FeedChanges, FeedClaim, FeedObject};
 use crate::ops::namespace::{
     DirEntry, DirListing, ListOutcome, PageRequest, ReadBytes, ReadOutcome,
 };
@@ -453,7 +453,7 @@ impl<'a> EffectApplier<'a> {
         answer: wit_types::FeedAnswer,
         effects: &wit_types::Effects,
         now_millis: u64,
-    ) -> anyhow::Result<(FeedOutcome, ProjectionTransition, FeedChanges)> {
+    ) -> anyhow::Result<(ProjectionTransition, FeedChanges)> {
         let mut transition = self.lower_writes(effects, now_millis, true)?;
         let mut changes = FeedChanges::default();
         for write in &effects.fs {
@@ -477,39 +477,37 @@ impl<'a> EffectApplier<'a> {
             paths.dedup();
         }
         let deadline = now_millis.saturating_add(DYNAMIC_TTL_MILLIS);
-        let (outcome, part) = match answer {
-            wit_types::FeedAnswer::Unchanged => (FeedOutcome::Unchanged, None),
-            wit_types::FeedAnswer::Part(part) => {
-                let inner = part
-                    .inner
-                    .iter()
-                    .map(|state| {
-                        (
-                            ObjectId::from_wit(&state.id).as_bytes().to_vec(),
-                            state.token.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                (
-                    FeedOutcome::Part { more: part.more },
-                    Some((
-                        FeedPartWrite {
-                            token: part.token,
-                            more: part.more,
-                        },
-                        inner,
-                    )),
-                )
-            },
-        };
-        let (part, inner) = part.map_or((None, Vec::new()), |(part, inner)| (Some(part), inner));
-        transition.feed = Some(FeedWrite {
+        let mut feed = FeedWrite {
             object: object.id.as_bytes().to_vec(),
-            part,
-            inner,
+            part: None,
+            inner: Vec::new(),
+            anchors: Vec::new(),
             deadline,
-        });
-        Ok((outcome, transition, changes))
+        };
+        if let wit_types::FeedAnswer::Part(part) = answer {
+            feed.inner = part
+                .inner
+                .iter()
+                .map(|state| {
+                    (
+                        ObjectId::from_wit(&state.id).as_bytes().to_vec(),
+                        state.token.clone(),
+                    )
+                })
+                .collect();
+            feed.anchors = part
+                .anchors
+                .iter()
+                .map(|anchor| Ok((Path::parse(&anchor.path)?, Path::parse(&anchor.anchor)?)))
+                .collect::<Result<_, omnifs_core::path::ParseError>>()
+                .map_err(anyhow::Error::from)?;
+            feed.part = Some(FeedPartWrite {
+                token: part.token,
+                more: part.more,
+            });
+        }
+        transition.feed = Some(feed);
+        Ok((transition, changes))
     }
 
     pub(crate) fn lower_read(
