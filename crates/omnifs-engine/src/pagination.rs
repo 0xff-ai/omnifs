@@ -2,7 +2,7 @@
 
 use super::Runtime;
 use crate::cache::{PublicationKey, RecordKind};
-use crate::ops::namespace::ListOutcome;
+use crate::ops::namespace::{ListOutcome, PageRequest};
 use crate::view::DirentsPayload;
 use omnifs_core::path::Path;
 
@@ -39,15 +39,13 @@ impl Runtime {
         let Some(cursor) = dirents.next_cursor else {
             return NextPageOutcome::NoMore;
         };
-        match self
-            .run_list_children(
-                path,
-                Some(crate::wit_protocol::cached_cursor_to_wit(cursor.clone())),
-                Some(cursor),
-                captured_epoch,
-            )
-            .await
-        {
+        // The next cursor asks for a page the listing has not cached, so the
+        // call carries no validator.
+        let request = PageRequest {
+            cursor: Some(cursor),
+            validator: None,
+        };
+        match self.run_list_children(path, request, captured_epoch).await {
             Ok(ListOutcome::Entries(listing)) => {
                 let more = listing.next_cursor.is_some();
                 self.record_dir_changed(path);
@@ -56,8 +54,8 @@ impl Runtime {
                     more,
                 }
             },
-            Ok(ListOutcome::Subtree(_)) => {
-                NextPageOutcome::Error("pagination target resolved to a subtree handoff".into())
+            Ok(ListOutcome::Subtree(_) | ListOutcome::Unchanged) => {
+                NextPageOutcome::Error("pagination target answered no next page".into())
             },
             Err(error) => NextPageOutcome::Error(error.to_string()),
         }

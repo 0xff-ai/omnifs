@@ -13,18 +13,18 @@
 #![allow(clippy::unnecessary_wraps, clippy::manual_async_fn)]
 
 use omnifs_sdk::__wit::provider::types as wit_types;
-use omnifs_sdk::browse::{CachedCanonical, List, ReadOutcome};
+use omnifs_sdk::browse::{CachedCanonical, List, PageValidator, ReadOutcome};
 use omnifs_sdk::captures::{Captures, FromCaptures, PathSegment};
 use omnifs_sdk::collection::{Collection, CollectionEntry, ListCx, NoCursor, PageCursor};
 use omnifs_sdk::cx::Cx;
 use omnifs_sdk::error::{ProviderError, Result};
-use omnifs_sdk::file_attrs::{FileSize, Stability};
-use omnifs_sdk::handler::MemoryRangeReader;
+use omnifs_sdk::file_attrs::{FileSize, Stability, VersionToken};
+use omnifs_sdk::handler::{DirCx, MemoryRangeReader};
 use omnifs_sdk::identity::{Facet, IdentityCaptures};
 use omnifs_sdk::object::{
     Canonical, FacetAxis, FacetMetadata, Key, Load, Object, ObjectEntry, ObjectKind, Validator,
 };
-use omnifs_sdk::projection::{FileProjection, StreamFile};
+use omnifs_sdk::projection::{DirListing, Entry, FileProjection, StreamFile};
 use omnifs_sdk::repr::{Json, Markdown, Representable};
 use omnifs_sdk::router::{CompiledRouter, Router};
 use std::cell::RefCell;
@@ -865,6 +865,158 @@ fn anchor_collection_page_is_partial_and_carries_cursor() {
         !names.contains(&"repo0"),
         "the continuation does not restart the collection at repo0"
     );
+}
+
+// ===========================================================================
+// Page validators
+// ===========================================================================
+
+/// An anchor object whose load fails when it sees a validator: the validator
+/// of a listing page belongs to the page, never to the anchor object.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StrictOwner {
+    name: String,
+}
+impl Object for StrictOwner {
+    type Key = OwnerKey;
+    type State = ();
+    type Canonical = Json;
+    fn load(
+        cx: &Cx<()>,
+        key: &OwnerKey,
+        since: Option<Validator>,
+    ) -> impl Future<Output = Result<Load<Self>>> {
+        let seen = since.is_some() || cx.version().is_some();
+        let owner = key.owner.clone();
+        async move {
+            if seen {
+                return Err(ProviderError::internal(
+                    "the anchor object load saw the validator of a page",
+                ));
+            }
+            Ok(Load::fresh(
+                StrictOwner {
+                    name: owner.clone(),
+                },
+                Canonical::new(format!(r#"{{"name":"{owner}"}}"#).into_bytes(), None),
+            ))
+        }
+    }
+    fn decode(bytes: &[u8]) -> Result<Self> {
+        omnifs_sdk::object::decode_json(bytes)
+    }
+    fn kind() -> ObjectKind {
+        ObjectKind("test.strict_owner")
+    }
+}
+
+async fn list_repos_validated(
+    key: OwnerKey,
+    cx: ListCx<NoCursor, ()>,
+) -> Result<Collection<Repo, NoCursor>> {
+    if cx
+        .validator()
+        .is_some_and(|validator| validator.as_str() == "repos-v1")
+    {
+        return Ok(Collection::unchanged(PageValidator {
+            token: VersionToken::from("repos-v1"),
+            interval: Some(60),
+        }));
+    }
+    Ok(Collection::complete([CollectionEntry::key(RepoKey {
+        owner: key.owner.clone(),
+        repo: "gvfs".into(),
+    })])
+    .with_validator(PageValidator {
+        token: VersionToken::from("repos-v1"),
+        interval: Some(60),
+    }))
+}
+
+#[test]
+fn anchor_collection_page_validator_reaches_the_collection_and_not_the_anchor_load() {
+    let mut r = Router::<()>::new();
+    r.object::<StrictOwner>("/{owner}", |o| {
+        o.dynamic();
+        o.file("owner.json").canonical::<Json>()?;
+        o.dir("{repo}").collection(list_repos_validated)?;
+        Ok(())
+    })
+    .unwrap();
+    r.object::<Repo>("/{owner}/{repo}", |o| {
+        o.dynamic();
+        o.file("repo.json").canonical::<Json>()?;
+        Ok(())
+    })
+    .unwrap();
+    let r = r.compile().unwrap();
+
+    let cx = cx();
+    let (out, _effects) = list_wit(drive(&cx, r.list_children(&cx, "/o", None)));
+    let wit_types::ListChildrenResult::Entries(listing) = out else {
+        panic!("owner anchor lists entries");
+    };
+    let validator = listing.validator.expect("the page carries its validator");
+    assert_eq!(validator.token, "repos-v1");
+    assert_eq!(validator.interval, Some(60));
+
+    let cx = cx.with_version(Some(VersionToken::from("repos-v1")));
+    let (out, effects) = list_wit(drive(&cx, r.list_children(&cx, "/o", None)));
+    assert!(matches!(
+        out,
+        wit_types::ListChildrenResult::Unchanged(wit_types::PageValidator {
+            ref token,
+            interval: Some(60),
+        }) if token == "repos-v1"
+    ));
+    assert!(
+        effects.canonical.is_empty(),
+        "an unchanged page answers without the load of the anchor object"
+    );
+}
+
+async fn validated_dir(cx: DirCx<()>) -> Result<DirListing> {
+    if cx
+        .version()
+        .is_some_and(|validator| validator.as_str() == "dir-v1")
+    {
+        return Ok(DirListing::unchanged(PageValidator {
+            token: VersionToken::from("dir-v1"),
+            interval: None,
+        }));
+    }
+    Ok(
+        DirListing::exhaustive([Entry::file("a")]).with_validator(PageValidator {
+            token: VersionToken::from("dir-v1"),
+            interval: None,
+        }),
+    )
+}
+
+#[test]
+fn dir_handler_page_validator_lowers_and_unchanged_answers_its_validator() {
+    let mut r = Router::<()>::new();
+    r.dir("/d").handler(validated_dir).unwrap();
+    let r = r.compile().unwrap();
+
+    let cx = cx();
+    let (out, _effects) = list_wit(drive(&cx, r.list_children(&cx, "/d", None)));
+    let wit_types::ListChildrenResult::Entries(listing) = out else {
+        panic!("the dir handler lists entries");
+    };
+    let validator = listing.validator.expect("the page carries its validator");
+    assert_eq!(validator.token, "dir-v1");
+    assert_eq!(validator.interval, None);
+
+    let cx = cx.with_version(Some(VersionToken::from("dir-v1")));
+    let (out, _effects) = list_wit(drive(&cx, r.list_children(&cx, "/d", None)));
+    assert!(matches!(
+        out,
+        wit_types::ListChildrenResult::Unchanged(wit_types::PageValidator {
+            ref token,
+            interval: None,
+        }) if token == "dir-v1"
+    ));
 }
 
 // ===========================================================================

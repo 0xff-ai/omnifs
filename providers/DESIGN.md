@@ -73,8 +73,10 @@ changes:
   const generics, attribute strings, or path-name type tricks;
 - collections return child objects. When a list response contains complete
   child canonical bytes, the SDK stores them at listing time;
-- collections carry typed cursors and validators. The host stores cursor and
-  validator bytes opaquely and feeds them back to the provider;
+- collections carry typed cursors and page validators. The host stores cursor
+  and validator bytes opaquely and feeds them back to the provider: the cursor
+  to continue a listing, the validator to ask again for a page past its
+  deadline;
 - lazy and eager describe materialization from bytes already in hand. They never
   authorize an extra upstream fetch just to populate a computed field;
 - providers describe file and directory characteristics: size, content type,
@@ -524,13 +526,19 @@ The minimal SDK surface is:
 enum Collection<T: Object, C = NoCursor> {
     Complete {
         entries: Vec<CollectionEntry<T>>,
+        validator: Option<PageValidator>,
     },
     Page {
         entries: Vec<CollectionEntry<T>>,
         next: C,
+        validator: Option<PageValidator>,
     },
     Partial {
         entries: Vec<CollectionEntry<T>>,
+        validator: Option<PageValidator>,
+    },
+    Unchanged {
+        validator: PageValidator,
     },
 }
 
@@ -540,6 +548,7 @@ struct ListCx<C = NoCursor> {
 
 impl<C> ListCx<C> {
     fn cursor(&self) -> Option<&C>;
+    fn validator(&self) -> Option<&VersionToken>;
 }
 
 trait Cursor: Sized {
@@ -574,6 +583,21 @@ Collection outcomes:
   worth fetching.
 - `Collection::partial(entries)` means the listing is intentionally open or
   truncated, with no cursor. Lookup remains authoritative for navigable names.
+- `Collection::unchanged(validator)` means the validator of the call still
+  matches its page: the cached page stands, with `validator` from then on,
+  such as the validator of the call with the interval of its upstream.
+
+Each page may carry the validator of its upstream answer with
+`.with_validator(PageValidator { token, interval })`: the `ETag` of the page, or
+a token that also holds what asking for the page again needs, with the seconds
+of the interval the upstream asks between requests. The host gives the page a
+deadline from that interval, three seconds without one, and once the page is
+past it, the next listing asks for that page again with its cursor and with
+the token as `ListCx::validator()`. A conditional request answers that call:
+`RequestBuilder::page` maps `304` to `PageAnswer::Unchanged` and `200` to the
+decoded body with its `ETag`. A raw dir handler does the same with
+`DirListing::with_validator`, `DirListing::unchanged`, and `DirCx::version()`.
+A page without a validator keeps the freshness of a cached listing.
 
 No next cursor is not proof of completeness. A provider may return a short
 terminal page as `Partial` when the upstream search window, cap, or domain is
@@ -670,6 +694,8 @@ The object model must preserve current provider error semantics:
 - `Load::NotFound` means a valid object identity was absent upstream;
 - `Load::Unchanged` means a conditional validator matched and cached canonical
   bytes are still usable;
+- an `unchanged` listing answers only a call that carries the validator of a
+  cached page;
 - rate limit errors carry retry-after information when available;
 - `InvalidInput` is for malformed provider input, not missing upstream data.
 

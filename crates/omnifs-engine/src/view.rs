@@ -684,15 +684,53 @@ pub struct DirentRecord {
 
 pub use omnifs_vfs::CachedCursor;
 
+/// A cached directory listing: its pages in their order, whether it
+/// enumerates every child, and the cursor of its next page to load. A listing
+/// is paginated once it has a later page or a next cursor.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DirentsPayload {
-    pub entries: Vec<DirentRecord>,
+    pub pages: Vec<DirentsPage>,
     pub exhaustive: bool,
     pub next_cursor: Option<CachedCursor>,
-    pub paginated: bool,
+}
+
+/// One page of a cached listing: the cursor that asked for it (`None` for the
+/// first page), its validator, and its entries.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DirentsPage {
+    pub cursor: Option<CachedCursor>,
+    pub validator: Option<PageValidator>,
+    pub entries: Vec<DirentRecord>,
+}
+
+/// The validator of a cached page: the token the provider gave it, the
+/// seconds of the interval of its upstream, and the deadline after which the
+/// page is asked for again with the token.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PageValidator {
+    pub token: String,
+    pub interval: Option<u32>,
+    pub deadline: u64,
 }
 
 impl DirentsPayload {
+    /// A listing of one first page without a validator.
+    pub fn single_page(
+        entries: Vec<DirentRecord>,
+        exhaustive: bool,
+        next_cursor: Option<CachedCursor>,
+    ) -> Self {
+        Self {
+            pages: vec![DirentsPage {
+                cursor: None,
+                validator: None,
+                entries,
+            }],
+            exhaustive,
+            next_cursor,
+        }
+    }
+
     pub fn serialize(&self) -> Option<Vec<u8>> {
         postcard::to_allocvec(self).ok()
     }
@@ -701,14 +739,47 @@ impl DirentsPayload {
         postcard::from_bytes(bytes).ok()
     }
 
+    /// The entries of all pages, in page order.
+    pub fn entries(&self) -> impl Iterator<Item = &DirentRecord> {
+        self.pages.iter().flat_map(|page| page.entries.iter())
+    }
+
+    /// The page asked for with `cursor`, and the cursor of the page after it.
+    #[must_use]
+    pub fn page(
+        &self,
+        cursor: Option<&CachedCursor>,
+    ) -> Option<(&DirentsPage, Option<&CachedCursor>)> {
+        let index = self
+            .pages
+            .iter()
+            .position(|page| page.cursor.as_ref() == cursor)?;
+        let next = self
+            .pages
+            .get(index + 1)
+            .map_or(self.next_cursor.as_ref(), |page| page.cursor.as_ref());
+        Some((&self.pages[index], next))
+    }
+
+    fn paginated(&self) -> bool {
+        self.pages.len() > 1 || self.next_cursor.is_some()
+    }
+
     #[must_use]
     pub fn is_authoritative_listing(&self) -> bool {
-        self.exhaustive || self.paginated || self.next_cursor.is_some()
+        self.exhaustive || self.paginated()
     }
 
     #[must_use]
     pub fn is_complete_offline(&self) -> bool {
-        self.exhaustive || (self.paginated && self.next_cursor.is_none())
+        self.exhaustive || (self.pages.len() > 1 && self.next_cursor.is_none())
+    }
+
+    /// Remove the entry `name` from every page.
+    pub fn remove_entry(&mut self, name: &str) {
+        for page in &mut self.pages {
+            page.entries.retain(|entry| entry.name != name);
+        }
     }
 
     pub fn merged(
@@ -717,47 +788,37 @@ impl DirentsPayload {
         listing_exhaustive: bool,
     ) -> Self {
         if listing_exhaustive {
-            return Self {
-                entries: new_children.into_values().collect(),
-                exhaustive: true,
-                next_cursor: None,
-                paginated: false,
-            };
+            return Self::single_page(new_children.into_values().collect(), true, None);
         }
 
-        let (previously_exhaustive, next_cursor, paginated, mut entries) = existing_record
-            .map_or_else(
-                || (false, None, false, Vec::new()),
-                |payload| {
-                    (
-                        payload.exhaustive,
-                        payload.next_cursor,
-                        payload.paginated,
-                        payload.entries,
-                    )
-                },
-            );
+        let mut payload =
+            existing_record.unwrap_or_else(|| Self::single_page(Vec::new(), false, None));
 
         // Replace matched entries in place; entries absent from new_children
         // are untouched. No name cloning: BTreeMap::remove gives ownership of
         // both key and value.
-        for entry in &mut entries {
-            if let Some(updated) = new_children.remove(&entry.name) {
-                *entry = updated;
+        for page in &mut payload.pages {
+            for entry in &mut page.entries {
+                if let Some(updated) = new_children.remove(&entry.name) {
+                    *entry = updated;
+                }
             }
         }
 
         // Any names still left in new_children are introductions. Append them
-        // in BTreeMap order (deterministic, sorted by name).
+        // to the last page in BTreeMap order (deterministic, sorted by name).
         let introduced = !new_children.is_empty();
-        entries.extend(new_children.into_values());
-
-        Self {
-            entries,
-            exhaustive: listing_exhaustive || (previously_exhaustive && !introduced),
-            next_cursor,
-            paginated,
+        if let Some(page) = payload.pages.last_mut() {
+            page.entries.extend(new_children.into_values());
+        } else {
+            payload.pages.push(DirentsPage {
+                cursor: None,
+                validator: None,
+                entries: new_children.into_values().collect(),
+            });
         }
+        payload.exhaustive &= !introduced;
+        payload
     }
 }
 
@@ -896,7 +957,15 @@ mod tests {
     }
 
     fn names(payload: &DirentsPayload) -> Vec<&str> {
-        payload.entries.iter().map(|e| e.name.as_str()).collect()
+        payload.entries().map(|e| e.name.as_str()).collect()
+    }
+
+    fn page(cursor: Option<CachedCursor>, names: &[&str]) -> DirentsPage {
+        DirentsPage {
+            cursor,
+            validator: None,
+            entries: names.iter().map(|name| dir_record(name)).collect(),
+        }
     }
 
     // Exhaustive short-circuit: replaces everything, marks exhaustive, clears
@@ -904,47 +973,55 @@ mod tests {
     #[test]
     fn merged_exhaustive_replaces_all() {
         let existing = DirentsPayload {
-            entries: vec![dir_record("old-a"), dir_record("old-b")],
+            pages: vec![
+                page(None, &["old-a"]),
+                page(Some(CachedCursor::Page(1)), &["old-b"]),
+            ],
             exhaustive: false,
-            next_cursor: Some(CachedCursor::Page(1)),
-            paginated: true,
+            next_cursor: Some(CachedCursor::Page(2)),
         };
         let result = DirentsPayload::merged(Some(existing), new_children(&["new-x"]), true);
         assert!(result.exhaustive);
         assert_eq!(names(&result), vec!["new-x"]);
         assert!(result.next_cursor.is_none());
-        assert!(!result.paginated);
+        assert_eq!(result.pages.len(), 1);
     }
 
-    // Replacement keeps position: an entry already in the vec is updated in
+    // Replacement keeps position: an entry already in a page is updated in
     // place, not appended. Entry count does not grow.
     #[test]
     fn merged_replacement_keeps_position_and_count() {
         let existing = DirentsPayload {
-            entries: vec![dir_record("alpha"), dir_record("beta"), dir_record("gamma")],
+            pages: vec![
+                page(None, &["alpha", "beta"]),
+                page(Some(CachedCursor::Page(1)), &["gamma"]),
+            ],
             exhaustive: false,
             next_cursor: None,
-            paginated: false,
         };
-        let updated = new_children(&["beta"]);
+        let updated = new_children(&["gamma"]);
         let result = DirentsPayload::merged(Some(existing), updated, false);
-        // Count unchanged: beta was replaced, not appended.
-        assert_eq!(result.entries.len(), 3);
+        // Count unchanged: gamma was replaced in its page, not appended.
+        assert_eq!(result.entries().count(), 3);
+        assert_eq!(result.pages[1].entries.len(), 1);
         // Order unchanged: alpha, beta, gamma.
         assert_eq!(names(&result), vec!["alpha", "beta", "gamma"]);
         // No introduction: exhaustive flag is preserved as-is (false && !false = false).
         assert!(!result.exhaustive);
     }
 
-    // Introduction appends in name order and demotes an exhaustive snapshot;
-    // only an explicit exhaustive input can establish authority.
+    // Introduction appends to the last page in name order and demotes an
+    // exhaustive snapshot; only an explicit exhaustive input can establish
+    // authority. Pagination state is carried through.
     #[test]
     fn merged_introduction_appends_and_demotes_exhaustive() {
         let existing = DirentsPayload {
-            entries: vec![dir_record("alpha"), dir_record("beta")],
+            pages: vec![
+                page(None, &["alpha"]),
+                page(Some(CachedCursor::Page(1)), &["beta"]),
+            ],
             exhaustive: true,
             next_cursor: None,
-            paginated: false,
         };
         // Introduce two new names; BTreeMap order is "delta" then "gamma".
         let result =
@@ -952,7 +1029,8 @@ mod tests {
         assert!(!result.exhaustive);
         // Existing entries first, introductions appended in name (BTreeMap) order.
         assert_eq!(names(&result), vec!["alpha", "beta", "delta", "gamma"]);
-        // Pagination state is carried through.
+        assert_eq!(result.pages[1].entries.len(), 3);
+        assert!(result.is_complete_offline());
     }
 
     // No-overlap merge (empty existing): all children become introductions,
@@ -963,23 +1041,45 @@ mod tests {
         // BTreeMap insertion order is alphabetical.
         assert_eq!(names(&result), vec!["alpha", "mid", "zed"]);
         assert!(!result.exhaustive);
+        assert!(!result.is_authoritative_listing());
     }
 
     // Mix: some names replaced in place, others introduced and appended.
     #[test]
     fn merged_mixed_replace_and_introduce() {
-        let existing = DirentsPayload {
-            entries: vec![dir_record("a"), dir_record("b"), dir_record("c")],
-            exhaustive: false,
-            next_cursor: None,
-            paginated: false,
-        };
+        let existing = DirentsPayload::single_page(
+            vec![dir_record("a"), dir_record("b"), dir_record("c")],
+            false,
+            None,
+        );
         // "b" is a replacement; "d" and "e" are introductions.
         let result = DirentsPayload::merged(Some(existing), new_children(&["b", "e", "d"]), false);
-        assert_eq!(result.entries.len(), 5);
+        assert_eq!(result.entries().count(), 5);
         // Existing order preserved for a, b, c; introductions d, e appended in name order.
         assert_eq!(names(&result), vec!["a", "b", "c", "d", "e"]);
         // Introduction occurred: exhaustive demoted.
         assert!(!result.exhaustive);
+    }
+
+    // A page is found by the cursor that asked for it, with the cursor of the
+    // page after it, the listing's next cursor for the last page.
+    #[test]
+    fn page_finds_the_cursor_and_the_following_cursor() {
+        let payload = DirentsPayload {
+            pages: vec![
+                page(None, &["a"]),
+                page(Some(CachedCursor::Page(1)), &["b"]),
+            ],
+            exhaustive: false,
+            next_cursor: Some(CachedCursor::Page(2)),
+        };
+        let (first, after_first) = payload.page(None).unwrap();
+        assert_eq!(first.entries[0].name, "a");
+        assert_eq!(after_first, Some(&CachedCursor::Page(1)));
+        let (_, after_last) = payload.page(Some(&CachedCursor::Page(1))).unwrap();
+        assert_eq!(after_last, Some(&CachedCursor::Page(2)));
+        assert!(payload.page(Some(&CachedCursor::Page(2))).is_none());
+        assert!(payload.is_authoritative_listing());
+        assert!(!payload.is_complete_offline());
     }
 }

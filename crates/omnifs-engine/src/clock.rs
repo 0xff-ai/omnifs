@@ -5,6 +5,12 @@ use crate::view::Stability;
 /// Default deadline for a dynamic view leaf and a negative record, in milliseconds.
 pub const DYNAMIC_TTL_MILLIS: u64 = 3_000;
 
+/// The deadline of a listing page with a validator: the seconds of the
+/// interval of its upstream after now, else [`DYNAMIC_TTL_MILLIS`].
+pub(crate) fn page_deadline(interval: Option<u32>, now_millis: u64) -> u64 {
+    now_millis.saturating_add(interval.map_or(DYNAMIC_TTL_MILLIS, |secs| u64::from(secs) * 1000))
+}
+
 /// Translate provider stability into the single host-owned freshness policy.
 pub(crate) fn freshness_expiry(stability: Stability, now_millis: u64) -> Option<u64> {
     match stability {

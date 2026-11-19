@@ -35,6 +35,8 @@ Online and cache-only serving use the same `TreeNamespace` and fixed `MountTable
 
 Access-driven revalidation is the cache freshness boundary. An expired indexed view leaf makes the next read enter `read-file` with the cached canonical id, validator, and bytes in `ReadMode::Revalidate`, so normal provider effects apply refreshed canonical bytes or invalidations. Provider-declared timer events remain independent and use the manifest refresh interval.
 
+A cached listing keeps its pages, each with the cursor that asked for it. A page with a validator, complete or not, has the deadline of the interval of its upstream, else `DYNAMIC_TTL_MILLIS`. Before a cached listing serves online, each of its pages past its deadline is asked for again, in page order, with its cursor and validator: `unchanged` keeps the entries of the page and renews it with the validator of the answer, a changed page replaces its entries, keeps the later pages only while its next cursor stays, and records the directory as changed, and a failed answer, a rate limit included, is the error of the listing. Every `list-children` call carries the validator of the cached page of its cursor. A page without a validator keeps the freshness of a cached listing: a complete or paged listing serves until it is invalidated. While the rate-limit window of the mount is open, a cached listing serves without asking.
+
 ### Listing and lookup
 
 Lookup, listing, and read must use one shared target-resolution model. Listing must be honest about what is currently knowable without inventing provider-specific filesystem behavior.

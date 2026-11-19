@@ -33,8 +33,8 @@ use super::projection::{ProjectionStore, ProjectionStoreError};
 use crate::cache::memory::MemoryTier;
 use crate::object_id::ObjectId;
 use crate::view::{
-    AttrPayload, ByteSource, CachedCursor, DirentsPayload, EntryMeta, FileAttrsCache, FilePayload,
-    FileSize, LookupPayload,
+    AttrPayload, ByteSource, CachedCursor, DirentsPage, DirentsPayload, EntryMeta, FileAttrsCache,
+    FilePayload, FileSize, LookupPayload,
 };
 use omnifs_core::ProviderId;
 
@@ -136,13 +136,44 @@ pub(crate) enum DirentsMutation {
         entries: Vec<crate::view::DirentRecord>,
         exhaustive: bool,
     },
+    /// The next page of a listing, asked for with the listing's next cursor.
     AppendPage {
         path: Path,
-        expected_cursor: CachedCursor,
-        entries: Vec<crate::view::DirentRecord>,
+        page: DirentsPage,
         next_cursor: Option<CachedCursor>,
         exhaustive: bool,
     },
+    /// A changed cached page, asked for with its validator: it replaces the
+    /// page of its cursor and keeps the later pages only while its next
+    /// cursor stays.
+    ReplacePage {
+        path: Path,
+        page: DirentsPage,
+        next_cursor: Option<CachedCursor>,
+        exhaustive: bool,
+    },
+    /// An `unchanged` answer for the cached page of `cursor`: the page keeps
+    /// its entries, takes `interval` when the answer carries one, and gets a
+    /// new deadline from its interval.
+    RenewPage {
+        path: Path,
+        cursor: Option<CachedCursor>,
+        token: String,
+        interval: Option<u32>,
+        now_millis: u64,
+    },
+}
+
+impl DirentsMutation {
+    pub(crate) fn path(&self) -> &Path {
+        match self {
+            Self::Replace { path, .. }
+            | Self::MergeHints { path, .. }
+            | Self::AppendPage { path, .. }
+            | Self::ReplacePage { path, .. }
+            | Self::RenewPage { path, .. } => path,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -817,12 +848,7 @@ impl MountResources {
             memory_paths.insert(record.path.clone());
         }
         for mutation in &dirents {
-            let path = match mutation {
-                DirentsMutation::Replace { path, .. }
-                | DirentsMutation::MergeHints { path, .. }
-                | DirentsMutation::AppendPage { path, .. } => path,
-            };
-            memory_paths.insert(path.clone());
+            memory_paths.insert(mutation.path().clone());
         }
         for freshness in &freshness {
             memory_paths.insert(freshness.path.clone());
@@ -1580,22 +1606,24 @@ fn invalidate_parent_listing(
     let Some((parent, name)) = path.parent_and_name() else {
         return Ok(None);
     };
-    let Some(mut listing) = read_dirents_fact(tx, facts, &parent)? else {
+    let Some(listing) = read_dirents_fact(tx, facts, &parent)? else {
         return Ok(None);
     };
-    listing.entries.retain(|entry| entry.name != name);
     // An exact child invalidation makes the parent's prior completeness claim,
-    // and cursor stale. The next ordinary browse refetches the parent;
-    // rate-limited serve-stale may retain unaffected siblings.
-    listing.exhaustive = false;
-    listing.paginated = false;
-    listing.next_cursor = None;
+    // cursor, and page validators stale: the remaining entries collapse into
+    // one first page without a validator. The next ordinary browse refetches
+    // the parent; rate-limited serve-stale may retain unaffected siblings.
+    let entries = listing
+        .entries()
+        .filter(|entry| entry.name != name)
+        .cloned()
+        .collect();
     apply_dirents(
         tx,
         facts,
         &DirentsMutation::Replace {
             path: parent.clone(),
-            value: listing,
+            value: DirentsPayload::single_page(entries, false, None),
         },
     )?;
     Ok(Some(parent))
@@ -1646,10 +1674,8 @@ fn reconcile_listing_relations(
                 )?;
                 mutated.insert(parent);
             },
-            LookupPayload::Negative { .. }
-                if listing.entries.iter().any(|entry| entry.name == name) =>
-            {
-                listing.entries.retain(|entry| entry.name != name);
+            LookupPayload::Negative { .. } if listing.entries().any(|entry| entry.name == name) => {
+                listing.remove_entry(name);
                 apply_dirents(
                     tx,
                     facts,
@@ -1669,11 +1695,7 @@ fn reconcile_listing_relations(
     // transaction. Object index rows remain independently owned.
     let touched: HashSet<Path> = dirents
         .iter()
-        .map(|mutation| match mutation {
-            DirentsMutation::Replace { path, .. }
-            | DirentsMutation::MergeHints { path, .. }
-            | DirentsMutation::AppendPage { path, .. } => path.clone(),
-        })
+        .map(|mutation| mutation.path().clone())
         .collect();
     for parent in touched {
         let Some(listing) = read_dirents_fact(tx, facts, &parent)? else {
@@ -1682,11 +1704,7 @@ fn reconcile_listing_relations(
         if !listing.is_complete_offline() {
             continue;
         }
-        let names: HashSet<&str> = listing
-            .entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect();
+        let names: HashSet<&str> = listing.entries().map(|entry| entry.name.as_str()).collect();
         let mut contradictions = Vec::new();
         for guard in tx.prefix(facts, b"r:L:") {
             let (key, value) = guard.into_inner()?;
@@ -1795,24 +1813,77 @@ fn apply_dirents(
         },
         DirentsMutation::AppendPage {
             path,
-            expected_cursor,
-            entries,
+            page,
             next_cursor,
             exhaustive,
         } => {
-            let current = read_dirents_fact(tx, facts, path)?.ok_or_else(|| {
+            let mut current = read_dirents_fact(tx, facts, path)?.ok_or_else(|| {
                 ProjectionError::Inconsistent("missing accumulated listing".into())
             })?;
-            if current.next_cursor.as_ref() != Some(expected_cursor) {
+            if current.next_cursor.is_none() || current.next_cursor != page.cursor {
                 return Err(ProjectionError::Inconsistent(
                     "listing cursor changed".into(),
                 ));
             }
-            let mut merged = current;
-            merged.entries.extend(entries.iter().cloned());
-            merged.next_cursor.clone_from(next_cursor);
-            merged.exhaustive = *exhaustive;
-            (path, merged)
+            current.pages.push(page.clone());
+            current.next_cursor.clone_from(next_cursor);
+            current.exhaustive = *exhaustive;
+            (path, current)
+        },
+        DirentsMutation::ReplacePage {
+            path,
+            page,
+            next_cursor,
+            exhaustive,
+        } => {
+            let mut current = read_dirents_fact(tx, facts, path)?.ok_or_else(|| {
+                ProjectionError::Inconsistent("missing revalidated listing".into())
+            })?;
+            let index = current
+                .pages
+                .iter()
+                .position(|cached| cached.cursor == page.cursor)
+                .ok_or_else(|| {
+                    ProjectionError::Inconsistent("revalidated listing page is not cached".into())
+                })?;
+            let following = current
+                .pages
+                .get(index + 1)
+                .map_or_else(|| current.next_cursor.clone(), |later| later.cursor.clone());
+            current.pages[index] = page.clone();
+            if following != *next_cursor {
+                current.pages.truncate(index + 1);
+                current.next_cursor.clone_from(next_cursor);
+            }
+            if index + 1 == current.pages.len() {
+                current.exhaustive = *exhaustive;
+            }
+            (path, current)
+        },
+        DirentsMutation::RenewPage {
+            path,
+            cursor,
+            token,
+            interval,
+            now_millis,
+        } => {
+            let mut current = read_dirents_fact(tx, facts, path)?.ok_or_else(|| {
+                ProjectionError::Inconsistent("missing revalidated listing".into())
+            })?;
+            let validator = current
+                .pages
+                .iter_mut()
+                .find(|page| page.cursor == *cursor)
+                .and_then(|page| page.validator.as_mut())
+                .ok_or_else(|| {
+                    ProjectionError::Inconsistent(
+                        "unchanged answer for a page without a cached validator".into(),
+                    )
+                })?;
+            validator.token.clone_from(token);
+            validator.interval = *interval;
+            validator.deadline = crate::clock::page_deadline(*interval, *now_millis);
+            (path, current)
         },
     };
     tx.insert(
@@ -2087,12 +2158,7 @@ mod tests {
                 ProjectionTransition {
                     dirents: vec![DirentsMutation::Replace {
                         path: dir.clone(),
-                        value: DirentsPayload {
-                            entries: Vec::new(),
-                            exhaustive: true,
-                            next_cursor: None,
-                            paginated: false,
-                        },
+                        value: DirentsPayload::single_page(Vec::new(), true, None),
                     }],
                     invalidations: vec![Invalidation::ListingPrefix(dir.clone())],
                     ..ProjectionTransition::default()
@@ -2256,12 +2322,7 @@ mod tests {
                 ProjectionTransition {
                     dirents: vec![DirentsMutation::Replace {
                         path: parent.clone(),
-                        value: DirentsPayload {
-                            entries: Vec::new(),
-                            exhaustive: true,
-                            next_cursor: None,
-                            paginated: false,
-                        },
+                        value: DirentsPayload::single_page(Vec::new(), true, None),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2293,7 +2354,7 @@ mod tests {
                 .payload,
         )
         .unwrap();
-        assert_eq!(listing.entries[0].name, "child");
+        assert_eq!(listing.pages[0].entries[0].name, "child");
         assert!(!listing.is_complete_offline());
         store
             .publish(
@@ -2311,14 +2372,14 @@ mod tests {
             )
             .unwrap();
         assert!(
-            store.dirents_payload(&parent).unwrap().unwrap().entries[0]
+            store.dirents_payload(&parent).unwrap().unwrap().pages[0].entries[0]
                 .meta
                 .is_file()
         );
 
         publish_negative(&store, &child, Some(OBJ_ID.to_vec()), 30_000);
         let listing = store.dirents_payload(&parent).unwrap().unwrap();
-        assert!(listing.entries.is_empty());
+        assert!(listing.entries().next().is_none());
         assert!(store.negative_for_checked(&child, 1_000).unwrap());
 
         let invalidated_parent = p("/invalidated");
@@ -2333,15 +2394,14 @@ mod tests {
                     }],
                     dirents: vec![DirentsMutation::Replace {
                         path: invalidated_parent.clone(),
-                        value: DirentsPayload {
-                            entries: vec![crate::view::DirentRecord {
+                        value: DirentsPayload::single_page(
+                            vec![crate::view::DirentRecord {
                                 name: "child".into(),
                                 meta: EntryMeta::directory(),
                             }],
-                            exhaustive: true,
-                            next_cursor: None,
-                            paginated: false,
-                        },
+                            true,
+                            None,
+                        ),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2358,7 +2418,7 @@ mod tests {
             )
             .unwrap();
         let listing = store.dirents_payload(&invalidated_parent).unwrap().unwrap();
-        assert!(listing.entries.is_empty());
+        assert!(listing.entries().next().is_none());
         assert!(!listing.is_complete_offline());
 
         let partial_parent = p("/partial");
@@ -2368,15 +2428,14 @@ mod tests {
                 ProjectionTransition {
                     dirents: vec![DirentsMutation::Replace {
                         path: partial_parent.clone(),
-                        value: DirentsPayload {
-                            entries: vec![crate::view::DirentRecord {
+                        value: DirentsPayload::single_page(
+                            vec![crate::view::DirentRecord {
                                 name: "sibling".into(),
                                 meta: EntryMeta::directory(),
                             }],
-                            exhaustive: false,
-                            next_cursor: Some(crate::view::CachedCursor::Opaque("cursor".into())),
-                            paginated: true,
-                        },
+                            false,
+                            Some(crate::view::CachedCursor::Opaque("cursor".into())),
+                        ),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2393,10 +2452,11 @@ mod tests {
             )
             .unwrap();
         let listing = store.dirents_payload(&partial_parent).unwrap().unwrap();
-        assert_eq!(listing.entries.len(), 1);
-        assert_eq!(listing.entries[0].name, "sibling");
+        assert_eq!(listing.pages.len(), 1);
+        assert_eq!(listing.pages[0].entries.len(), 1);
+        assert_eq!(listing.pages[0].entries[0].name, "sibling");
         assert!(listing.next_cursor.is_none());
-        assert!(!listing.paginated);
+        assert!(!listing.is_authoritative_listing());
         assert!(!listing.is_complete_offline());
 
         let stale = p("/dir/stale");
@@ -2428,15 +2488,14 @@ mod tests {
                 ProjectionTransition {
                     dirents: vec![DirentsMutation::Replace {
                         path: parent,
-                        value: DirentsPayload {
-                            entries: vec![crate::view::DirentRecord {
+                        value: DirentsPayload::single_page(
+                            vec![crate::view::DirentRecord {
                                 name: "reverse".into(),
                                 meta: EntryMeta::directory(),
                             }],
-                            exhaustive: true,
-                            next_cursor: None,
-                            paginated: false,
-                        },
+                            true,
+                            None,
+                        ),
                     }],
                     ..ProjectionTransition::default()
                 },

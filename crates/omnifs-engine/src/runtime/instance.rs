@@ -51,6 +51,7 @@ enum Command {
         id: u64,
         path: String,
         cursor: Option<wit_types::Cursor>,
+        validator: Option<String>,
         span: tracing::Span,
         reply: tokio::sync::oneshot::Sender<ListTransport>,
     },
@@ -228,6 +229,7 @@ impl Instance {
         id: u64,
         path: String,
         cursor: Option<wit_types::Cursor>,
+        validator: Option<String>,
     ) -> ListTransport {
         let (reply, recv) = tokio::sync::oneshot::channel();
         self.tx
@@ -235,6 +237,7 @@ impl Instance {
                 id,
                 path,
                 cursor,
+                validator,
                 span: tracing::Span::current(),
                 reply,
             })
@@ -448,12 +451,12 @@ async fn drive_instance(
                                     let _ = reply.send(result);
                                 }.instrument(span)));
                             },
-                            Command::ListChildren { id, path, cursor, span, reply } => {
+                            Command::ListChildren { id, path, cursor, validator, span, reply } => {
                                 let namespace = Arc::clone(&bindings);
                                 calls.push(Box::pin(async move {
                                     let result = namespace
                                         .omnifs_provider_namespace()
-                                        .call_list_children(accessor, id, path, cursor)
+                                        .call_list_children(accessor, id, path, cursor, validator)
                                         .await
                                         .map_err(Into::into);
                                     let _ = reply.send(result);

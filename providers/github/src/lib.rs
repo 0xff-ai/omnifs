@@ -3,7 +3,7 @@
 //! github-provider: GitHub virtual filesystem provider for omnifs.
 
 use omnifs_sdk::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub(crate) use omnifs_sdk::prelude::Result;
 
@@ -17,10 +17,21 @@ use objects::{
     ReviewComment, WorkflowRun,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum OwnerKind {
     User,
     Org,
+}
+
+impl OwnerKind {
+    /// The REST scope of the owner's resources.
+    pub(crate) const fn scope(self) -> &'static str {
+        match self {
+            Self::User => "users",
+            Self::Org => "orgs",
+        }
+    }
 }
 
 /// State filter for resources.

@@ -20,7 +20,6 @@
 //! `tail -f` picks up an `AttrsChanged` grown size on its next re-stat.
 
 use crate::cache::ReplyCache;
-use crate::delayed::{PendingListings, PendingOutcome};
 use crate::export::{
     Attr, DirEntry, DirListing, NodeKind, OpenRead, OpenResult, OpenSeed, OpenTable,
     ReadOnlyExport, StateId, Status, StatusResult, ensure_read_access,
@@ -38,21 +37,9 @@ use omnifs_vfs::{
     Namespace, NsError, NsEvent,
 };
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::runtime::{Handle, RuntimeFlavor};
-
-/// Inline wait budget for proactive `READDIR` deferral.
-/// Past this duration the handler replies `NFS4ERR_DELAY` while the listing task
-/// keeps running in the background. Short enough that a cold listing never holds
-/// the reply; long enough that a warm listing still answers in one round trip.
-/// Distinct from reactive `DELAY` in [`Status::from`](crate::export::Status) for
-/// [`NsError`], which maps transient upstream errors on any op without background
-/// continuation. Only `READDIR` uses proactive deferral; `LOOKUP` resolves
-/// inline.
-const NFS_INLINE_BUDGET: Duration = Duration::from_millis(75);
 
 /// One inode's protocol-local state. This is the NFS analogue of the FUSE node
 /// entry: the stable identity a `(generation, id)` filehandle rehydrates from,
@@ -110,8 +97,6 @@ pub struct Export {
     /// Invalidation and live-growth events, drained inline after each namespace
     /// op so the filesystem applies them with drain-before-answer ordering.
     events: Mutex<EventStream>,
-    /// Proactive deferral for provider-backed `READDIR`.
-    delayed_lists: PendingListings,
     /// NFS inode id -> protocol state. `Arc` so the filehandle persister thread
     /// snapshots the same table the adapter mutates.
     inodes: Arc<DashMap<u64, Inode>>,
@@ -158,7 +143,6 @@ impl Export {
             "NFS adapter requires a multi-thread Tokio runtime because sync NFS workers call Handle::block_on"
         );
         let events = Mutex::new(namespace.subscribe());
-        let delayed_lists = PendingListings::new(rt.clone());
         let generation = persist
             .as_ref()
             .map_or_else(crate::protocol::filehandle::generation, |init| {
@@ -238,7 +222,6 @@ impl Export {
             namespace,
             replies: ReplyCache::new(),
             events,
-            delayed_lists,
             inodes,
             by_node,
             next_ino,
@@ -318,7 +301,6 @@ impl Export {
             match event {
                 NsEvent::InvalidateSubtree { path } => {
                     self.replies.invalidate(&path);
-                    self.delayed_lists.reset(&path);
                     if path.is_root() {
                         self.grown_sizes.clear();
                     } else {
@@ -460,33 +442,18 @@ impl Export {
 
     // --- listing -------------------------------------------------------------
 
-    /// The truth computation for one directory: drain every namespace page into a
-    /// finite snapshot, as a `'static` future factory the deferral table spawns.
-    /// Errors are logged and mapped to `Status` here so the table stays
-    /// protocol-agnostic.
-    fn list_op(
-        &self,
-        node: Path,
-    ) -> impl FnOnce() -> Pin<Box<dyn Future<Output = crate::delayed::ListResult> + Send>> + use<>
-    {
-        let namespace = Arc::clone(&self.namespace);
-        move || {
-            Box::pin(async move {
-                let mut entries = Vec::new();
-                let mut cursor = DirCursor::start();
-                loop {
-                    let page = namespace.readdir(node.clone(), cursor, 0).await.map_err(|error| {
-                        tracing::warn!(op = "readdir", error = %error, "NFS namespace readdir failed");
-                        Status::from(&error)
-                    })?;
-                    entries.extend(page.entries);
-                    match page.next {
-                        Some(next) => cursor = next,
-                        None => break,
-                    }
-                }
-                Ok(entries)
-            })
+    /// Drain every namespace page of `node` into a finite listing, inline like a
+    /// lookup: the listing waits for the answers that the namespace asks for it.
+    fn list(&self, node: &Path) -> Result<Vec<NsDirEntry>, NsError> {
+        let mut entries = Vec::new();
+        let mut cursor = DirCursor::start();
+        loop {
+            let page = self.block_on_namespace(self.namespace.readdir(node.clone(), cursor, 0))?;
+            entries.extend(page.entries);
+            match page.next {
+                Some(next) => cursor = next,
+                None => return Ok(entries),
+            }
         }
     }
 
@@ -674,23 +641,11 @@ impl ReadOnlyExport for Export {
         drop(inode);
 
         let node = body.node().ok_or(Status::Stale)?;
-        // Proactive deferral only. On persistent failure the namespace does not
-        // cache the error, so each retry may re-defer until the listing succeeds
-        // or maps to a terminal `Status`.
-        let outcome =
-            self.delayed_lists
-                .resolve(node.clone(), NFS_INLINE_BUDGET, self.list_op(node.clone()));
-        self.apply_pending_events();
-        match outcome {
-            PendingOutcome::Ready(result) => {
-                self.apply_pending_events();
-                match result.as_ref() {
-                    Ok(entries) => Ok(self.snapshot(scope, id, &node, entries)),
-                    Err(status) => Err(*status),
-                }
-            },
-            PendingOutcome::Pending => Err(Status::Delay),
-        }
+        let entries = self.list(&node).map_err(|error| {
+            tracing::warn!(op = "readdir", error = %error, "NFS namespace readdir failed");
+            Status::from(&error)
+        })?;
+        Ok(self.snapshot(scope, id, &node, &entries))
     }
 
     fn read(&self, id: u64) -> StatusResult<Vec<u8>> {
@@ -909,6 +864,7 @@ mod tests {
     };
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::time::Duration;
 
