@@ -158,6 +158,7 @@ pub(crate) enum DirentsMutation {
     RenewPage {
         path: Path,
         cursor: Option<CachedCursor>,
+        token: String,
         interval: Option<u32>,
         now_millis: u64,
     },
@@ -1862,6 +1863,7 @@ fn apply_dirents(
         DirentsMutation::RenewPage {
             path,
             cursor,
+            token,
             interval,
             now_millis,
         } => {
@@ -1878,10 +1880,9 @@ fn apply_dirents(
                         "unchanged answer for a page without a cached validator".into(),
                     )
                 })?;
-            if interval.is_some() {
-                validator.interval = *interval;
-            }
-            validator.deadline = crate::clock::page_deadline(validator.interval, *now_millis);
+            validator.token.clone_from(token);
+            validator.interval = *interval;
+            validator.deadline = crate::clock::page_deadline(*interval, *now_millis);
             (path, current)
         },
     };

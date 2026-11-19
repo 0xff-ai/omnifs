@@ -599,7 +599,12 @@ mod tests {
 
     #[test]
     fn unchanged_answers_only_a_validated_call_and_page_validators_are_version_tokens() {
-        let unchanged = Ok(wit_types::ListChildrenResult::Unchanged(Some(60)));
+        let unchanged = Ok(wit_types::ListChildrenResult::Unchanged(
+            wit_types::PageValidator {
+                token: "v1".to_owned(),
+                interval: Some(60),
+            },
+        ));
         let error = validate_list(&unchanged, &effects(), false, |_| true).unwrap_err();
         assert!(error.contains("without a validator"));
         validate_list(&unchanged, &effects(), true, |_| true).unwrap();

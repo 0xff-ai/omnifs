@@ -222,12 +222,12 @@ interface types {
     }
 
     /// List-children result. `unchanged` answers a call with a `validator`:
-    /// the cached page of that validator stands, with the seconds of the
-    /// interval of its upstream.
+    /// the cached page of that validator stands, with the validator it keeps
+    /// from then on.
     variant list-children-result {
         entries(dir-listing),
         subtree(tree-ref),
-        unchanged(option<u32>),
+        unchanged(page-validator),
     }
 
     /// A directory listing returned by a provider, pairing child entries

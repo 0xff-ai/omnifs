@@ -381,11 +381,12 @@ impl<'a> EffectApplier<'a> {
                 });
                 ListOutcome::Subtree(tree)
             },
-            wit_types::ListChildrenResult::Unchanged(interval) => {
+            wit_types::ListChildrenResult::Unchanged(validator) => {
                 transition.dirents.push(DirentsMutation::RenewPage {
                     path: path.clone(),
                     cursor: request.cursor.clone(),
-                    interval,
+                    token: validator.token,
+                    interval: validator.interval,
                     now_millis,
                 });
                 ListOutcome::Unchanged

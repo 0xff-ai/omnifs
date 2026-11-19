@@ -462,7 +462,7 @@ impl Owner {
             ..
         } = answer
         else {
-            return Ok(Collection::unchanged(None));
+            return unchanged(&cx);
         };
         let len = repos.len() as u64;
         let entries = repos
@@ -487,7 +487,10 @@ impl Owner {
         )?;
         Ok(with_page_validator(
             collection,
-            validator.map(|etag| encode_validator(&RepoValidator { kind, etag: etag.0 })),
+            encode_validator(&RepoValidator {
+                kind,
+                etag: page_etag(validator)?.0,
+            }),
         ))
     }
 }
@@ -568,7 +571,7 @@ impl Repo {
             ..
         } = answer
         else {
-            return Ok(Collection::unchanged(None));
+            return unchanged(&cx);
         };
         let len = runs.workflow_runs.len() as u64;
         let entries = runs
@@ -594,7 +597,7 @@ impl Repo {
             .collect();
         Ok(with_page_validator(
             page_or_complete(entries, len, 30, PageCursor(page + 1))?,
-            validator,
+            page_etag(validator)?,
         ))
     }
 }
@@ -653,7 +656,7 @@ impl PullRequest {
             ..
         } = answer
         else {
-            return Ok(Collection::unchanged(None));
+            return unchanged(&cx);
         };
         let len = files.len() as u64;
         let entries = files
@@ -674,7 +677,7 @@ impl PullRequest {
             .collect::<Vec<_>>();
         Ok(with_page_validator(
             page_or_complete(entries, len, FILE_PAGE_SIZE, PageCursor(page + 1))?,
-            validator,
+            page_etag(validator)?,
         ))
     }
 
@@ -699,7 +702,7 @@ impl PullRequest {
             ..
         } = answer
         else {
-            return Ok(Collection::unchanged(None));
+            return unchanged(&cx);
         };
         let len = reviews.len() as u64;
         let entries = reviews
@@ -720,15 +723,16 @@ impl PullRequest {
             .collect::<Vec<_>>();
         Ok(with_page_validator(
             page_or_complete(entries, len, REVIEW_PAGE_SIZE, PageCursor(page + 1))?,
-            validator,
+            page_etag(validator)?,
         ))
     }
 
     /// The first page asks for the pull request with the `ETag` of its
-    /// validator: an unchanged head keeps its SHA, and the check runs of that
-    /// head ask with their own `ETag`, while a changed pull request asks for
-    /// the check runs of its head in full, so the page takes the new
-    /// validator of the pull request.
+    /// validator, and the check runs of the head that the pull request names
+    /// ask with their own `ETag` while the head is that of the validator, or
+    /// in full for another head. The page keeps the `ETag` of the pull request
+    /// that its answer brought, so an unchanged page of check runs after a
+    /// changed pull request takes it too.
     pub(crate) async fn checks(
         key: PullKey,
         cx: ListCx<CheckCursor>,
@@ -760,15 +764,17 @@ impl PullRequest {
                     PageAnswer::Fresh {
                         value, validator, ..
                     },
-                    _,
+                    known,
                 ) => (
                     value.head.sha.clone(),
                     1,
-                    validator.map(|etag| PullValidator {
-                        etag: etag.0,
-                        sha: value.head.sha,
+                    Some(PullValidator {
+                        etag: page_etag(validator)?.0,
+                        sha: value.head.sha.clone(),
                     }),
-                    None,
+                    known
+                        .filter(|(pull, _)| pull.sha == value.head.sha)
+                        .map(|(_, runs)| runs),
                 ),
                 (PageAnswer::Unchanged { .. }, Some((pull, runs))) => {
                     (pull.sha.clone(), 1, Some(pull), Some(runs))
@@ -785,7 +791,7 @@ impl PullRequest {
             .get(format!(
                 "/repos/{repo}/commits/{sha}/check-runs?per_page={CHECK_RUN_PAGE_SIZE}&page={page}"
             ))
-            .maybe_if_none_match(runs_since.map(VersionToken).as_ref())
+            .maybe_if_none_match(runs_since.clone().map(VersionToken).as_ref())
             .page::<CheckRunsResponse>()
             .await?;
         let PageAnswer::Fresh {
@@ -794,11 +800,17 @@ impl PullRequest {
             ..
         } = answer
         else {
-            return Ok(Collection::unchanged(None));
+            let runs = runs_since.ok_or_else(|| {
+                ProviderError::internal("the check runs answered 304 to a request without an ETag")
+            })?;
+            return Ok(Collection::unchanged(PageValidator {
+                token: encode_validator(&CheckValidator { pull, runs }),
+                interval: None,
+            }));
         };
-        let validator = runs_etag.and_then(|runs| {
-            (cx.cursor().is_some() || pull.is_some())
-                .then(|| encode_validator(&CheckValidator { pull, runs: runs.0 }))
+        let validator = encode_validator(&CheckValidator {
+            pull,
+            runs: page_etag(runs_etag)?.0,
         });
         let len = runs.check_runs.len() as u64;
         let entries = runs
@@ -855,7 +867,7 @@ impl Review {
             ..
         } = answer
         else {
-            return Ok(Collection::unchanged(None));
+            return unchanged(&cx);
         };
         let len = comments.len() as u64;
         let entries = comments
@@ -877,7 +889,7 @@ impl Review {
             .collect::<Vec<_>>();
         Ok(with_page_validator(
             page_or_complete(entries, len, REVIEW_PAGE_SIZE, PageCursor(page + 1))?,
-            validator,
+            page_etag(validator)?,
         ))
     }
 }
@@ -907,14 +919,26 @@ impl Notification {
                 // the seconds of `X-Poll-Interval`, on each answer.
                 let interval = answer
                     .header("x-poll-interval")
-                    .and_then(|seconds| seconds.trim().parse::<u32>().ok());
+                    .map(|seconds| {
+                        seconds.trim().parse::<u32>().map_err(|error| {
+                            ProviderError::invalid_input(format!(
+                                "X-Poll-Interval {seconds:?}: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
                 let PageAnswer::Fresh {
                     value: notifications,
                     validator,
                     ..
                 } = answer
                 else {
-                    return Ok(DirListing::unchanged(interval));
+                    let token = cx.version().cloned().ok_or_else(|| {
+                        ProviderError::internal(
+                            "the notifications answered 304 to a request without an ETag",
+                        )
+                    })?;
+                    return Ok(DirListing::unchanged(PageValidator { token, interval }));
                 };
                 let len = notifications.len() as u64;
                 let entries = notifications
@@ -932,9 +956,10 @@ impl Notification {
                 } else {
                     DirListing::paged(entries, Cursor::Page(page + 1))
                 };
-                if let Some(token) = validator {
-                    listing = listing.with_validator(PageValidator { token, interval });
-                }
+                listing = listing.with_validator(PageValidator {
+                    token: page_etag(validator)?,
+                    interval,
+                });
                 for notification in notifications {
                     if notification.id.parse::<ThreadId>().is_ok() {
                         listing = listing.preload_file(
@@ -1098,19 +1123,35 @@ fn page_or_complete<T: omnifs_sdk::object::Object, C: omnifs_sdk::collection::Cu
     }
 }
 
+/// The `ETag` of a page answer, which the host asks for the page again with.
+fn page_etag(validator: Option<VersionToken>) -> Result<VersionToken> {
+    validator.ok_or_else(|| ProviderError::internal("a page answered without an ETag"))
+}
+
 /// A page with `token` as its validator, the `ETag` of its answer or a
 /// validator that carries it.
 fn with_page_validator<T: omnifs_sdk::object::Object, C: omnifs_sdk::collection::Cursor>(
     collection: Collection<T, C>,
-    token: Option<VersionToken>,
+    token: VersionToken,
 ) -> Collection<T, C> {
-    match token {
-        Some(token) => collection.with_validator(PageValidator {
-            token,
-            interval: None,
-        }),
-        None => collection,
-    }
+    collection.with_validator(PageValidator {
+        token,
+        interval: None,
+    })
+}
+
+/// The page of the validator of the call stands with that validator, which
+/// the `304` of its request answered.
+fn unchanged<T: omnifs_sdk::object::Object, C: omnifs_sdk::collection::Cursor>(
+    cx: &ListCx<C>,
+) -> Result<Collection<T, C>> {
+    let token = cx.validator().cloned().ok_or_else(|| {
+        ProviderError::internal("a page answered 304 to a request without an ETag")
+    })?;
+    Ok(Collection::unchanged(PageValidator {
+        token,
+        interval: None,
+    }))
 }
 
 fn encode_validator<T: Serialize>(validator: &T) -> VersionToken {

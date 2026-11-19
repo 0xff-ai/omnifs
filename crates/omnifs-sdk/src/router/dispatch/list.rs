@@ -86,9 +86,12 @@ impl<S> CompiledRouter<S> {
                 Some(_) => {
                     let projection = collection(cursor.clone()).await?;
                     if let Some(projection) = &projection
-                        && let DirPage::Unchanged { interval } = projection.page()
+                        && let DirPage::Unchanged { validator } = projection.page()
                     {
-                        return Ok(List::unchanged(*interval, projection.project_effects()?));
+                        return Ok(List::unchanged(
+                            validator.clone(),
+                            projection.project_effects()?,
+                        ));
                     }
                     Some(projection)
                 },

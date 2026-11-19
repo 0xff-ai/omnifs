@@ -97,6 +97,15 @@ pub async fn answering<T>(
     (output, requests)
 }
 
+/// An answer `304` without headers.
+pub fn not_modified() -> HttpResponse {
+    HttpResponse {
+        status: 304,
+        headers: Vec::new(),
+        body: Vec::new(),
+    }
+}
+
 /// The value of header `name` of `request`.
 pub fn request_header<'a>(request: &'a HttpRequest, name: &str) -> Option<&'a str> {
     request

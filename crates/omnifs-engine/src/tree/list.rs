@@ -142,10 +142,10 @@ impl EngineNamespace {
 
     /// Ask the provider again, in page order, for each page of a cached
     /// listing whose validator is past its deadline, with its cursor and its
-    /// validator. `unchanged` renews the deadline of the page; a changed page
-    /// replaces its entries, keeps the later pages only while its next cursor
-    /// stays, and records the directory as changed. A rate limit serves the
-    /// listing as it stands.
+    /// validator. `unchanged` renews the page with the validator of the
+    /// answer; a changed page replaces its entries, keeps the later pages only
+    /// while its next cursor stays, and records the directory as changed. A
+    /// failed answer, a rate limit included, is the error of the listing.
     async fn revalidate_pages(
         &self,
         runtime: &Runtime,
@@ -178,7 +178,6 @@ impl EngineNamespace {
                         "revalidated listing page resolved to a host-tree handoff",
                     ));
                 },
-                Err(error) if error.is_provider_rate_limited() => return Ok(dirents),
                 Err(error) => return Err(error.into()),
             }
             dirents = cached_dirents(&runtime.resources, path)?

@@ -538,7 +538,7 @@ enum Collection<T: Object, C = NoCursor> {
         validator: Option<PageValidator>,
     },
     Unchanged {
-        interval: Option<u32>,
+        validator: PageValidator,
     },
 }
 
@@ -583,8 +583,9 @@ Collection outcomes:
   worth fetching.
 - `Collection::partial(entries)` means the listing is intentionally open or
   truncated, with no cursor. Lookup remains authoritative for navigable names.
-- `Collection::unchanged(interval)` means the validator of the call still
-  matches its page: the cached page stands.
+- `Collection::unchanged(validator)` means the validator of the call still
+  matches its page: the cached page stands, with `validator` from then on,
+  such as the validator of the call with the interval of its upstream.
 
 Each page may carry the validator of its upstream answer with
 `.with_validator(PageValidator { token, interval })`: the `ETag` of the page, or

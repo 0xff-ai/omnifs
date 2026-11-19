@@ -172,7 +172,7 @@ A file-shaped object projects as a single file, not a directory: `r.file_object:
 
 ## HTTP, batching, pagination, rate limits
 
-- Conditional pages: `cx.version()` (`cx.validator()` in a collection) is the validator of the cached page a list call asks for. Send it with `.maybe_if_none_match(..)` and the `.page::<T>()` terminal, which gives `PageAnswer::Unchanged` for `304` and the decoded body with its `ETag` for `200`, both with the headers of the answer; a dir handler answers `DirListing::unchanged(interval)` or `.with_validator(..)`. Object loads get `since` handed to them.
+- Conditional pages: `cx.version()` (`cx.validator()` in a collection) is the validator of the cached page a list call asks for. Send it with `.maybe_if_none_match(..)` and the `.page::<T>()` terminal, which gives `PageAnswer::Unchanged` for `304` and the decoded body with its `ETag` for `200`, both with the headers of the answer; a dir handler answers `DirListing::unchanged(validator)`, with the validator the page keeps, or `.with_validator(..)`. Object loads get `since` handed to them.
 - Two terminal layers on the request builder: object-layer `.load::<T>()`/`conditional` (three-state) vs structural `.json::<T>()`/`.send_checked()` (two-state, errors on non-2xx). Pick deliberately.
 - Batch independent fetches with `join_all([f1, f2, ..])`: it polls the async host-import futures together and returns results in input order. There is no provider-managed resume batch or positional callout queue.
 - Pagination: for a raw dir listing return `DirListing::paged(entries, Cursor::Page(n + 1))`; for an object collection return `Collection::page(entries).next(cursor)`; the host echoes the cursor back on continuation.

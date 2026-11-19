@@ -471,8 +471,7 @@ impl From<Lookup> for wit_types::LookupChildResult {
 }
 
 /// A list result: a listing, a subtree handoff, or the cached page of the
-/// validator of the call standing, with the seconds of the interval of its
-/// upstream.
+/// validator of the call standing, with the validator it keeps from then on.
 #[derive(Clone, Debug)]
 pub enum List {
     Entries(Listing),
@@ -480,7 +479,7 @@ pub enum List {
         tree: u64,
     },
     Unchanged {
-        interval: Option<u32>,
+        validator: PageValidator,
         effects: Effects,
     },
 }
@@ -494,8 +493,8 @@ impl List {
         Self::Subtree { tree }
     }
 
-    pub fn unchanged(interval: Option<u32>, effects: Effects) -> Self {
-        Self::Unchanged { interval, effects }
+    pub fn unchanged(validator: PageValidator, effects: Effects) -> Self {
+        Self::Unchanged { validator, effects }
     }
 
     #[doc(hidden)]
@@ -508,9 +507,10 @@ impl List {
             Self::Subtree { tree } => {
                 (wit_types::ListChildrenResult::Subtree(tree), Effects::new())
             },
-            Self::Unchanged { interval, effects } => {
-                (wit_types::ListChildrenResult::Unchanged(interval), effects)
-            },
+            Self::Unchanged { validator, effects } => (
+                wit_types::ListChildrenResult::Unchanged(validator.into()),
+                effects,
+            ),
         }
     }
 }
