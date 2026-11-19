@@ -222,6 +222,23 @@ impl RpcClient {
         .await
     }
 
+    /// Waits for the daemon to be ready, as its `WatchPhase` stream gives
+    /// it: the error of a daemon that requires recovery, or of one that ends
+    /// before it is ready.
+    pub(crate) async fn ready_phase(&self) -> anyhow::Result<()> {
+        let mut client = self.client().await?;
+        let phases = client
+            .watch_phase(Request::new(wire::Empty {}))
+            .await
+            .map_err(|status| status_error(&status))?
+            .into_inner();
+        until_ready(phases.map(|item| match item {
+            Ok(event) => grpc::phase_event(&event).map_err(anyhow::Error::from),
+            Err(status) => Err(status_error(&status)),
+        }))
+        .await
+    }
+
     pub(crate) async fn list_mounts(&self) -> anyhow::Result<Vec<MountRecord>> {
         let response = bounded_unary!(self, list_mounts, wire::Empty {}).into_inner();
         response
@@ -533,6 +550,26 @@ async fn settle(
     Ok(())
 }
 
+/// Takes `phases` up to a ready daemon: the error of one that requires
+/// recovery, or of their end before it is ready.
+async fn until_ready(
+    phases: impl tokio_stream::Stream<Item = anyhow::Result<PhaseEvent>>,
+) -> anyhow::Result<()> {
+    let mut phases = std::pin::pin!(phases);
+    while let Some(phase) = phases.next().await {
+        match phase? {
+            PhaseEvent::Starting => {},
+            PhaseEvent::Ready => return Ok(()),
+            PhaseEvent::RecoveryRequired { error } => {
+                return Err(anyhow::anyhow!("daemon requires recovery: {error}"))
+                    .with_exit_code(ExitCode::DaemonUnavailable);
+            },
+        }
+    }
+    Err(anyhow::anyhow!("the daemon ended before it was ready"))
+        .with_exit_code(ExitCode::DaemonUnavailable)
+}
+
 fn status_error(status: &tonic::Status) -> anyhow::Error {
     if let Ok(detail) = wire::ErrorDetail::decode(status.details())
         && let Ok(error) = grpc::error_detail(&detail)
@@ -603,6 +640,29 @@ mod tests {
             .is_err(),
             "a starting daemon settles"
         );
+    }
+
+    /// `until_ready` takes a starting daemon up to its readiness, gives the
+    /// error of a daemon that requires recovery, and of one that ends before
+    /// it is ready.
+    #[tokio::test]
+    async fn until_ready_waits_for_a_ready_daemon() {
+        until_ready(open_phases(vec![PhaseEvent::Starting, PhaseEvent::Ready]))
+            .await
+            .unwrap();
+        let error = until_ready(open_phases(vec![PhaseEvent::RecoveryRequired {
+            error: "control store could not be opened".into(),
+        }]))
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "daemon requires recovery: control store could not be opened"
+        );
+        let error = until_ready(tokio_stream::iter([Ok(PhaseEvent::Starting)]))
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "the daemon ended before it was ready");
     }
 
     /// `settle` ends with the stream of a daemon that ends, and stops at an

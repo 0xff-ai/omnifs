@@ -9,6 +9,7 @@ use crate::error::ExitCode;
 use crate::ui::output::{Output, OutputMode};
 
 #[derive(Parser)]
+#[allow(clippy::struct_excessive_bools)] // independent global flags of the command line
 #[command(
     name = "omnifs",
     version,
@@ -49,6 +50,10 @@ pub struct Cli {
     /// Approve confirmation-only decisions.
     #[arg(long, global = true, help_heading = "Global options")]
     pub yes: bool,
+
+    /// Wait for a daemon that another process starts, without starting one.
+    #[arg(long, global = true, help_heading = "Global options")]
+    pub wait_for_daemon: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,

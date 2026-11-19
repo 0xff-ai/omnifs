@@ -398,6 +398,80 @@ async fn status_ready_gives_a_recovering_daemon_with_its_error() {
     daemon.stop().await;
 }
 
+/// A command with `--wait-for-daemon` started without the folder of its
+/// profile starts no daemon, and ends with the daemon that another process
+/// starts after it, once that daemon is ready.
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_for_daemon_ends_with_the_daemon_of_another_process_once_it_is_ready() {
+    let parent = tempfile::tempdir().expect("parent of the profile");
+    let profile = parent.path().join("profile");
+    let mut command = Command::new(omnifs_bin())
+        .args([
+            "--wait-for-daemon",
+            "--output",
+            "json",
+            "mount",
+            "rm",
+            "absent",
+            "--dry-run",
+        ])
+        .env("OMNIFS_HOME", &profile)
+        .env("NO_COLOR", "1")
+        .env("RUST_LOG", "warn")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn omnifs with --wait-for-daemon");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        command.try_wait().expect("poll the command").is_none(),
+        "the command waits for a daemon"
+    );
+    assert!(!profile.exists(), "the command starts no daemon");
+
+    let endpoint = Bootstrap::<Client>::under_root(&profile);
+    let mut daemon = DaemonGuard {
+        child: Some(
+            Command::new(omnifs_bin())
+                .arg("daemon")
+                .env("OMNIFS_HOME", &profile)
+                .env("RUST_LOG", "warn")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn omnifs daemon"),
+        ),
+        endpoint: endpoint.clone(),
+    };
+    let output = tokio::time::timeout(
+        STARTUP_TIMEOUT,
+        tokio::task::spawn_blocking(move || command.wait_with_output()),
+    )
+    .await
+    .expect("the command ends with the daemon")
+    .expect("join the command")
+    .expect("wait for the command");
+    assert_success(&output, "mount rm --dry-run with --wait-for-daemon");
+    let inventory = client(&endpoint.control_socket())
+        .await
+        .expect("connect to the daemon")
+        .get_inventory(unary(wire::Empty {}))
+        .await
+        .expect("the inventory of the daemon")
+        .into_inner()
+        .inventory
+        .expect("an inventory");
+    assert_eq!(
+        grpc::daemon_inventory(&inventory)
+            .expect("a valid inventory")
+            .phase,
+        omnifs_api::DaemonPhase::Ready,
+        "the command ends once the daemon is ready"
+    );
+    daemon.stop().await;
+}
+
 /// `status --ready` without a daemon gives the status at once and starts
 /// none.
 #[tokio::test(flavor = "multi_thread")]
