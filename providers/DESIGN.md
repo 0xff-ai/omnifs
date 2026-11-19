@@ -785,9 +785,10 @@ of each comment. Its first full listing takes the rows of
 repository, then the GitHub GraphQL counts of the comments of each item, where
 an item with another count takes the ids of its comments. After it, each answer
 past the deadline is a check of each page of the rows since the time of the last
-row, the first with the `ETag` of that time, and of the counts, where another
-count of a kind takes the numbers of its items, and an item that GitHub GraphQL
-cannot resolve leaves. Before the first
+row, the first with the `ETag` of that time, and of the counts, at most 100
+items a `POST`, where another count of a kind takes the numbers of its items,
+and an item that GitHub GraphQL cannot resolve leaves; each request is a part,
+and the host keeps the parts until the last one. Before the first
 full listing ends, the feed of an item answers for it from
 `GET /repos/{owner}/{repo}/issues/{number}` and takes its comments at the first
 read of its `comments/`.

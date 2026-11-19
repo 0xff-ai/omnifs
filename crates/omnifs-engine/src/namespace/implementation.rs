@@ -307,17 +307,18 @@ impl EngineNamespace {
             .ok_or_else(|| TreeError::offline_miss(format!("mount {mount} is cache-only")))
     }
 
+    /// The entry of `mount`: an active mount, or a mount without its provider,
+    /// which serves its projection as a cache-only entry.
     pub(crate) fn entry_for(&self, mount: &str) -> Result<&MountEntry, TreeError> {
         let entry = self
             .configured_entry(mount)
             .ok_or_else(|| TreeError::not_found(format!("no such mount: {mount}")))?;
         match entry.availability() {
-            crate::MountAvailability::Active => Ok(entry),
+            crate::MountAvailability::Active | crate::MountAvailability::ProviderUnavailable => {
+                Ok(entry)
+            },
             crate::MountAvailability::AuthRequired => Err(TreeError::auth_required(format!(
                 "mount {mount} requires a compatible credential"
-            ))),
-            crate::MountAvailability::ProviderUnavailable => Err(TreeError::internal(format!(
-                "mount {mount} provider is unavailable"
             ))),
         }
     }
@@ -692,14 +693,17 @@ impl EngineNamespace {
         )
     }
 
-    /// The epoch of the changes of `node` at `id`: that of its fact, which a
-    /// fed node of another facet of its object shares with the node of the
-    /// first facet.
+    /// The epoch of the changes of `node` at `id`: that of its facts, which a
+    /// node under an anchor of another facet of an object shares with the
+    /// node under the anchor of its claim.
     fn node_epoch(&self, id: &Path, node: &crate::Node) -> u64 {
-        let fact = node.fact().map(|fact| mount_full_path(node.mount(), fact));
-        self.node_epochs
-            .get(fact.as_ref().unwrap_or(id))
-            .map_or(0, |epoch| *epoch)
+        let fact = mount_full_path(node.mount(), node.fact());
+        let at = if node.fact() == node.path() {
+            id
+        } else {
+            &fact
+        };
+        self.node_epochs.get(at).map_or(0, |epoch| *epoch)
     }
 
     /// The change counter for a node, folding the served-mount set into the

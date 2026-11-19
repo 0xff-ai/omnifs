@@ -92,7 +92,7 @@ impl EngineNamespace {
             parent.mount().to_string(),
             entry,
             parent.path(),
-            parent.fact(),
+            Some(parent.fact()),
             name,
         )
         .await
@@ -101,8 +101,10 @@ impl EngineNamespace {
     /// Shared body for [`resolve`](Self::resolve) and
     /// [`resolve_child`](Self::resolve_child): resolve `name` under `parent`
     /// (a mount-relative directory path) on the runtime serving `mount`. A
-    /// fed `parent` gives the path of its facts, under which the child is fed
-    /// when its fact is.
+    /// fed `parent` gives the path of its facts. A path under an anchor of
+    /// another facet of an object resolves as the same path under the anchor
+    /// of the claim of the object, without the provider, and the anchor
+    /// itself keeps that anchor as the path of its facts.
     async fn resolve_child_in(
         &self,
         mount: String,
@@ -144,18 +146,48 @@ impl EngineNamespace {
             };
         }
 
+        let fact = match parent_fact {
+            Some(parent_fact) => parent_fact.join(name).map_err(|error| {
+                TreeError::invalid_input(format!("resolve_child: invalid name {name:?}: {error}"))
+            })?,
+            None => under_facet_anchor(resources, &rel)?,
+        };
+        if fact != rel {
+            let (fact_parent, _) = fact
+                .parent_and_name()
+                .ok_or_else(|| TreeError::internal(format!("{fact} has no parent")))?;
+            let node =
+                Box::pin(self.resolve_child_in(mount, entry, &fact_parent, None, name)).await?;
+            return Ok(node.at(rel));
+        }
+        let anchor = resources
+            .facet_anchor(&rel)
+            .map_err(|error| TreeError::internal(error.to_string()))?;
+        let node = self
+            .resolve_own_child(mount, entry, parent, name, rel)
+            .await?;
+        Ok(match anchor {
+            Some(anchor) => node.with_fact(anchor),
+            None => node,
+        })
+    }
+
+    /// Resolve `name` under `parent` at its own path, `rel`.
+    async fn resolve_own_child(
+        &self,
+        mount: String,
+        entry: &crate::registry::MountEntry,
+        parent: &Path,
+        name: &str,
+        rel: Path,
+    ) -> Result<Node> {
+        let resources = entry.resources();
         let offline = entry.runtime().is_none();
         // A fed fact is served once its feeds have answered, so its lookup
         // asks the provider for their claims.
-        let fact = match parent_fact {
-            Some(parent_fact) => &parent_fact.join(name).map_err(|error| {
-                TreeError::invalid_input(format!("resolve_child: invalid name {name:?}: {error}"))
-            })?,
-            None => &rel,
-        };
         let fed = !offline
             && resources
-                .is_fed(fact)
+                .is_fed(&rel)
                 .map_err(|error| TreeError::internal(error.to_string()))?;
         if !fed && let Some(node) = cached_child_node(entry, &mount, parent, name, &rel)? {
             return Ok(node);
@@ -167,7 +199,7 @@ impl EngineNamespace {
             LookupOutcome::Entry(entry) if fed => Ok(Node::fed(
                 mount,
                 entry.path().clone(),
-                fact.clone(),
+                entry.path().clone(),
                 entry.meta().clone(),
             )),
             LookupOutcome::Entry(entry) => Ok(Node::new(
@@ -315,6 +347,28 @@ fn cached_child_node(
         )));
     }
     Ok(None)
+}
+
+/// `rel` with the leading segments of the nearest anchor of another facet
+/// above it replaced by the anchor of its claim; `rel` itself without one.
+fn under_facet_anchor(resources: &MountResources, rel: &Path) -> Result<Path> {
+    let mut above = rel.parent_and_name().map(|(parent, _)| parent);
+    while let Some(path) = above {
+        if let Some(anchor) = resources
+            .facet_anchor(&path)
+            .map_err(|error| TreeError::internal(error.to_string()))?
+        {
+            return rel
+                .segments()
+                .skip(path.segments().count())
+                .try_fold(anchor, |at, segment| {
+                    at.join(segment)
+                        .map_err(|error| TreeError::internal(error.to_string()))
+                });
+        }
+        above = path.parent_and_name().map(|(parent, _)| parent);
+    }
+    Ok(rel.clone())
 }
 
 /// A fed child served from its lookup at `at` in the projection once its

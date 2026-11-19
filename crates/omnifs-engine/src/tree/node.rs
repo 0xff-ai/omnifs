@@ -86,20 +86,21 @@ pub struct Node {
     /// The node's facts come from feeds: a renderer gets them with the zero
     /// lifetime of dynamic entries, so each access asks the namespace again.
     fed: bool,
-    /// The path of the facts of a fed node in the projection, which a node of
-    /// another facet of its object shares with the node of the first facet.
-    fact: Option<Path>,
+    /// The path of the node's facts: its own path, or the same path under
+    /// the anchor of the claim of an object for a node under an anchor of
+    /// another facet of the object.
+    fact: Path,
 }
 
 impl Node {
     pub fn new(mount: String, path: Path, meta: EntryMeta, body: NodeBody) -> Self {
         Self {
             mount,
+            fact: path.clone(),
             path,
             meta,
             body,
             fed: false,
-            fact: None,
         }
     }
 
@@ -112,7 +113,7 @@ impl Node {
             meta,
             body: NodeBody::Provider,
             fed: true,
-            fact: Some(fact),
+            fact,
         }
     }
 
@@ -120,9 +121,24 @@ impl Node {
         self.fed
     }
 
-    /// The path of the facts of a fed node in the projection.
-    pub(crate) fn fact(&self) -> Option<&Path> {
-        self.fact.as_ref()
+    /// The path of the node's facts.
+    pub(crate) fn fact(&self) -> &Path {
+        &self.fact
+    }
+
+    /// This node with its facts at `fact`.
+    pub(crate) fn with_fact(self, fact: Path) -> Self {
+        Self { fact, ..self }
+    }
+
+    /// This node at `path`, with its facts where they are.
+    pub(crate) fn at(self, path: Path) -> Self {
+        Self { path, ..self }
+    }
+
+    /// This node at the path of its facts.
+    pub(crate) fn at_fact(&self) -> Self {
+        self.clone().at(self.fact.clone())
     }
 
     /// Construct a host-synthesized node (a pagination control or a mount-root
@@ -131,11 +147,11 @@ impl Node {
     pub fn synthetic(mount: String, path: Path, meta: EntryMeta, synthetic: Synthetic) -> Self {
         Self {
             mount,
+            fact: path.clone(),
             path,
             meta,
             body: NodeBody::Synthetic(synthetic),
             fed: false,
-            fact: None,
         }
     }
 

@@ -31,6 +31,10 @@ pub struct RuntimeHarness {
     pub namespace: Arc<EngineNamespace>,
     pub clone_dir: TempDir,
     pub cache_dir: TempDir,
+    /// The host of the mount table, over the projections in `cache_dir`.
+    host: omnifs_engine::HostOnline,
+    /// The configs of the mounts.
+    configs: Vec<String>,
     /// An owned executor for synchronous fixtures that have no ambient Tokio
     /// runtime. It is declared last so the namespace, registry, and temporary
     /// directories drop before the executor.
@@ -101,6 +105,10 @@ impl RuntimeHarness {
             MountTable::prepare_durable(&host, mounts)
         }
         .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+        let configs = configs_json
+            .iter()
+            .map(|config| (*config).to_owned())
+            .collect();
         let registry = Arc::new(registry);
         let runtime = registry
             .get(&selected_mount)
@@ -113,8 +121,31 @@ impl RuntimeHarness {
             namespace,
             clone_dir,
             cache_dir,
+            host,
+            configs,
             _owned_runtime: owned_runtime,
         })
+    }
+
+    /// The namespace of the mounts of the harness without their providers,
+    /// each over its projection.
+    pub fn without_providers(&self) -> Result<Arc<EngineNamespace>, BuildError> {
+        let inputs = self
+            .configs
+            .iter()
+            .map(|config| {
+                let mut input = mount_input_from_json(config)?;
+                input.provider = None;
+                input.state = MountBuildState::ProviderUnavailable;
+                Ok(input)
+            })
+            .collect::<Result<Vec<_>, BuildError>>()?;
+        let registry = MountTable::prepare_durable(&self.host, inputs)
+            .map_err(|error| BuildError::InvalidConfig(error.to_string()))?;
+        Ok(EngineNamespace::online(
+            Arc::new(registry),
+            tokio::runtime::Handle::current(),
+        ))
     }
 
     pub fn lookup(

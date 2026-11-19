@@ -101,6 +101,14 @@ impl Effects {
         Self::default()
     }
 
+    /// The paths of the directories these effects write.
+    pub(crate) fn directories(&self) -> impl Iterator<Item = &str> {
+        self.fs
+            .iter()
+            .filter(|write| matches!(write.kind, wit_types::FsKind::Directory(_)))
+            .map(|write| write.path.as_str())
+    }
+
     /// Materialize a directory into the view cache without claiming its
     /// listing is complete; later readdirs may still invoke the provider.
     /// Paths here and on every other `project_*` method are

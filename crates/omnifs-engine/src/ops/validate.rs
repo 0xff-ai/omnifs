@@ -111,6 +111,13 @@ where
                     Self::object_id(&state.id)?;
                     Self::feed_token(&state.token)?;
                 }
+                for anchor in &part.anchors {
+                    for path in [&anchor.path, &anchor.anchor] {
+                        Path::parse(path).map_err(|_| {
+                            format!("facet anchor {path:?} is not a valid protocol path")
+                        })?;
+                    }
+                }
                 Ok(())
             },
         }

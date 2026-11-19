@@ -131,8 +131,8 @@ async fn a_feed_starts_from_its_starting_path_and_answers_once_past_its_deadline
     );
     assert_eq!(
         log(&harness).await[3..],
-        ["oak version-0 -", "oak version-0 -"],
-        "the change answered the next call past the deadline"
+        ["oak version-0 -", "oak version-0 -", "oak change-1 -"],
+        "the change answered the next answer past the deadline, in two parts"
     );
 }
 
@@ -175,5 +175,62 @@ async fn a_stopped_feed_keeps_its_token_and_its_inner_states_answer_meanwhile() 
     assert_eq!(
         log(&harness).await[3..],
         ["flaky page-1 books", "flaky page-2 books"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_answer_publishes_its_parts_with_its_last_part_and_continues_after_a_stop() {
+    let harness = make_initialized_runtime(CONFIG);
+    assert_eq!(
+        names(&harness, &["shelves", "wobbly", "books"])
+            .await
+            .unwrap(),
+        ["1", "2"]
+    );
+
+    // A later answer keeps its first part and stops at a rate limit before
+    // its last part: the operation takes the error of the stop.
+    read(&harness, &["hello", "shelf-change"]).await;
+    tokio::time::sleep(PAST_DEADLINE).await;
+    assert!(matches!(
+        names(&harness, &["shelves", "wobbly", "books"]).await,
+        Err(NsError::RateLimited { .. })
+    ));
+
+    // While the rate-limit window is open, the projection serves without the
+    // kept part.
+    assert_eq!(
+        names(&harness, &["shelves", "wobbly", "books"])
+            .await
+            .unwrap(),
+        ["1", "2"]
+    );
+    assert_eq!(
+        read(&harness, &["shelves", "wobbly", "books", "1", "title"]).await,
+        "Book 1"
+    );
+
+    // After the window, the next operation continues the answer from the
+    // token of its kept part, whatever the deadline, and its last part
+    // publishes both parts.
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert_eq!(
+        names(&harness, &["shelves", "wobbly", "books"])
+            .await
+            .unwrap(),
+        ["1", "3"]
+    );
+    assert_eq!(
+        read(&harness, &["shelves", "wobbly", "books", "1", "title"]).await,
+        "Book 1 v1"
+    );
+    assert_eq!(read(&harness, &["shelves", "wobbly", "seen"]).await, "1,2");
+    assert_eq!(
+        log(&harness).await[3..],
+        [
+            "wobbly version-0 -",
+            "wobbly change-1 -",
+            "wobbly change-1 -"
+        ]
     );
 }

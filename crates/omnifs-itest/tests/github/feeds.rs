@@ -3,6 +3,7 @@
 //! it, and the feed of an item before it ends.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use omnifs_core::path::Path;
@@ -1012,14 +1013,23 @@ async fn a_check_takes_each_page_of_its_rows_and_the_numbers_of_the_pull_request
     );
 }
 
-/// A `RATE_LIMITED` answer of GitHub GraphQL fails the check with the window
-/// of its `x-ratelimit-reset`, in which a read asks GitHub nothing and the
-/// files serve; the first read after the window checks again.
+/// A check makes a part of each request and publishes its parts with its
+/// last one. A `RATE_LIMITED` answer of GitHub GraphQL after its rows and
+/// comments stops it with the window of its `x-ratelimit-reset`, in which a
+/// read asks GitHub nothing and the files from before the check serve; the
+/// first read after the window continues the check with its next `POST`
+/// alone.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rate_limited_answer_of_github_graphql_stops_the_check_until_its_reset() {
+async fn a_check_stopped_by_the_rate_limit_of_github_graphql_continues_with_its_next_post() {
     let harness = github_harness();
-    let one = || item(1, "One", "open", "2026-11-18T09:00:00Z", 0, false);
-    first_full_listing(&harness, &json!([one()]), &json!([]), &[(1, 0)], &[]).await;
+    first_full_listing(
+        &harness,
+        &json!([item(1, "One", "open", "2026-11-18T09:00:00Z", 0, false)]),
+        &json!([]),
+        &[(1, 0)],
+        &[],
+    )
+    .await;
 
     tokio::time::sleep(PAST_DEADLINE).await;
     let reset = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap() + Duration::from_secs(2))
@@ -1029,7 +1039,14 @@ async fn a_rate_limited_answer_of_github_graphql_stops_the_check_until_its_reset
         &harness,
         names(&harness, "octocat/hello/issues/all"),
         vec![
-            ok(&json!([one()])),
+            ok(&json!([item(
+                1,
+                "One again",
+                "open",
+                "2026-11-18T10:00:00Z",
+                0,
+                false
+            )])),
             ok(&json!([])),
             answer(
                 200,
@@ -1061,8 +1078,63 @@ async fn a_rate_limited_answer_of_github_graphql_stops_the_check_until_its_reset
     let (listing, requests) = answering(
         &harness,
         names(&harness, "octocat/hello/issues/all"),
+        vec![graphql(&json!({
+            "issues": { "totalCount": 1 },
+            "pullRequests": { "totalCount": 0 },
+        }))],
+    )
+    .await;
+    assert_eq!(listing.unwrap(), ["1"]);
+    let (query, _) = graphql_of(&requests[0]);
+    assert!(
+        query.contains("issues { totalCount } pullRequests { totalCount }"),
+        "{query}"
+    );
+    assert_eq!(
+        served(&harness, read(&harness, "octocat/hello/issues/all/1/title"))
+            .await
+            .unwrap(),
+        "One again"
+    );
+}
+
+/// A check stopped by the network gives a read its error, and the next read
+/// continues it with its next request, whatever its deadline.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_stopped_by_the_network_gives_its_error_to_a_read() {
+    let harness = github_harness();
+    first_full_listing(
+        &harness,
+        &json!([item(1, "One", "open", "2026-11-18T09:00:00Z", 0, false)]),
+        &json!([]),
+        &[(1, 0)],
+        &[],
+    )
+    .await;
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let (stopped, _) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/1/title"),
         vec![
-            ok(&json!([one()])),
+            ok(&json!([item(
+                1,
+                "One again",
+                "open",
+                "2026-11-18T10:00:00Z",
+                0,
+                false
+            )])),
+            empty(502, &[]),
+        ],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+
+    let (title, requests) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/1/title"),
+        vec![
             ok(&json!([])),
             graphql(&json!({
                 "issues": { "totalCount": 1 },
@@ -1071,9 +1143,143 @@ async fn a_rate_limited_answer_of_github_graphql_stops_the_check_until_its_reset
         ],
     )
     .await;
-    assert_eq!(listing.unwrap(), ["1"]);
+    assert_eq!(title.unwrap(), "One again");
     assert_eq!(
         requests[0].url,
-        api(&format!("{ROWS}&since=2026-11-18T09:00:00Z"))
+        api(
+            "/repos/octocat/hello/issues/comments?sort=created&direction=asc&per_page=100\
+             &since=2026-11-18T09:00:00Z&page=1"
+        )
+    );
+}
+
+/// A check asks GitHub GraphQL for the IDs of at most 100 changed items with
+/// comments in a `POST`, the first with the counts.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn a_check_asks_github_graphql_for_a_hundred_changed_items_a_post() {
+    let harness = github_harness();
+    first_full_listing(
+        &harness,
+        &json!([item(
+            200,
+            "Two hundred",
+            "open",
+            "2026-11-18T09:00:00Z",
+            0,
+            false
+        )]),
+        &json!([]),
+        &[(200, 0)],
+        &[],
+    )
+    .await;
+
+    let rows = (1..=101)
+        .map(|number| item(number, "Item", "closed", "2026-11-18T10:00:00Z", 1, false))
+        .collect::<Vec<_>>();
+    let comments = (1..=101)
+        .map(|number| comment(1_000 + number, number, false, "a comment"))
+        .collect::<Vec<_>>();
+    let page = |numbers: std::ops::RangeInclusive<u64>| {
+        Value::Object(
+            numbers
+                .map(|number| {
+                    (
+                        format!("i{number}"),
+                        ids(&[(1_000 + number, "2026-11-18T10:00:00Z")], None),
+                    )
+                })
+                .collect(),
+        )
+    };
+    let mut first = page(1..=100);
+    first["issues"] = json!({ "totalCount": 102 });
+    first["pullRequests"] = json!({ "totalCount": 0 });
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let (listing, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![
+            answer(200, &[("Link", NEXT)], &Value::Array(rows[..100].to_vec())),
+            ok(&Value::Array(rows[100..].to_vec())),
+            ok(&Value::Array(comments[..100].to_vec())),
+            ok(&Value::Array(comments[100..].to_vec())),
+            graphql(&first),
+            graphql(&page(101..=101)),
+        ],
+    )
+    .await;
+    assert_eq!(listing.unwrap().len(), 102);
+    let (query, _) = graphql_of(&requests[4]);
+    assert!(query.contains("issues { totalCount }"), "{query}");
+    assert!(
+        query.contains("i100: issueOrPullRequest(number: 100)"),
+        "{query}"
+    );
+    assert!(!query.contains("(number: 101)"), "{query}");
+    let (query, _) = graphql_of(&requests[5]);
+    assert!(!query.contains("totalCount"), "{query}");
+    assert!(
+        query.contains("i101: issueOrPullRequest(number: 101)"),
+        "{query}"
+    );
+    assert_eq!(
+        served(
+            &harness,
+            names(&harness, "octocat/hello/issues/all/101/comments")
+        )
+        .await
+        .unwrap(),
+        ["1101"]
+    );
+}
+
+/// `open/` of a mount without its provider serves the facts of `all/` from
+/// the projection.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_of_a_mount_without_its_provider_serves_the_facts_of_all() {
+    let harness = github_harness();
+    first_full_listing(
+        &harness,
+        &json!([item(1, "One", "open", "2026-11-18T09:00:00Z", 1, false)]),
+        &json!([comment(10, 1, false, "first")]),
+        &[(1, 1)],
+        &[],
+    )
+    .await;
+
+    let namespace = harness.without_providers().unwrap();
+    let path = |path: &'static str| {
+        let namespace = Arc::clone(&namespace);
+        async move {
+            let mut answer = namespace.lookup(Path::root(), "github").await.unwrap();
+            for segment in path.split('/') {
+                answer = namespace.lookup(answer.path, segment).await.unwrap();
+            }
+            answer.path
+        }
+    };
+    let title = namespace
+        .read(path("octocat/hello/issues/open/1/title").await, 0, u32::MAX)
+        .await
+        .unwrap();
+    assert_eq!(title.bytes, b"One");
+    let comments = namespace
+        .readdir(
+            path("octocat/hello/issues/open/1/comments").await,
+            DirCursor::start(),
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        comments
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["10"]
     );
 }
