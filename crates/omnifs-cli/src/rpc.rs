@@ -177,13 +177,39 @@ impl RpcClient {
         .with_exit_code(ExitCode::DaemonUnavailable)?
     }
 
+    /// Whether a daemon listens on the control socket: the socket is missing
+    /// or refuses a connection without one.
+    pub(crate) async fn control_reachable(&self) -> anyhow::Result<bool> {
+        match UnixStream::connect(self.endpoint.control_socket()).await {
+            Ok(stream) => {
+                drop(stream);
+                Ok(true)
+            },
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                Ok(false)
+            },
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "probe daemon control socket {}",
+                    self.endpoint.control_socket().display()
+                )
+            }),
+        }
+    }
+
     /// Waits for the daemon to be ready or to require recovery, as its
     /// `WatchPhase` stream gives it, up to the end of the daemon; without a
     /// daemon to answer, it returns at once.
     pub(crate) async fn settled_phase(&self) -> anyhow::Result<()> {
-        let Ok(mut client) = self.client().await else {
+        if !self.control_reachable().await? {
             return Ok(());
-        };
+        }
+        let mut client = self.client().await?;
         let phases = client
             .watch_phase(Request::new(wire::Empty {}))
             .await
@@ -492,7 +518,6 @@ fn lease_conflict_sentence(code: omnifs_api::ControlErrorCode) -> Option<&'stati
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 /// Takes `phases` up to a ready daemon, one that requires recovery, or their
 /// end with the daemon.
 async fn settle(
@@ -722,6 +747,29 @@ mod tests {
         assert_eq!(providers.len(), 2);
         assert_eq!(providers[0].reference.id.as_bytes(), &[1; 32]);
         assert_eq!(providers[1].reference.id.as_bytes(), &[3; 32]);
+    }
+
+    /// `settled_phase` answers at once without a daemon, for a control
+    /// socket that is missing or refuses a connection, and gives each other
+    /// error of the connection, as a path too long for a socket.
+    #[tokio::test]
+    async fn settled_phase_answers_at_once_only_without_a_daemon() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let endpoint = Bootstrap::<Client>::under_root(dir.path());
+        let socket = endpoint.control_socket().clone();
+        let rpc = RpcClient::from_endpoint(endpoint);
+        rpc.settled_phase().await.unwrap();
+        drop(std::os::unix::net::UnixListener::bind(&socket).expect("bind control socket"));
+        rpc.settled_phase().await.unwrap();
+
+        let long = RpcClient::from_endpoint(Bootstrap::<Client>::under_root(
+            &dir.path().join("x".repeat(120)),
+        ));
+        let error = long.settled_phase().await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("probe daemon control socket"),
+            "{error:#}"
+        );
     }
 
     #[tokio::test]

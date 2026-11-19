@@ -712,6 +712,13 @@ async fn patch_mount(
             .load_provider_metadata(provider_id)
             .await?
             .with_context(|| format!("provider {provider_id} is not retained"))?;
+        // A mount moves only to another artifact of its provider.
+        if provider.reference.meta.name != document.provider.meta.name {
+            return Err(ManagerError::Invalid(format!(
+                "mount {} moves only to an artifact of its provider {}, not of {}",
+                document.name, document.provider.meta.name, provider.reference.meta.name
+            )));
+        }
         document.provider = provider.reference;
     }
     match patch.auth {
@@ -744,13 +751,6 @@ async fn patch_mount(
             document.config =
                 serde_json::from_slice(&config).context("mount config is not valid JSON")?;
         },
-    }
-    if let Some(credential) = &document.credential
-        && credential.provider_name() != document.provider.meta.name.as_str()
-    {
-        return Err(ManagerError::Invalid(
-            "provider change requires a matching credential or clearing mount auth".to_owned(),
-        ));
     }
     Ok(document)
 }
@@ -883,37 +883,45 @@ mod tests {
     /// `ProviderManifest` validation so `import_provider` and, later,
     /// `GenerationDraft::prepare` succeed.
     fn demo_provider_wasm() -> Vec<u8> {
-        let metadata = serde_json::to_vec(&serde_json::json!({
-            "id": "demo",
-            "displayName": "Demo",
-            "description": "A test provider",
-            "provider": "demo.wasm",
-            "defaultMount": "demo",
-            "projection": 1,
-            "refreshIntervalSecs": 0,
-            "capabilities": [{
-                "kind": "domain",
-                "value": "api.demo.test",
-                "why": "Test credential injection."
-            }],
-            "auth": {
-                "default": "pat",
-                "schemes": [{
-                    "staticToken": {
-                        "key": "pat",
-                        "valuePrefix": "Bearer ",
-                        "description": "Demo token",
-                        "injectDomains": ["api.demo.test"]
-                    }
-                }]
-            }
-        }))
-        .unwrap();
+        metadata_only_wasm(
+            &serde_json::to_vec(&serde_json::json!({
+                "id": "demo",
+                "displayName": "Demo",
+                "description": "A test provider",
+                "provider": "demo.wasm",
+                "defaultMount": "demo",
+                "projection": 1,
+                "refreshIntervalSecs": 0,
+                "capabilities": [{
+                    "kind": "domain",
+                    "value": "api.demo.test",
+                    "why": "Test credential injection."
+                }],
+                "auth": {
+                    "default": "pat",
+                    "schemes": [{
+                        "staticToken": {
+                            "key": "pat",
+                            "valuePrefix": "Bearer ",
+                            "description": "Demo token",
+                            "injectDomains": ["api.demo.test"]
+                        }
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+    }
+
+    /// The wasm of a provider artifact with `metadata` alone: it passes the
+    /// metadata validation of `import_provider`, and the host cannot
+    /// instantiate it.
+    fn metadata_only_wasm(metadata: &[u8]) -> Vec<u8> {
         let name = omnifs_provider::PROVIDER_METADATA_SECTION_NAME.as_bytes();
         let mut payload = Vec::new();
         append_uleb(&mut payload, name.len());
         payload.extend_from_slice(name);
-        payload.extend_from_slice(&metadata);
+        payload.extend_from_slice(metadata);
 
         let mut wasm = b"\0asm\x01\0\0\0".to_vec();
         wasm.push(0);
@@ -1139,6 +1147,174 @@ mod tests {
                     if demo == "demo" && test == "test" && reason.contains("cannot instantiate")
             ),
             "{statuses:?}"
+        );
+
+        manager.shutdown().await.unwrap();
+    }
+
+    /// Import the provider artifact `bytes` as `file`.
+    async fn import(state: &StateStore, file: &str, bytes: &[u8]) -> ProviderId {
+        let digest = ProviderId::from_wasm_bytes(bytes);
+        let upload = state
+            .stage_provider_bytes(file, digest, bytes)
+            .await
+            .unwrap();
+        state.import_provider(upload).await.unwrap().reference.id
+    }
+
+    /// Apply `ops` as the batch `id`.
+    async fn apply_ops(
+        manager: &MutationManager,
+        id: u8,
+        ops: Vec<MutationOp>,
+    ) -> Result<ApplyOutcome, ManagerError> {
+        let id = MutationId::from_bytes([id; 16]);
+        manager.begin(id).await?;
+        manager.apply(id, ops).await
+    }
+
+    /// The patch of `mount update test --provider` with `provider`.
+    fn provider_update(provider: ProviderId) -> MutationOp {
+        MutationOp::UpdateMount {
+            name: omnifs_core::MountName::new("test").unwrap(),
+            patch: MountPatch {
+                provider: Some(provider),
+                auth: MountField::Keep,
+                limits: MountField::Keep,
+                config: MountField::Keep,
+            },
+        }
+    }
+
+    /// The mount `test` of the test provider, with its projection of
+    /// `hello/validated` read.
+    async fn test_mount(manager: &MutationManager, state: &StateStore, serving: &ServingCell) {
+        let provider = import(state, "test_provider.wasm", &test_provider_wasm()).await;
+        apply_ops(
+            manager,
+            1,
+            vec![MutationOp::CreateMount(MountDefinition {
+                name: omnifs_core::MountName::new("test").unwrap(),
+                provider,
+                auth: None,
+                limits: None,
+                config: b"{}".to_vec(),
+            })],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            validated_names(serving).await.unwrap(),
+            ["v-0", "v-1", "@next", "@all"]
+        );
+    }
+
+    /// The names of `hello/validated` of the mount `test`.
+    async fn validated_names(serving: &ServingCell) -> Result<Vec<String>, omnifs_vfs::NsError> {
+        use omnifs_vfs::ServingNamespace as _;
+        let lease = serving.acquire()?;
+        let namespace = lease.namespace();
+        let mut path = namespace
+            .lookup(omnifs_core::path::Path::root(), "test")
+            .await?
+            .path;
+        for segment in ["hello", "validated"] {
+            path = namespace.lookup(path, segment).await?.path;
+        }
+        let page = namespace
+            .readdir(path, omnifs_vfs::DirCursor::start(), 0)
+            .await?;
+        Ok(page.entries.into_iter().map(|entry| entry.name).collect())
+    }
+
+    /// `mount update --provider` moves a mount to another artifact of its
+    /// provider: on one with the same number of the projection, here one the
+    /// host cannot instantiate, the mount serves the projection it keeps;
+    /// on one with another number, it starts an empty one. An artifact of
+    /// another provider is refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mount_update_provider_moves_a_mount_to_an_artifact_of_its_provider() {
+        let (manager, state, serving, _temp) =
+            test_manager_with_state(Duration::from_secs(30)).await;
+        test_mount(&manager, &state, &serving).await;
+        let manifest = omnifs_provider::read_provider_metadata_section(&test_provider_wasm())
+            .unwrap()
+            .unwrap();
+        let artifact = |projection: u32| {
+            let mut manifest = manifest.clone();
+            manifest.projection = projection;
+            metadata_only_wasm(&serde_json::to_vec(&manifest).unwrap())
+        };
+
+        let same = import(&state, "same.wasm", &artifact(manifest.projection)).await;
+        apply_ops(&manager, 2, vec![provider_update(same)])
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .get_mount(&omnifs_core::MountName::new("test").unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+                .document
+                .provider
+                .id,
+            same
+        );
+        assert_eq!(validated_names(&serving).await.unwrap(), ["v-0", "v-1"]);
+
+        let other = import(&state, "other.wasm", &artifact(manifest.projection + 1)).await;
+        apply_ops(&manager, 3, vec![provider_update(other)])
+            .await
+            .unwrap();
+        assert_eq!(
+            validated_names(&serving).await.unwrap_err(),
+            omnifs_vfs::NsError::OfflineMiss
+        );
+
+        let demo = import(&state, "demo.wasm", &demo_provider_wasm()).await;
+        let error = apply_ops(&manager, 4, vec![provider_update(demo)])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ManagerError::Invalid(message)
+                    if message.contains("only to an artifact of its provider test-provider")
+            ),
+            "{error}"
+        );
+
+        manager.shutdown().await.unwrap();
+    }
+
+    /// `mount update --provider` with the artifact of the mount changes
+    /// nothing: the mount keeps its version, its provider and its projection.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mount_update_provider_without_a_change_keeps_the_mount() {
+        let (manager, state, serving, _temp) =
+            test_manager_with_state(Duration::from_secs(30)).await;
+        test_mount(&manager, &state, &serving).await;
+        let name = omnifs_core::MountName::new("test").unwrap();
+        let before = state.get_mount(&name).await.unwrap().unwrap();
+
+        apply_ops(
+            &manager,
+            2,
+            vec![provider_update(before.document.provider.id)],
+        )
+        .await
+        .unwrap();
+        let after = state.get_mount(&name).await.unwrap().unwrap();
+        assert_eq!(after.version, before.version);
+        assert_eq!(after.document, before.document);
+        assert!(matches!(
+            &serving.mount_statuses()[..],
+            [status] if status.availability == omnifs_engine::MountAvailability::Active
+        ));
+        assert_eq!(
+            validated_names(&serving).await.unwrap(),
+            ["v-0", "v-1", "@next", "@all"]
         );
 
         manager.shutdown().await.unwrap();

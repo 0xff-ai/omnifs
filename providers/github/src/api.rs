@@ -25,14 +25,19 @@ pub struct GitHubApi;
 
 impl EndpointHooks for GitHubApi {
     /// Map a GitHub rate-limit response to a typed `RateLimited` error so the
-    /// endpoint breaker arms on it; `None` for everything else, leaving the
-    /// SDK's default 4xx/5xx mapping in charge.
+    /// endpoint breaker arms on it, or to the error of a header of its window
+    /// that does not parse; `None` for everything else, leaving the SDK's
+    /// default 4xx/5xx mapping in charge.
     fn classify(&self, resp: &Response<Vec<u8>>) -> Option<ProviderError> {
         if !is_rate_limited(resp) {
             return None;
         }
-        let retry_after = parse_github_retry(resp);
-        Some(ProviderError::rate_limited(rate_limit_message(resp)).with_retry_after(retry_after))
+        Some(match parse_github_retry(resp) {
+            Ok(retry_after) => {
+                ProviderError::rate_limited(rate_limit_message(resp)).with_retry_after(retry_after)
+            },
+            Err(error) => error,
+        })
     }
 }
 
@@ -42,7 +47,7 @@ impl EndpointHooks for GitHubApi {
 /// host applies its short default cooldown and re-hammers github every few
 /// seconds for the whole (up to ~1h) primary-limit window instead of waiting
 /// out the real reset.
-fn parse_github_retry(resp: &Response<Vec<u8>>) -> Option<Duration> {
+fn parse_github_retry(resp: &Response<Vec<u8>>) -> Result<Option<Duration>, ProviderError> {
     retry_window(|header| {
         resp.headers()
             .get(header)
@@ -51,15 +56,31 @@ fn parse_github_retry(resp: &Response<Vec<u8>>) -> Option<Duration> {
 }
 
 /// The backoff window of a rate-limited answer from its headers, which
-/// `header` gives by name: `Retry-After`, else `x-ratelimit-reset` minus now.
-pub(crate) fn retry_window<'a>(header: impl Fn(&str) -> Option<&'a str>) -> Option<Duration> {
-    let seconds = |name| header(name).and_then(|value| value.trim().parse::<u64>().ok());
-    if let Some(secs) = seconds("retry-after") {
-        return Some(Duration::from_secs(secs));
+/// `header` gives by name: `Retry-After`, else `x-ratelimit-reset` minus now,
+/// zero for a reset that passed; none without them. A header that does not
+/// parse as seconds fails.
+pub(crate) fn retry_window<'a>(
+    header: impl Fn(&str) -> Option<&'a str>,
+) -> Result<Option<Duration>, ProviderError> {
+    let seconds = |name: &str| {
+        header(name)
+            .map(|value| {
+                value.trim().parse::<u64>().map_err(|error| {
+                    ProviderError::invalid_input(format!("the header {name} {value:?}: {error}"))
+                })
+            })
+            .transpose()
+    };
+    if let Some(secs) = seconds("retry-after")? {
+        return Ok(Some(Duration::from_secs(secs)));
     }
-    let reset_epoch = seconds("x-ratelimit-reset")?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    reset_epoch.checked_sub(now).map(Duration::from_secs)
+    let Some(reset) = seconds("x-ratelimit-reset")? else {
+        return Ok(None);
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| ProviderError::internal(format!("the clock: {error}")))?;
+    Ok(Some(Duration::from_secs(reset).saturating_sub(now)))
 }
 
 fn is_rate_limited(resp: &Response<Vec<u8>>) -> bool {

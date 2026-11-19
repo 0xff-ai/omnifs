@@ -8,7 +8,7 @@ use crate::status::InventoryReport;
 use crate::ui::access::ActionLine;
 use crate::ui::output::Output;
 
-#[derive(Args, Debug, Clone, Default)]
+#[derive(Args, Debug, Clone)]
 #[command(after_help = "Examples:\n  omnifs status\n  omnifs status --ready")]
 pub struct StatusArgs {
     /// Give the status of a starting daemon once it is ready or requires
