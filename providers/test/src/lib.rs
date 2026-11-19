@@ -109,19 +109,23 @@ impl Item {
     /// leaf under the item anchor including this one and reads it to
     /// completion, so its reader must actually reach EOF (`ItemLogReader`)
     /// rather than fabricate bytes forever.
-    #[allow(clippy::unused_async)]
-    async fn log(_cx: Cx<State>, _key: ItemKey) -> Result<StreamFile> {
-        Ok(StreamFile::new(ItemLogReader).live())
+    fn log(
+        _cx: Cx<State>,
+        _key: ItemKey,
+    ) -> impl core::future::Future<Output = Result<StreamFile>> {
+        core::future::ready(Ok(StreamFile::new(ItemLogReader).live()))
     }
 
     /// Returns an intentionally unknown handle so host validation can exercise
     /// the retained object-directory tree-handoff boundary.
-    #[allow(clippy::unused_async)]
-    async fn unknown_tree(_cx: Cx<State>, _key: ItemKey) -> Result<Tree> {
-        Ok(Tree::at(
+    fn unknown_tree(
+        _cx: Cx<State>,
+        _key: ItemKey,
+    ) -> impl core::future::Future<Output = Result<Tree>> {
+        core::future::ready(Ok(Tree::at(
             TreeRef::new(777),
             "0123456789abcdef0123456789abcdef01234567",
-        ))
+        )))
     }
 
     /// The hand-written load `#[object]` forwards `Object::load` to. Item 404 is
@@ -293,17 +297,16 @@ impl Comment {
         Ok(FileProjection::text(self.author.as_bytes(), TextFormat::Raw).build())
     }
 
-    #[allow(clippy::unused_async)]
-    async fn load(
+    fn load(
         _cx: &Cx<State>,
         key: &ItemCommentKey,
         _since: Option<Validator>,
-    ) -> Result<Load<Self>> {
-        if key.idx == 0 {
-            return Err(ProviderError::invalid_input("comment index is 1-based"));
-        }
-        let (value, canonical) = canned_comment(key.idx)?;
-        Ok(Load::fresh(value, canonical))
+    ) -> impl core::future::Future<Output = Result<Load<Self>>> {
+        core::future::ready(if key.idx == 0 {
+            Err(ProviderError::invalid_input("comment index is 1-based"))
+        } else {
+            canned_comment(key.idx).map(|(value, canonical)| Load::fresh(value, canonical))
+        })
     }
 }
 
@@ -377,17 +380,15 @@ struct Shelf {
 }
 
 impl Shelf {
-    #[allow(clippy::unused_async)]
-    async fn load(
+    fn load(
         _cx: &Cx<State>,
         key: &ShelfKey,
         _since: Option<Validator>,
-    ) -> Result<Load<Self>> {
+    ) -> impl core::future::Future<Output = Result<Load<Self>>> {
         let bytes = format!(r#"{{"name":"{}"}}"#, key.shelf).into_bytes();
-        Ok(Load::fresh(
-            Self::decode(&bytes)?,
-            Canonical::new(bytes, None),
-        ))
+        core::future::ready(
+            Self::decode(&bytes).map(|shelf| Load::fresh(shelf, Canonical::new(bytes, None))),
+        )
     }
 
     /// The feed of a shelf: its first answer lists books 1 and 2 in two
@@ -398,8 +399,11 @@ impl Shelf {
     /// in `seen` the names the host listed for `books` in a part, and removes
     /// book 2 in its last part; the `wobbly` shelf stops once at a rate limit
     /// of a second before that last part.
-    #[allow(clippy::unused_async)]
-    async fn feed(cx: FeedCx<ShelfKey, State>) -> Result<Feed> {
+    fn feed(cx: FeedCx<ShelfKey, State>) -> impl core::future::Future<Output = Result<Feed>> {
+        core::future::ready(Self::answer(&cx))
+    }
+
+    fn answer(cx: &FeedCx<ShelfKey, State>) -> Result<Feed> {
         let shelf = cx.key().shelf.clone();
         let token = cx.token().map(str::to_owned);
         let version = cx.state_mut(|state| {
@@ -489,19 +493,20 @@ struct Book {
 }
 
 impl Book {
-    #[allow(clippy::unused_async)]
-    async fn load(_cx: &Cx<State>, key: &BookKey, _since: Option<Validator>) -> Result<Load<Self>> {
+    fn load(
+        _cx: &Cx<State>,
+        key: &BookKey,
+        _since: Option<Validator>,
+    ) -> impl core::future::Future<Output = Result<Load<Self>>> {
         let bytes = format!(r#"{{"book":{}}}"#, key.book).into_bytes();
-        Ok(Load::fresh(
-            Self::decode(&bytes)?,
-            Canonical::new(bytes, None),
-        ))
+        core::future::ready(
+            Self::decode(&bytes).map(|book| Load::fresh(book, Canonical::new(bytes, None))),
+        )
     }
 
     /// The feed of one book, answering for its title before the first answer
     /// of its shelf ends: it rewrites the title from the book's own upstream.
-    #[allow(clippy::unused_async)]
-    async fn feed(cx: FeedCx<BookKey, State>) -> Result<Feed> {
+    fn feed(cx: FeedCx<BookKey, State>) -> impl core::future::Future<Output = Result<Feed>> {
         let BookKey { shelf, book } = cx.key();
         let token = cx.token().unwrap_or("-").to_owned();
         cx.state_mut(|state| {
@@ -510,11 +515,13 @@ impl Book {
                 cx.start().unwrap_or("-")
             ));
         });
-        cx.file(
-            format!("/shelves/{shelf}/books/{book}/title"),
-            format!("Book {book} (own)").into_bytes(),
-        )?;
-        Ok(Feed::part(format!("own-{book}")).into())
+        core::future::ready(
+            cx.file(
+                format!("/shelves/{shelf}/books/{book}/title"),
+                format!("Book {book} (own)").into_bytes(),
+            )
+            .map(|()| Feed::from(Feed::part(format!("own-{book}")))),
+        )
     }
 }
 
@@ -733,14 +740,13 @@ impl TestProvider {
 
     /// Intent-tagged invalidation: evict the cached `/scoped/item` listing and
     /// item 7's canonical object (and its facet-expanded view leaves).
-    #[allow(clippy::unused_async)]
-    async fn on_tick(_cx: Cx<State>) -> Result<Invalidation> {
-        Ok(Invalidation::new()
+    fn on_tick(_cx: Cx<State>) -> impl core::future::Future<Output = Result<Invalidation>> {
+        core::future::ready(Ok(Invalidation::new()
             .listing_path("/scoped/item")
             .object::<Item>(&ItemKey {
                 filter: Facet::<StateFilter>(StateFilter::Open),
                 number: 7,
-            }))
+            })))
     }
 }
 

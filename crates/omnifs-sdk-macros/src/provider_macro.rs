@@ -1078,60 +1078,74 @@ fn generate_notify(
             ),
         });
     };
-    let dispatch = if let Some(timer) = timer {
-        let method = timer
-            .handler
-            .segments
-            .last()
-            .map(|segment| segment.ident.clone());
-        let method = method.unwrap_or_else(|| format_ident!("on_tick"));
-        quote! {
-            match &event {
-                omnifs_sdk::omnifs::provider::types::ProviderEvent::TimerTick => {
-                    match #type_name::#method(future_cx).await {
-                        Ok(inv) => (
-                            Ok(()),
-                            inv.into_effects().into_wit(),
-                        ),
-                        Err(error) => (
-                            Err(error.into()),
-                            omnifs_sdk::prelude::Effects::new().into_wit(),
-                        ),
-                    }
-                },
-                _ => {
-                    #warn_ignored_event
-                    (Ok(()), omnifs_sdk::prelude::Effects::new().into_wit())
-                },
-            }
-        }
-    } else {
-        quote! {
-            let _ = future_cx;
-            #warn_ignored_event
-            (Ok(()), omnifs_sdk::prelude::Effects::new().into_wit())
-        }
+    let output = quote! {
+        (
+            core::result::Result<(), omnifs_sdk::omnifs::provider::types::ProviderError>,
+            omnifs_sdk::omnifs::provider::types::Effects,
+        )
     };
+    let not_initialized = quote! {
+        (
+            Err(omnifs_sdk::error::ProviderError::internal(
+                "provider not initialized",
+            ).into()),
+            omnifs_sdk::prelude::Effects::new().into_wit(),
+        )
+    };
+    // Without a timer no event has a handler, so the answer is ready
+    // without a future of a handler to await.
+    let Some(timer) = timer else {
+        return quote! {
+            impl omnifs_sdk::exports::omnifs::provider::notify::Guest for #type_name {
+                fn on_event(
+                    _id: u64,
+                    event: omnifs_sdk::prelude::ProviderEvent,
+                ) -> impl core::future::Future<Output = #output> {
+                    core::future::ready(if state_handle().is_ok() {
+                        #warn_ignored_event
+                        (Ok(()), omnifs_sdk::prelude::Effects::new().into_wit())
+                    } else {
+                        #not_initialized
+                    })
+                }
+            }
+        };
+    };
+    let method = timer
+        .handler
+        .segments
+        .last()
+        .map(|segment| segment.ident.clone());
+    let method = method.unwrap_or_else(|| format_ident!("on_tick"));
 
     quote! {
         impl omnifs_sdk::exports::omnifs::provider::notify::Guest for #type_name {
             async fn on_event(
                 id: u64,
                 event: omnifs_sdk::prelude::ProviderEvent,
-            ) -> (
-                core::result::Result<(), omnifs_sdk::omnifs::provider::types::ProviderError>,
-                omnifs_sdk::omnifs::provider::types::Effects,
-            ) {
+            ) -> #output {
                 let Ok(state) = state_handle() else {
-                    return (
-                        Err(omnifs_sdk::error::ProviderError::internal(
-                            "provider not initialized",
-                        ).into()),
-                        omnifs_sdk::prelude::Effects::new().into_wit(),
-                    );
+                    return #not_initialized;
                 };
                 let future_cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
-                #dispatch
+                match &event {
+                    omnifs_sdk::omnifs::provider::types::ProviderEvent::TimerTick => {
+                        match #type_name::#method(future_cx).await {
+                            Ok(inv) => (
+                                Ok(()),
+                                inv.into_effects().into_wit(),
+                            ),
+                            Err(error) => (
+                                Err(error.into()),
+                                omnifs_sdk::prelude::Effects::new().into_wit(),
+                            ),
+                        }
+                    },
+                    _ => {
+                        #warn_ignored_event
+                        (Ok(()), omnifs_sdk::prelude::Effects::new().into_wit())
+                    },
+                }
             }
         }
     }

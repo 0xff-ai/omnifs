@@ -199,14 +199,14 @@ async fn teams_list(cx: DirCx) -> Result<DirListing> {
 }
 
 impl TeamPath {
-    #[allow(clippy::unused_async, clippy::unused_self)]
-    async fn filters(self, _cx: DirCx) -> Result<DirListing> {
-        Ok(DirListing::exhaustive(
+    #[allow(clippy::unused_self)]
+    fn filters(self, _cx: DirCx) -> impl core::future::Future<Output = Result<DirListing>> {
+        core::future::ready(Ok(DirListing::exhaustive(
             StateFilter::choices()
                 .into_iter()
                 .flatten()
                 .map(|&name| Entry::dir(name.to_string())),
-        ))
+        )))
     }
 }
 
