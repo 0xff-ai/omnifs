@@ -1587,7 +1587,8 @@ fn hash_attr_facts(hasher: &mut DefaultHasher, attrs: Option<&FileAttrsCache>, e
 #[cfg(test)]
 mod tests {
     use super::{
-        DirCursor, EngineNamespace, EntryKind, INSPECTOR_SYNTHETIC_ROOT, inspector_identity,
+        DirCursor, EngineNamespace, EntryKind, INSPECTOR_SYNTHETIC_ROOT, NsEvent,
+        inspector_identity,
     };
     use crate::MountTable;
     use crate::namespace::Namespace;
@@ -1953,8 +1954,9 @@ mod tests {
     /// A tree that the listing of its parent names resolves through its own
     /// lookup. Past the deadline of its tree path it asks for its commit
     /// again: `unchanged` keeps the checkout, and a new commit is fetched into
-    /// the clone, checked out, and read in the tree. The nodes of the tree
-    /// answer with the zero lifetime of dynamic entries.
+    /// the clone, checked out, and read in the tree, whose root it changes in
+    /// place. The nodes of the tree answer with the zero lifetime of dynamic
+    /// entries.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_tree_past_its_deadline_follows_the_commit_of_its_upstream() {
         use crate::authority::RuntimeAuthority;
@@ -2033,6 +2035,7 @@ mod tests {
         assert!(validators.is_empty(), "the tree serves within its deadline");
         assert_eq!(readme.attrs().expect("README attrs").ttl, Duration::ZERO);
         let read = || Namespace::read(namespace.as_ref(), readme.path.clone(), 0, 64);
+        let mut events = namespace.subscribe();
 
         tokio::time::sleep(Duration::from_millis(3_300)).await;
         let (kept, validators) = answering_commits(&runtime, &executor, read(), &[None]).await;
@@ -2061,6 +2064,15 @@ mod tests {
         assert!(
             validators.is_empty(),
             "the new commit renews the deadline of the tree"
+        );
+        let changed = std::iter::from_fn(|| events.try_recv())
+            .filter(
+                |event| matches!(event, NsEvent::AttrsChanged { path, .. } if *path == tree.path),
+            )
+            .count();
+        assert_eq!(
+            changed, 1,
+            "the new commit alone changes the root of the tree"
         );
     }
 

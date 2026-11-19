@@ -236,8 +236,8 @@ impl EngineNamespace {
     /// rate-limit window of the mount, `list-children` of the tree path with
     /// the commit as its validator comes first, in the one flight of the
     /// path: `unchanged` renews the deadline, and a subtree with a new commit
-    /// updates the Git fact and renews it. `None` without a Git fact of `rel`
-    /// or without its tree open.
+    /// updates the Git fact and renews it, and records the tree path as
+    /// changed. `None` without a Git fact of `rel` or without its tree open.
     pub(crate) async fn current_tree(
         &self,
         entry: &crate::registry::MountEntry,
@@ -271,10 +271,15 @@ impl EngineNamespace {
         };
         match runtime.list_children(rel, request, captured_epoch).await? {
             crate::ops::namespace::ListOutcome::Unchanged => Ok(Some(tree_ref)),
-            crate::ops::namespace::ListOutcome::Subtree(tree) => runtime
-                .tree_ref(tree)
-                .map(Some)
-                .ok_or_else(|| TreeError::internal(format!("unresolved tree_ref {tree}"))),
+            crate::ops::namespace::ListOutcome::Subtree(tree) => {
+                // A filesystem answers the root of the tree from what it holds
+                // until the attributes of the root change.
+                runtime.record_dir_changed(rel);
+                runtime
+                    .tree_ref(tree)
+                    .map(Some)
+                    .ok_or_else(|| TreeError::internal(format!("unresolved tree_ref {tree}")))
+            },
             crate::ops::namespace::ListOutcome::Entries(_)
             | crate::ops::namespace::ListOutcome::Feed(_) => {
                 Err(TreeError::internal("the tree path answered no tree"))
