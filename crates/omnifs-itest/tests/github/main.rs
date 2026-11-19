@@ -399,21 +399,51 @@ fn github_owner_listing_tracks_browsed_repos() {
             if token == validator
     ));
 
+    // A changed first page has the faces of the owner without a load of the
+    // owner.
+    let mut first_changed = harness
+        .list_page("/octocat", None, Some(validator))
+        .unwrap();
+    let repos_changed = first_changed.expect_single_fetch();
+    assert!(
+        repos_changed
+            .url
+            .ends_with("/users/octocat/repos?sort=full_name&direction=asc&per_page=100&page=1"),
+        "a changed page goes straight to the repos of its owner kind: {}",
+        repos_changed.url
+    );
+    first_changed
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: vec![Header {
+                name: "ETag".to_string(),
+                value: r#""repos-2""#.to_string(),
+            }],
+            body: br#"[{"name":"Hello-World"},{"name":"new-repo"}]"#.to_vec(),
+        })])
+        .unwrap();
+    match first_changed.result().unwrap() {
+        Ok(ListChildrenResult::Entries(listing)) => {
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            for name in ["owner.json", "profile.md", "Hello-World", "new-repo"] {
+                assert!(names.contains(&name), "{name} in {names:?}");
+            }
+        },
+        other => panic!("expected the changed owner page, got {other:?}"),
+    }
+
+    // A later page goes straight to the repos of its owner kind, without a
+    // load of the owner, and has none of its faces.
     let mut page_two = harness
         .list_page(
             "/octocat",
             Some(&Cursor::Opaque(r#"{"kind":"user","page":2}"#.to_string())),
             None,
         )
-        .unwrap();
-    let owner_reload = page_two.expect_single_fetch();
-    assert!(owner_reload.url.ends_with("/users/octocat"));
-    page_two
-        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
-            status: 200,
-            headers: Vec::<Header>::new(),
-            body: br#"{"login":"octocat","type":"User"}"#.to_vec(),
-        })])
         .unwrap();
     let repos_fetch = page_two.expect_single_fetch();
     assert!(
@@ -426,10 +456,24 @@ fn github_owner_listing_tracks_browsed_repos() {
     page_two
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
-            headers: Vec::<Header>::new(),
+            headers: vec![Header {
+                name: "ETag".to_string(),
+                value: r#""repos-page-2""#.to_string(),
+            }],
             body: br#"[{"name":"z-last"}]"#.to_vec(),
         })])
         .unwrap();
+    match page_two.result().unwrap() {
+        Ok(ListChildrenResult::Entries(listing)) => {
+            let names: Vec<&str> = listing
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            assert_eq!(names, ["z-last"]);
+        },
+        other => panic!("expected the second owner page, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1934,8 +1978,9 @@ fn entry_names(page: &omnifs_engine::DirPage) -> Vec<&str> {
 
 /// A page of `actions/runs/` with the `ETag` of its answer serves from cache
 /// within its deadline, three seconds without an interval of its upstream, and
-/// is asked for again with `If-None-Match` only after it; `304` keeps it, and
-/// a rate limit is the error of the listing.
+/// is asked for again with `If-None-Match` only after it; `304` keeps it, a
+/// rate limit is the error of the listing, and a read in the window of the
+/// rate limit takes the cached entries without a request.
 #[tokio::test(flavor = "multi_thread")]
 async fn github_action_runs_page_is_asked_again_with_its_etag_after_its_deadline() {
     let harness = github_harness();
@@ -1996,6 +2041,13 @@ async fn github_action_runs_page_is_asked_again_with_its_etag_after_its_deadline
         limited,
         Err(omnifs_engine::NsError::RateLimited { .. })
     ));
+
+    let (windowed, requests) = answering(&harness, readdir(), Vec::new()).await;
+    assert_eq!(entry_names(&windowed.unwrap()), ["123"]);
+    assert!(
+        requests.is_empty(),
+        "a read in the window of the rate limit asks GitHub nothing"
+    );
 }
 
 /// A page answer without an `ETag` has no validator to be asked for again

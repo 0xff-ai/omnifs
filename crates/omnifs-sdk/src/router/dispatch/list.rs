@@ -1,6 +1,6 @@
 //! `list_children` dispatch.
 
-use crate::browse::List;
+use crate::browse::{List, Listing};
 use crate::cx::Cx;
 use crate::error::{ProviderError, Result};
 use crate::handler::{Cursor, DirIntent};
@@ -32,8 +32,12 @@ impl<S> CompiledRouter<S> {
     ///
     /// The validator of the cached page of `cursor` ([`Cx::version`]) reaches
     /// a dir route and the collection of an object anchor, the owners of the
-    /// page, and never the anchor object's own load, which an unchanged page
-    /// of the collection answers without.
+    /// page, and never the anchor object's own load. A call with the
+    /// validator of a page, or for a later page, lists an object anchor
+    /// without the load of its object, which the listing of its first page
+    /// loads: an unchanged page answers `unchanged`, a changed first page has
+    /// the leaves of the anchor without the source attributes of its
+    /// canonical leaf, and a later page has none of them.
     pub async fn list_children(
         &self,
         cx: &Cx<S>,
@@ -85,23 +89,27 @@ impl<S> CompiledRouter<S> {
                 .await
                 .map_err(|error| error.with_context("list-children", &abs))
             };
-            // A call with the validator of its page asks for the page first: an
-            // unchanged page answers without the load of the anchor object.
-            let asked = match cx.version() {
-                Some(_) => {
-                    let projection = collection(cursor.clone()).await?;
-                    if let Some(projection) = &projection
-                        && let DirPage::Unchanged { validator } = projection.page()
-                    {
-                        return Ok(List::unchanged(
-                            validator.clone(),
-                            projection.project_effects()?,
-                        ));
-                    }
-                    Some(projection)
-                },
-                None => None,
-            };
+            if cx.version().is_some() || cursor.is_some() {
+                let first = cursor.is_none();
+                let projection = collection(cursor).await?;
+                if let Some(projection) = &projection
+                    && let DirPage::Unchanged { validator } = projection.page()
+                {
+                    return Ok(List::unchanged(
+                        validator.clone(),
+                        projection.project_effects()?,
+                    ));
+                }
+                let listing = if first {
+                    shape.object_dir_listing(route.entry, &abs, None)
+                } else {
+                    Listing::complete(Vec::new())
+                };
+                let Some(projection) = projection else {
+                    return Ok(List::entries(listing));
+                };
+                return super::route_shape::merge_anchor_collection(&listing, &projection);
+            }
             // A fed anchor lists its faces without a load of its object.
             let out = if route.entry.anchor_claims.is_some() {
                 super::super::object::ObjectListing {
@@ -109,10 +117,9 @@ impl<S> CompiledRouter<S> {
                     source: None,
                 }
             } else {
-                let object_cx = cx.clone().with_version(None);
                 super::route_future(
                     route.entry.pattern.template(),
-                    (route.entry.list)(&object_cx, route.captures.clone(), path.to_string()),
+                    (route.entry.list)(cx, route.captures.clone(), path.to_string()),
                 )
                 .await
                 .map_err(|error| error.with_context("list-children", &abs))?
@@ -120,11 +127,7 @@ impl<S> CompiledRouter<S> {
             let listing = shape
                 .object_dir_listing(route.entry, &abs, out.source.as_ref())
                 .with_effects(out.effects);
-            let projection = match asked {
-                Some(projection) => projection,
-                None => collection(cursor).await?,
-            };
-            let Some(projection) = projection else {
+            let Some(projection) = collection(cursor).await? else {
                 return Ok(List::entries(listing));
             };
             return super::route_shape::merge_anchor_collection(&listing, &projection);
