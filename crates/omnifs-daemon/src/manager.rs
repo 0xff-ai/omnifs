@@ -889,6 +889,7 @@ mod tests {
             "description": "A test provider",
             "provider": "demo.wasm",
             "defaultMount": "demo",
+            "projection": 1,
             "refreshIntervalSecs": 0,
             "capabilities": [{
                 "kind": "domain",
@@ -1064,16 +1065,94 @@ mod tests {
         // `GenerationDraft::prepare`, which is the same single-writer path
         // `apply` uses. This fixture's wasm bytes are just enough to pass
         // `import_provider`'s metadata validation, not a real component, so
-        // `prepare` fails to compile it; that failure is exactly the
-        // evidence that (unlike the unrelated-provider call above) this call
-        // actually attempted the rebuild instead of returning a no-op.
-        let error = manager
+        // the host cannot instantiate it: the published mount is unavailable
+        // with that error, the evidence that (unlike the unrelated-provider
+        // call above) this call actually rebuilt.
+        manager
             .rebuild_for_provider_repair(provider.id)
             .await
-            .unwrap_err();
-        assert!(matches!(error, ManagerError::RecoveryRequired(_)));
-        assert!(serving.mount_statuses().is_empty());
+            .unwrap();
+        let statuses = serving.mount_statuses();
+        assert!(
+            matches!(
+                &statuses[..],
+                [status] if status.name.as_str() == "demo"
+                    && matches!(
+                        &status.availability,
+                        omnifs_engine::MountAvailability::ProviderUnavailable { reason }
+                            if reason.contains("cannot instantiate")
+                    )
+            ),
+            "{:?}",
+            statuses
+                .iter()
+                .map(|status| (&status.name, &status.availability))
+                .collect::<Vec<_>>()
+        );
 
         manager.shutdown().await.unwrap();
+    }
+
+    /// A mount whose artifact the host cannot instantiate is unavailable with
+    /// that error, and the generation publishes the mount beside it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mount_the_host_cannot_instantiate_publishes_beside_a_ready_one() {
+        let (manager, state, serving, _temp) =
+            test_manager_with_state(Duration::from_secs(30)).await;
+        let mut documents = Vec::new();
+        for (file, bytes, mount) in [
+            ("demo.wasm", demo_provider_wasm(), "demo"),
+            ("test_provider.wasm", test_provider_wasm(), "test"),
+        ] {
+            let digest = ProviderId::from_wasm_bytes(&bytes);
+            let upload = state
+                .stage_provider_bytes(file, digest, &bytes)
+                .await
+                .unwrap();
+            let outcome = state.import_provider(upload).await.unwrap();
+            documents.push(StateOp::CreateMount(MountDocument {
+                name: omnifs_core::MountName::new(mount).unwrap(),
+                provider: outcome.reference,
+                credential: None,
+                limits: None,
+                config: serde_json::Value::Object(serde_json::Map::default()),
+            }));
+        }
+        state
+            .apply_batch(MutationId::from_bytes([8; 16]), documents)
+            .await
+            .unwrap();
+        manager
+            .rebuild_for_provider_repair(ProviderId::from_wasm_bytes(&demo_provider_wasm()))
+            .await
+            .unwrap();
+        let statuses = serving
+            .mount_statuses()
+            .into_iter()
+            .map(|status| (status.name.to_string(), status.availability))
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                &statuses[..],
+                [(demo, omnifs_engine::MountAvailability::ProviderUnavailable { reason }),
+                 (test, omnifs_engine::MountAvailability::Active)]
+                    if demo == "demo" && test == "test" && reason.contains("cannot instantiate")
+            ),
+            "{statuses:?}"
+        );
+
+        manager.shutdown().await.unwrap();
+    }
+
+    /// The test provider component that the providers build writes.
+    fn test_provider_wasm() -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/wasm32-wasip2/release/test_provider.wasm");
+        std::fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "build providers before the daemon fixture: {}: {error}",
+                path.display()
+            )
+        })
     }
 }

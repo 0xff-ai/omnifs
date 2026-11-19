@@ -128,15 +128,16 @@ impl RuntimeHarness {
     }
 
     /// The namespace of the mounts of the harness without their providers,
-    /// each over its projection.
+    /// each over its projection, which the manifest of its provider names.
     pub fn without_providers(&self) -> Result<Arc<EngineNamespace>, BuildError> {
         let inputs = self
             .configs
             .iter()
             .map(|config| {
                 let mut input = mount_input_from_json(config)?;
-                input.provider = None;
-                input.state = MountBuildState::ProviderUnavailable;
+                input.state = MountBuildState::ProviderUnavailable {
+                    reason: "the harness serves the mount without its provider".to_owned(),
+                };
                 Ok(input)
             })
             .collect::<Result<Vec<_>, BuildError>>()?;

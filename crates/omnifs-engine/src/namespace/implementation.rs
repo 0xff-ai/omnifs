@@ -315,9 +315,8 @@ impl EngineNamespace {
             .configured_entry(mount)
             .ok_or_else(|| TreeError::not_found(format!("no such mount: {mount}")))?;
         match entry.availability() {
-            crate::MountAvailability::Active | crate::MountAvailability::ProviderUnavailable => {
-                Ok(entry)
-            },
+            crate::MountAvailability::Active
+            | crate::MountAvailability::ProviderUnavailable { .. } => Ok(entry),
             crate::MountAvailability::AuthRequired => Err(TreeError::auth_required(format!(
                 "mount {mount} requires a compatible credential"
             ))),
@@ -1778,6 +1777,7 @@ mod tests {
         // The Git fact of the tree path serves the nodes of its tree.
         let published = entry
             .resources()
+            .expect("the projection of the mount")
             .publish(
                 ProjectionTransition {
                     git: vec![GitWrite {
@@ -1788,7 +1788,10 @@ mod tests {
                     }],
                     ..ProjectionTransition::default()
                 },
-                entry.resources().current_epoch(),
+                entry
+                    .resources()
+                    .expect("the projection of the mount")
+                    .current_epoch(),
             )
             .expect("publish the Git fact");
         assert!(matches!(
@@ -1963,6 +1966,7 @@ mod tests {
     /// place. The nodes of the tree answer with the zero lifetime of dynamic
     /// entries.
     #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)]
     async fn a_tree_past_its_deadline_follows_the_commit_of_its_upstream() {
         use crate::authority::RuntimeAuthority;
         use crate::cache::identity::GitId;
@@ -2061,6 +2065,7 @@ mod tests {
         assert_eq!(validators, [Some(first)]);
         let fact = entry
             .resources()
+            .expect("the projection of the mount")
             .git_for_path(&Path::parse("/repos/fixture/tree").unwrap())
             .expect("Git fact read")
             .expect("the Git fact of the tree");

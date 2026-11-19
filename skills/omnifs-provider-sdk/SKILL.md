@@ -70,6 +70,7 @@ struct ItemKey {
 
 #[omnifs_sdk::provider(
     id = "example",
+    projection = 1,
     capabilities(domain("api.example.com", "fetch items")),
 )]
 impl ExampleProvider {
@@ -191,6 +192,7 @@ A feed method is `async fn feed(cx: FeedCx<K, State>) -> Result<Feed>`. `cx.path
 The manifest (identity, access capabilities, scalar limits, config metadata, auth) is authored from `#[omnifs_sdk::provider(...)]` arguments plus `#[omnifs_sdk::config]` metadata, and embedded as the `omnifs.provider-metadata.v1` wasm custom section by the provider macro. There is no hand-written `omnifs.provider.json` or post-build injector.
 
 - `id = ".."`, `display_name = ".."`, `mount = ".."` set identity.
+- `projection = N` names the number of the projection of the provider: a mount keeps its projection on an artifact with the same number, so a provider moves the number when the meaning of its facts, tokens, or validators changes.
 - `capabilities(domain("v","why"), git_repo("v","why"), unix_socket(dynamic,"why"), preopened_path(dynamic,"why"))` declare authority needs; `unix_socket`/`preopened_path` `dynamic` forms resolve at mount-start from a `HostSocket`/`HostFile` config field.
 - `limits(memory_mb(<int>,"why"))` declares scalar runtime ceilings seeded into new mount specs separately from access grants.
 - `auth = <JSON string>` declares the wire-shaped auth block directly; the macro parses and validates the literal before embedding it.

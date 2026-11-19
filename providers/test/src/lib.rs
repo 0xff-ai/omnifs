@@ -609,6 +609,7 @@ struct RepoKey {
     id = "test-provider",
     display_name = "A test provider with canned data",
     mount = "test",
+    projection = 1,
     capabilities(
         domain(
             "httpbin.org",

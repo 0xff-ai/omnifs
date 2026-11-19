@@ -150,7 +150,7 @@ impl EngineNamespace {
         }
 
         let entry = self.entry_for(node.mount())?;
-        let resources = entry.resources();
+        let resources = entry.resources()?;
         let offline = entry.runtime().is_none();
         let path = node.path();
         let captured_epoch = resources.current_epoch();

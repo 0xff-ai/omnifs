@@ -113,7 +113,7 @@ impl EngineNamespace {
         parent_fact: Option<&Path>,
         name: &str,
     ) -> Result<Node> {
-        let resources = entry.resources();
+        let resources = entry.resources()?;
         let rel = parent.join(name).map_err(|e| {
             TreeError::invalid_input(format!("resolve_child: invalid name {name:?}: {e}"))
         })?;
@@ -181,7 +181,7 @@ impl EngineNamespace {
         name: &str,
         rel: Path,
     ) -> Result<Node> {
-        let resources = entry.resources();
+        let resources = entry.resources()?;
         let offline = entry.runtime().is_none();
         // A fed fact is served once its feeds have answered, so its lookup
         // asks the provider for their claims.
@@ -299,7 +299,7 @@ impl EngineNamespace {
         entry: &crate::registry::MountEntry,
         rel: &Path,
     ) -> Result<Option<TreeRef>> {
-        let resources = entry.resources();
+        let resources = entry.resources()?;
         let captured_epoch = resources.current_epoch();
         let Some(git) = resources
             .git_for_path(rel)
@@ -354,7 +354,7 @@ fn cached_child_node(
     name: &str,
     rel: &Path,
 ) -> Result<Option<Node>> {
-    let resources = entry.resources();
+    let resources = entry.resources()?;
     let offline = entry.runtime().is_none();
     let expired = !offline
         && resources
@@ -496,21 +496,15 @@ mod tests {
         Caches, FactPayload, GitWrite, ProjectionId, ProjectionTransition, RecordWrite,
     };
     use crate::view::LookupPayload;
-    use omnifs_core::{MountName, ProviderId};
+    use omnifs_core::MountName;
 
     #[test]
     fn a_git_fact_without_an_open_tree_is_a_lookup_miss() {
         // A restart keeps the Git fact of a path but no open tree in memory.
         let dir = tempfile::tempdir().unwrap();
         let caches = Caches::open(dir.path()).unwrap();
-        let provider_id = ProviderId::from_wasm_bytes(b"m");
         let resources = caches
-            .mount(
-                &MountName::new("m").unwrap(),
-                ProjectionId::new(b"m", provider_id),
-                provider_id,
-                b"m",
-            )
+            .mount(&MountName::new("m").unwrap(), ProjectionId::new(b"m"), b"m")
             .unwrap();
         let path = Path::parse("/owner/repo/repo").unwrap();
         resources

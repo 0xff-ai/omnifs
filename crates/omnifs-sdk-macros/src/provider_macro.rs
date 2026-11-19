@@ -62,6 +62,7 @@ pub struct ProviderArgs {
     display_name: Option<LitStr>,
     description: Option<LitStr>,
     mount: Option<LitStr>,
+    projection: Option<syn::LitInt>,
     capabilities: Vec<ParsedAccessNeed>,
     limits: ParsedLimitDeclarations,
     auth: Option<LitStr>,
@@ -75,6 +76,7 @@ impl Parse for ProviderArgs {
             display_name: None,
             description: None,
             mount: None,
+            projection: None,
             capabilities: Vec::new(),
             limits: ParsedLimitDeclarations::default(),
             auth: None,
@@ -106,6 +108,10 @@ impl Parse for ProviderArgs {
                     let _: Token![=] = input.parse()?;
                     args.mount = Some(input.parse()?);
                 },
+                "projection" => {
+                    let _: Token![=] = input.parse()?;
+                    args.projection = Some(input.parse()?);
+                },
                 "capabilities" => {
                     let content;
                     syn::parenthesized!(content in input);
@@ -128,7 +134,7 @@ impl Parse for ProviderArgs {
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "supported provider arguments are `id`/`display_name`/`description`/`mount`, `capabilities(...)`, `limits(...)`, `auth = ...`, and `events(...)`",
+                        "supported provider arguments are `id`/`display_name`/`description`/`mount`/`projection`, `capabilities(...)`, `limits(...)`, `auth = ...`, and `events(...)`",
                     ));
                 },
             }
@@ -472,6 +478,7 @@ struct ManifestFacts {
     default_mount: String,
     provider_file: String,
     version: Option<String>,
+    projection: u32,
 }
 
 impl ManifestFacts {
@@ -504,6 +511,16 @@ impl ManifestFacts {
             default_mount,
             provider_file: format!("{}.wasm", pkg_name.replace('-', "_")),
             version: std::env::var("CARGO_PKG_VERSION").ok(),
+            projection: args
+                .projection
+                .as_ref()
+                .ok_or_else(|| {
+                    syn::Error::new(
+                        Span::call_site(),
+                        "provider needs a `projection = N` annotation",
+                    )
+                })?
+                .base10_parse::<u32>()?,
         })
     }
 
@@ -529,6 +546,7 @@ impl ManifestFacts {
         }
         fields.push(("witPackage", json_string("package omnifs:provider@0.10.0;")));
         fields.push(("sdkVersion", json_string(env!("CARGO_PKG_VERSION"))));
+        fields.push(("projection", self.projection.to_string()));
         fields.push(("refreshIntervalSecs", refresh_interval_secs.to_string()));
         if !capabilities.is_empty() {
             fields.push(("capabilities", capabilities_json(capabilities)));

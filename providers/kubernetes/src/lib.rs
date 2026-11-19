@@ -159,6 +159,7 @@ struct PodLogKey {
     display_name = "Kubernetes",
     description = "cluster resources, read-only",
     mount = "k8s",
+    projection = 1,
     capabilities(unix_socket(
         dynamic,
         "Talk to the Kubernetes API server through a local `kubectl proxy --unix-socket` endpoint. kubectl terminates TLS and injects the active-context credentials, so the provider issues plain HTTP over the socket and never handles a token."

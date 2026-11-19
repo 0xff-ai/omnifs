@@ -143,6 +143,7 @@ impl Issue {
     display_name = "Linear",
     description = "issues and projects from your workspace",
     mount = "linear",
+    projection = 1,
     capabilities(domain(
         "api.linear.app",
         "Fetch Linear GraphQL resources for teams, issues, projects, and workflow metadata."

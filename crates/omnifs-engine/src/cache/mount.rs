@@ -36,7 +36,6 @@ use crate::view::{
     AttrPayload, ByteSource, CachedCursor, DirentsPage, DirentsPayload, EntryMeta, FileAttrsCache,
     FilePayload, FileSize, ListingWrite, LookupPayload,
 };
-use omnifs_core::ProviderId;
 
 /// Result of a warm canonical lookup: the object id, the canonical bytes, and
 /// the optional validator.
@@ -452,10 +451,9 @@ impl Caches {
         self: &Arc<Self>,
         mount: &MountName,
         projection_id: ProjectionId,
-        provider_id: ProviderId,
         spec_source: &[u8],
     ) -> anyhow::Result<Arc<MountResources>> {
-        let resources = self.prepare_mount(mount, projection_id, provider_id, spec_source)?;
+        let resources = self.prepare_mount(mount, projection_id, spec_source)?;
         resources.activate();
         Ok(resources)
     }
@@ -468,11 +466,10 @@ impl Caches {
         self: &Arc<Self>,
         mount: &MountName,
         projection_id: ProjectionId,
-        provider_id: ProviderId,
         spec_source: &[u8],
     ) -> anyhow::Result<Arc<MountResources>> {
         let fence = self.resource_fence(projection_id);
-        MountResources::new(self, mount, projection_id, provider_id, spec_source, fence)
+        MountResources::new(self, mount, projection_id, spec_source, fence)
     }
 
     fn resource_fence(&self, projection_id: ProjectionId) -> Arc<ResourceFence> {
@@ -612,7 +609,6 @@ impl MountResources {
         caches: &Caches,
         mount: &MountName,
         projection_id: ProjectionId,
-        provider_id: ProviderId,
         spec_source: &[u8],
         fence: Arc<ResourceFence>,
     ) -> anyhow::Result<Arc<Self>> {
@@ -622,7 +618,6 @@ impl MountResources {
             projection_id,
             mount,
             spec_source,
-            provider_id,
         )?;
         Ok(Self::from_projection(caches, projection, fence))
     }
@@ -2269,11 +2264,8 @@ mod tests {
         let caches = Caches::open(dir.path()).unwrap();
         let name = MountName::new(mount).unwrap();
         let source = mount.as_bytes();
-        let provider_id = ProviderId::from_wasm_bytes(source);
-        let projection_id = ProjectionId::new(source, provider_id);
-        let store = caches
-            .mount(&name, projection_id, provider_id, source)
-            .unwrap();
+        let projection_id = ProjectionId::new(source);
+        let store = caches.mount(&name, projection_id, source).unwrap();
         (dir, caches, store)
     }
 
@@ -2331,11 +2323,8 @@ mod tests {
         let (_dir, caches, first) = open_store("m");
         let name = MountName::new("m").unwrap();
         let source = b"m";
-        let provider_id = ProviderId::from_wasm_bytes(source);
-        let projection_id = ProjectionId::new(source, provider_id);
-        let successor = caches
-            .prepare_mount(&name, projection_id, provider_id, source)
-            .unwrap();
+        let projection_id = ProjectionId::new(source);
+        let successor = caches.prepare_mount(&name, projection_id, source).unwrap();
 
         let old_path = p("/old");
         assert!(matches!(
@@ -2408,14 +2397,8 @@ mod tests {
 
         let name_b = MountName::new("b").unwrap();
         let source = b"b";
-        let provider_id = ProviderId::from_wasm_bytes(source);
         let store_b = caches
-            .mount(
-                &name_b,
-                ProjectionId::new(source, provider_id),
-                provider_id,
-                source,
-            )
+            .mount(&name_b, ProjectionId::new(source), source)
             .unwrap();
         publish_object(&store_b, OBJ_ID, b"from-b", std::slice::from_ref(&alias));
         assert_eq!(

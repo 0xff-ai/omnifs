@@ -45,7 +45,7 @@ An operation on a fed path answers `feed(claims)` without a request, with `start
 
 ### Provider metadata
 
-Provider manifests are generated from `#[omnifs_sdk::provider]` annotations, each `#[omnifs_sdk::config]` type's static config dialect, and a literal wire-shaped auth JSON declaration. `capabilities(...)` declares authority needs only; scalar ceilings use `limits(...)`. The provider macro assembles one JSON byte array at compile time and emits it as the `omnifs.provider-metadata.v1` custom section. The final component is self-describing before host instantiation, and the host parser owns validation and conversion into `ProviderManifest`.
+Provider manifests are generated from `#[omnifs_sdk::provider]` annotations, whose `projection = N` names the number of the projection of the provider: a mount keeps its projection on an artifact with the same number, and a provider moves the number when its facts, tokens, or validators change their meaning, each `#[omnifs_sdk::config]` type's static config dialect, and a literal wire-shaped auth JSON declaration. `capabilities(...)` declares authority needs only; scalar ceilings use `limits(...)`. The provider macro assembles one JSON byte array at compile time and emits it as the `omnifs.provider-metadata.v1` custom section. The final component is self-describing before host instantiation, and the host parser owns validation and conversion into `ProviderManifest`.
 
 Every auth injection domain must be covered by a declared domain capability need in the same manifest. Metadata validation rejects a scheme whose `injectDomains` entry is not matched by the provider's domain needs, and the error names the scheme key and domain.
 

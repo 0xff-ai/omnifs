@@ -15,6 +15,7 @@ use crate::row::{RowExt as _, decode_error, sql_int};
 use crate::{MountMutationOutcome, MountWriteError};
 
 const CANONICAL_MOUNT_V1_PREFIX: &[u8] = b"omnifs.mount.v1\0";
+const PROJECTION_MOUNT_V1_PREFIX: &[u8] = b"omnifs.mount-projection.v1\0";
 const MOUNT_VERSION_DOMAIN: &str = "omnifs mount version v1";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +72,22 @@ impl StoredMount {
         })
     }
 
+    /// The canonical mount without the content ID and the version of the
+    /// artifact of its provider, which the projection of the mount takes
+    /// with the number of the projection of its provider.
+    pub fn canonical_without_artifact(&self) -> anyhow::Result<Vec<u8>> {
+        let canonical = CanonicalMountV1::from_document(&self.document)?;
+        let payload = postcard::to_allocvec(&ProjectionMountV1 {
+            name: canonical.name,
+            provider_name: canonical.provider_name,
+            credential: canonical.credential,
+            limits: canonical.limits,
+            config: canonical.config,
+        })
+        .context("encode the canonical mount without its artifact")?;
+        Ok([PROJECTION_MOUNT_V1_PREFIX, &payload].concat())
+    }
+
     fn decode_row(row: &SqliteRow) -> anyhow::Result<Self> {
         decode(
             row.bytes("canonical")?,
@@ -100,6 +117,16 @@ struct CanonicalMountV1 {
     /// integers stay distinct from floats. Turning that feature on anywhere in
     /// the workspace would silently change these bytes and invalidate every
     /// stored mount version.
+    config: String,
+}
+
+/// The canonical mount without the artifact of its provider.
+#[derive(Debug, Serialize)]
+struct ProjectionMountV1 {
+    name: String,
+    provider_name: String,
+    credential: Option<CanonicalCredentialV1>,
+    limits: Option<CanonicalLimitsV1>,
     config: String,
 }
 
