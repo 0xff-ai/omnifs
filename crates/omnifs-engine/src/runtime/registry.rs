@@ -64,22 +64,29 @@ pub enum MountAvailability {
     Active,
     AuthRequired,
     /// The provider of the mount is unavailable for `reason`: its artifact
-    /// is not retained, its manifest is invalid, or the host cannot
-    /// instantiate it.
+    /// is not retained, its manifest is invalid, or it does not build.
     ProviderUnavailable {
         reason: String,
     },
 }
 
 impl MountEntry {
-    /// The projection of the mount.
+    /// The projection of the mount. A mount without one, whose provider has
+    /// no manifest, answers with its unavailability and its reason.
     pub(crate) fn resources(&self) -> Result<&Arc<MountResources>, crate::tree::TreeError> {
-        self.resources.as_ref().ok_or_else(|| {
-            crate::tree::TreeError::internal(format!(
-                "mount {} has no projection without a manifest of its provider",
+        match (&self.resources, &self.availability) {
+            (Some(resources), _) => Ok(resources),
+            (None, MountAvailability::ProviderUnavailable { reason }) => {
+                Err(crate::tree::TreeError::offline_miss(format!(
+                    "mount {} is unavailable: {reason}",
+                    self.name
+                )))
+            },
+            (None, _) => Err(crate::tree::TreeError::internal(format!(
+                "mount {} has no projection while its provider is available",
                 self.name
-            ))
-        })
+            ))),
+        }
     }
 
     pub(crate) fn trees(&self) -> &Arc<TreeRefs> {
@@ -138,8 +145,10 @@ impl MountTable {
     }
 
     /// Build one mount. A mount whose provider artifact does not match its
-    /// pin, or whose artifact the host cannot instantiate, is
-    /// `ProviderUnavailable` with that error, so that the other mounts build.
+    /// pin, or whose provider does not build, as an artifact the host cannot
+    /// instantiate, a configuration or an authority its manifest rejects, or
+    /// an initialize that fails, is `ProviderUnavailable` with that error, so
+    /// that the other mounts build.
     /// The projection of a mount comes from the number of the projection of
     /// its provider.
     fn build_durable_mount(
@@ -213,13 +222,17 @@ impl MountTable {
                 capture_test_callouts,
             ) {
                 Ok(runtime) => Some(Arc::new(runtime)),
-                Err(BuildError::Wasmtime(error)) => {
+                Err(error) => {
                     availability = MountAvailability::ProviderUnavailable {
-                        reason: format!("the host cannot instantiate its provider: {error}"),
+                        reason: match error {
+                            BuildError::Wasmtime(error) => {
+                                format!("the host cannot instantiate its provider: {error}")
+                            },
+                            error => format!("its provider does not build: {error}"),
+                        },
                     };
                     None
                 },
-                Err(error) => return Err(RegistryError::from_build(&mount, error)),
             },
             _ => None,
         };
@@ -511,21 +524,10 @@ pub enum RegistryError {
     RuntimeError(String),
 }
 
-impl RegistryError {
-    fn from_build(mount: &str, error: BuildError) -> Self {
-        match error {
-            BuildError::InvalidConfig(message) => {
-                Self::ConfigError(format!("mount {mount}: {message}"))
-            },
-            other => Self::RuntimeError(other.to_string()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        MountBuildInput, MountBuildState, MountTable, ProviderBuildInput, RegistryError,
+        MountAvailability, MountBuildInput, MountBuildState, MountTable, ProviderBuildInput,
         generation_cache_source,
     };
     use crate::runtime::host::HostOnline;
@@ -577,7 +579,7 @@ mod tests {
                 config,
                 max_fetch_blob_bytes: None,
             },
-            canonical: Arc::from(b"canonical mount".as_slice()),
+            canonical: Arc::from(format!("canonical mount {name}").into_bytes()),
             provider: Some(ProviderBuildInput {
                 bytes: Arc::from(bytes.to_vec().into_boxed_slice()),
                 manifest,
@@ -586,35 +588,88 @@ mod tests {
         }
     }
 
+    /// A mount whose provider does not build, as for a configuration its
+    /// manifest rejects, is unavailable with that error, and the generation
+    /// builds the mount beside it.
     #[tokio::test(flavor = "multi_thread")]
-    async fn durable_input_rejects_invalid_provider_config() {
+    async fn a_mount_whose_provider_does_not_build_is_unavailable_beside_a_ready_one() {
         let root = tempfile::tempdir().expect("temp root");
         let path = test_provider_wasm_path();
         assert!(path.exists(), "build providers before the host fixture");
         let bytes = std::fs::read(path).expect("read test provider");
         let (_, manifest) = Artifact::from_bytes_with_manifest("test-provider.wasm", bytes.clone())
             .expect("validate test provider");
-        let result = MountTable::prepare_durable(
+        let active = || MountBuildState::Active {
+            auth: None,
+            credential_generation: None,
+        };
+        let table = MountTable::prepare_durable(
             &test_host(root.path()),
-            vec![input(
-                &bytes,
-                manifest,
-                "test",
-                serde_json::json!({"unexpected": true}),
-                MountBuildState::Active {
-                    auth: None,
-                    credential_generation: None,
-                },
-            )],
+            vec![
+                input(
+                    &bytes,
+                    manifest.clone(),
+                    "bad",
+                    serde_json::json!({"unexpected": true}),
+                    active(),
+                ),
+                input(&bytes, manifest, "test", serde_json::json!({}), active()),
+            ],
+        )
+        .expect("prepare the generation");
+        let entries = table
+            .selected_entries()
+            .map(|(name, _, availability, runtime)| {
+                (name.to_string(), availability, runtime.is_some())
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                &entries[..],
+                [
+                    (bad, MountAvailability::ProviderUnavailable { reason }, false),
+                    (test, MountAvailability::Active, true),
+                ] if bad == "bad"
+                    && test == "test"
+                    && reason.contains("failed validation")
+                    && reason.contains("mount bad")
+            ),
+            "{entries:?}"
         );
-        match result {
-            Err(RegistryError::ConfigError(message)) => {
-                assert!(message.contains("failed validation"));
-                assert!(message.contains("mount test"));
+    }
+
+    /// A read under a mount whose provider has no manifest, and so no
+    /// projection, answers with its unavailability.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mount_without_a_manifest_of_its_provider_answers_as_unavailable() {
+        let root = tempfile::tempdir().expect("temp root");
+        let path = test_provider_wasm_path();
+        assert!(path.exists(), "build providers before the host fixture");
+        let bytes = std::fs::read(path).expect("read test provider");
+        let (_, manifest) = Artifact::from_bytes_with_manifest("test-provider.wasm", bytes.clone())
+            .expect("validate test provider");
+        let mut input = input(
+            &bytes,
+            manifest,
+            "test",
+            serde_json::json!({}),
+            MountBuildState::ProviderUnavailable {
+                reason: "its provider artifact is not retained".to_owned(),
             },
-            Err(other) => panic!("expected config error, got {other}"),
-            Ok(_) => panic!("expected invalid provider config to be rejected"),
-        }
+        );
+        input.provider = None;
+        let table = Arc::new(
+            MountTable::prepare_durable(&test_host(root.path()), vec![input])
+                .expect("prepare the mount"),
+        );
+        let namespace = EngineNamespace::online(table, tokio::runtime::Handle::current());
+        assert_eq!(
+            namespace
+                .lookup(omnifs_core::path::Path::root(), "test")
+                .await
+                .unwrap_err(),
+            NsError::OfflineMiss
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

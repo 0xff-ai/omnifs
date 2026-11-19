@@ -477,6 +477,42 @@ mod tests {
         );
     }
 
+    /// The canonical mount without its artifact leaves out the content ID and
+    /// the version of the artifact of its provider alone: another artifact of
+    /// its provider keeps it, and another provider or config changes it.
+    #[test]
+    fn the_canonical_mount_without_its_artifact_leaves_out_the_artifact_alone() {
+        let stored = |document: &MountDocument| {
+            StoredMount::prepare(
+                document.clone(),
+                MountRevision::new(1),
+                MutationId::from_bytes([1; 16]),
+            )
+            .unwrap()
+        };
+        let mount = document(serde_json::json!({"a": 1}));
+        let mut moved = mount.clone();
+        moved.provider.id = ProviderId::from_wasm_bytes(b"another artifact");
+        moved.provider.meta.version = Some(ProviderVersion::new("2"));
+        let mut renamed = mount.clone();
+        renamed.provider.meta.name = ProviderName::new("other").unwrap();
+        let configured = document(serde_json::json!({"a": 2}));
+
+        let without = stored(&mount).canonical_without_artifact().unwrap();
+        assert!(without.starts_with(PROJECTION_MOUNT_V1_PREFIX));
+        assert_ne!(stored(&mount).canonical, stored(&moved).canonical);
+        assert_eq!(
+            stored(&moved).canonical_without_artifact().unwrap(),
+            without
+        );
+        for other in [renamed, configured] {
+            assert_ne!(
+                stored(&other).canonical_without_artifact().unwrap(),
+                without
+            );
+        }
+    }
+
     #[test]
     fn canonical_mount_round_trips() {
         let document = document(serde_json::json!({"nested": [true, null, -2, 3.5]}));
