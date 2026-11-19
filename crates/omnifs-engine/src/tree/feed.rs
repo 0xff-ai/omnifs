@@ -22,12 +22,15 @@ pub(crate) enum FedFact {
 /// `path` needs it: the outer claim whose first answer ended, else the
 /// innermost one. A feed with kept parts of a later answer continues that
 /// answer, whatever its deadline, outside the rate-limit window of the mount.
-/// Else an operation that starts that feed without its fact in the projection
-/// takes an answer with its path under the anchor of the innermost claim as
-/// `start`, and any other operation takes an answer once the feed is past its
-/// deadline, outside the rate-limit window of the mount. An operation that
-/// waited on another answer of the same feed, or whose feed another answer
-/// moved before its flight, decides again after it.
+/// Else a read or a listing that starts that feed without its fact in the
+/// projection, and a lookup that starts it without its positive lookup before
+/// the end of the first answer of the feed, take an answer with its path under
+/// the anchor of the innermost claim as `start`; after that end, a lookup is
+/// served from the projection, as not found for a path that it lacks. Any
+/// other operation takes an answer once the feed is past its deadline,
+/// outside the rate-limit window of the mount. An operation that waited on
+/// another answer of the same feed, or whose feed another answer moved before
+/// its flight, decides again after it.
 ///
 /// Returns the path of the fact of the operation in the projection, and the
 /// path of the operation under the anchor of the innermost claim. The facts
@@ -65,9 +68,13 @@ pub(crate) async fn answer_claims(
             .resources
             .has_kept_parts(claim.object.id.as_bytes())
             .map_err(|error| TreeError::internal(error.to_string()))?;
+        let first_answer = state.as_ref().is_none_or(|state| !state.ended);
         let start = if kept {
             runtime.rate_limited_until().is_none().then_some(None)
-        } else if claim.starts && !has_fact(runtime, at, fact)? {
+        } else if claim.starts
+            && (first_answer || !matches!(fact, FedFact::Lookup))
+            && !has_fact(runtime, at, fact)?
+        {
             Some(Some(under_anchor))
         } else if runtime.rate_limited_until().is_none()
             && state

@@ -896,19 +896,12 @@ async fn an_item_before_the_end_of_the_first_full_listing_takes_its_own_answers(
         .unwrap()
         .is_empty()
     );
-    let (open, requests) = answering(
-        &harness,
-        lookup(&harness, "octocat/hello/issues/open/7"),
-        vec![not_modified()],
-    )
-    .await;
     assert!(
-        open.unwrap().is_missing(),
+        served(&harness, lookup(&harness, "octocat/hello/issues/open/7"))
+            .await
+            .unwrap()
+            .is_missing(),
         "a closed issue leaves issues/open"
-    );
-    assert_eq!(
-        request_header(&requests[0], "if-none-match"),
-        Some(r#""item-7b""#)
     );
 }
 
@@ -1098,8 +1091,9 @@ async fn a_check_stopped_by_the_rate_limit_of_github_graphql_continues_with_its_
     );
 }
 
-/// A check stopped by the network gives a read its error, and the next read
-/// continues it with its next request, whatever its deadline.
+/// A check stopped by the network gives a read its error, and each next read
+/// continues it with its next request alone, whatever its deadline: the read
+/// of a network that fails again takes its error.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_check_stopped_by_the_network_gives_its_error_to_a_read() {
     let harness = github_harness();
@@ -1131,6 +1125,19 @@ async fn a_check_stopped_by_the_network_gives_its_error_to_a_read() {
     .await;
     assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
 
+    let comments = api(
+        "/repos/octocat/hello/issues/comments?sort=created&direction=asc&per_page=100\
+         &since=2026-11-18T09:00:00Z&page=1",
+    );
+    let (stopped, requests) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/1/title"),
+        vec![empty(502, &[])],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+    assert_eq!(requests[0].url, comments);
+
     let (title, requests) = answering(
         &harness,
         read(&harness, "octocat/hello/issues/all/1/title"),
@@ -1144,13 +1151,7 @@ async fn a_check_stopped_by_the_network_gives_its_error_to_a_read() {
     )
     .await;
     assert_eq!(title.unwrap(), "One again");
-    assert_eq!(
-        requests[0].url,
-        api(
-            "/repos/octocat/hello/issues/comments?sort=created&direction=asc&per_page=100\
-             &since=2026-11-18T09:00:00Z&page=1"
-        )
-    );
+    assert_eq!(requests[0].url, comments);
 }
 
 /// A check asks GitHub GraphQL for the IDs of at most 100 changed items with
@@ -1236,6 +1237,223 @@ async fn a_check_asks_github_graphql_for_a_hundred_changed_items_a_post() {
     );
 }
 
+/// A first full listing stopped by the network at a page of its rows gives
+/// each read of its folders the error of the network of its next page alone,
+/// and the next read continues it from that page.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_full_listing_stopped_by_the_network_continues_from_its_next_page() {
+    let harness = github_harness();
+    let next = api("/repositories/1/issues?state=all&page=2");
+    let (stopped, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![
+            answer(
+                200,
+                &[("Link", NEXT)],
+                &json!([item(1, "One", "open", "2026-11-18T09:00:00Z", 0, false)]),
+            ),
+            empty(502, &[]),
+        ],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+    assert_eq!(requests[1].url, next);
+
+    let (stopped, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/pulls/all"),
+        vec![empty(502, &[])],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+    assert_eq!(requests[0].url, next);
+
+    let (listing, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![
+            ok(&json!([item(
+                2,
+                "Two",
+                "open",
+                "2026-11-18T10:00:00Z",
+                0,
+                false
+            )])),
+            ok(&json!([])),
+            graphql(&counted(&[(1, 0), (2, 0)])),
+            graphql(&counted(&[])),
+        ],
+    )
+    .await;
+    assert_eq!(listing.unwrap(), ["1", "2"]);
+    assert_eq!(requests[0].url, next);
+}
+
+/// The first answer of item 7, `Seven`, with the count `comments` `0`, and,
+/// past its deadline, the request of its later answer for a change to
+/// `Seven again` with one comment: its `GET` and the page of its comments
+/// since its time, which `stop` answers.
+async fn later_answer_stopped(harness: &RuntimeHarness, stop: HttpResponse) -> NsError {
+    let (title, _) = answering(
+        harness,
+        read(harness, "octocat/hello/issues/all/7/title"),
+        vec![answer(
+            200,
+            &[("ETag", r#""item-7""#)],
+            &item(7, "Seven", "open", "2026-11-18T09:00:00Z", 0, false),
+        )],
+    )
+    .await;
+    assert_eq!(title.unwrap(), "Seven");
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let (stopped, requests) = answering(
+        harness,
+        read(harness, "octocat/hello/issues/all/7/title"),
+        vec![
+            answer(
+                200,
+                &[("ETag", r#""item-7b""#)],
+                &item(7, "Seven again", "open", "2026-11-18T10:00:00Z", 1, false),
+            ),
+            stop,
+        ],
+    )
+    .await;
+    assert_eq!(requests[1].url, api(ITEM_7_SINCE));
+    stopped.unwrap_err()
+}
+
+/// The page of the comments of item 7 since the time of its first answer.
+const ITEM_7_SINCE: &str =
+    "/repos/octocat/hello/issues/7/comments?per_page=100&since=2026-11-18T09:00:00Z&page=1";
+
+/// The end of the later answer of item 7 from the page of its comments since
+/// its time: that page, with its comment, and its IDs.
+async fn later_answer_continued(harness: &RuntimeHarness) {
+    let (title, requests) = answering(
+        harness,
+        read(harness, "octocat/hello/issues/all/7/title"),
+        vec![
+            ok(&json!([comment(70, 7, false, "late")])),
+            graphql(&json!({ "item": ids(&[(70, "2026-11-18T10:00:00Z")], None) })),
+        ],
+    )
+    .await;
+    assert_eq!(title.unwrap(), "Seven again");
+    assert_eq!(requests[0].url, api(ITEM_7_SINCE));
+    assert_eq!(
+        served(
+            harness,
+            read(harness, "octocat/hello/issues/all/7/comments/70/body.md")
+        )
+        .await
+        .unwrap(),
+        "late"
+    );
+}
+
+/// A later answer of an item stopped at a rate limit at the page of its
+/// comments since its time serves the facts from before it in the window,
+/// without a request, and continues from that page alone after the window.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_answer_of_an_item_stopped_at_a_rate_limit_continues_from_its_next_request() {
+    let harness = github_harness();
+    let stopped = later_answer_stopped(
+        &harness,
+        empty(403, &[("x-ratelimit-remaining", "0"), ("retry-after", "2")]),
+    )
+    .await;
+    assert!(
+        matches!(stopped, NsError::RateLimited { .. }),
+        "{stopped:?}"
+    );
+    assert_eq!(
+        served(&harness, read(&harness, "octocat/hello/issues/all/7/title"))
+            .await
+            .unwrap(),
+        "Seven"
+    );
+
+    tokio::time::sleep(Duration::from_millis(2_200)).await;
+    later_answer_continued(&harness).await;
+}
+
+/// A later answer of an item stopped by the network at the page of its
+/// comments since its time gives each next read the error of the network of
+/// that page alone, and the next read continues it from that page.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_later_answer_of_an_item_stopped_by_the_network_continues_from_its_next_request() {
+    let harness = github_harness();
+    let stopped = later_answer_stopped(&harness, empty(502, &[])).await;
+    assert!(matches!(stopped, NsError::Network), "{stopped:?}");
+
+    let (stopped, requests) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/7/title"),
+        vec![empty(502, &[])],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+    assert_eq!(requests[0].url, api(ITEM_7_SINCE));
+
+    later_answer_continued(&harness).await;
+}
+
+/// An item that an answer of its feed removed is not found within the
+/// deadline of that answer, without a request, and is asked for again past
+/// it with one `GET` of the item.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_item_is_asked_for_again_only_past_the_deadline_of_its_feed() {
+    let harness = github_harness();
+    let (title, _) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/8/title"),
+        vec![answer(
+            200,
+            &[("ETag", r#""item-8""#)],
+            &item(8, "Eight", "open", "2026-11-18T09:00:00Z", 0, false),
+        )],
+    )
+    .await;
+    assert_eq!(title.unwrap(), "Eight");
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let (found, requests) = answering(
+        &harness,
+        lookup(&harness, "octocat/hello/issues/all/8"),
+        vec![empty(404, &[])],
+    )
+    .await;
+    assert!(found.unwrap().is_missing());
+    assert_eq!(
+        request_header(&requests[0], "if-none-match"),
+        Some(r#""item-8""#)
+    );
+    for path in ["issues/all/8", "issues/open/8"] {
+        assert!(
+            served(&harness, lookup(&harness, &format!("octocat/hello/{path}")))
+                .await
+                .unwrap()
+                .is_missing(),
+            "{path}"
+        );
+    }
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let (found, requests) = answering(
+        &harness,
+        lookup(&harness, "octocat/hello/issues/all/8"),
+        vec![empty(404, &[])],
+    )
+    .await;
+    assert!(found.unwrap().is_missing());
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url, api("/repos/octocat/hello/issues/8"));
+}
+
 /// An answer of GitHub GraphQL about the repository with `null` for each item
 /// it cannot resolve, with an error of the type `NOT_FOUND`.
 fn graphql_not_found(repository: &Value) -> HttpResponse {
@@ -1249,7 +1467,8 @@ fn graphql_not_found(repository: &Value) -> HttpResponse {
 }
 
 /// A first full listing that stops at a comment by its ID continues from that
-/// comment at the next read of its folders, without a request before it.
+/// comment alone at each next read of its folders: the read of a network that
+/// fails again takes its error.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_first_full_listing_stopped_at_a_comment_by_its_id_continues_from_it() {
     let harness = github_harness();
@@ -1290,6 +1509,18 @@ async fn a_first_full_listing_stopped_at_a_comment_by_its_id_continues_from_it()
         );
     }
 
+    let (stopped, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/pulls/all"),
+        vec![empty(502, &[])],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+    assert_eq!(
+        requests[0].url,
+        api("/repos/octocat/hello/issues/comments/12")
+    );
+
     let (listing, requests) = answering(
         &harness,
         names(&harness, "octocat/hello/issues/all"),
@@ -1327,8 +1558,9 @@ async fn a_first_full_listing_stopped_at_a_comment_by_its_id_continues_from_it()
 }
 
 /// A check that stops at a comment by its ID continues from that comment
-/// alone at the next read. A comment that left its item before its ID was
-/// asked, `404`, does not join the item.
+/// alone at each next read: the read of a network that fails again takes its
+/// error. A comment that left its item before its ID was asked, `404`, does
+/// not join the item.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_check_stopped_at_a_comment_by_its_id_continues_from_it() {
     let harness = github_harness();
@@ -1381,6 +1613,18 @@ async fn a_check_stopped_at_a_comment_by_its_id_continues_from_it() {
         );
     }
 
+    let (stopped, requests) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/1/title"),
+        vec![empty(502, &[])],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+    assert_eq!(
+        requests[0].url,
+        api("/repos/octocat/hello/issues/comments/12")
+    );
+
     let (listing, requests) = answering(
         &harness,
         names(&harness, "octocat/hello/issues/all"),
@@ -1419,7 +1663,8 @@ async fn a_check_stopped_at_a_comment_by_its_id_continues_from_it() {
 }
 
 /// A later answer of an item that stops at a comment by its ID continues from
-/// that comment at the next read.
+/// that comment alone at each next read: the read of a network that fails
+/// again takes its error.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_later_answer_of_an_item_stopped_at_a_comment_by_its_id_continues_from_it() {
     let harness = github_harness();
@@ -1464,6 +1709,18 @@ async fn a_later_answer_of_an_item_stopped_at_a_comment_by_its_id_continues_from
             api(&format!("/repos/octocat/hello/issues/comments/{id}"))
         );
     }
+
+    let (stopped, requests) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/7/title"),
+        vec![empty(502, &[])],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+    assert_eq!(
+        requests[0].url,
+        api("/repos/octocat/hello/issues/comments/72")
+    );
 
     let (title, requests) = answering(
         &harness,
