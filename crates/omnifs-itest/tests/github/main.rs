@@ -2054,3 +2054,131 @@ async fn github_notifications_are_asked_again_only_after_their_poll_interval() {
     let (_, requests) = answering(&harness, readdir(), Vec::new()).await;
     assert!(requests.is_empty(), "304 renews the deadline of the page");
 }
+
+/// The row of pull request 7, which its own feed asks for before the first
+/// full listing of the repository, and asks for again with its `ETag` once
+/// the feed is past its deadline.
+fn pull_seven() -> HttpResponse {
+    HttpResponse {
+        status: 200,
+        headers: vec![header("ETag", r#""pull-7""#)],
+        body: br#"{
+            "number":7,
+            "title":"Seven",
+            "body":"Seven body",
+            "state":"open",
+            "user":{"login":"octocat"},
+            "updated_at":"2026-11-18T09:00:00Z",
+            "comments":0,
+            "pull_request":{"url":"https://api.github.com/repos/octocat/Hello-World/pulls/7"}
+        }"#
+        .to_vec(),
+    }
+}
+
+fn not_modified() -> HttpResponse {
+    HttpResponse {
+        status: 304,
+        headers: Vec::new(),
+        body: Vec::new(),
+    }
+}
+
+/// The page of the folder `folder` of pull request 7, `body` from `url` with
+/// the `ETag` `"page-1"`, has `names`. It serves from cache within its
+/// deadline, three seconds without an interval of its upstream, and is asked
+/// for again with `If-None-Match` only after it, once the feed of the pull
+/// request has asked for its row again; `304` keeps it.
+async fn pull_page_is_asked_again_with_its_etag_after_its_deadline(
+    folder: &str,
+    url: &str,
+    body: &[u8],
+    names: &[&str],
+) {
+    let harness = github_harness();
+    let (dir, _) = answering(
+        &harness,
+        resolve_namespace(
+            harness.namespace.as_ref(),
+            &format!("/github/octocat/Hello-World/pulls/open/7/{folder}"),
+        ),
+        vec![pull_seven()],
+    )
+    .await;
+    let readdir = || {
+        harness
+            .namespace
+            .readdir(dir.path.clone(), omnifs_engine::DirCursor::start(), 0)
+    };
+
+    let (first, requests) = answering(
+        &harness,
+        readdir(),
+        vec![HttpResponse {
+            status: 200,
+            headers: vec![header("ETag", r#""page-1""#)],
+            body: body.to_vec(),
+        }],
+    )
+    .await;
+    assert_eq!(entry_names(&first.unwrap()), names);
+    assert_eq!(
+        requests[0].url,
+        format!("https://api.github.com/repos/octocat/Hello-World/pulls/7/{url}")
+    );
+    assert_eq!(request_header(&requests[0], "if-none-match"), None);
+
+    let (cached, requests) = answering(&harness, readdir(), Vec::new()).await;
+    assert_eq!(entry_names(&cached.unwrap()), names);
+    assert!(requests.is_empty(), "the page serves within its deadline");
+
+    tokio::time::sleep(std::time::Duration::from_millis(3_300)).await;
+    let (kept, requests) =
+        answering(&harness, readdir(), vec![not_modified(), not_modified()]).await;
+    assert_eq!(entry_names(&kept.unwrap()), names);
+    assert_eq!(
+        request_header(&requests[0], "if-none-match"),
+        Some(r#""pull-7""#)
+    );
+    assert_eq!(
+        requests[1].url,
+        format!("https://api.github.com/repos/octocat/Hello-World/pulls/7/{url}")
+    );
+    assert_eq!(
+        request_header(&requests[1], "if-none-match"),
+        Some(r#""page-1""#)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn github_pr_files_page_is_asked_again_with_its_etag_after_its_deadline() {
+    pull_page_is_asked_again_with_its_etag_after_its_deadline(
+        "files",
+        "files?per_page=100&page=1",
+        br#"[{"filename":"src/lib.rs","status":"modified","additions":1,"deletions":1,"changes":2}]"#,
+        &["src%2Flib.rs"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn github_pr_reviews_page_is_asked_again_with_its_etag_after_its_deadline() {
+    pull_page_is_asked_again_with_its_etag_after_its_deadline(
+        "reviews",
+        "reviews?per_page=100&page=1",
+        br#"[{"id":80,"state":"APPROVED","body":"ok","user":{"login":"reviewer"}}]"#,
+        &["80"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn github_pr_review_comments_page_is_asked_again_with_its_etag_after_its_deadline() {
+    pull_page_is_asked_again_with_its_etag_after_its_deadline(
+        "reviews/80/comments",
+        "reviews/80/comments?per_page=100&page=1",
+        br#"[{"id":99,"body":"nit","path":"src/lib.rs","user":{"login":"reviewer"}}]"#,
+        &["99"],
+    )
+    .await;
+}
