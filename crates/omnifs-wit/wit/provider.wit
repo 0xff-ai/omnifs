@@ -246,12 +246,12 @@ interface types {
     }
 
     /// List-children result. `unchanged` answers a call with a `validator`:
-    /// the cached page of that validator stands, with the seconds of the
-    /// interval of its upstream, or the commit of the tree of the path does.
+    /// the cached page of that validator stands, with the validator it keeps
+    /// from then on, or, without one, the commit of the tree of the path does.
     variant list-children-result {
         entries(dir-listing),
         subtree(subtree),
-        unchanged(option<u32>),
+        unchanged(option<page-validator>),
         feed(list<feed-claim>),
     }
 
@@ -326,8 +326,9 @@ interface types {
         inner: list<feed-state>,
     }
 
+    /// The token of an inner feed, keyed by the logical id of its object.
     record feed-state {
-        object: feed-object,
+        id: logical-id,
         token: feed-token,
     }
 

@@ -367,9 +367,9 @@ pub(crate) enum DirPage {
         cursor: Option<Cursor>,
         validator: Option<PageValidator>,
     },
-    /// The cached page of the validator of the call stands, with the seconds
-    /// of the interval of its upstream.
-    Unchanged { interval: Option<u32> },
+    /// The cached page of the validator of the call stands, with the
+    /// validator it keeps from then on.
+    Unchanged { validator: PageValidator },
 }
 
 impl DirProjection {
@@ -398,9 +398,9 @@ impl DirProjection {
     }
 
     /// The validator the host sent for this page still matches: its cached
-    /// page stands, with the seconds of the interval of its upstream.
-    pub fn unchanged(interval: Option<u32>) -> Self {
-        Self::from_page(DirPage::Unchanged { interval })
+    /// page stands, with `validator` from then on.
+    pub fn unchanged(validator: PageValidator) -> Self {
+        Self::from_page(DirPage::Unchanged { validator })
     }
 
     fn from_entries(entries: Vec<Entry>, exhaustive: bool, cursor: Option<Cursor>) -> Self {
@@ -421,8 +421,8 @@ impl DirProjection {
         }
     }
 
-    /// Carry the validator of the enumerated page; an `unchanged` page keeps
-    /// the validator the host sent.
+    /// Carry the validator of the enumerated page; an `unchanged` page carries
+    /// its own.
     #[must_use]
     pub fn with_validator(mut self, validator: PageValidator) -> Self {
         if let DirPage::Entries {
@@ -582,10 +582,10 @@ impl DirListing {
     }
 
     /// The validator of the call ([`crate::cx::Cx::version`]) still matches:
-    /// the cached page stands, with the seconds of the interval of its
-    /// upstream.
-    pub fn unchanged(interval: Option<u32>) -> Self {
-        Self(DirProjection::unchanged(interval))
+    /// the cached page stands, with `validator` from then on, such as that of
+    /// the call with the interval of its upstream.
+    pub fn unchanged(validator: PageValidator) -> Self {
+        Self(DirProjection::unchanged(validator))
     }
 
     /// Carry the validator of this page; see [`PageValidator`].

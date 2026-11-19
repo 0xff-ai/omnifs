@@ -120,11 +120,8 @@ pub(super) fn present_validator(
             }
         }
     }
-    let validators = Arc::new(validators);
-    let present = {
-        let validators = Arc::clone(&validators);
-        Arc::new(move |caps: &Captures| validators.iter().any(|v| v.accepts_present(caps)))
-    };
+    let present: Arc<dyn Fn(&Captures) -> bool> =
+        Arc::new(move |caps: &Captures| validators.iter().any(|v| v.accepts_present(caps)));
     RouteValidator {
         full: present.clone(),
         present,

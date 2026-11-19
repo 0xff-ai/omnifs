@@ -411,21 +411,31 @@ impl<'a> EffectApplier<'a> {
                 add_subtree_records(&mut transition, path, id, subtree.commit, now_millis);
                 ListOutcome::Subtree(tree)
             },
-            wit_types::ListChildrenResult::Unchanged(interval) => {
-                if self
+            wit_types::ListChildrenResult::Unchanged(validator) => {
+                let tree = self
                     .store
                     .git_for_path(path)
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?
-                    .is_some()
-                {
-                    transition.freshness.push(tree_freshness(path, now_millis));
-                } else {
-                    transition.dirents.push(DirentsMutation::RenewPage {
-                        path: path.clone(),
-                        cursor: request.cursor.clone(),
-                        interval,
-                        now_millis,
-                    });
+                    .is_some();
+                match (tree, validator) {
+                    (true, None) => transition.freshness.push(tree_freshness(path, now_millis)),
+                    (false, Some(validator)) => {
+                        transition.dirents.push(DirentsMutation::RenewPage {
+                            path: path.clone(),
+                            cursor: request.cursor.clone(),
+                            token: validator.token,
+                            interval: validator.interval,
+                            now_millis,
+                        });
+                    },
+                    (true, Some(_)) => {
+                        anyhow::bail!(
+                            "an unchanged tree answer for {path} carries a page validator"
+                        )
+                    },
+                    (false, None) => {
+                        anyhow::bail!("an unchanged page answer for {path} carries no validator")
+                    },
                 }
                 ListOutcome::Unchanged
             },
@@ -475,7 +485,7 @@ impl<'a> EffectApplier<'a> {
                     .iter()
                     .map(|state| {
                         (
-                            ObjectId::from_wit(&state.object.id).as_bytes().to_vec(),
+                            ObjectId::from_wit(&state.id).as_bytes().to_vec(),
                             state.token.clone(),
                         )
                     })

@@ -146,7 +146,7 @@ impl Effects {
 
     /// Retract the facts of `path` and of everything beneath it, leaving the
     /// parent listing as complete as it was.
-    pub fn remove(&mut self, path: impl AsRef<str>) -> Result<&mut Self> {
+    pub(crate) fn remove(&mut self, path: impl AsRef<str>) -> Result<&mut Self> {
         self.removals.push(wire_path(path.as_ref())?.into());
         Ok(self)
     }
@@ -565,9 +565,10 @@ impl From<Lookup> for wit_types::LookupChildResult {
     }
 }
 
-/// A list result: a listing, a subtree handoff, the cached page or tree of
-/// the validator of the call standing, with the seconds of the interval of
-/// the upstream of a page, or the feeds that answer for a fed listing.
+/// A list result: a listing, a subtree handoff, the cached page of the
+/// validator of the call standing, with the validator it keeps from then on,
+/// the tree of the validator of the call standing, or the feeds that answer
+/// for a fed listing.
 #[derive(Clone, Debug)]
 pub enum List {
     Entries(Listing),
@@ -576,9 +577,10 @@ pub enum List {
         commit: String,
     },
     Unchanged {
-        interval: Option<u32>,
+        validator: PageValidator,
         effects: Effects,
     },
+    TreeUnchanged,
     Feed(Vec<FeedClaim>),
 }
 
@@ -591,8 +593,13 @@ impl List {
         Self::Subtree { tree, commit }
     }
 
-    pub fn unchanged(interval: Option<u32>, effects: Effects) -> Self {
-        Self::Unchanged { interval, effects }
+    pub fn unchanged(validator: PageValidator, effects: Effects) -> Self {
+        Self::Unchanged { validator, effects }
+    }
+
+    /// The commit of the tree of the validator of the call stands.
+    pub fn tree_unchanged() -> Self {
+        Self::TreeUnchanged
     }
 
     #[doc(hidden)]
@@ -606,9 +613,14 @@ impl List {
                 wit_types::ListChildrenResult::Subtree(wit_types::Subtree { tree, commit }),
                 Effects::new(),
             ),
-            Self::Unchanged { interval, effects } => {
-                (wit_types::ListChildrenResult::Unchanged(interval), effects)
-            },
+            Self::Unchanged { validator, effects } => (
+                wit_types::ListChildrenResult::Unchanged(Some(validator.into())),
+                effects,
+            ),
+            Self::TreeUnchanged => (
+                wit_types::ListChildrenResult::Unchanged(None),
+                Effects::new(),
+            ),
             Self::Feed(claims) => (
                 wit_types::ListChildrenResult::Feed(wit_claims(claims)),
                 Effects::new(),

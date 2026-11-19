@@ -66,10 +66,15 @@ where
         Ok(())
     }
 
-    fn feed_object(object: &wit_types::FeedObject) -> std::result::Result<(), String> {
-        if object.id.kind.is_empty() {
+    fn object_id(id: &wit_types::LogicalId) -> std::result::Result<(), String> {
+        if id.kind.is_empty() {
             return Err("feed object id.kind must not be empty".to_string());
         }
+        Ok(())
+    }
+
+    fn feed_object(object: &wit_types::FeedObject) -> std::result::Result<(), String> {
+        Self::object_id(&object.id)?;
         Path::parse(&object.path).map(|_| ()).map_err(|_| {
             format!(
                 "feed object path {:?} is not a valid protocol path",
@@ -103,7 +108,7 @@ where
             wit_types::FeedAnswer::Part(part) => {
                 Self::feed_token(&part.token)?;
                 for state in &part.inner {
-                    Self::feed_object(&state.object)?;
+                    Self::object_id(&state.id)?;
                     Self::feed_token(&state.token)?;
                 }
                 Ok(())
@@ -157,7 +162,12 @@ where
                     "list-children answered unchanged to a call without a validator".into(),
                 );
             },
-            wit_types::ListChildrenResult::Unchanged(_) => {},
+            wit_types::ListChildrenResult::Unchanged(validator) => {
+                if let Some(validator) = validator {
+                    Self::version_token(&validator.token)
+                        .map_err(|error| format!("page validator: {error}"))?;
+                }
+            },
             wit_types::ListChildrenResult::Feed(claims) => self.claims(claims)?,
         }
         Ok(())
@@ -730,7 +740,12 @@ mod tests {
 
     #[test]
     fn unchanged_answers_only_a_validated_call_and_page_validators_are_version_tokens() {
-        let unchanged = Ok(wit_types::ListChildrenResult::Unchanged(Some(60)));
+        let unchanged = Ok(wit_types::ListChildrenResult::Unchanged(Some(
+            wit_types::PageValidator {
+                token: "v1".to_owned(),
+                interval: Some(60),
+            },
+        )));
         let error = validate_list(&unchanged, &effects(), false, |_| true).unwrap_err();
         assert!(error.contains("without a validator"));
         validate_list(&unchanged, &effects(), true, |_| true).unwrap();
@@ -739,18 +754,22 @@ mod tests {
             (String::new(), "must not be empty"),
             ("v".repeat(MAX_VERSION_TOKEN_BYTES + 1), "exceeds"),
         ] {
+            let validator = wit_types::PageValidator {
+                token,
+                interval: None,
+            };
             let result = Ok(wit_types::ListChildrenResult::Entries(
                 wit_types::DirListing {
                     entries: vec![entry("child")],
                     exhaustive: true,
                     next_cursor: None,
-                    validator: Some(wit_types::PageValidator {
-                        token,
-                        interval: None,
-                    }),
+                    validator: Some(validator.clone()),
                 },
             ));
             let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
+            assert!(error.contains("page validator") && error.contains(message));
+            let unchanged = Ok(wit_types::ListChildrenResult::Unchanged(Some(validator)));
+            let error = validate_list(&unchanged, &effects(), true, |_| true).unwrap_err();
             assert!(error.contains("page validator") && error.contains(message));
         }
     }

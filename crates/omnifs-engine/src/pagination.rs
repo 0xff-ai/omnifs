@@ -48,7 +48,7 @@ impl Runtime {
         match self.run_list_children(path, request, captured_epoch).await {
             Ok(ListOutcome::Entries(listing)) => {
                 let more = listing.next_cursor.is_some();
-                self.record_dir_changed(path);
+                self.record_dir_changed(path, false);
                 NextPageOutcome::Loaded {
                     added: listing.entries.len(),
                     more,

@@ -44,7 +44,8 @@ impl EngineNamespace {
             )));
         };
 
-        self.resolve_child_in(mount, entry, &parent, name).await
+        self.resolve_child_in(mount, entry, &parent, None, name)
+            .await
     }
 
     /// Resolve a child of an already-resolved parent directory `Node` to a
@@ -87,18 +88,27 @@ impl EngineNamespace {
             return self.mount_root_node(name.to_string()).await;
         }
         let entry = self.entry_for(parent.mount())?;
-        self.resolve_child_in(parent.mount().to_string(), entry, parent.path(), name)
-            .await
+        self.resolve_child_in(
+            parent.mount().to_string(),
+            entry,
+            parent.path(),
+            parent.fact(),
+            name,
+        )
+        .await
     }
 
     /// Shared body for [`resolve`](Self::resolve) and
     /// [`resolve_child`](Self::resolve_child): resolve `name` under `parent`
-    /// (a mount-relative directory path) on the runtime serving `mount`.
+    /// (a mount-relative directory path) on the runtime serving `mount`. A
+    /// fed `parent` gives the path of its facts, under which the child is fed
+    /// when its fact is.
     async fn resolve_child_in(
         &self,
         mount: String,
         entry: &crate::registry::MountEntry,
         parent: &Path,
+        parent_fact: Option<&Path>,
         name: &str,
     ) -> Result<Node> {
         let resources = entry.resources();
@@ -137,9 +147,15 @@ impl EngineNamespace {
         let offline = entry.runtime().is_none();
         // A fed fact is served once its feeds have answered, so its lookup
         // asks the provider for their claims.
+        let fact = match parent_fact {
+            Some(parent_fact) => &parent_fact.join(name).map_err(|error| {
+                TreeError::invalid_input(format!("resolve_child: invalid name {name:?}: {error}"))
+            })?,
+            None => &rel,
+        };
         let fed = !offline
             && resources
-                .is_fed(&rel)
+                .is_fed(fact)
                 .map_err(|error| TreeError::internal(error.to_string()))?;
         if !fed {
             if let Some(tree_ref) = self.current_tree(entry, &rel).await? {
@@ -162,9 +178,12 @@ impl EngineNamespace {
         crate::inspector::cache_event(CacheKind::BrowseMiss);
         let runtime = entry.runtime().expect("online entry has a runtime");
         match runtime.lookup_child(parent, name).await? {
-            LookupOutcome::Entry(entry) if fed => {
-                Ok(Node::fed(mount, entry.path().clone(), entry.meta().clone()))
-            },
+            LookupOutcome::Entry(entry) if fed => Ok(Node::fed(
+                mount,
+                entry.path().clone(),
+                fact.clone(),
+                entry.meta().clone(),
+            )),
             LookupOutcome::Entry(entry) => Ok(Node::new(
                 mount,
                 entry.path().clone(),
@@ -195,9 +214,14 @@ impl EngineNamespace {
                 }
             },
             LookupOutcome::Feed(claims) => {
-                super::feed::answer_claims(&runtime, &rel, super::feed::FedFact::Lookup, &claims)
-                    .await?;
-                fed_lookup_node(resources, mount, rel)
+                let (at, fact) = super::feed::answer_claims(
+                    &runtime,
+                    &rel,
+                    super::feed::FedFact::Lookup,
+                    &claims,
+                )
+                .await?;
+                fed_lookup_node(resources, mount, rel, &at, fact)
             },
         }
     }
@@ -274,7 +298,7 @@ impl EngineNamespace {
             crate::ops::namespace::ListOutcome::Subtree(tree) => {
                 // A filesystem answers the root of the tree from what it holds
                 // until the attributes of the root change.
-                runtime.record_dir_changed(rel);
+                runtime.record_dir_changed(rel, false);
                 runtime
                     .tree_ref(tree)
                     .map(Some)
@@ -340,14 +364,20 @@ fn cached_child_node(
     Ok(None)
 }
 
-/// A fed child served from the projection once its feeds have answered, or
-/// not found.
-fn fed_lookup_node(resources: &MountResources, mount: String, rel: Path) -> Result<Node> {
+/// A fed child served from its lookup at `at` in the projection once its
+/// feeds have answered, with its facts at `fact`, or not found.
+fn fed_lookup_node(
+    resources: &MountResources,
+    mount: String,
+    rel: Path,
+    at: &Path,
+    fact: Path,
+) -> Result<Node> {
     match resources
-        .lookup_payload(&rel)
+        .lookup_payload(at)
         .map_err(|error| TreeError::internal(error.to_string()))?
     {
-        Some(crate::view::LookupPayload::Positive(meta)) => Ok(Node::fed(mount, rel, meta)),
+        Some(crate::view::LookupPayload::Positive(meta)) => Ok(Node::fed(mount, rel, fact, meta)),
         Some(crate::view::LookupPayload::Negative { .. }) | None => {
             Err(TreeError::not_found(rel.as_str()))
         },

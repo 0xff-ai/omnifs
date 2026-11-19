@@ -167,7 +167,7 @@ impl EngineNamespace {
             {
                 ReadReply::File(result) => finish_read(&runtime, path, result),
                 ReadReply::Feed(claims) => {
-                    serve_fed_read(&runtime, &attr_store, path, &claims, captured_epoch).await
+                    serve_fed_read(&runtime, path, &claims, captured_epoch).await
                 },
             };
         }
@@ -210,7 +210,7 @@ impl EngineNamespace {
         let result = match runtime.read_file(path, content_type, captured_epoch).await {
             Ok(ReadReply::File(result)) => result,
             Ok(ReadReply::Feed(claims)) => {
-                return serve_fed_read(&runtime, &attr_store, path, &claims, captured_epoch).await;
+                return serve_fed_read(&runtime, path, &claims, captured_epoch).await;
             },
             Err(EngineError::ProviderError(error)) => {
                 warn!(
@@ -281,19 +281,21 @@ impl EngineNamespace {
     }
 }
 
-/// Serve a fed file from the projection once the answering feed among
-/// `claims` has answered, or as not found.
+/// Serve a fed file from its fact in the projection once the answering feed
+/// among `claims` has answered, or as not found.
 async fn serve_fed_read(
     runtime: &Runtime,
-    attr_store: &FileAttrStore<'_>,
     path: &omnifs_core::path::Path,
     claims: &[crate::ops::feed::FeedClaim],
     captured_epoch: u64,
 ) -> Result<ReadResult> {
-    super::feed::answer_claims(runtime, path, super::feed::FedFact::File, claims).await?;
+    let (fact, _) =
+        super::feed::answer_claims(runtime, path, super::feed::FedFact::File, claims).await?;
+    let path = &fact;
+    let resources = &runtime.resources;
+    let attr_store = &FileAttrStore::new(resources, path);
     let now = now_millis();
     let attrs = attr_store.cached(now, true)?;
-    let resources = &runtime.resources;
     if let Some(result) = projected_read(
         attr_store,
         resources,

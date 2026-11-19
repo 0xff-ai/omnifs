@@ -932,35 +932,40 @@ async fn feed(cx: DirCx<State>) -> Result<DirListing> {
 
 /// Two pages with validators and an interval of one second: the first lists
 /// `v-0` and `v-1` with a cursor, the second `v-2`, complete. A call with the
-/// validator of its page answers `unchanged`, except the second revalidation
-/// of the first page, which answers a changed page with `v-1b` in place of
-/// `v-1` and the same cursor.
+/// validator of its page answers `unchanged` with that validator, except the
+/// second revalidation of the first page, which answers a changed page with
+/// `v-1b` in place of `v-1` and the same cursor, and the third, which answers
+/// a complete page with `v-0` alone.
 async fn validated(cx: DirCx<State>) -> Result<DirListing> {
     if !matches!(cx.intent(), DirIntent::List { .. }) {
         return Ok(DirListing::exhaustive([]));
     }
     cx.state_mut(|state| state.validated_calls += 1);
+    let validator = |token: &str| PageValidator {
+        token: VersionToken::from(token),
+        interval: Some(1),
+    };
     let page = |names: &[&str], token: &str| {
         let entries = names.iter().map(|name| Entry::dir(*name));
         let listing = match cx.cursor() {
             None => DirListing::paged(entries, Cursor::Page(1)),
             Some(_) => DirListing::exhaustive(entries),
         };
-        listing.with_validator(PageValidator {
-            token: VersionToken::from(token),
-            interval: Some(1),
-        })
+        listing.with_validator(validator(token))
     };
     let first_page_stood = cx.state(|state| state.validated_first_page_stood);
     match (cx.cursor(), cx.version().map(VersionToken::as_str)) {
         (None, None) => Ok(page(&["v-0", "v-1"], "first-v1")),
         (None, Some("first-v1")) if !first_page_stood => {
             cx.state_mut(|state| state.validated_first_page_stood = true);
-            Ok(DirListing::unchanged(Some(1)))
+            Ok(DirListing::unchanged(validator("first-v1")))
         },
         (None, Some("first-v1")) => Ok(page(&["v-0", "v-1b"], "first-v2")),
+        (None, Some("first-v2")) => {
+            Ok(DirListing::exhaustive([Entry::dir("v-0")]).with_validator(validator("first-v3")))
+        },
         (Some(Cursor::Page(1)), None) => Ok(page(&["v-2"], "second-v1")),
-        (_, Some(_)) => Ok(DirListing::unchanged(Some(1))),
+        (_, Some(token)) => Ok(DirListing::unchanged(validator(token))),
         (Some(_), None) => Err(ProviderError::not_found("hello/validated has two pages")),
     }
 }

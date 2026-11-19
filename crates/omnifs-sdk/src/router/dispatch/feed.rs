@@ -12,7 +12,7 @@ use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
 
 use super::super::compiled::CompiledRouter;
-use super::super::object::{ClaimSpec, anchor_path};
+use super::super::object::ClaimSpec;
 use super::route_shape::Shape;
 
 impl<S> CompiledRouter<S> {
@@ -82,24 +82,11 @@ impl<S> CompiledRouter<S> {
                 let (token, more, inner) = part.into_parts();
                 let inner = inner
                     .into_iter()
-                    .map(|state| {
-                        let entry = shape.object_of_kind(state.kind).ok_or_else(|| {
-                            ProviderError::internal(format!(
-                                "inner feed state of {} names no mounted object",
-                                state.kind.as_str()
-                            ))
-                        })?;
-                        let path =
-                            anchor_path(&entry.pattern.template(), &state.identity, state.facets);
-                        Ok(wit_types::FeedState {
-                            object: wit_types::FeedObject {
-                                id: LogicalId::new(state.kind, state.identity).into(),
-                                path,
-                            },
-                            token: state.token,
-                        })
+                    .map(|state| wit_types::FeedState {
+                        id: LogicalId::new(state.kind, state.identity).into(),
+                        token: state.token,
                     })
-                    .collect::<Result<Vec<_>>>()?;
+                    .collect();
                 wit_types::FeedAnswer::Part(wit_types::FeedPart { token, more, inner })
             },
         };
@@ -110,7 +97,9 @@ impl<S> CompiledRouter<S> {
 impl<S> Shape<'_, S> {
     /// The claims of a fed face for an operation on `path`: each claiming
     /// feed whose object the router resolves at the leading segments of
-    /// `path`, with its object id and anchor path, the outer object first.
+    /// `path`, with its object id and its anchor path, the outer object
+    /// first. The anchor path of a claim has the facets of its route at their
+    /// first choice: the facts of an object live there for every facet.
     /// `on_face` is false for an operation on a child of a fed dir, which
     /// starts none of its feeds. A path no feed answers for is not found.
     pub(super) fn feed_claims(
@@ -132,9 +121,11 @@ impl<S> Shape<'_, S> {
             else {
                 continue;
             };
+            let path = feed.facets.first_choices(anchor.as_str())?;
             claims.push(FeedClaim {
                 id: (feed.id)(&route.captures)?,
-                path: anchor,
+                path: Path::parse(&path)
+                    .map_err(|error| ProviderError::internal(error.to_string()))?,
                 starts: on_face && spec.starts,
             });
         }
@@ -144,14 +135,6 @@ impl<S> Shape<'_, S> {
             )));
         }
         Ok(claims)
-    }
-
-    /// The first mounted object route of `kind`.
-    pub(super) fn object_of_kind(
-        &self,
-        kind: crate::object::ObjectKind,
-    ) -> Option<&super::super::object::ObjectRouteEntry<S>> {
-        self.router.objects.iter().find(|entry| entry.kind == kind)
     }
 }
 

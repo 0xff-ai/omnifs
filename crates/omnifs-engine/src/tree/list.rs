@@ -137,7 +137,11 @@ impl EngineNamespace {
             };
             crate::inspector::cache_event(CacheKind::BrowseHit);
             return Ok(ListOutcome::Listing(listing_from_dirents(
-                resources, node, &dirents, offline,
+                resources,
+                node,
+                node.path(),
+                &dirents,
+                offline,
             )?));
         }
 
@@ -149,10 +153,10 @@ impl EngineNamespace {
 
     /// Ask the provider again, in page order, for each page of a cached
     /// listing whose validator is past its deadline, with its cursor and its
-    /// validator. `unchanged` renews the deadline of the page; a changed page
-    /// replaces its entries, keeps the later pages only while its next cursor
-    /// stays, and records the directory as changed. A rate limit serves the
-    /// listing as it stands.
+    /// validator. `unchanged` renews the page with the validator of the
+    /// answer; a changed page replaces its entries, keeps the later pages only
+    /// while its next cursor stays, and records the directory as changed. A
+    /// failed answer, a rate limit included, is the error of the listing.
     async fn revalidate_pages(
         &self,
         runtime: &Runtime,
@@ -177,7 +181,7 @@ impl EngineNamespace {
             crate::inspector::cache_event(CacheKind::BrowseMiss);
             match runtime.list_children(path, request, captured_epoch).await {
                 Ok(crate::ops::namespace::ListOutcome::Entries(_)) => {
-                    runtime.record_dir_changed(path);
+                    runtime.record_dir_changed(path, false);
                 },
                 Ok(crate::ops::namespace::ListOutcome::Unchanged) => {},
                 Ok(
@@ -188,7 +192,6 @@ impl EngineNamespace {
                         "revalidated listing page answered no page",
                     ));
                 },
-                Err(error) if error.is_provider_rate_limited() => return Ok(dirents),
                 Err(error) => return Err(error.into()),
             }
             dirents = cached_dirents(&runtime.resources, path)?
@@ -269,18 +272,25 @@ impl EngineNamespace {
                 Ok(ListOutcome::Listing(listing_from_dirents(
                     &runtime.resources,
                     node,
+                    node.path(),
                     &dirents,
                     false,
                 )?))
             },
             Ok(crate::ops::namespace::ListOutcome::Feed(claims)) => {
-                super::feed::answer_claims(runtime, path, super::feed::FedFact::Listing, &claims)
-                    .await?;
-                let dirents = cached_dirents(&runtime.resources, path)?
+                let (fact, _) = super::feed::answer_claims(
+                    runtime,
+                    path,
+                    super::feed::FedFact::Listing,
+                    &claims,
+                )
+                .await?;
+                let dirents = cached_dirents(&runtime.resources, &fact)?
                     .ok_or_else(|| TreeError::not_found(path.as_str()))?;
                 Ok(ListOutcome::Listing(listing_from_dirents(
                     &runtime.resources,
                     node,
+                    &fact,
                     &dirents,
                     false,
                 )?))
@@ -303,6 +313,7 @@ impl EngineNamespace {
                     return Ok(ListOutcome::Listing(listing_from_dirents(
                         &runtime.resources,
                         node,
+                        node.path(),
                         &dirents,
                         false,
                     )?));
@@ -399,8 +410,9 @@ fn provider_entries(path: &omnifs_core::path::Path, entries: &[ProviderEntry]) -
         .collect()
 }
 
-/// Build a `Listing` from an accumulated/cached dirents record (the
-/// cache-hit and rate-limit-stale paths). The cached record
+/// Build a `Listing` from an accumulated/cached dirents record at `records`
+/// (the cache-hit, fed, and rate-limit-stale paths), each entry fed when its
+/// record under `records` is. The cached record
 /// keeps the `@next`/`@all` control records for the directory's whole
 /// paginated lifetime (`pagination.rs` never strips them, even at exhaustion,
 /// so a name a consumer resolved from an earlier listing keeps resolving).
@@ -410,10 +422,11 @@ fn provider_entries(path: &omnifs_core::path::Path, entries: &[ProviderEntry]) -
 fn listing_from_dirents(
     resources: &MountResources,
     node: &Node,
+    records: &omnifs_core::path::Path,
     dirents: &DirentsPayload,
     offline: bool,
 ) -> Result<Listing> {
-    let mut entries = cached_entries(resources, node.path(), dirents.entries())?;
+    let mut entries = cached_entries(resources, records, dirents.entries())?;
 
     let mut synthetic_entries = Vec::new();
     if !offline && dirents.next_cursor.is_some() {

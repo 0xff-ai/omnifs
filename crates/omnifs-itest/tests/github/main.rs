@@ -8,11 +8,11 @@ use omnifs_engine::Namespace;
 use omnifs_itest::ReadFileOpExt;
 use omnifs_wit::host::types::{
     CalloutResult, Cursor, EntryKind, Header, HttpResponse, ListChildrenResult, LookupChildResult,
-    ReadFileOutcome, Stability,
+    PageValidator, ReadFileOutcome, Stability,
 };
 use support::{
-    TestOpExt, answering, github_harness, project_file_stability, project_paths, request_header,
-    resolve_namespace,
+    TestOpExt, answering, github_harness, not_modified, project_file_stability, project_paths,
+    request_header, resolve_namespace,
 };
 
 #[test]
@@ -96,7 +96,7 @@ fn github_provider_routes_namespace_and_numeric_paths() {
     runs_listed
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
-            headers: Vec::<Header>::new(),
+            headers: vec![header("ETag", r#""page-1""#)],
             body: br#"{
                 "workflow_runs": [
                     {"id":123,"status":"completed","conclusion":"success"}
@@ -142,7 +142,7 @@ fn github_action_run_list_projects_files() {
     response
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
-            headers: Vec::new(),
+            headers: vec![header("ETag", r#""page-1""#)],
             body: br#"{
                 "workflow_runs":[
                     {
@@ -379,22 +379,7 @@ fn github_owner_listing_tracks_browsed_repos() {
     let mut first_again = harness
         .list_page("/octocat", None, Some(validator))
         .unwrap();
-    let owner_reload = first_again.expect_single_fetch();
-    assert!(owner_reload.url.ends_with("/users/octocat"));
-    assert!(
-        !owner_reload
-            .headers
-            .iter()
-            .any(|header| header.name.eq_ignore_ascii_case("if-none-match")),
-        "the owner object loads without the validator of the page"
-    );
-    first_again
-        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
-            status: 200,
-            headers: Vec::<Header>::new(),
-            body: br#"{"login":"octocat","type":"User"}"#.to_vec(),
-        })])
-        .unwrap();
+    // The unchanged page answers without a load of the owner object.
     let repos_again = first_again.expect_single_fetch();
     assert!(
         repos_again
@@ -407,15 +392,12 @@ fn github_owner_listing_tracks_browsed_repos() {
         header.name.eq_ignore_ascii_case("if-none-match") && header.value == r#""repos-1""#
     }));
     first_again
-        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
-            status: 304,
-            headers: Vec::<Header>::new(),
-            body: Vec::new(),
-        })])
+        .answer_callouts(vec![CalloutResult::HttpResponse(not_modified())])
         .unwrap();
     assert!(matches!(
         first_again.result().unwrap(),
-        Ok(ListChildrenResult::Unchanged(None))
+        Ok(ListChildrenResult::Unchanged(Some(PageValidator { token, interval: None })))
+            if token == validator
     ));
 
     let mut page_two = harness
@@ -527,7 +509,7 @@ fn github_root_and_owner_listings_ignore_unclassified_repo_paths() {
     owner_listing
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
-            headers: Vec::<Header>::new(),
+            headers: vec![header("ETag", r#""page-1""#)],
             body: b"[]".to_vec(),
         })])
         .unwrap();
@@ -563,6 +545,8 @@ fn github_provider_missing_item_resources_validate_on_lookup() {
 
     // An issue anchor answers the claims of the feeds of the repository and
     // of the issue without a request: its existence comes from the feeds.
+    // The claim of the issue has its anchor in `all/`, the first facet, where
+    // its facts live for `open/` too.
     let harness = github_harness();
 
     let lookup = harness
@@ -579,7 +563,7 @@ fn github_provider_missing_item_resources_validate_on_lookup() {
                 claims,
                 [
                     ("/octocat/Hello-World", false),
-                    ("/octocat/Hello-World/issues/open/999999999", true),
+                    ("/octocat/Hello-World/issues/all/999999999", true),
                 ]
             );
         },
@@ -643,7 +627,7 @@ fn github_pr_lookup_is_fed_and_exposes_diff() {
         Ok(LookupChildResult::Feed(claims)) => {
             assert_eq!(claims.len(), 2);
             assert_eq!(claims[1].object.id.kind, "github.pull");
-            assert_eq!(claims[1].object.path, "/octocat/Hello-World/pulls/open/7");
+            assert_eq!(claims[1].object.path, "/octocat/Hello-World/pulls/all/7");
         },
         other => panic!("expected the claims of the PR anchor, got {other:?}"),
     }
@@ -765,7 +749,7 @@ fn github_pr_files_list_and_read_changed_file_objects() {
     listed
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
-            headers: Vec::new(),
+            headers: vec![header("ETag", r#""page-1""#)],
             body: files_response.clone(),
         })])
         .unwrap();
@@ -783,8 +767,8 @@ fn github_pr_files_list_and_read_changed_file_objects() {
             assert_eq!(
                 preloaded,
                 vec![
-                    "/octocat/Hello-World/pulls/open/7/files/src%2Flib.rs/filename",
-                    "/octocat/Hello-World/pulls/open/7/files/src%2Flib.rs/status",
+                    "/octocat/Hello-World/pulls/all/7/files/src%2Flib.rs/filename",
+                    "/octocat/Hello-World/pulls/all/7/files/src%2Flib.rs/status",
                 ]
             );
             assert!(
@@ -847,7 +831,7 @@ fn github_pr_reviews_and_review_comments_list_and_read_objects() {
     reviews
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
-            headers: Vec::new(),
+            headers: vec![header("ETag", r#""page-1""#)],
             body: br#"[
                 {
                     "id":80,
@@ -870,7 +854,7 @@ fn github_pr_reviews_and_review_comments_list_and_read_objects() {
             let effects = reviews.effects().unwrap();
             assert!(
                 project_paths(effects)
-                    .contains(&"/octocat/Hello-World/pulls/open/7/reviews/80/state"),
+                    .contains(&"/octocat/Hello-World/pulls/all/7/reviews/80/state"),
                 "missing review state preload"
             );
             assert!(
@@ -928,7 +912,7 @@ fn github_pr_reviews_and_review_comments_list_and_read_objects() {
     comments
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
-            headers: Vec::new(),
+            headers: vec![header("ETag", r#""page-1""#)],
             body: br#"[
                 {
                     "id":99,
@@ -1096,11 +1080,7 @@ fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
         Some(r#""pull-1""#)
     );
     first_again
-        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
-            status: 304,
-            headers: Vec::new(),
-            body: Vec::new(),
-        })])
+        .answer_callouts(vec![CalloutResult::HttpResponse(not_modified())])
         .unwrap();
     let runs_again = first_again.expect_single_fetch();
     assert!(
@@ -1113,15 +1093,42 @@ fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
         Some(r#""runs-1""#)
     );
     first_again
-        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
-            status: 304,
-            headers: Vec::new(),
-            body: Vec::new(),
-        })])
+        .answer_callouts(vec![CalloutResult::HttpResponse(not_modified())])
         .unwrap();
     assert!(matches!(
         first_again.result().unwrap(),
-        Ok(ListChildrenResult::Unchanged(None))
+        Ok(ListChildrenResult::Unchanged(Some(PageValidator { token, interval: None })))
+            if token == validator
+    ));
+
+    // A changed pull request with the same head asks for its check runs with
+    // their `ETag`, and their `304` keeps the page with the new `ETag` of the
+    // pull request.
+    let mut changed_pull = harness
+        .list_page(
+            "/octocat/Hello-World/pulls/open/7/checks",
+            None,
+            Some(validator),
+        )
+        .unwrap();
+    changed_pull
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: vec![header("ETag", r#""pull-2""#)],
+            body: br#"{"head":{"sha":"abc123"}}"#.to_vec(),
+        })])
+        .unwrap();
+    assert_eq!(
+        request_header(changed_pull.expect_single_fetch(), "if-none-match"),
+        Some(r#""runs-1""#)
+    );
+    changed_pull
+        .answer_callouts(vec![CalloutResult::HttpResponse(not_modified())])
+        .unwrap();
+    assert!(matches!(
+        changed_pull.result().unwrap(),
+        Ok(ListChildrenResult::Unchanged(Some(PageValidator { token, interval: None })))
+            if token == r#"{"pull":{"etag":"\"pull-2\"","sha":"abc123"},"runs":"\"runs-1\""}"#
     ));
 
     let cursor = r#"{"sha":"abc123","page":2}"#.to_string();
@@ -1143,7 +1150,7 @@ fn github_pr_checks_list_from_head_sha_and_read_check_run_objects() {
     page_two
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
-            headers: Vec::new(),
+            headers: vec![header("ETag", r#""page-1""#)],
             body: br#"{"check_runs":[]}"#.to_vec(),
         })])
         .unwrap();
@@ -1207,7 +1214,7 @@ fn github_notifications_list_and_read_thread_objects() {
     listed
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
-            headers: Vec::new(),
+            headers: vec![header("ETag", r#""page-1""#)],
             body: br#"[
                 {
                     "id":"123",
@@ -1341,7 +1348,7 @@ fn github_projected_resource_reads_return_all_fetched_siblings() {
     index_listed
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
-            headers: Vec::new(),
+            headers: vec![header("ETag", r#""page-1""#)],
             body: br#"{"workflow_runs":[{"id":42,"status":"in_progress","conclusion":null}]}"#
                 .to_vec(),
         })])
@@ -1740,7 +1747,7 @@ fn github_provider_lookup_owner_validates_and_owner_listing_classifies_with_org_
     listing
         .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
             status: 200,
-            headers: Vec::new(),
+            headers: vec![header("ETag", r#""page-1""#)],
             body: br#"[{"name":"api"}]"#.to_vec(),
         })])
         .unwrap();
@@ -1928,7 +1935,8 @@ fn entry_names(page: &omnifs_engine::DirPage) -> Vec<&str> {
 
 /// A page of `actions/runs/` with the `ETag` of its answer serves from cache
 /// within its deadline, three seconds without an interval of its upstream, and
-/// is asked for again with `If-None-Match` only after it; `304` keeps it.
+/// is asked for again with `If-None-Match` only after it; `304` keeps it, and
+/// a rate limit is the error of the listing.
 #[tokio::test(flavor = "multi_thread")]
 async fn github_action_runs_page_is_asked_again_with_its_etag_after_its_deadline() {
     let harness = github_harness();
@@ -1967,21 +1975,63 @@ async fn github_action_runs_page_is_asked_again_with_its_etag_after_its_deadline
     assert!(requests.is_empty(), "the page serves within its deadline");
 
     tokio::time::sleep(std::time::Duration::from_millis(3_300)).await;
-    let (kept, requests) = answering(
-        &harness,
-        readdir(),
-        vec![HttpResponse {
-            status: 304,
-            headers: Vec::new(),
-            body: Vec::new(),
-        }],
-    )
-    .await;
+    let (kept, requests) = answering(&harness, readdir(), vec![not_modified()]).await;
     assert_eq!(entry_names(&kept.unwrap()), ["123"]);
     assert_eq!(
         request_header(&requests[0], "if-none-match"),
         Some(r#""runs-1""#)
     );
+
+    tokio::time::sleep(std::time::Duration::from_millis(3_300)).await;
+    let (limited, _) = answering(
+        &harness,
+        readdir(),
+        vec![HttpResponse {
+            status: 429,
+            headers: vec![header("Retry-After", "60")],
+            body: br#"{"message":"API rate limit exceeded"}"#.to_vec(),
+        }],
+    )
+    .await;
+    assert!(matches!(
+        limited,
+        Err(omnifs_engine::NsError::RateLimited { .. })
+    ));
+}
+
+/// A page answer without an `ETag` has no validator to be asked for again
+/// with, and `notifications/` takes the seconds of `X-Poll-Interval` only as
+/// a number: each is an error of the listing.
+#[test]
+fn github_page_answers_without_an_etag_or_with_another_poll_interval_fail() {
+    let harness = github_harness();
+    let mut runs = harness.list("/octocat/Hello-World/actions/runs").unwrap();
+    runs.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+        status: 200,
+        headers: Vec::new(),
+        body: br#"{"workflow_runs":[]}"#.to_vec(),
+    })])
+    .unwrap();
+    assert!(matches!(
+        runs.result().unwrap(),
+        Err(error) if error.message.contains("without an ETag")
+    ));
+
+    let mut notifications = harness.list("/notifications").unwrap();
+    notifications
+        .answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
+            status: 200,
+            headers: vec![
+                header("ETag", r#""notifications-1""#),
+                header("X-Poll-Interval", "soon"),
+            ],
+            body: b"[]".to_vec(),
+        })])
+        .unwrap();
+    assert!(matches!(
+        notifications.result().unwrap(),
+        Err(error) if error.message.contains("X-Poll-Interval")
+    ));
 }
 
 /// `notifications/` is asked for again with `If-None-Match` only after the
@@ -2073,14 +2123,6 @@ fn pull_seven() -> HttpResponse {
             "pull_request":{"url":"https://api.github.com/repos/octocat/Hello-World/pulls/7"}
         }"#
         .to_vec(),
-    }
-}
-
-fn not_modified() -> HttpResponse {
-    HttpResponse {
-        status: 304,
-        headers: Vec::new(),
-        body: Vec::new(),
     }
 }
 

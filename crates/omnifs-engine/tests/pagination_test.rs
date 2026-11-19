@@ -149,10 +149,10 @@ async fn pagination_preserves_siblings_and_non_paged_directories_have_no_next() 
 
 /// A listing of pages with validators serves from cache within the deadline of
 /// its pages and asks for each page again with its validator after it: an
-/// `unchanged` page stands with a new deadline, and a changed first page
-/// replaces its entries and keeps the later page, whose cursor stays. A
-/// listing of pages without a validator keeps the freshness it has, served
-/// from cache past those deadlines.
+/// `unchanged` page stands with a new deadline, a changed first page replaces
+/// its entries and keeps the later page while its cursor stays, and drops it
+/// for another cursor. A listing of pages without a validator keeps the
+/// freshness it has, served from cache past those deadlines.
 #[tokio::test(flavor = "multi_thread")]
 async fn pages_with_validators_are_asked_again_after_their_deadline() {
     // The pages of `hello/validated` have an interval of one second.
@@ -192,4 +192,27 @@ async fn pages_with_validators_are_asked_again_after_their_deadline() {
 
     harness.runtime.shutdown().unwrap();
     assert_eq!(walk(&harness, &feed).await, feed_names);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_page_without_its_next_cursor_drops_the_later_pages() {
+    // The pages of `hello/validated` have an interval of one second; its
+    // third revalidation answers a complete first page.
+    const PAST_DEADLINE: Duration = Duration::from_millis(1_200);
+
+    let harness = make_initialized_runtime(CONFIG);
+    let validated = hello_child(&harness, "validated").await;
+    assert_eq!(walk(&harness, &validated).await, ["v-0", "v-1", "v-2"]);
+    for names in [["v-0", "v-1", "v-2"], ["v-0", "v-1b", "v-2"]] {
+        tokio::time::sleep(PAST_DEADLINE).await;
+        assert_eq!(walk(&harness, &validated).await, names);
+    }
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    assert_eq!(walk(&harness, &validated).await, ["v-0"]);
+    assert_eq!(
+        validated_calls(&harness).await,
+        7,
+        "a complete first page drops the later page, which no call asks for"
+    );
 }

@@ -920,7 +920,10 @@ async fn list_repos_validated(
         .validator()
         .is_some_and(|validator| validator.as_str() == "repos-v1")
     {
-        return Ok(Collection::unchanged(Some(60)));
+        return Ok(Collection::unchanged(PageValidator {
+            token: VersionToken::from("repos-v1"),
+            interval: Some(60),
+        }));
     }
     Ok(Collection::complete([CollectionEntry::key(RepoKey {
         owner: key.owner.clone(),
@@ -963,14 +966,14 @@ fn anchor_collection_page_validator_reaches_the_collection_and_not_the_anchor_lo
     let (out, effects) = list_wit(drive(&cx, r.list_children(&cx, "/o", None)));
     assert!(matches!(
         out,
-        wit_types::ListChildrenResult::Unchanged(Some(60))
+        wit_types::ListChildrenResult::Unchanged(Some(wit_types::PageValidator {
+            ref token,
+            interval: Some(60),
+        })) if token == "repos-v1"
     ));
     assert!(
-        effects
-            .canonical
-            .iter()
-            .any(|store| store.id.kind == "test.strict_owner"),
-        "the anchor object loads without the validator beside its unchanged page"
+        effects.canonical.is_empty(),
+        "an unchanged page answers without the load of the anchor object"
     );
 }
 
@@ -979,7 +982,10 @@ async fn validated_dir(cx: DirCx<()>) -> Result<DirListing> {
         .version()
         .is_some_and(|validator| validator.as_str() == "dir-v1")
     {
-        return Ok(DirListing::unchanged(None));
+        return Ok(DirListing::unchanged(PageValidator {
+            token: VersionToken::from("dir-v1"),
+            interval: None,
+        }));
     }
     Ok(
         DirListing::exhaustive([Entry::file("a")]).with_validator(PageValidator {
@@ -1008,7 +1014,10 @@ fn dir_handler_page_validator_lowers_and_unchanged_answers_its_validator() {
     let (out, _effects) = list_wit(drive(&cx, r.list_children(&cx, "/d", None)));
     assert!(matches!(
         out,
-        wit_types::ListChildrenResult::Unchanged(None)
+        wit_types::ListChildrenResult::Unchanged(Some(wit_types::PageValidator {
+            ref token,
+            interval: None,
+        })) if token == "dir-v1"
     ));
 }
 

@@ -35,13 +35,14 @@ impl OwnerKind {
     }
 }
 
-/// State filter for resources.
+/// State filter for resources. `all` comes first: the facts of an issue or a
+/// pull request live under its folder in `all/`, which `open/` shares.
 #[omnifs_sdk::path_segment]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[strum(serialize_all = "snake_case")]
 pub enum StateFilter {
-    Open,
     All,
+    Open,
 }
 
 #[omnifs_sdk::provider(

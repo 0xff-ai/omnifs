@@ -24,7 +24,7 @@ use crate::browse::{Effects, ListingWrite};
 use crate::cx::Cx;
 use crate::error::Result;
 use crate::identity::IdentityCaptures;
-use crate::object::{FacetAxis, FacetMetadata, Key, Object, ObjectKind};
+use crate::object::{Key, Object, ObjectKind};
 use omnifs_core::path::Path;
 use omnifs_wit::provider::types as wit_types;
 
@@ -223,7 +223,6 @@ impl FeedPart {
         self.inner.push(InnerState {
             kind: O::kind(),
             identity: key.identity_captures(),
-            facets: <O::Key as FacetMetadata>::facet_axes(),
             token: token.into(),
         });
         self
@@ -234,12 +233,11 @@ impl FeedPart {
     }
 }
 
-/// An inner feed state, type-erased to the object kind and identity the
-/// router renders into the object's anchor path.
+/// An inner feed state, type-erased to the kind and the identity of the
+/// logical id of its object.
 pub(crate) struct InnerState {
     pub(crate) kind: ObjectKind,
     pub(crate) identity: Vec<(&'static str, String)>,
-    pub(crate) facets: &'static [FacetAxis],
     pub(crate) token: String,
 }
 
