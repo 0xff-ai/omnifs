@@ -4,7 +4,7 @@ use omnifs_wit::host::types::{
     Callout, CalloutResult, GitRepoInfo, HttpRequest, HttpResponse, ListChildrenResult,
 };
 
-use crate::support::{TestOpExt, github_harness, request_header};
+use crate::support::{TestOpExt, github_harness, not_modified, request_header};
 
 const TREE: &str = "/octocat/Hello-World/repo";
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -39,12 +39,8 @@ fn github_repo_tree_stands_on_304() {
     let harness = github_harness();
     let mut list = harness.list_page(TREE, None, Some(COMMIT)).unwrap();
     assert_head_request(list.expect_single_fetch());
-    list.answer_callouts(vec![CalloutResult::HttpResponse(HttpResponse {
-        status: 304,
-        headers: Vec::new(),
-        body: Vec::new(),
-    })])
-    .unwrap();
+    list.answer_callouts(vec![CalloutResult::HttpResponse(not_modified())])
+        .unwrap();
     assert!(matches!(
         list.into_ok().unwrap(),
         ListChildrenResult::Unchanged(None)
