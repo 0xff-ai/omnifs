@@ -15,21 +15,30 @@ const STOP_ATTEMPT_WAIT: Duration = Duration::from_secs(2);
 
 pub(crate) struct Lifecycle {
     pub(crate) cancelled: Arc<AtomicBool>,
-    /// Set by a `Restart`: the owner of the mount stops its server without an
-    /// unmount.
-    pub(crate) released: Arc<AtomicBool>,
     pub(crate) phase: watch::Sender<RunnerPhase>,
     pub(crate) wire_teardown_tx: mpsc::Sender<TeardownRequest>,
     pub(crate) wire_teardown_rx: mpsc::Receiver<TeardownRequest>,
     pub(crate) host_stop_rx: mpsc::Receiver<StopRequest>,
-    pub(crate) host_restart_rx: mpsc::Receiver<RestartRequest>,
+    /// The `Restart` of a host runner whose mount restarts in place; none for
+    /// any other runner.
+    pub(crate) host_restart: Option<HostRestart>,
     pub(crate) host_control: Option<HostControl>,
+}
+
+/// The `Restart` requests of a host runner, with the release that wakes the
+/// owner of its mount, which stops its server without an unmount.
+pub(crate) struct HostRestart {
+    requests: mpsc::Receiver<RestartRequest>,
+    release: std::sync::mpsc::Sender<()>,
 }
 
 pub(crate) struct LifecycleConfig<'a> {
     pub(crate) spec: &'a fs::Spec,
     pub(crate) state_dir: Option<&'a Path>,
     pub(crate) runner_control: Option<RunnerControlConfig>,
+    /// The release of the owner of a mount that restarts in place, which a
+    /// host runner takes `Restart` for.
+    pub(crate) release: Option<std::sync::mpsc::Sender<()>>,
 }
 
 pub(crate) struct RunnerControlConfig {
@@ -43,11 +52,12 @@ impl Lifecycle {
             spec,
             state_dir,
             runner_control,
+            release,
         } = config;
         let (phase, _) = watch::channel(RunnerPhase::Preflight);
         let (wire_teardown_tx, wire_teardown_rx) = mpsc::channel(1);
         let (host_stop_tx, host_stop_rx) = mpsc::channel(1);
-        let (host_restart_tx, host_restart_rx) = mpsc::channel(1);
+        let mut host_restart = None;
         let host_control = match spec.runtime() {
             fs::Runtime::Host => {
                 let state_dir = state_dir
@@ -71,9 +81,11 @@ impl Lifecycle {
                     program,
                 )?;
                 let mut control = HostControl::bind(state_dir, &record)?;
-                // An NFS mount restarts in place: a new instance serves it at
-                // the address of its state with its filehandle table.
-                let restart = (spec.protocol() == fs::Protocol::Nfs).then_some(host_restart_tx);
+                let restart = release.map(|release| {
+                    let (sender, requests) = mpsc::channel(1);
+                    host_restart = Some(HostRestart { requests, release });
+                    sender
+                });
                 control.spawn(
                     instance_id,
                     phase.subscribe(),
@@ -94,12 +106,11 @@ impl Lifecycle {
         };
         Ok(Self {
             cancelled: Arc::new(AtomicBool::new(false)),
-            released: Arc::new(AtomicBool::new(false)),
             phase,
             wire_teardown_tx,
             wire_teardown_rx,
             host_stop_rx,
-            host_restart_rx,
+            host_restart,
             host_control,
         })
     }
@@ -141,6 +152,16 @@ pub(crate) async fn coordinate_mount(
     )
     .run()
     .await
+}
+
+/// The next `Restart` of `restart`, with its release; none once its control
+/// ends.
+async fn restart_request(
+    restart: &mut Option<HostRestart>,
+) -> Option<(RestartRequest, std::sync::mpsc::Sender<()>)> {
+    let restart = restart.as_mut()?;
+    let request = restart.requests.recv().await?;
+    Some((request, restart.release.clone()))
 }
 
 struct MountCoordinator<'a> {
@@ -187,6 +208,7 @@ impl<'a> MountCoordinator<'a> {
         loop {
             let await_mount = self.mount_result.is_none();
             let host_control = self.lifecycle.host_control.is_some();
+            let restart = self.lifecycle.host_restart.is_some();
             tokio::select! {
                 result = &mut self.mount_done, if await_mount => {
                     let result = result.unwrap_or_else(|_| {
@@ -218,9 +240,12 @@ impl<'a> MountCoordinator<'a> {
                         return Ok(());
                     }
                 }
-                request = self.lifecycle.host_restart_rx.recv(), if host_control && await_mount && !self.stopping => {
-                    let Some(request) = request else { continue; };
-                    return self.release(request).await;
+                request = restart_request(&mut self.lifecycle.host_restart), if restart && await_mount && !self.stopping => {
+                    let Some((request, release)) = request else {
+                        self.lifecycle.host_restart = None;
+                        continue;
+                    };
+                    return self.release(request, &release).await;
                 }
                 signal = self.signals.recv() => {
                     if signal.is_none() {
@@ -242,11 +267,16 @@ impl<'a> MountCoordinator<'a> {
     }
 
     /// Stops the server of a mount that a new instance serves in place: the
-    /// owner of the mount stops its server without an unmount and writes its
-    /// filehandle table, and the runner ends.
-    async fn release(&mut self, request: RestartRequest) -> anyhow::Result<()> {
+    /// owner of the mount, which `release` wakes, stops its server without an
+    /// unmount and writes its filehandle table, and the runner ends.
+    async fn release(
+        &mut self,
+        request: RestartRequest,
+        release: &std::sync::mpsc::Sender<()>,
+    ) -> anyhow::Result<()> {
         self.lifecycle.phase.send_replace(RunnerPhase::Stopping);
-        self.lifecycle.released.store(true, Ordering::Release);
+        // An owner that ended has its result in `mount_done`.
+        let _ = release.send(());
         let result = (&mut self.mount_done)
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("mount owner exited without a result")));
@@ -460,6 +490,7 @@ mod tests {
             spec: &spec,
             state_dir: None,
             runner_control: None,
+            release: None,
         })
         .unwrap()
     }

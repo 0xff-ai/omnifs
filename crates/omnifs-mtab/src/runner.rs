@@ -213,6 +213,59 @@ pub fn process_group_exists(_process_group: u32) -> io::Result<bool> {
     Ok(true)
 }
 
+/// A descriptor that becomes readable at the exit of the process `pid`, an
+/// event of the kernel: a kqueue with `NOTE_EXIT` of the process; none for a
+/// process that has already exited.
+#[cfg(target_os = "macos")]
+pub fn process_exit(pid: u32) -> io::Result<Option<std::os::fd::OwnedFd>> {
+    use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
+    let pid =
+        usize::try_from(pid).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let kqueue = Kqueue::new()?;
+    let exit = KEvent::new(
+        pid,
+        EventFilter::EVFILT_PROC,
+        EvFlags::EV_ADD | EvFlags::EV_ONESHOT,
+        FilterFlag::NOTE_EXIT,
+        0,
+        0,
+    );
+    let now = nix::libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    match kqueue.kevent(&[exit], &mut [], Some(now)) {
+        Ok(_) => Ok(Some(kqueue.into())),
+        Err(nix::errno::Errno::ESRCH) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A descriptor that becomes readable at the exit of the process `pid`, an
+/// event of the kernel: a pidfd of the process; none for a process that has
+/// already exited.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+pub fn process_exit(pid: u32) -> io::Result<Option<std::os::fd::OwnedFd>> {
+    use std::os::fd::FromRawFd as _;
+    let pid = nix::libc::pid_t::try_from(pid)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    // SAFETY: `pidfd_open` takes a pid and no flags, and returns a new
+    // descriptor or -1 with `errno`.
+    let fd = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid, 0) };
+    if fd == -1 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(nix::libc::ESRCH) {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    let fd = std::os::fd::RawFd::try_from(fd)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    // SAFETY: the descriptor is new, and nothing else owns it.
+    Ok(Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }))
+}
+
 #[cfg(unix)]
 fn process_group_id() -> io::Result<u32> {
     u32::try_from(nix::unistd::getpgrp().as_raw())
@@ -227,6 +280,31 @@ fn process_group_id() -> io::Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The descriptor of the exit of a process becomes readable at its exit,
+    /// and a process that has exited has none.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn the_exit_of_a_process_is_an_event() {
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+        use std::os::fd::AsFd as _;
+        let readable = |fd: &std::os::fd::OwnedFd, timeout: u16| {
+            let mut fds = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
+            poll(&mut fds, PollTimeout::from(timeout)).unwrap() == 1
+        };
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let exit = process_exit(child.id())
+            .unwrap()
+            .expect("a running process");
+        assert!(!readable(&exit, 0));
+        child.kill().unwrap();
+        assert!(readable(&exit, 5_000));
+        child.wait().unwrap();
+        assert!(process_exit(child.id()).unwrap().is_none());
+    }
 
     fn record(instance: &str, id: &str, mount: &str) -> RunnerRecord {
         RunnerRecord {

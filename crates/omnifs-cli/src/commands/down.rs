@@ -13,7 +13,7 @@ use crate::ui::output::Output;
 use clap::Args;
 use omnifs_bootstrap::{Bootstrap, Client};
 
-#[derive(Args, Debug, Clone, Default)]
+#[derive(Args, Debug, Clone)]
 #[command(after_help = "Examples:\n  omnifs down\n  omnifs down --keep-filesystems")]
 pub struct DownArgs {
     /// Stop the daemon alone, as `SIGTERM` does: the attached filesystems stay

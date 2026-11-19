@@ -124,23 +124,30 @@ impl HostDriver {
         record: &RunnerRecord,
         state: &RunnerState,
     ) -> Result<()> {
-        if state.restart && omnifs_nfs::mount_is_active(record.spec.location()) {
+        if state.restart && omnifs_nfs::mount_is_active_checked(record.spec.location())? {
             self.release_confirmed(record).await
         } else {
             self.stop_confirmed(record).await
         }
     }
 
-    /// Restarts a proven runner of an active NFS mount in place: reconfirm it,
-    /// ask it to release its mount, and wait for it to end, so that a new
+    /// Restarts a proven runner of an active NFS mount in place: ask it to
+    /// release its mount, and wait for the exit of its process, so that a new
     /// runner serves the mount at the address of its state with its
     /// filehandle table.
     pub(crate) async fn release_confirmed(&self, expected: &RunnerRecord) -> Result<()> {
         let record = RunnerRecord::read(&self.state_dir)?
             .context("runner record disappeared before its restart")?;
         ensure_identity_unchanged(Some(&record), expected, "runner")?;
-        RunnerControlClient::new(&record).restart().await?;
-        wait_for_release(&self.state_dir, record.spec.location()).await
+        // The exit is watched before the runner is reconfirmed, so that the
+        // process it watches is the runner that answers, and before its
+        // restart, which leaves the mount to the next runner.
+        let exit = process_exit(record.pid)?.context("the runner ended before its restart")?;
+        let client = RunnerControlClient::new(&record);
+        client.ping().await.context("reconfirm host filesystem")?;
+        client.restart().await?;
+        drop(exit.readable().await?);
+        Ok(())
     }
 
     pub(crate) async fn cleanup_stale(&self, expected: &RunnerRecord) -> Result<()> {
@@ -374,20 +381,12 @@ async fn wait_for_cleanup(
     )
 }
 
-/// Waits for a runner that released its mount to end, which removes its
-/// record.
-async fn wait_for_release(state_dir: &Path, mount_point: &Path) -> Result<()> {
-    crate::process::poll_until(STOP_TIMEOUT, POLL_INTERVAL, || async {
-        Ok(RunnerRecord::read(state_dir)?.is_none().then_some(()))
-    })
-    .await?
-    .with_context(|| {
-        format!(
-            "the runner of {} did not end within {}s after it released the mount",
-            mount_point.display(),
-            STOP_TIMEOUT.as_secs()
-        )
-    })
+/// The exit of the process `pid`, an event of the kernel that becomes
+/// readable at it; none for a process that has already exited.
+fn process_exit(pid: u32) -> Result<Option<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>> {
+    Ok(omnifs_mtab::process_exit(pid)?
+        .map(|exit| tokio::io::unix::AsyncFd::with_interest(exit, tokio::io::Interest::READABLE))
+        .transpose()?)
 }
 
 pub(crate) async fn owned(filesystem: &ClientFilesystemState) -> Result<Vec<Candidate>> {
@@ -438,6 +437,28 @@ pub(crate) async fn owned(filesystem: &ClientFilesystemState) -> Result<Vec<Cand
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exit of a process is an event that a wait takes at the exit, and
+    /// a process that has exited has none.
+    #[tokio::test]
+    async fn the_exit_of_a_runner_is_an_event() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("1")
+            .spawn()
+            .unwrap();
+        let exit = process_exit(child.id())
+            .unwrap()
+            .expect("a running process");
+        drop(
+            tokio::time::timeout(Duration::from_secs(10), exit.readable())
+                .await
+                .expect("the exit is an event")
+                .unwrap(),
+        );
+        child.wait().unwrap();
+        assert!(process_exit(child.id()).unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn busy_stop_waits_for_runner_cleanup() {
         let temp = tempfile::tempdir().unwrap();

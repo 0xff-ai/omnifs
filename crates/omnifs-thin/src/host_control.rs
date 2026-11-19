@@ -178,11 +178,7 @@ impl HostControl {
                 let phase = phase.clone();
                 let requests = requests.clone();
                 tokio::spawn(async move {
-                    let _ = tokio::time::timeout(
-                        RUNNER_CONTROL_TIMEOUT,
-                        handle_connection(stream, instance_id, phase, requests),
-                    )
-                    .await;
+                    let _ = handle_connection(stream, instance_id, phase, requests).await;
                 });
             }
         })
@@ -202,7 +198,12 @@ async fn handle_connection(
     requests: ControlRequests,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
-    let request: RunnerRequestEnvelope = read_line(reader).await?;
+    // A request is answered once the owner of its mount answers it, as a
+    // `Restart` once the server has stopped.
+    let request: RunnerRequestEnvelope =
+        tokio::time::timeout(RUNNER_CONTROL_TIMEOUT, read_line(reader))
+            .await
+            .map_err(|_| anyhow::anyhow!("runner control request timed out"))??;
     if request.version != RUNNER_CONTROL_VERSION {
         let current_phase = phase.borrow().clone();
         return write_reply(
@@ -392,10 +393,11 @@ impl RunnerControlClient {
     }
 
     /// Asks the runner to write its filehandle table, stop its server and end
-    /// without an unmount; it answers once its server has stopped.
+    /// without an unmount; it answers once its server has stopped, which
+    /// waits for each operation in flight, without a time-out.
     pub async fn restart(&self) -> anyhow::Result<()> {
         let reply = self
-            .request(RunnerRequest::Restart {
+            .exchange(RunnerRequest::Restart {
                 instance_id: self.instance_id.clone(),
             })
             .await?;
@@ -424,30 +426,33 @@ impl RunnerControlClient {
     }
 
     async fn request(&self, request: RunnerRequest) -> anyhow::Result<RunnerReplyEnvelope> {
-        tokio::time::timeout(RUNNER_CONTROL_TIMEOUT, async {
-            let mut stream = UnixStream::connect(&self.socket).await?;
-            let mut line = serde_json::to_vec(&RunnerRequestEnvelope {
-                version: RUNNER_CONTROL_VERSION,
-                request,
-            })?;
-            line.push(b'\n');
-            stream.write_all(&line).await?;
-            stream.flush().await?;
-            let (reader, _) = stream.into_split();
-            let reply: RunnerReplyEnvelope = read_reply_line(reader).await?;
-            anyhow::ensure!(
-                reply.version == RUNNER_CONTROL_VERSION,
-                "unsupported runner control version {}",
-                reply.version
-            );
-            anyhow::ensure!(
-                reply.instance_id == self.instance_id,
-                "runner instance does not match"
-            );
-            Ok(reply)
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("runner control request timed out"))?
+        tokio::time::timeout(RUNNER_CONTROL_TIMEOUT, self.exchange(request))
+            .await
+            .map_err(|_| anyhow::anyhow!("runner control request timed out"))?
+    }
+
+    /// Sends `request` and reads its reply.
+    async fn exchange(&self, request: RunnerRequest) -> anyhow::Result<RunnerReplyEnvelope> {
+        let mut stream = UnixStream::connect(&self.socket).await?;
+        let mut line = serde_json::to_vec(&RunnerRequestEnvelope {
+            version: RUNNER_CONTROL_VERSION,
+            request,
+        })?;
+        line.push(b'\n');
+        stream.write_all(&line).await?;
+        stream.flush().await?;
+        let (reader, _) = stream.into_split();
+        let reply: RunnerReplyEnvelope = read_reply_line(reader).await?;
+        anyhow::ensure!(
+            reply.version == RUNNER_CONTROL_VERSION,
+            "unsupported runner control version {}",
+            reply.version
+        );
+        anyhow::ensure!(
+            reply.instance_id == self.instance_id,
+            "runner instance does not match"
+        );
+        Ok(reply)
     }
 }
 
@@ -594,6 +599,40 @@ mod tests {
         client.restart().await.unwrap();
         completion.await.unwrap();
         server.await.unwrap();
+    }
+
+    /// A `Restart` waits for the owner of the mount past the time-out of the
+    /// other requests, as for an operation in flight that its server waits
+    /// for.
+    #[tokio::test]
+    async fn a_restart_waits_for_the_owner_of_the_mount_without_a_time_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("control.sock");
+        let instance = "0123456789abcdef0123456789abcdef";
+        let mut control =
+            HostControl::bind(temp.path(), &record(socket.clone(), instance)).unwrap();
+        let (_phase_tx, phase_rx) = watch::channel(RunnerPhase::Mounted);
+        let (stop_tx, _stop_rx) = mpsc::channel(1);
+        let (restart_tx, mut restart_rx) = mpsc::channel(1);
+        control.spawn(
+            instance.to_owned(),
+            phase_rx,
+            ControlRequests {
+                stop: stop_tx,
+                restart: Some(restart_tx),
+            },
+        );
+        tokio::time::pause();
+        let completion = tokio::spawn(async move {
+            let request = restart_rx.recv().await.unwrap();
+            tokio::time::sleep(RUNNER_CONTROL_TIMEOUT * 2).await;
+            request.complete(Ok(())).await;
+        });
+        RunnerControlClient::new(&record(socket, instance))
+            .restart()
+            .await
+            .unwrap();
+        completion.await.unwrap();
     }
 
     /// The `Pong` of a runner of a build before `Restart` reads without it.
