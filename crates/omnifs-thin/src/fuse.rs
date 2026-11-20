@@ -42,6 +42,7 @@ pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
             spec: &spec,
             state_dir: state_dir.as_deref(),
             runner_control,
+            release: None,
         })?
     };
     preflight(&spec, state_dir.as_deref()).context("check the FUSE mount location")?;

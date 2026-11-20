@@ -247,32 +247,30 @@ impl wire::control_server::Control for GrpcControlService {
             },
         };
         let recovery_id = RecoveryId::from_bytes(exact_bytes(&request.recovery_id, "recovery id")?);
-        let recovery = {
-            let mut phase = self
-                .control
-                .phase
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut offered = Err(ControlError::new(
+            ControlErrorCode::Conflict,
+            "the daemon is not offering state repair",
+        ));
+        self.control.phase.send_if_modified(|phase| {
             let ControlPhase::Recovery(recovery) = &*phase else {
-                return Err(grpc_status(ControlError::new(
-                    ControlErrorCode::Conflict,
-                    "the daemon is not offering state repair",
-                )));
+                return false;
             };
             let valid = request.instance_id == self.control.context.instance_id()
                 && recovery.repair.as_ref().is_some_and(|offer| {
                     offer.id == recovery_id && offer.actions.contains(&action)
                 });
             if !valid {
-                return Err(grpc_status(ControlError::new(
+                offered = Err(ControlError::new(
                     ControlErrorCode::Conflict,
                     "the recovery offer is stale or does not match this daemon",
-                )));
+                ));
+                return false;
             }
-            let recovery = recovery.clone();
+            offered = Ok(recovery.clone());
             *phase = ControlPhase::Starting;
-            recovery
-        };
+            true
+        });
+        let recovery = offered.map_err(grpc_status)?;
         let (reply, receive) = tokio::sync::oneshot::channel();
         if self
             .control
@@ -695,6 +693,59 @@ impl wire::control_server::Control for GrpcControlService {
         tokio::spawn(async move {
             let _permit = permit;
             log_stream::stream(path, tail_lines, follow, sender, shutdown).await;
+        });
+        Ok(Response::new(ReceiverStream::new(receiver)))
+    }
+
+    type WatchPhaseStream = ReceiverStream<Result<wire::PhaseEvent, Status>>;
+
+    /// The phase of the daemon at the subscription, then each change of it
+    /// once, up to the end of the daemon, in each phase before teardown.
+    async fn watch_phase(
+        &self,
+        _request: Request<wire::Empty>,
+    ) -> Result<Response<Self::WatchPhaseStream>, Status> {
+        let mut phases = self.control.phase.subscribe();
+        if phases.borrow().event().is_none() {
+            return Err(grpc_status(ControlPhase::shutting_down()));
+        }
+        let permit = Arc::clone(&self.control.stream_permits)
+            .try_acquire_owned()
+            .map_err(|_| {
+                grpc_status(ControlError::new(
+                    ControlErrorCode::Busy,
+                    "stream capacity exhausted",
+                ))
+            })?;
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let mut shutdown = self.control.shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let mut given = None;
+            loop {
+                let Some(event) = phases.borrow_and_update().event() else {
+                    return;
+                };
+                if given.as_ref() != Some(&event) {
+                    if sender.send(Ok(grpc::to_phase_event(&event))).await.is_err() {
+                        return;
+                    }
+                    given = Some(event);
+                }
+                tokio::select! {
+                    () = sender.closed() => return,
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            return;
+                        }
+                    },
+                    changed = phases.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    },
+                }
+            }
         });
         Ok(Response::new(ReceiverStream::new(receiver)))
     }
