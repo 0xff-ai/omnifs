@@ -83,16 +83,62 @@ pub struct Node {
     path: Path,
     meta: EntryMeta,
     body: NodeBody,
+    /// The node's facts come from feeds: a renderer gets them with the zero
+    /// lifetime of dynamic entries, so each access asks the namespace again.
+    fed: bool,
+    /// The path of the node's facts: its own path, or the same path under
+    /// the anchor of the claim of an object for a node under an anchor of
+    /// another facet of the object.
+    fact: Path,
 }
 
 impl Node {
     pub fn new(mount: String, path: Path, meta: EntryMeta, body: NodeBody) -> Self {
         Self {
             mount,
+            fact: path.clone(),
             path,
             meta,
             body,
+            fed: false,
         }
+    }
+
+    /// A provider node whose facts come from feeds, with them at `fact` in
+    /// the projection.
+    pub(crate) fn fed(mount: String, path: Path, fact: Path, meta: EntryMeta) -> Self {
+        Self {
+            mount,
+            path,
+            meta,
+            body: NodeBody::Provider,
+            fed: true,
+            fact,
+        }
+    }
+
+    pub(crate) fn is_fed(&self) -> bool {
+        self.fed
+    }
+
+    /// The path of the node's facts.
+    pub(crate) fn fact(&self) -> &Path {
+        &self.fact
+    }
+
+    /// This node with its facts at `fact`.
+    pub(crate) fn with_fact(self, fact: Path) -> Self {
+        Self { fact, ..self }
+    }
+
+    /// This node at `path`, with its facts where they are.
+    pub(crate) fn at(self, path: Path) -> Self {
+        Self { path, ..self }
+    }
+
+    /// This node at the path of its facts.
+    pub(crate) fn at_fact(&self) -> Self {
+        self.clone().at(self.fact.clone())
     }
 
     /// Construct a host-synthesized node (a pagination control or a mount-root
@@ -101,9 +147,11 @@ impl Node {
     pub fn synthetic(mount: String, path: Path, meta: EntryMeta, synthetic: Synthetic) -> Self {
         Self {
             mount,
+            fact: path.clone(),
             path,
             meta,
             body: NodeBody::Synthetic(synthetic),
+            fed: false,
         }
     }
 
@@ -158,17 +206,36 @@ impl Node {
 pub struct Entry {
     pub name: String,
     pub meta: EntryMeta,
+    /// The child's facts come from feeds.
+    pub fed: bool,
 }
 
 impl Entry {
     /// A normal provider-projected child.
     pub(crate) fn provider(name: String, meta: EntryMeta) -> Self {
-        Self { name, meta }
+        Self {
+            name,
+            meta,
+            fed: false,
+        }
+    }
+
+    /// A child whose facts come from feeds.
+    pub(crate) fn fed(name: String, meta: EntryMeta) -> Self {
+        Self {
+            name,
+            meta,
+            fed: true,
+        }
     }
 
     /// A host-synthesized child surfaced by `Tree` and materialized by a
     /// filesystem through the namespace.
     pub(crate) fn synthetic(name: String, meta: EntryMeta) -> Self {
-        Self { name, meta }
+        Self {
+            name,
+            meta,
+            fed: false,
+        }
     }
 }

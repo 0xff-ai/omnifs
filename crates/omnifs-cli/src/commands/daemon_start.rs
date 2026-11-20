@@ -2,9 +2,11 @@
 
 use anyhow::{Context as _, ensure};
 use omnifs_api::DaemonPhase;
-use omnifs_bootstrap::{Bootstrap, Client};
+use omnifs_bootstrap::{Bootstrap, Client, FolderChange};
 use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
@@ -19,14 +21,18 @@ const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Readiness polling can take up to `READY_TIMEOUT`, so a spawn narrates
 /// exactly one line before it starts waiting; an already-running daemon
 /// narrates nothing, since there is nothing this command is doing that the
-/// operator does not already know about.
+/// operator does not already know about. With `--wait-for-daemon`, it waits
+/// for a daemon that another process starts, without starting one.
 pub(crate) async fn start(output: &Output) -> anyhow::Result<()> {
     let endpoint = Bootstrap::<Client>::for_client()?;
+    if output.wait_for_daemon() {
+        return wait_for_daemon(&endpoint).await;
+    }
     let _spawn_lock = endpoint
         .acquire_spawn_lock()
         .context("acquire daemon spawn lock")?;
     let rpc = RpcClient::resolve()?;
-    let mut child = if control_reachable(&endpoint).await? {
+    let mut child = if rpc.control_reachable().await? {
         None
     } else {
         output.narrate("Starting the daemon");
@@ -35,27 +41,57 @@ pub(crate) async fn start(output: &Output) -> anyhow::Result<()> {
     wait_until_ready(&rpc, child.as_mut()).await
 }
 
-async fn control_reachable(endpoint: &Bootstrap<Client>) -> anyhow::Result<bool> {
-    match UnixStream::connect(endpoint.control_socket()).await {
-        Ok(stream) => {
-            drop(stream);
-            Ok(true)
-        },
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            Ok(false)
-        },
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "probe daemon control socket {}",
-                endpoint.control_socket().display()
-            )
-        }),
+/// Waits for a daemon of the profile of `endpoint` that another process
+/// starts: a watch of the folder of the profile, or of its parent while that
+/// folder is missing, before each connection to its control socket, which
+/// connects again at each change of that folder until a connection succeeds;
+/// then the readiness of the daemon, as its `WatchPhase` stream gives it.
+async fn wait_for_daemon(endpoint: &Bootstrap<Client>) -> anyhow::Result<()> {
+    let folder = endpoint.bootstrap_dir();
+    let socket = endpoint.control_socket();
+    loop {
+        let (change, missing) = match FolderChange::watch(folder) {
+            Ok(change) => (change, false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let parent = folder
+                    .parent()
+                    .with_context(|| format!("{} has no parent folder", folder.display()))?;
+                let change = FolderChange::watch(parent)
+                    .with_context(|| format!("watch {}", parent.display()))?;
+                (change, true)
+            },
+            Err(error) => {
+                return Err(error).with_context(|| format!("watch {}", folder.display()));
+            },
+        };
+        match UnixStream::connect(&socket).await {
+            Ok(stream) => {
+                drop(stream);
+                break;
+            },
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) => {},
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("connect to daemon at {}", socket.display()));
+            },
+        }
+        // A folder that its parent gained since the watch has its own.
+        if missing && folder.exists() {
+            continue;
+        }
+        drop(
+            AsyncFd::with_interest(change, Interest::READABLE)?
+                .readable()
+                .await?,
+        );
     }
+    RpcClient::from_endpoint(endpoint.clone())
+        .ready_phase()
+        .await
 }
 
 fn spawn() -> anyhow::Result<Child> {

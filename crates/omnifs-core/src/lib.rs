@@ -8,6 +8,7 @@ pub mod fs;
 mod mount_name;
 mod mutation;
 pub mod path;
+mod program;
 mod provider;
 mod provider_id;
 mod state_version;
@@ -19,6 +20,7 @@ pub use file::{FileSize, ReadMode, Stability};
 pub use mount_name::{MountName, MountNameError};
 pub use mutation::{MutationId, MutationIdError};
 pub use path::{ParseError, Path, Segment};
+pub use program::executable_program;
 pub use provider::{
     IdError, ProviderMeta, ProviderName, ProviderRef, ProviderVersion, validate_account,
     validate_key_part,
