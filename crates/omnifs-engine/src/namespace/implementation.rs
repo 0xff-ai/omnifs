@@ -544,11 +544,36 @@ impl EngineNamespace {
             current = parent;
         };
 
+        // The lookup of a fed path has the feeds of each path above it
+        // answer, so the paths above it resolve from the projection.
+        let fed = self.is_fed(full_path)?;
         let mut node = anchor;
-        for name in chain.into_iter().rev() {
-            node = self.resolve_child(&node, &name, &RequestCtx).await?;
+        let mut names = chain.into_iter().rev().peekable();
+        while let Some(name) = names.next() {
+            node = if fed && names.peek().is_some() {
+                self.resolve_above_fed(&node, &name).await?
+            } else {
+                self.resolve_child(&node, &name, &RequestCtx).await?
+            };
         }
         Ok(node)
+    }
+
+    /// Whether the facts of `full_path` come from feeds alone.
+    fn is_fed(&self, full_path: &Path) -> Result<bool, NsError> {
+        let Some(mount) = full_path.segments().next() else {
+            return Ok(false);
+        };
+        let Some(entry) = self.configured_entry(mount) else {
+            return Ok(false);
+        };
+        if entry.runtime().is_none() {
+            return Ok(false);
+        }
+        Ok(entry
+            .resources()?
+            .is_fed(&mount_relative_path(mount, full_path))
+            .map_err(|error| TreeError::internal(error.to_string()))?)
     }
 
     /// The node of the host record at `full_path` in the current tree of its

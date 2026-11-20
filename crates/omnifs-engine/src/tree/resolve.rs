@@ -44,7 +44,7 @@ impl EngineNamespace {
             )));
         };
 
-        self.resolve_child_in(mount, entry, &parent, None, name)
+        self.resolve_child_in(mount, entry, &parent, None, name, false)
             .await
     }
 
@@ -68,6 +68,19 @@ impl EngineNamespace {
         name: &str,
         _ctx: &RequestCtx,
     ) -> Result<Node> {
+        self.resolve_child_as(parent, name, false).await
+    }
+
+    /// Resolve a child of `parent` that is above the fed path of an
+    /// operation, on the way to it from the root. A fed child with its
+    /// positive lookup in the projection resolves from it, without the
+    /// provider: the lookup of the path of the operation takes the claims of
+    /// the feeds of each path above it, and has them answer.
+    pub(crate) async fn resolve_above_fed(&self, parent: &Node, name: &str) -> Result<Node> {
+        self.resolve_child_as(parent, name, true).await
+    }
+
+    async fn resolve_child_as(&self, parent: &Node, name: &str, above_fed: bool) -> Result<Node> {
         if parent.host().is_some() {
             return self
                 .resolve_host_child(parent, name)
@@ -94,6 +107,7 @@ impl EngineNamespace {
             parent.path(),
             Some(parent.fact()),
             name,
+            above_fed,
         )
         .await
     }
@@ -112,6 +126,7 @@ impl EngineNamespace {
         parent: &Path,
         parent_fact: Option<&Path>,
         name: &str,
+        above_fed: bool,
     ) -> Result<Node> {
         let resources = entry.resources()?;
         let rel = parent.join(name).map_err(|e| {
@@ -157,14 +172,15 @@ impl EngineNamespace {
                 .parent_and_name()
                 .ok_or_else(|| TreeError::internal(format!("{fact} has no parent")))?;
             let node =
-                Box::pin(self.resolve_child_in(mount, entry, &fact_parent, None, name)).await?;
+                Box::pin(self.resolve_child_in(mount, entry, &fact_parent, None, name, above_fed))
+                    .await?;
             return Ok(node.at(rel));
         }
         let anchor = resources
             .facet_anchor(&rel)
             .map_err(|error| TreeError::internal(error.to_string()))?;
         let node = self
-            .resolve_own_child(mount, entry, parent, name, rel)
+            .resolve_own_child(mount, entry, parent, name, rel, above_fed)
             .await?;
         Ok(match anchor {
             Some(anchor) => node.with_fact(anchor),
@@ -180,6 +196,7 @@ impl EngineNamespace {
         parent: &Path,
         name: &str,
         rel: Path,
+        above_fed: bool,
     ) -> Result<Node> {
         let resources = entry.resources()?;
         let offline = entry.runtime().is_none();
@@ -189,6 +206,14 @@ impl EngineNamespace {
             && resources
                 .is_fed(&rel)
                 .map_err(|error| TreeError::internal(error.to_string()))?;
+        if fed
+            && above_fed
+            && let Some(crate::view::LookupPayload::Positive(meta)) = resources
+                .lookup_payload(&rel)
+                .map_err(|error| TreeError::internal(error.to_string()))?
+        {
+            return Ok(Node::fed(mount, rel.clone(), rel, meta));
+        }
         if !fed {
             if let Some(tree_ref) = self.current_tree(entry, &rel).await? {
                 return Ok(Node::new(
