@@ -9,7 +9,7 @@
 //! `error_for_status` mapping.
 
 use core::time::Duration;
-use http::{Response, StatusCode};
+use http::{HeaderMap, Response, StatusCode};
 use omnifs_sdk::endpoint::EndpointHooks;
 use omnifs_sdk::error::ProviderError;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,7 +32,7 @@ impl EndpointHooks for GitHubApi {
         if !is_rate_limited(resp) {
             return None;
         }
-        Some(match parse_github_retry(resp) {
+        Some(match retry_window(resp.headers()) {
             Ok(retry_after) => {
                 ProviderError::rate_limited(rate_limit_message(resp)).with_retry_after(retry_after)
             },
@@ -41,35 +41,22 @@ impl EndpointHooks for GitHubApi {
     }
 }
 
-/// Structured backoff window for a github rate-limit response. Prefers an
-/// explicit `Retry-After` (secondary limits / abuse detection); falls back to
-/// the primary limit's `x-ratelimit-reset` epoch minus now. Without this the
-/// host applies its short default cooldown and re-hammers github every few
-/// seconds for the whole (up to ~1h) primary-limit window instead of waiting
-/// out the real reset.
-fn parse_github_retry(resp: &Response<Vec<u8>>) -> Result<Option<Duration>, ProviderError> {
-    retry_window(|header| {
-        resp.headers()
-            .get(header)
-            .and_then(|value| value.to_str().ok())
-    })
-}
-
-/// The backoff window of a rate-limited answer from its headers, which
-/// `header` gives by name: `Retry-After`, else `x-ratelimit-reset` minus now,
-/// zero for a reset that passed; none without them. A header that does not
-/// parse as seconds fails.
-pub(crate) fn retry_window<'a>(
-    header: impl Fn(&str) -> Option<&'a str>,
-) -> Result<Option<Duration>, ProviderError> {
-    let seconds = |name: &str| {
-        header(name)
-            .map(|value| {
-                value.trim().parse::<u64>().map_err(|error| {
-                    ProviderError::invalid_input(format!("the header {name} {value:?}: {error}"))
-                })
-            })
-            .transpose()
+/// The backoff window of a rate-limited answer from its `headers`: an explicit
+/// `Retry-After` (secondary limits / abuse detection), else the primary
+/// limit's `x-ratelimit-reset` epoch minus now, zero for a reset that passed;
+/// none without them, for the short default cooldown of the host. A header of
+/// the window that is not text, or that does not parse as seconds, fails.
+pub(crate) fn retry_window(headers: &HeaderMap) -> Result<Option<Duration>, ProviderError> {
+    let seconds = |name: &str| -> Result<Option<u64>, ProviderError> {
+        let Some(value) = headers.get(name) else {
+            return Ok(None);
+        };
+        let text = value.to_str().map_err(|error| {
+            ProviderError::invalid_input(format!("the header {name} is not text: {error}"))
+        })?;
+        text.trim().parse::<u64>().map(Some).map_err(|error| {
+            ProviderError::invalid_input(format!("the header {name} {text:?}: {error}"))
+        })
     };
     if let Some(secs) = seconds("retry-after")? {
         return Ok(Some(Duration::from_secs(secs)));
@@ -122,5 +109,26 @@ fn append_header_hint(resp: &Response<Vec<u8>>, message: &mut String, header: &s
         message.push_str(label);
         message.push('=');
         message.push_str(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_window;
+    use http::{HeaderMap, HeaderValue};
+
+    /// A header of the window of a rate limit that is not text, or that does
+    /// not parse as seconds, fails.
+    #[test]
+    fn a_header_of_the_window_that_is_not_text_or_seconds_fails() {
+        for (name, value) in [
+            ("retry-after", HeaderValue::from_bytes(b"2\xff").unwrap()),
+            ("x-ratelimit-reset", HeaderValue::from_static("soon")),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, value);
+            assert!(retry_window(&headers).is_err(), "{name}");
+        }
+        assert_eq!(retry_window(&HeaderMap::new()).unwrap(), None);
     }
 }
