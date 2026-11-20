@@ -225,5 +225,5 @@ fn cached_control_dirent(
     };
     let dirents: DirentsPayload = postcard::from_bytes(&record.payload)
         .map_err(|error| TreeError::internal(error.to_string()))?;
-    Ok(dirents.entries.into_iter().find(|e| e.name == name))
+    Ok(dirents.entries().find(|e| e.name == name).cloned())
 }

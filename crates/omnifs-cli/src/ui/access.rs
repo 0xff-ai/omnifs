@@ -111,6 +111,7 @@ mod tests {
             state,
             mount_count: 1,
             fix: None,
+            current_program: None,
         }
     }
 

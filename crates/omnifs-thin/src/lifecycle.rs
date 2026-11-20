@@ -1,4 +1,6 @@
-use crate::host_control::{HostControl, RunnerPhase, StopOutcome, StopRequest};
+use crate::host_control::{
+    ControlRequests, HostControl, RestartRequest, RunnerPhase, StopOutcome, StopRequest,
+};
 use omnifs_core::fs;
 use omnifs_vfs::{TeardownOutcome, TeardownRequest};
 use std::path::{Path, PathBuf};
@@ -17,13 +19,26 @@ pub(crate) struct Lifecycle {
     pub(crate) wire_teardown_tx: mpsc::Sender<TeardownRequest>,
     pub(crate) wire_teardown_rx: mpsc::Receiver<TeardownRequest>,
     pub(crate) host_stop_rx: mpsc::Receiver<StopRequest>,
+    /// The `Restart` of a host runner whose mount restarts in place; none for
+    /// any other runner.
+    pub(crate) host_restart: Option<HostRestart>,
     pub(crate) host_control: Option<HostControl>,
+}
+
+/// The `Restart` requests of a host runner, with the release that wakes the
+/// owner of its mount, which stops its server without an unmount.
+pub(crate) struct HostRestart {
+    requests: mpsc::Receiver<RestartRequest>,
+    release: omnifs_nfs::Release,
 }
 
 pub(crate) struct LifecycleConfig<'a> {
     pub(crate) spec: &'a fs::Spec,
     pub(crate) state_dir: Option<&'a Path>,
     pub(crate) runner_control: Option<RunnerControlConfig>,
+    /// The release of the owner of a mount that restarts in place, which a
+    /// host runner takes `Restart` for.
+    pub(crate) release: Option<omnifs_nfs::Release>,
 }
 
 pub(crate) struct RunnerControlConfig {
@@ -37,10 +52,12 @@ impl Lifecycle {
             spec,
             state_dir,
             runner_control,
+            release,
         } = config;
         let (phase, _) = watch::channel(RunnerPhase::Preflight);
         let (wire_teardown_tx, wire_teardown_rx) = mpsc::channel(1);
         let (host_stop_tx, host_stop_rx) = mpsc::channel(1);
+        let mut host_restart = None;
         let host_control = match spec.runtime() {
             fs::Runtime::Host => {
                 let state_dir = state_dir
@@ -54,10 +71,29 @@ impl Lifecycle {
                     instance_id,
                     socket,
                 } = runner_control;
-                let record =
-                    omnifs_mtab::RunnerRecord::new(instance_id.clone(), spec.clone(), socket)?;
+                let program = omnifs_core::executable_program().map_err(|error| {
+                    anyhow::anyhow!("read the executable of the runner: {error}")
+                })?;
+                let record = omnifs_mtab::RunnerRecord::new(
+                    instance_id.clone(),
+                    spec.clone(),
+                    socket,
+                    program,
+                )?;
                 let mut control = HostControl::bind(state_dir, &record)?;
-                control.spawn(instance_id, phase.subscribe(), host_stop_tx);
+                let restart = release.map(|release| {
+                    let (sender, requests) = mpsc::channel(1);
+                    host_restart = Some(HostRestart { requests, release });
+                    sender
+                });
+                control.spawn(
+                    instance_id,
+                    phase.subscribe(),
+                    ControlRequests {
+                        stop: host_stop_tx,
+                        restart,
+                    },
+                );
                 Some(control)
             },
             fs::Runtime::Docker | fs::Runtime::Libkrun => {
@@ -74,6 +110,7 @@ impl Lifecycle {
             wire_teardown_tx,
             wire_teardown_rx,
             host_stop_rx,
+            host_restart,
             host_control,
         })
     }
@@ -81,8 +118,10 @@ impl Lifecycle {
 
 pub(crate) fn preflight(spec: &fs::Spec, state_dir: Option<&Path>) -> anyhow::Result<()> {
     let mount_point = spec.location();
-    std::fs::create_dir_all(mount_point)?;
+    // An active mount is never touched: a mount whose server is down, as an
+    // NFS mount between two instances of a restart in place, blocks a stat.
     if !omnifs_nfs::mount_is_active_checked(mount_point)? {
+        std::fs::create_dir_all(mount_point)?;
         return Ok(());
     }
     anyhow::ensure!(
@@ -113,6 +152,16 @@ pub(crate) async fn coordinate_mount(
     )
     .run()
     .await
+}
+
+/// The next `Restart` of `restart`, with its release; none once its control
+/// ends.
+async fn restart_request(
+    restart: &mut Option<HostRestart>,
+) -> Option<(RestartRequest, omnifs_nfs::Release)> {
+    let restart = restart.as_mut()?;
+    let request = restart.requests.recv().await?;
+    Some((request, restart.release.clone()))
 }
 
 struct MountCoordinator<'a> {
@@ -159,6 +208,7 @@ impl<'a> MountCoordinator<'a> {
         loop {
             let await_mount = self.mount_result.is_none();
             let host_control = self.lifecycle.host_control.is_some();
+            let restart = self.lifecycle.host_restart.is_some();
             tokio::select! {
                 result = &mut self.mount_done, if await_mount => {
                     let result = result.unwrap_or_else(|_| {
@@ -190,6 +240,19 @@ impl<'a> MountCoordinator<'a> {
                         return Ok(());
                     }
                 }
+                request = restart_request(&mut self.lifecycle.host_restart), if restart && await_mount && !self.stopping => {
+                    let Some((request, release)) = request else {
+                        self.lifecycle.host_restart = None;
+                        continue;
+                    };
+                    if let Err(error) = release.release() {
+                        request
+                            .complete(Err(format!("release the mount: {error}")))
+                            .await;
+                        continue;
+                    }
+                    return self.released(request).await;
+                }
                 signal = self.signals.recv() => {
                     if signal.is_none() {
                         continue;
@@ -207,6 +270,22 @@ impl<'a> MountCoordinator<'a> {
                 }
             }
         }
+    }
+
+    /// Answers `request` once the owner of a mount that a new instance serves
+    /// in place, which its release woke, has stopped its server without an
+    /// unmount and written its filehandle table; the runner then ends.
+    async fn released(&mut self, request: RestartRequest) -> anyhow::Result<()> {
+        self.lifecycle.phase.send_replace(RunnerPhase::Stopping);
+        let result = (&mut self.mount_done)
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("mount owner exited without a result")));
+        let outcome = match &result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(format!("{error:#}")),
+        };
+        request.complete(outcome).await;
+        result
     }
 
     fn observe_mount(&mut self) {
@@ -411,6 +490,7 @@ mod tests {
             spec: &spec,
             state_dir: None,
             runner_control: None,
+            release: None,
         })
         .unwrap()
     }

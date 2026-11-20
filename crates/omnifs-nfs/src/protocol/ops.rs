@@ -18,7 +18,6 @@ use crate::protocol::consts::{
 use crate::protocol::filehandle::{decode_file_handle, file_handle};
 use crate::protocol::name::ComponentName;
 use crate::protocol::xdr::{XdrError, XdrReader, XdrWriter};
-use std::hash::{DefaultHasher, Hash, Hasher};
 
 const OPEN4_NOCREATE: u32 = 0;
 const OPEN4_CREATE: u32 = 1;
@@ -300,7 +299,8 @@ impl CompoundDecoder<'_, '_> {
 
     fn readdir_op(&mut self) -> Result<(u32, Vec<u8>), XdrError> {
         let cookie = self.reader.u64()?;
-        let verifier = self.reader.fixed_opaque(8)?;
+        // Each cookie stands for each listing, whatever its verifier.
+        self.reader.fixed_opaque(8)?;
         let _dircount = self.reader.u32()?;
         let maxcount = self.reader.u32()?;
         let attrs = self.reader.bitmap()?;
@@ -308,7 +308,6 @@ impl CompoundDecoder<'_, '_> {
             self.export,
             self.state.current,
             cookie,
-            &verifier,
             maxcount,
             &attrs,
         ))
@@ -581,24 +580,22 @@ pub(crate) fn read(
     (NFS4_OK, res.into_inner())
 }
 
-fn readdir_cookie_verifier(id: u64, change: u64, entries: &[DirEntry]) -> [u8; 8] {
-    let mut hasher = DefaultHasher::new();
-    id.hash(&mut hasher);
-    change.hash(&mut hasher);
-    entries.len().hash(&mut hasher);
-    for entry in entries {
-        entry.name.hash(&mut hasher);
-        entry.id.hash(&mut hasher);
-        entry.attr.change.hash(&mut hasher);
-    }
-    hasher.finish().to_be_bytes()
+/// The cookie of the entry `name` of a directory: the FNV-1a hash of the
+/// name, past the cookies `0`, `1` and `2` that the protocol reserves. It is
+/// the same in each listing of the directory, whatever the other entries, so
+/// a listing continues from a cookie after a change of the directory, with
+/// each entry that stays in it once.
+pub(crate) fn readdir_cookie(name: &str) -> u64 {
+    let hash = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    hash.max(3)
 }
 
 pub(crate) fn readdir(
     export: &dyn ReadOnlyExport,
     current: Option<u64>,
     cookie: u64,
-    verifier: &[u8],
     maxcount: u32,
     attrs: &[u32],
 ) -> (u32, Vec<u8>) {
@@ -619,35 +616,36 @@ pub(crate) fn readdir(
         Ok(listing) => listing,
         Err(status) => return error_reply(OP_READDIR, status),
     };
-    entries.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
-    let cookie_verifier = readdir_cookie_verifier(id, dir_attr.change, &entries);
+    // The entries are in the order of their cookies, and a listing continues
+    // with the entries past its cookie.
+    let mut entries: Vec<(u64, DirEntry)> = entries
+        .drain(..)
+        .map(|entry| (readdir_cookie(&entry.name), entry))
+        .collect();
+    entries.sort_by_key(|entry| entry.0);
+    if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        // Two names of the directory with one cookie have no listing.
+        return error_reply(OP_READDIR, Status::Io);
+    }
     let start = match cookie {
         0 => 0,
         1 | 2 => return error_reply(OP_READDIR, Status::BadCookie),
-        _ if verifier != cookie_verifier => {
-            return error_reply(OP_READDIR, Status::NotSame);
-        },
-        cookie => {
-            let idx = usize::try_from(cookie - 3).unwrap_or(usize::MAX);
-            if idx >= entries.len() {
-                return error_reply(OP_READDIR, Status::BadCookie);
-            }
-            idx + 1
-        },
+        cookie => entries.partition_point(|(entry, _)| *entry <= cookie),
     };
     let mut res = op_status(OP_READDIR, NFS4_OK);
     let prefix_len = res.len();
-    res.bytes(&cookie_verifier);
+    // Each cookie stands for each listing, so the verifier never changes.
+    res.bytes(&[0; 8]);
     let maxcount = usize::try_from(maxcount).unwrap_or(usize::MAX);
     let trailer_len = 8; // final entry-present bool plus EOF bool.
     if (res.len() - prefix_len).saturating_add(trailer_len) > maxcount {
         return error_reply(OP_READDIR, Status::TooSmall);
     }
     let mut eof = true;
-    for (emitted, (idx, entry)) in entries.iter().enumerate().skip(start).enumerate() {
+    for (emitted, (cookie, entry)) in entries.iter().skip(start).enumerate() {
         let mut encoded_entry = XdrWriter::new();
         encoded_entry.bool(true);
-        encoded_entry.u64(u64::try_from(idx).expect("READDIR index exceeds u64") + 3);
+        encoded_entry.u64(*cookie);
         encoded_entry.string(&entry.name);
         encoded_entry.bytes(&encode_attrs(export.generation(), &entry.attr, attrs));
         let encoded_entry = encoded_entry.into_inner();

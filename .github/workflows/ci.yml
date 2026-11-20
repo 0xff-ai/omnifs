@@ -103,7 +103,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - name: Run preflight checks
         run: |
@@ -124,7 +124,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: wasm32-wasip2
 
@@ -193,7 +193,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -260,7 +260,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -331,7 +331,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -380,7 +380,7 @@ jobs:
           OMNIFS_BIN="$(pwd)/dist-cli/bin/omnifs" \
           OMNIFS_THIN_BIN="$(pwd)/dist-cli/bin/omnifs-thin" \
           cargo nextest run -p omnifs-itest \
-            -E 'binary(filesystem_matrix) + binary(control_plane) + binary(multi_filesystem) + binary(wire_reattach)' --no-capture
+            -E 'binary(filesystem_matrix) + binary(control_plane) + binary(multi_filesystem) + binary(wire_reattach) + binary(host_restart)' --no-capture
 
       - name: Upload conformance scorecards
         if: always()
@@ -412,7 +412,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -495,7 +495,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-docker
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -557,7 +557,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -642,7 +642,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -687,7 +687,7 @@ jobs:
 
       - uses: ./.github/actions/omnifs-just
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -1079,7 +1079,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.98.0
 
       - uses: Swatinem/rust-cache@v2
         with:

@@ -275,6 +275,78 @@ impl Instance {
     }
 }
 
+/// A descriptor that becomes readable at a change of the entries of a
+/// folder, an event of the kernel: a kqueue with `NOTE_WRITE` of the folder on
+/// macOS, an inotify watch of it on Linux.
+#[derive(Debug)]
+pub struct FolderChange {
+    events: std::os::fd::OwnedFd,
+    #[cfg(target_os = "macos")]
+    _folder: File,
+}
+
+impl FolderChange {
+    /// Watch the entries of `folder`, which a missing folder fails with
+    /// `NotFound`.
+    #[cfg(target_os = "macos")]
+    pub fn watch(folder: &Path) -> io::Result<Self> {
+        use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
+        use std::os::fd::AsRawFd as _;
+        let opened = File::open(folder)?;
+        let ident = usize::try_from(opened.as_raw_fd())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let kqueue = Kqueue::new()?;
+        let change = KEvent::new(
+            ident,
+            EventFilter::EVFILT_VNODE,
+            EvFlags::EV_ADD | EvFlags::EV_CLEAR,
+            FilterFlag::NOTE_WRITE,
+            0,
+            0,
+        );
+        let now = nix::libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        kqueue.kevent(&[change], &mut [], Some(now))?;
+        Ok(Self {
+            events: kqueue.into(),
+            _folder: opened,
+        })
+    }
+
+    /// Watch the entries of `folder`, which a missing folder fails with
+    /// `NotFound`.
+    #[cfg(target_os = "linux")]
+    pub fn watch(folder: &Path) -> io::Result<Self> {
+        use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+        let inotify = Inotify::init(InitFlags::IN_CLOEXEC | InitFlags::IN_NONBLOCK)?;
+        inotify.add_watch(
+            folder,
+            AddWatchFlags::IN_CREATE
+                | AddWatchFlags::IN_DELETE
+                | AddWatchFlags::IN_MOVED_FROM
+                | AddWatchFlags::IN_MOVED_TO
+                | AddWatchFlags::IN_ONLYDIR,
+        )?;
+        Ok(Self {
+            events: inotify.into(),
+        })
+    }
+}
+
+impl std::os::fd::AsRawFd for FolderChange {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.events.as_raw_fd()
+    }
+}
+
+impl std::os::fd::AsFd for FolderChange {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.events.as_fd()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("cannot resolve omnifs home: set HOME or OMNIFS_HOME")]
 pub struct ResolveError;
@@ -390,6 +462,29 @@ fn process_executable(_pid: u32) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The watch of a folder becomes readable at an entry that joins it, and
+    /// a missing folder has none.
+    #[test]
+    fn a_change_of_a_folder_is_an_event() {
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+        use std::os::fd::AsFd as _;
+        let readable = |change: &FolderChange, timeout: u16| {
+            let mut fds = [PollFd::new(change.as_fd(), PollFlags::POLLIN)];
+            poll(&mut fds, PollTimeout::from(timeout)).unwrap() == 1
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let change = FolderChange::watch(temp.path()).unwrap();
+        assert!(!readable(&change, 0));
+        std::fs::write(temp.path().join("control.sock"), b"").unwrap();
+        assert!(readable(&change, 5_000));
+        assert_eq!(
+            FolderChange::watch(&temp.path().join("missing"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
 
     #[test]
     fn endpoint_owns_only_fixed_bootstrap_paths() {
