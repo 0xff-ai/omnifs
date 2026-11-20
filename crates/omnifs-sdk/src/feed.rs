@@ -9,7 +9,9 @@
 //! feed for an answer when its facts lack the path, for a lookup only before
 //! the end of the first answer of the feed, or are past their deadline, and
 //! serves the path from its projection, as not found for a path that it
-//! lacks.
+//! lacks. A lookup of a path that the projection lacks, under a fed listing
+//! below the anchor of the answering feed that is not complete, takes the
+//! answer of that listing first.
 //!
 //! The host calls the feed `method` once per part of an answer with a
 //! [`FeedCx`]: the anchor path and the key of the object, the token the feed

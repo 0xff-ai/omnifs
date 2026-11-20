@@ -58,7 +58,18 @@ async fn names(harness: &RuntimeHarness, path: &str) -> Result<Vec<String>, NsEr
 
 async fn read(harness: &RuntimeHarness, path: &str) -> Result<String, NsError> {
     let file = lookup(harness, path).await?;
-    let read = harness.namespace.read(file.path, 0, u32::MAX).await?;
+    contents(harness, file.path).await
+}
+
+/// The file at `path` under the mount by its path alone, without a lookup,
+/// as by a filehandle held across a change of the projection.
+async fn read_at(harness: &RuntimeHarness, path: &str) -> Result<String, NsError> {
+    let file = Path::parse(&format!("/github/{path}")).unwrap();
+    contents(harness, file).await
+}
+
+async fn contents(harness: &RuntimeHarness, file: Path) -> Result<String, NsError> {
+    let read = harness.namespace.read(file, 0, u32::MAX).await?;
     Ok(String::from_utf8(read.bytes).unwrap())
 }
 
@@ -1402,6 +1413,39 @@ async fn a_later_answer_of_an_item_stopped_by_the_network_continues_from_its_nex
     assert_eq!(requests[0].url, api(ITEM_7_SINCE));
 
     later_answer_continued(&harness).await;
+}
+
+/// A read of the `body.md` of a comment by its path alone, as by a filehandle
+/// held across a change of the projection, looks up each segment from the
+/// root: the item takes its answer, and the comment, which the `comments/` of
+/// the item lacks before it is complete, takes the comments of the item
+/// first, so that the comment serves.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_of_a_comment_by_its_path_alone_takes_the_comments_of_its_item() {
+    let harness = github_harness();
+    let comments = "octocat/hello/issues/all/3/comments";
+    let (body, requests) = answering(
+        &harness,
+        read_at(&harness, &format!("{comments}/31/body.md")),
+        vec![
+            ok(&item(3, "Three", "open", "2026-11-18T09:00:00Z", 2, false)),
+            ok(&json!([
+                comment(30, 3, false, "first"),
+                comment(31, 3, false, "second"),
+            ])),
+        ],
+    )
+    .await;
+    assert_eq!(body.unwrap(), "second");
+    assert_eq!(requests[0].url, api("/repos/octocat/hello/issues/3"));
+    assert_eq!(
+        requests[1].url,
+        api("/repos/octocat/hello/issues/3/comments?per_page=100&page=1")
+    );
+    assert_eq!(
+        served(&harness, names(&harness, comments)).await.unwrap(),
+        ["30", "31"]
+    );
 }
 
 /// An item that an answer of its feed removed is not found within the
