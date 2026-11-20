@@ -808,6 +808,24 @@ impl MountResources {
         // Bodies become immutable and addressable before the projection
         // transaction can publish a reference to them. This work intentionally
         // happens before taking the coherence mutex.
+        let mut bodies = Vec::<&[u8]>::new();
+        for object in &objects {
+            if let ObjectMutation::Canonical { bytes, .. } = object {
+                bodies.push(bytes);
+            }
+        }
+        for record in &records {
+            match &record.fact {
+                FactPayload::Lookup(LookupPayload::Positive(meta)) => {
+                    bodies.extend(inline_bytes(meta));
+                },
+                FactPayload::Attr(value) => bodies.extend(inline_bytes(&value.meta)),
+                FactPayload::File(value) => bodies.push(&value.content),
+                FactPayload::Lookup(LookupPayload::Negative { .. })
+                | FactPayload::FileBody { .. } => {},
+            }
+        }
+        self.body.publish_all(&bodies)?;
         let mut prepared_objects = Vec::new();
         for object in &objects {
             if let ObjectMutation::Canonical {
@@ -1526,6 +1544,15 @@ fn normalize_attr(value: &AttrPayload, body: &BodyStore) -> Result<AttrPayload, 
     Ok(AttrPayload {
         meta: normalize_meta(&value.meta, body)?,
     })
+}
+
+/// The inline bytes of the file of `meta`, which its publication stores as a
+/// body.
+fn inline_bytes(meta: &EntryMeta) -> Option<&[u8]> {
+    let EntryMeta::File { attrs: Some(attrs) } = meta else {
+        return None;
+    };
+    attrs.inline_bytes()
 }
 
 fn normalize_meta(meta: &EntryMeta, body: &BodyStore) -> Result<EntryMeta, ProjectionError> {
