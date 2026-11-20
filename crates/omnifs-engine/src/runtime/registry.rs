@@ -19,12 +19,13 @@ use tokio::sync::watch;
 use tracing::{debug, warn};
 
 /// One selected mount revision. Cache-only entries deliberately have no
-/// provider runtime and never fabricate provider handles.
+/// provider runtime and never fabricate provider handles; a mount whose
+/// provider names no number of a projection has no projection either.
 pub struct MountEntry {
     name: MountName,
     config: RuntimeMountConfig,
     availability: MountAvailability,
-    resources: Arc<MountResources>,
+    resources: Option<Arc<MountResources>>,
     trees: Arc<TreeRefs>,
     runtime: Option<Arc<Runtime>>,
     provider_interval_secs: u32,
@@ -33,6 +34,8 @@ pub struct MountEntry {
 /// Daemon-supplied, already-validated input for one durable mount.
 pub struct MountBuildInput {
     pub config: RuntimeMountConfig,
+    /// The canonical mount without the content ID and the version of the
+    /// artifact of its provider.
     pub canonical: Arc<[u8]>,
     pub provider: Option<ProviderBuildInput>,
     pub state: MountBuildState,
@@ -49,19 +52,41 @@ pub enum MountBuildState {
         credential_generation: Option<CredentialGeneration>,
     },
     AuthRequired,
-    ProviderUnavailable,
+    /// The provider of the mount is unavailable for `reason`: its artifact
+    /// is not retained, or its manifest is invalid.
+    ProviderUnavailable {
+        reason: String,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MountAvailability {
     Active,
     AuthRequired,
-    ProviderUnavailable,
+    /// The provider of the mount is unavailable for `reason`: its artifact
+    /// is not retained, its manifest is invalid, or it does not build.
+    ProviderUnavailable {
+        reason: String,
+    },
 }
 
 impl MountEntry {
-    pub(crate) fn resources(&self) -> &Arc<MountResources> {
-        &self.resources
+    /// The projection of the mount. A mount without one, whose provider has
+    /// no manifest, answers with its unavailability and its reason.
+    pub(crate) fn resources(&self) -> Result<&Arc<MountResources>, crate::tree::TreeError> {
+        match (&self.resources, &self.availability) {
+            (Some(resources), _) => Ok(resources),
+            (None, MountAvailability::ProviderUnavailable { reason }) => {
+                Err(crate::tree::TreeError::offline_miss(format!(
+                    "mount {} is unavailable: {reason}",
+                    self.name
+                )))
+            },
+            (None, _) => Err(crate::tree::TreeError::internal(format!(
+                "mount {} has no projection while its provider is available",
+                self.name
+            ))),
+        }
     }
 
     pub(crate) fn trees(&self) -> &Arc<TreeRefs> {
@@ -72,8 +97,8 @@ impl MountEntry {
         self.runtime.clone()
     }
 
-    pub(crate) fn availability(&self) -> MountAvailability {
-        self.availability
+    pub(crate) fn availability(&self) -> &MountAvailability {
+        &self.availability
     }
 }
 
@@ -119,6 +144,13 @@ impl MountTable {
         })
     }
 
+    /// Build one mount. A mount whose provider artifact does not match its
+    /// pin, or whose provider does not build, as an artifact the host cannot
+    /// instantiate, a configuration or an authority its manifest rejects, or
+    /// an initialize that fails, is `ProviderUnavailable` with that error, so
+    /// that the other mounts build.
+    /// The projection of a mount comes from the number of the projection of
+    /// its provider.
     fn build_durable_mount(
         host: &HostOnline,
         input: MountBuildInput,
@@ -131,55 +163,78 @@ impl MountTable {
             state,
         } = input;
         let mount = config.name.to_string();
-        let (availability, auth, credential_generation) = match state {
+        let (mut availability, auth, credential_generation) = match state {
             MountBuildState::Active {
                 auth,
                 credential_generation,
             } => (MountAvailability::Active, auth, credential_generation),
             MountBuildState::AuthRequired => (MountAvailability::AuthRequired, None, None),
-            MountBuildState::ProviderUnavailable => {
-                (MountAvailability::ProviderUnavailable, None, None)
-            },
+            MountBuildState::ProviderUnavailable { reason } => (
+                MountAvailability::ProviderUnavailable { reason },
+                None,
+                None,
+            ),
         };
-        if availability != MountAvailability::ProviderUnavailable {
+        if !matches!(availability, MountAvailability::ProviderUnavailable { .. }) {
             let provider = provider.as_ref().ok_or_else(|| {
                 RegistryError::RuntimeError(format!(
                     "mount {mount} has no retained provider artifact"
                 ))
             })?;
-            validate_provider_input(&config, &provider.bytes, &provider.manifest)?;
+            if let Err(error) =
+                validate_provider_input(&config, &provider.bytes, &provider.manifest)
+            {
+                availability = MountAvailability::ProviderUnavailable {
+                    reason: error.to_string(),
+                };
+            }
         }
-        let source = generation_cache_source(&canonical, credential_generation);
-        let projection_id = ProjectionId::new(&source, config.provider.id);
-        let resources = host
-            .caches()
-            .prepare_mount(&config.name, projection_id, config.provider.id, &source)
-            .map_err(|error| RegistryError::RuntimeError(format!("cache open: {error}")))?;
+        let resources = provider
+            .as_ref()
+            .map(|provider| {
+                let source = projection_source(
+                    &canonical,
+                    provider.manifest.projection,
+                    credential_generation,
+                );
+                host.caches()
+                    .prepare_mount(&config.name, ProjectionId::new(&source), &source)
+                    .map_err(|error| RegistryError::RuntimeError(format!("cache open: {error}")))
+            })
+            .transpose()?;
         let trees = Arc::new(TreeRefs::new());
         let provider_interval_secs = provider
             .as_ref()
             .map_or(0, |provider| provider.manifest.refresh_interval_secs);
-        let runtime = if availability == MountAvailability::Active {
-            let provider = provider.expect("active mount provider was checked above");
-            Some(Arc::new(
-                Runtime::build(
-                    host.engine(),
-                    RuntimeBuildInput {
-                        wasm: provider.bytes,
-                        config: &config,
-                        manifest: &provider.manifest,
-                        auth,
-                        resources: Arc::clone(&resources),
-                        trees: Arc::clone(&trees),
-                        publish_initialize_effects: false,
-                    },
-                    Arc::clone(host.cloner()),
-                    capture_test_callouts,
-                )
-                .map_err(|error| RegistryError::from_build(&mount, error))?,
-            ))
-        } else {
-            None
+        let runtime = match (&availability, provider, &resources) {
+            (MountAvailability::Active, Some(provider), Some(resources)) => match Runtime::build(
+                host.engine(),
+                RuntimeBuildInput {
+                    wasm: provider.bytes,
+                    config: &config,
+                    manifest: &provider.manifest,
+                    auth,
+                    resources: Arc::clone(resources),
+                    trees: Arc::clone(&trees),
+                    publish_initialize_effects: false,
+                },
+                Arc::clone(host.cloner()),
+                capture_test_callouts,
+            ) {
+                Ok(runtime) => Some(Arc::new(runtime)),
+                Err(error) => {
+                    availability = MountAvailability::ProviderUnavailable {
+                        reason: match error {
+                            BuildError::Wasmtime(error) => {
+                                format!("the host cannot instantiate its provider: {error}")
+                            },
+                            error => format!("its provider does not build: {error}"),
+                        },
+                    };
+                    None
+                },
+            },
+            _ => None,
         };
         Ok(MountEntry {
             name: config.name.clone(),
@@ -227,7 +282,7 @@ impl MountTable {
             (
                 &entry.name,
                 &entry.config,
-                entry.availability(),
+                entry.availability().clone(),
                 entry.runtime(),
             )
         })
@@ -283,14 +338,22 @@ impl MountTable {
     }
 
     pub(crate) fn activate_resources(&self) {
-        for entry in self.entries.values() {
-            entry.resources.activate();
+        for resources in self
+            .entries
+            .values()
+            .filter_map(|entry| entry.resources.as_ref())
+        {
+            resources.activate();
         }
     }
 
     pub(crate) fn retire_resources(&self) {
-        for entry in self.entries.values() {
-            entry.resources.retire();
+        for resources in self
+            .entries
+            .values()
+            .filter_map(|entry| entry.resources.as_ref())
+        {
+            resources.retire();
         }
     }
 
@@ -421,6 +484,20 @@ fn validate_provider_input(
     Ok(())
 }
 
+/// The source of the projection of a mount: the number of the projection of
+/// its provider, its canonical mount without the artifact of its provider,
+/// and its credential generation.
+fn projection_source(
+    canonical: &[u8],
+    projection: u32,
+    credential_generation: Option<CredentialGeneration>,
+) -> Arc<[u8]> {
+    generation_cache_source(
+        &[&projection.to_le_bytes(), canonical].concat(),
+        credential_generation,
+    )
+}
+
 fn generation_cache_source(
     canonical: &[u8],
     credential_generation: Option<CredentialGeneration>,
@@ -447,21 +524,10 @@ pub enum RegistryError {
     RuntimeError(String),
 }
 
-impl RegistryError {
-    fn from_build(mount: &str, error: BuildError) -> Self {
-        match error {
-            BuildError::InvalidConfig(message) => {
-                Self::ConfigError(format!("mount {mount}: {message}"))
-            },
-            other => Self::RuntimeError(other.to_string()),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        MountBuildInput, MountBuildState, MountTable, ProviderBuildInput, RegistryError,
+        MountAvailability, MountBuildInput, MountBuildState, MountTable, ProviderBuildInput,
         generation_cache_source,
     };
     use crate::runtime::host::HostOnline;
@@ -513,7 +579,7 @@ mod tests {
                 config,
                 max_fetch_blob_bytes: None,
             },
-            canonical: Arc::from(b"canonical mount".as_slice()),
+            canonical: Arc::from(format!("canonical mount {name}").into_bytes()),
             provider: Some(ProviderBuildInput {
                 bytes: Arc::from(bytes.to_vec().into_boxed_slice()),
                 manifest,
@@ -522,35 +588,88 @@ mod tests {
         }
     }
 
+    /// A mount whose provider does not build, as for a configuration its
+    /// manifest rejects, is unavailable with that error, and the generation
+    /// builds the mount beside it.
     #[tokio::test(flavor = "multi_thread")]
-    async fn durable_input_rejects_invalid_provider_config() {
+    async fn a_mount_whose_provider_does_not_build_is_unavailable_beside_a_ready_one() {
         let root = tempfile::tempdir().expect("temp root");
         let path = test_provider_wasm_path();
         assert!(path.exists(), "build providers before the host fixture");
         let bytes = std::fs::read(path).expect("read test provider");
         let (_, manifest) = Artifact::from_bytes_with_manifest("test-provider.wasm", bytes.clone())
             .expect("validate test provider");
-        let result = MountTable::prepare_durable(
+        let active = || MountBuildState::Active {
+            auth: None,
+            credential_generation: None,
+        };
+        let table = MountTable::prepare_durable(
             &test_host(root.path()),
-            vec![input(
-                &bytes,
-                manifest,
-                "test",
-                serde_json::json!({"unexpected": true}),
-                MountBuildState::Active {
-                    auth: None,
-                    credential_generation: None,
-                },
-            )],
+            vec![
+                input(
+                    &bytes,
+                    manifest.clone(),
+                    "bad",
+                    serde_json::json!({"unexpected": true}),
+                    active(),
+                ),
+                input(&bytes, manifest, "test", serde_json::json!({}), active()),
+            ],
+        )
+        .expect("prepare the generation");
+        let entries = table
+            .selected_entries()
+            .map(|(name, _, availability, runtime)| {
+                (name.to_string(), availability, runtime.is_some())
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                &entries[..],
+                [
+                    (bad, MountAvailability::ProviderUnavailable { reason }, false),
+                    (test, MountAvailability::Active, true),
+                ] if bad == "bad"
+                    && test == "test"
+                    && reason.contains("failed validation")
+                    && reason.contains("mount bad")
+            ),
+            "{entries:?}"
         );
-        match result {
-            Err(RegistryError::ConfigError(message)) => {
-                assert!(message.contains("failed validation"));
-                assert!(message.contains("mount test"));
+    }
+
+    /// A read under a mount whose provider has no manifest, and so no
+    /// projection, answers with its unavailability.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mount_without_a_manifest_of_its_provider_answers_as_unavailable() {
+        let root = tempfile::tempdir().expect("temp root");
+        let path = test_provider_wasm_path();
+        assert!(path.exists(), "build providers before the host fixture");
+        let bytes = std::fs::read(path).expect("read test provider");
+        let (_, manifest) = Artifact::from_bytes_with_manifest("test-provider.wasm", bytes.clone())
+            .expect("validate test provider");
+        let mut input = input(
+            &bytes,
+            manifest,
+            "test",
+            serde_json::json!({}),
+            MountBuildState::ProviderUnavailable {
+                reason: "its provider artifact is not retained".to_owned(),
             },
-            Err(other) => panic!("expected config error, got {other}"),
-            Ok(_) => panic!("expected invalid provider config to be rejected"),
-        }
+        );
+        input.provider = None;
+        let table = Arc::new(
+            MountTable::prepare_durable(&test_host(root.path()), vec![input])
+                .expect("prepare the mount"),
+        );
+        let namespace = EngineNamespace::online(table, tokio::runtime::Handle::current());
+        assert_eq!(
+            namespace
+                .lookup(omnifs_core::path::Path::root(), "test")
+                .await
+                .unwrap_err(),
+            NsError::OfflineMiss
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -625,7 +744,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn unavailable_provider_keeps_mount_root_without_starting_runtime() {
+    async fn unavailable_provider_serves_its_projection_without_starting_runtime() {
         let root = tempfile::tempdir().expect("temp root");
         let path = test_provider_wasm_path();
         assert!(path.exists(), "build providers before the host fixture");
@@ -640,7 +759,9 @@ mod tests {
                     manifest,
                     "test",
                     serde_json::json!({}),
-                    MountBuildState::ProviderUnavailable,
+                    MountBuildState::ProviderUnavailable {
+                        reason: "its artifact is not retained".to_owned(),
+                    },
                 )],
             )
             .expect("prepare unavailable mount"),
@@ -651,10 +772,84 @@ mod tests {
             .lookup(omnifs_core::path::Path::root(), "test")
             .await
             .expect("configured mount root");
-        assert!(matches!(
-            namespace.readdir(mount.path, DirCursor::start(), 0).await,
-            Err(NsError::Internal { message }) if message.contains("provider is unavailable")
-        ));
+        assert_eq!(
+            namespace
+                .readdir(mount.path, DirCursor::start(), 0)
+                .await
+                .unwrap_err(),
+            NsError::OfflineMiss
+        );
+    }
+
+    /// A mount that moves to another artifact of its provider with the same
+    /// number of the projection keeps its projection, with each fact and
+    /// validator of a listing; one with another number starts an empty one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mount_keeps_its_projection_on_an_artifact_with_the_same_number() {
+        let root = tempfile::tempdir().expect("temp root");
+        let path = test_provider_wasm_path();
+        assert!(path.exists(), "build providers before the host fixture");
+        let bytes = std::fs::read(path).expect("read test provider");
+        let (_, manifest) = Artifact::from_bytes_with_manifest("test-provider.wasm", bytes.clone())
+            .expect("validate test provider");
+        let host = test_host(root.path());
+        let active = MountTable::prepare_durable(
+            &host,
+            vec![input(
+                &bytes,
+                manifest.clone(),
+                "test",
+                serde_json::json!({}),
+                MountBuildState::Active {
+                    auth: None,
+                    credential_generation: None,
+                },
+            )],
+        )
+        .expect("prepare the mount");
+        let active = Arc::new(active);
+        let namespace =
+            EngineNamespace::online(Arc::clone(&active), tokio::runtime::Handle::current());
+        let names = |namespace: Arc<EngineNamespace>| async move {
+            let mut path = namespace
+                .lookup(omnifs_core::path::Path::root(), "test")
+                .await?
+                .path;
+            for segment in ["hello", "validated"] {
+                path = namespace.lookup(path, segment).await?.path;
+            }
+            let page = namespace.readdir(path, DirCursor::start(), 0).await?;
+            Ok::<_, NsError>(
+                page.entries
+                    .into_iter()
+                    .map(|entry| entry.name)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            names(namespace).await.unwrap(),
+            ["v-0", "v-1", "@next", "@all"]
+        );
+
+        let moved = |projection: u32| {
+            let mut manifest = manifest.clone();
+            manifest.projection = projection;
+            let mut input = input(
+                &bytes,
+                manifest,
+                "test",
+                serde_json::json!({}),
+                MountBuildState::ProviderUnavailable {
+                    reason: "another artifact".to_owned(),
+                },
+            );
+            input.config.provider.id = ProviderId::from_wasm_bytes(b"another artifact");
+            let table =
+                MountTable::prepare_durable(&host, vec![input]).expect("prepare the moved mount");
+            EngineNamespace::online(Arc::new(table), tokio::runtime::Handle::current())
+        };
+        assert_eq!(names(moved(1)).await.unwrap(), ["v-0", "v-1"]);
+        assert_eq!(names(moved(2)).await.unwrap_err(), NsError::OfflineMiss);
     }
 
     #[test]
@@ -666,8 +861,8 @@ mod tests {
             Some(CredentialGeneration::initial().next().unwrap()),
         );
         assert_ne!(
-            super::ProjectionId::new(&first, ProviderId::from_wasm_bytes(b"provider")),
-            super::ProjectionId::new(&second, ProviderId::from_wasm_bytes(b"provider"))
+            super::ProjectionId::new(&first),
+            super::ProjectionId::new(&second)
         );
     }
 

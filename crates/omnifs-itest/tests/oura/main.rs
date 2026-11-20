@@ -3,7 +3,7 @@
 use omnifs_itest::{RuntimeHarness, TestOpExt, make_initialized_runtime};
 use omnifs_wit::host::types::{
     ByteSource, CalloutResult, EntryKind, ErrorKind, FileSize, FsKind, Header, HttpResponse,
-    ListChildrenResult, LookupChildResult, ReadFileOutcome, ReadMode, Stability,
+    ListChildrenResult, ListingWrite, LookupChildResult, ReadFileOutcome, ReadMode, Stability,
 };
 use serde_json::{Value, json};
 
@@ -104,7 +104,7 @@ fn assert_projected_dir(op: &omnifs_engine::test_support::TestOp<'_, ReadFileOut
         "directory should not carry an object id"
     );
     assert!(
-        matches!(write.kind, FsKind::Directory(false)),
+        matches!(write.kind, FsKind::Directory(ListingWrite::Partial)),
         "expected non-exhaustive directory projection for {path}, got {:?}",
         write.kind
     );

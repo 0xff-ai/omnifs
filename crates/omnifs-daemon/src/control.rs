@@ -20,13 +20,14 @@ use omnifs_api::{
     CredentialKind, CredentialStatus, CredentialStatusKind, DaemonHealth, DaemonInfo,
     DaemonInventory, DaemonPhase, DaemonRecovery, HealthReport, HealthState,
     MountDefinition as ApiMountDefinition, MountHealth, MountLimits as ApiMountLimits,
-    MountOpResult, MountRecord, MutationOpResult, ProviderImportDisposition, ProviderImportReceipt,
-    ProviderMetadata, ProviderReference, RecoveryId, RepairAction, RepairReceipt,
+    MountOpResult, MountRecord, MutationOpResult, PhaseEvent, ProviderImportDisposition,
+    ProviderImportReceipt, ProviderMetadata, ProviderReference, RecoveryId, RepairAction,
+    RepairReceipt,
 };
 use omnifs_state::StateStore;
 use prost::Message as _;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, ReadBuf};
 use tokio::net::UnixStream;
@@ -72,6 +73,19 @@ impl ControlPhase {
     fn shutting_down() -> ControlError {
         ControlError::new(ControlErrorCode::NotReady, "daemon is shutting down")
     }
+
+    /// The phase that `WatchPhase` gives, with the error of a recovery as its
+    /// store health reports it; none once teardown has begun.
+    fn event(&self) -> Option<PhaseEvent> {
+        match self {
+            Self::Starting => Some(PhaseEvent::Starting),
+            Self::Ready(_) => Some(PhaseEvent::Ready),
+            Self::Recovery(recovery) => Some(PhaseEvent::RecoveryRequired {
+                error: recovery.store_health.message.clone(),
+            }),
+            Self::ShuttingDown => None,
+        }
+    }
 }
 
 pub(crate) struct RepairCommand {
@@ -83,7 +97,8 @@ pub(crate) struct RepairCommand {
 pub(crate) struct ControlServer {
     context: Arc<DaemonContext>,
     embedded: Arc<EmbeddedProviders>,
-    phase: RwLock<ControlPhase>,
+    /// The phase, which each `WatchPhase` stream follows.
+    phase: tokio::sync::watch::Sender<ControlPhase>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     repair_tx: tokio::sync::mpsc::Sender<RepairCommand>,
     connection_permits: Arc<tokio::sync::Semaphore>,
@@ -118,7 +133,7 @@ impl ControlServer {
             Arc::new(Self {
                 context,
                 embedded,
-                phase: RwLock::new(ControlPhase::Starting),
+                phase: tokio::sync::watch::Sender::new(ControlPhase::Starting),
                 shutdown_tx,
                 repair_tx,
                 connection_permits: Arc::new(tokio::sync::Semaphore::new(connection_limit)),
@@ -130,31 +145,19 @@ impl ControlServer {
     }
 
     pub(crate) fn set_ready(&self, daemon: Arc<Daemon>) {
-        *self
-            .phase
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = ControlPhase::Ready(daemon);
+        self.phase.send_replace(ControlPhase::Ready(daemon));
     }
 
     pub(crate) fn set_recovery(&self, recovery: DaemonRecovery) {
-        *self
-            .phase
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = ControlPhase::Recovery(recovery);
+        self.phase.send_replace(ControlPhase::Recovery(recovery));
     }
 
     pub(crate) fn set_shutting_down(&self) {
-        *self
-            .phase
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = ControlPhase::ShuttingDown;
+        self.phase.send_replace(ControlPhase::ShuttingDown);
     }
 
     fn phase(&self) -> ControlPhase {
-        self.phase
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.phase.borrow().clone()
     }
 
     pub(crate) async fn run(

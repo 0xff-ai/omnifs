@@ -1,11 +1,26 @@
 //! `omnifs status` verb handler.
 
+use clap::Args;
+
 use crate::error::ExitCode;
+use crate::rpc::RpcClient;
 use crate::status::InventoryReport;
 use crate::ui::access::ActionLine;
 use crate::ui::output::Output;
 
-pub async fn run(output: Output) -> anyhow::Result<ExitCode> {
+#[derive(Args, Debug, Clone)]
+#[command(after_help = "Examples:\n  omnifs status\n  omnifs status --ready")]
+pub struct StatusArgs {
+    /// Give the status of a starting daemon once it is ready or requires
+    /// recovery; without a daemon, give the status at once.
+    #[arg(long)]
+    pub ready: bool,
+}
+
+pub async fn run(args: StatusArgs, output: Output) -> anyhow::Result<ExitCode> {
+    if args.ready {
+        RpcClient::resolve()?.settled_phase().await?;
+    }
     let report = InventoryReport::collect().await?;
     let exit_code = report.exit_code();
     if output.is_structured() {

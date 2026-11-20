@@ -536,6 +536,7 @@ mod tests {
             wit_package: None,
             sdk_version: None,
             refresh_interval_secs: 0,
+            projection: 1,
             capabilities,
             limits: LimitDeclarations::default(),
             auth: None,

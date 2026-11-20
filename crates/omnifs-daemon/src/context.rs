@@ -22,6 +22,8 @@ pub(crate) struct DaemonContext {
     instance_id: String,
     daemon_instance: [u8; 16],
     process: Instance,
+    /// The program of the daemon, taken at its start.
+    program: String,
 }
 
 impl DaemonContext {
@@ -29,6 +31,8 @@ impl DaemonContext {
         let endpoint = Bootstrap::<Daemon>::for_daemon()?;
         let attach_socket = endpoint.bootstrap_dir().join("daemon-state/local.sock");
         let process = Instance::current()?;
+        let program =
+            omnifs_core::executable_program().context("read the executable of the daemon")?;
         let mut daemon_instance = [0_u8; 16];
         hex::decode_to_slice(process.instance_token(), &mut daemon_instance)
             .context("decode daemon process instance token")?;
@@ -39,6 +43,7 @@ impl DaemonContext {
             instance_id: process.instance_token().to_owned(),
             daemon_instance,
             process,
+            program,
         })
     }
 
@@ -93,6 +98,7 @@ impl DaemonContext {
             executable: self.process.executable().to_path_buf(),
             attach_unix,
             attach_tcp,
+            program: Some(self.program.clone()),
         }
     }
 
@@ -147,6 +153,7 @@ mod tests {
             instance_id: "test-instance".to_owned(),
             daemon_instance: [0x42; 16],
             process,
+            program: "test-program".to_owned(),
         }
     }
 
