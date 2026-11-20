@@ -5,6 +5,7 @@ use crate::Runtime;
 use crate::cache::RecordKind;
 use crate::clock::now_millis;
 use crate::ops::feed::FeedClaim;
+use crate::ops::namespace::{ListOutcome, PageRequest};
 use crate::view::LookupPayload;
 use omnifs_core::path::Path;
 
@@ -20,7 +21,14 @@ pub(crate) enum FedFact {
 
 /// Have the answering feed among `claims` answer when the operation on
 /// `path` needs it: the outer claim whose first answer ended, else the
-/// innermost one. A feed with kept parts of a later answer continues that
+/// innermost one. A lookup of a path that the projection lacks, under a fed
+/// listing below the anchor of the answering claim that is not complete in
+/// the projection, takes the answer of that listing first, with its claims,
+/// and is then served from the projection: an operation reaches each path by
+/// a lookup of each segment from the root, a filehandle that it held too, so
+/// that a child that only the listing brings is found. A lookup under a
+/// complete listing, or under one at or above that anchor, keeps the rules
+/// below. A feed with kept parts of a later answer continues that
 /// answer, whatever its deadline, outside the rate-limit window of the mount.
 /// Else a read or a listing that starts that feed without its fact in the
 /// projection, and a lookup that starts it without its positive lookup before
@@ -64,6 +72,13 @@ pub(crate) async fn answer_claims(
             .position(|state| state.as_ref().is_some_and(|state| state.ended))
             .unwrap_or(claims.len() - 1);
         let (claim, state) = (&claims[answering], &states[answering]);
+        if matches!(fact, FedFact::Lookup)
+            && let Some(listing) = incomplete_listing(runtime, at, &claim.object.path)?
+            && let Some(claims) = listing_claims(runtime, &listing).await?
+        {
+            Box::pin(answer_claims(runtime, &listing, FedFact::Listing, &claims)).await?;
+            return Ok((at.clone(), under_anchor.clone()));
+        }
         let kept = runtime
             .resources
             .has_kept_parts(claim.object.id.as_bytes())
@@ -91,6 +106,43 @@ pub(crate) async fn answer_claims(
         if runtime.feed(&claim.object, start, state.as_ref()).await? {
             return Ok((at.clone(), under_anchor.clone()));
         }
+    }
+}
+
+/// The listing of the parent of `at` for a lookup of `at` that the projection
+/// lacks, when that listing is below `anchor`, fed, and not complete in the
+/// projection.
+fn incomplete_listing(runtime: &Runtime, at: &Path, anchor: &Path) -> Result<Option<Path>> {
+    let Some((listing, _)) = at.parent_and_name() else {
+        return Ok(None);
+    };
+    if listing == *anchor
+        || !listing.has_prefix(anchor)
+        || has_fact(runtime, at, FedFact::Lookup)?
+        || has_fact(runtime, &listing, FedFact::Listing)?
+        || !runtime
+            .resources
+            .is_fed(&listing)
+            .map_err(|error| TreeError::internal(error.to_string()))?
+    {
+        return Ok(None);
+    }
+    Ok(Some(listing))
+}
+
+/// The claims of the feeds that answer for `listing`, none for a listing that
+/// no feed answers.
+async fn listing_claims(runtime: &Runtime, listing: &Path) -> Result<Option<Vec<FeedClaim>>> {
+    let request = PageRequest {
+        cursor: None,
+        validator: None,
+    };
+    match runtime
+        .list_children(listing, request, runtime.resources.current_epoch())
+        .await?
+    {
+        ListOutcome::Feed(claims) => Ok(Some(claims)),
+        ListOutcome::Entries(_) | ListOutcome::Subtree(_) | ListOutcome::Unchanged => Ok(None),
     }
 }
 
