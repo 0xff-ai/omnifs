@@ -1,7 +1,6 @@
 //! Stable, domain-separated identities for host-owned callout storage.
 
 use omnifs_auth::CredentialId;
-use omnifs_core::ProviderId;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -11,17 +10,18 @@ pub(crate) struct BlobRequestId([u8; 32]);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct GitId([u8; 32]);
 
-/// Stable identity of one projected mount revision and provider artifact.
+/// Stable identity of the projection of a mount: its source, the canonical
+/// mount with the number of the projection of its provider in place of its
+/// artifact, and its credential generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ProjectionId([u8; 32]);
 
 impl ProjectionId {
     #[must_use]
-    pub(crate) fn new(spec_source: &[u8], provider_id: ProviderId) -> Self {
+    pub(crate) fn new(spec_source: &[u8]) -> Self {
         let mut hasher = blake3::Hasher::new();
-        frame(&mut hasher, b"omnifs/projection/v1");
+        frame(&mut hasher, b"omnifs/projection/v2");
         frame(&mut hasher, spec_source);
-        frame(&mut hasher, provider_id.as_bytes());
         Self(*hasher.finalize().as_bytes())
     }
 
@@ -176,17 +176,9 @@ mod tests {
     }
 
     #[test]
-    fn projection_identity_uses_exact_spec_bytes_and_provider_content() {
-        let provider = ProviderId::from_wasm_bytes(b"provider");
-        let same = ProjectionId::new(b"{\"mount\":\"demo\"}\n", provider);
-        assert_eq!(same, ProjectionId::new(b"{\"mount\":\"demo\"}\n", provider));
-        assert_ne!(same, ProjectionId::new(b"{\"mount\":\"demo\"}", provider));
-        assert_ne!(
-            same,
-            ProjectionId::new(
-                b"{\"mount\":\"demo\"}\n",
-                ProviderId::from_wasm_bytes(b"other")
-            )
-        );
+    fn projection_identity_uses_exact_spec_bytes() {
+        let same = ProjectionId::new(b"{\"mount\":\"demo\"}\n");
+        assert_eq!(same, ProjectionId::new(b"{\"mount\":\"demo\"}\n"));
+        assert_ne!(same, ProjectionId::new(b"{\"mount\":\"demo\"}"));
     }
 }

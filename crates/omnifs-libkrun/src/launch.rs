@@ -474,7 +474,6 @@ impl Config {
 mod tests {
     use std::io::{Read, Write};
     use std::os::fd::RawFd;
-    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::Mutex;
 
     use super::*;

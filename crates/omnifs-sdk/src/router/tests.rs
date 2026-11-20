@@ -580,6 +580,21 @@ fn object_dir_child_lookup_carries_all_sibling_leaves() {
         vec!["comments", "item.json", "item.md", "state", "title"],
         "an exhaustive object-dir leaf lookup must carry every other leaf as a sibling"
     );
+
+    // A dir face of the object answers statically with the same siblings.
+    let lookup = poll_ready(router.lookup_child(&cx, "/items/42", "comments")).unwrap();
+    let (wire, _effects) = lookup.into_result_and_effects();
+    let wit_types::LookupChildResult::Entry(entry) = wire else {
+        panic!("a dir face lookup must resolve to an entry");
+    };
+    assert!(entry.exhaustive);
+    let mut sibling_names: Vec<&str> = entry.siblings.iter().map(|s| s.name.as_str()).collect();
+    sibling_names.sort_unstable();
+    assert_eq!(
+        sibling_names,
+        vec!["body", "item.json", "item.md", "state", "title"],
+        "an exhaustive dir face lookup must carry every leaf of its object as a sibling"
+    );
 }
 
 #[test]
@@ -804,4 +819,218 @@ fn file_object_anchor_reads_canonical() {
         matches!(outcome, crate::browse::ReadOutcome::Found(_)),
         "file-object anchor must serve its canonical face"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Feeds and fed faces
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::unused_async)]
+async fn demo_feed(cx: crate::feed::FeedCx<DemoKey, ()>) -> Result<crate::feed::Feed> {
+    cx.file(
+        format!("/items/{}/summary", cx.key().id),
+        format!("{:?} {:?}", cx.token(), cx.start()).into_bytes(),
+    )?;
+    cx.dir(
+        format!("/items/{}/parts", cx.key().id),
+        crate::browse::ListingWrite::Complete,
+    )?;
+    Ok(crate::feed::Feed::part("t1").into())
+}
+
+fn fed_router(starts: &'static [&'static str]) -> Result<CompiledRouter<()>> {
+    let mut router = Router::<()>::new();
+    router.object::<DemoObj>("/items/{id}", |o| {
+        o.dynamic();
+        o.file("item.json").canonical::<Json>()?;
+        o.file("summary").fed()?;
+        o.dir("parts").fed()?;
+        o.feed(demo_feed).starts(starts.iter().copied())?;
+        Ok(())
+    })?;
+    router.compile()
+}
+
+fn claims_of(result: wit_types::LookupChildResult) -> Vec<wit_types::FeedClaim> {
+    let wit_types::LookupChildResult::Feed(claims) = result else {
+        panic!("expected a fed lookup, got {result:?}");
+    };
+    claims
+}
+
+#[test]
+fn compile_rejects_a_starting_path_that_is_no_fed_face() {
+    let Err(error) = fed_router(&["missing"]) else {
+        panic!("a starting path without a fed face must not compile");
+    };
+    assert!(error.message().contains("is not a fed face"), "{error}");
+}
+
+#[test]
+fn fed_faces_answer_the_claims_of_their_feeds_without_a_request() {
+    let router = fed_router(&["parts"]).unwrap();
+    let cx = Cx::new(1, Rc::new(RefCell::new(())));
+
+    let (lookup, effects) = poll_ready(router.lookup_child(&cx, "/items/7", "summary"))
+        .unwrap()
+        .into_result_and_effects();
+    assert!(effects.is_empty());
+    let claims = claims_of(lookup);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].object.path, "/items/7");
+    assert_eq!(claims[0].object.id.kind, "demo.obj");
+    assert_eq!(claims[0].object.id.captures[0].value, "7");
+    assert!(!claims[0].starts, "summary is not a starting path");
+
+    let (list, _) = poll_ready(router.list_children(&cx, "/items/7/parts", None))
+        .unwrap()
+        .into_result_and_effects();
+    let wit_types::ListChildrenResult::Feed(claims) = list else {
+        panic!("expected a fed listing, got {list:?}");
+    };
+    assert!(claims[0].starts, "parts is a starting path");
+
+    let outcome = poll_ready(router.read_file(&cx, "/items/7/summary", "", None)).unwrap();
+    assert!(matches!(outcome, crate::browse::ReadOutcome::Feed(_)));
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NoteObj {}
+
+impl Object for NoteObj {
+    type Key = NoteKey;
+    type State = ();
+    type Canonical = Json;
+
+    fn load(
+        _cx: &Cx<()>,
+        _key: &NoteKey,
+        _since: Option<Validator>,
+    ) -> impl Future<Output = Result<Load<Self>>> {
+        std::future::ready(Ok(Load::fresh(
+            NoteObj {},
+            Canonical::new(b"{}".to_vec(), None),
+        )))
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self> {
+        crate::object::decode_json(bytes)
+    }
+
+    fn kind() -> ObjectKind {
+        ObjectKind("demo.note")
+    }
+}
+
+struct NoteKey {
+    group: String,
+    id: String,
+    note: String,
+}
+
+impl FromCaptures for NoteKey {
+    fn from_captures(caps: &Captures) -> Result<Self> {
+        let capture = |name: &str| {
+            caps.get(name)
+                .map(ToString::to_string)
+                .ok_or_else(|| ProviderError::invalid_input(format!("missing {name}")))
+        };
+        Ok(Self {
+            group: capture("group")?,
+            id: capture("id")?,
+            note: capture("note")?,
+        })
+    }
+}
+
+impl IdentityCaptures for NoteKey {
+    fn identity_captures(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("group", self.group.clone()),
+            ("id", self.id.clone()),
+            ("note", self.note.clone()),
+        ]
+    }
+}
+
+impl crate::object::FacetMetadata for NoteKey {
+    fn facet_axes() -> &'static [crate::object::FacetAxis] {
+        &[]
+    }
+}
+
+impl Key for NoteKey {}
+
+#[test]
+fn a_feed_answers_for_the_fed_faces_beneath_the_paths_its_object_routes() {
+    let mut router = Router::<()>::new();
+    router
+        .object::<DemoObj>("/items/{id}", |o| {
+            o.dynamic();
+            o.file("item.json").canonical::<Json>()?;
+            o.file("summary").fed()?;
+            o.feed(demo_feed).starts(["summary"])?;
+            Ok(())
+        })
+        .unwrap();
+    // A capture where the anchor of the feed has a literal: the notes of an
+    // item are in its subtree, the notes of other groups are not.
+    router
+        .object::<NoteObj>("/{group}/{id}/notes/{note}", |o| {
+            o.dynamic();
+            o.fed();
+            o.file("note.json").canonical::<Json>()?;
+            o.file("text").fed()?;
+            Ok(())
+        })
+        .unwrap();
+    let router = router.compile().unwrap();
+    let cx = Cx::new(1, Rc::new(RefCell::new(())));
+
+    let outcome = poll_ready(router.read_file(&cx, "/items/7/notes/3/text", "", None)).unwrap();
+    let crate::browse::ReadOutcome::Feed(claims) = outcome else {
+        panic!("a note of an item reads through the feed of the item");
+    };
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].path.as_str(), "/items/7");
+    assert!(!claims[0].starts);
+
+    let error = poll_ready(router.read_file(&cx, "/others/7/notes/3/text", "", None)).unwrap_err();
+    assert_eq!(error.kind(), ProviderErrorKind::NotFound);
+}
+
+#[test]
+fn the_feed_export_runs_the_feed_of_the_object_at_its_path() {
+    let router = fed_router(&["parts"]).unwrap();
+    let cx = Cx::new(1, Rc::new(RefCell::new(())));
+
+    let (answer, effects) =
+        poll_ready(router.feed(&cx, "/items/7", None, Some("/items/7/parts".to_string()))).unwrap();
+    let wit_types::FeedAnswer::Part(part) = answer else {
+        panic!("expected a part");
+    };
+    assert_eq!(part.token, "t1");
+    assert!(!part.more);
+    let effects = effects.into_wit();
+    let summary = effects
+        .fs
+        .iter()
+        .find(|write| write.path == "/items/7/summary")
+        .expect("the part writes its fed file");
+    let wit_types::FsKind::File(file) = &summary.kind else {
+        panic!("summary is a file");
+    };
+    assert!(
+        matches!(&file.bytes, wit_types::ByteSource::Inline(bytes) if bytes == b"None Some(\"parts\")")
+    );
+    assert!(effects.fs.iter().any(|write| matches!(
+        write.kind,
+        wit_types::FsKind::Directory(wit_types::ListingWrite::Complete)
+    )));
+
+    let error = poll_ready(router.feed(&cx, "/items/7", None, Some("/items/8/parts".to_string())))
+        .unwrap_err();
+    assert_eq!(error.kind(), ProviderErrorKind::InvalidInput);
+    let error = poll_ready(router.feed(&cx, "/elsewhere", None, None)).unwrap_err();
+    assert_eq!(error.kind(), ProviderErrorKind::NotFound);
 }

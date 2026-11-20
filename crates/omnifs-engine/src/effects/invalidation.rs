@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 pub(crate) struct InvalidationState {
     invalidated_prefixes: Mutex<Vec<Path>>,
     invalidated_paths: Mutex<Vec<Path>>,
-    changed_dirs: Mutex<Vec<Path>>,
+    changed_dirs: Mutex<Vec<(Path, bool)>>,
 }
 
 impl InvalidationState {
@@ -18,8 +18,8 @@ impl InvalidationState {
         self.invalidated_paths.lock().push(path);
     }
 
-    pub(crate) fn record_changed_dir(&self, path: Path) {
-        self.changed_dirs.lock().push(path);
+    pub(crate) fn record_changed_dir(&self, path: Path, fed: bool) {
+        self.changed_dirs.lock().push((path, fed));
     }
 
     fn drain_prefixes(&self) -> Vec<Path> {
@@ -32,7 +32,7 @@ impl InvalidationState {
         std::mem::take(&mut *paths)
     }
 
-    fn drain_changed_dirs(&self) -> Vec<Path> {
+    fn drain_changed_dirs(&self) -> Vec<(Path, bool)> {
         let mut paths = self.changed_dirs.lock();
         std::mem::take(&mut *paths)
     }
@@ -50,10 +50,13 @@ impl Runtime {
     }
 
     /// Record that directory `path`'s contents changed without touching the
-    /// cached view record. Used by pagination's `@next`/`@all`; the host/FUSE
-    /// filesystem drains this event and decides how to notify the kernel.
-    pub fn record_dir_changed(&self, path: &Path) {
-        self.invalidation.record_changed_dir(path.clone());
+    /// cached view record, with whether its listing is `fed`. Used by
+    /// pagination's `@next`/`@all`, a changed listing page, and the listings a
+    /// feed answer writes into; filesystems see the directory's attributes
+    /// changed in place, so it keeps its identity and the nodes below it keep
+    /// theirs.
+    pub fn record_dir_changed(&self, path: &Path, fed: bool) {
+        self.invalidation.record_changed_dir(path.clone(), fed);
     }
 
     pub fn drain_invalidated_prefixes(&self) -> Vec<Path> {
@@ -64,7 +67,7 @@ impl Runtime {
         self.invalidation.drain_paths()
     }
 
-    pub fn drain_changed_dirs(&self) -> Vec<Path> {
+    pub fn drain_changed_dirs(&self) -> Vec<(Path, bool)> {
         self.invalidation.drain_changed_dirs()
     }
 

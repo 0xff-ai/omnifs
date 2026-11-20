@@ -1,11 +1,12 @@
 //! Typed async Git callout builders.
 //!
-//! `cx.git().open_repo(clone_url).send().await` issues a `git-open-repo`
-//! callout: the host checks `clone_url` against the provider's capability
-//! grants, clones the remote into a host-side cache directory if it is not
-//! already there, and returns a `GitRepoInfo` whose `tree` field is the
-//! handle a tree-capable directory face returns (wrap it in
-//! [`crate::handler::TreeRef::new`]). The repository bytes never enter guest
+//! `cx.git().open_repo(clone_url).commit(commit).await` issues a
+//! `git-open-repo` callout: the host checks `clone_url` against the
+//! provider's capability grants, clones the remote into a host-side cache
+//! directory if it is not already there, checks `commit` out, and returns a
+//! `GitRepoInfo` whose `tree` field is the handle a tree method answers
+//! (wrap it in [`crate::handler::TreeRef::new`] for
+//! [`crate::handler::Tree::at`]). The repository bytes never enter guest
 //! memory: traversal and file reads are served through FUSE bind mounts of
 //! the clone directory, not through the WIT.
 //!
@@ -16,9 +17,9 @@
 //! let opened = cx
 //!     .git()
 //!     .open_repo(format!("git@github.com:{owner}/{repo}.git"))
-//!     .send()
+//!     .commit(&commit)
 //!     .await?;
-//! Ok(TreeRef::new(opened.tree))
+//! Ok(Tree::at(TreeRef::new(opened.tree), commit))
 //! ```
 
 use crate::cx::Cx;
@@ -35,9 +36,9 @@ impl<'cx, S> Builder<'cx, S> {
         Self { cx }
     }
 
-    /// Open (cloning if needed) a repository host-side. Awaiting suspends
-    /// the operation while the host clones; a cache hit resumes without
-    /// network work. The host owns cache identity and layout.
+    /// Open (cloning if needed) a repository host-side; name the commit to
+    /// check out with [`OpenRequest::commit`]. The host owns cache identity
+    /// and layout.
     pub fn open_repo(self, clone_url: impl Into<String>) -> OpenRequest<'cx, S> {
         OpenRequest {
             cx: self.cx,
@@ -60,12 +61,17 @@ impl<'cx, S> OpenRequest<'cx, S> {
         self
     }
 
-    pub fn send(self) -> CalloutFuture<'cx, GitRepoInfo> {
+    /// Open the repository with `commit` checked out. Awaiting suspends the
+    /// operation while the host clones a missing clone, and fetches and
+    /// checks out `commit` in a clone at another commit; a clone at `commit`
+    /// resumes without network work.
+    pub fn commit(self, commit: impl Into<String>) -> CalloutFuture<'cx, GitRepoInfo> {
         CalloutFuture::new(
             self.cx,
             Callout::GitOpenRepo(GitOpenRequest {
                 clone_url: self.clone_url,
                 reference: self.reference,
+                commit: commit.into(),
             }),
             |r| {
                 crate::http::expect_callout(

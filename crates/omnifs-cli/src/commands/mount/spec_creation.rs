@@ -195,6 +195,7 @@ mod tests {
             "displayName": "Web",
             "provider": "web.wasm",
             "defaultMount": "web",
+            "projection": 1,
             "refreshIntervalSecs": 0,
             "capabilities": [{
                 "kind": "domain",
