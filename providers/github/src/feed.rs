@@ -1171,22 +1171,35 @@ impl RepoFeed<'_> {
         }))
     }
 
-    /// A comment of the first full listing by its ID, the last of the last
-    /// page of the IDs of its item with its `comments/` complete.
+    /// A comment of the first full listing by its ID that the projection
+    /// still lacks, the last of the last page of the IDs of its item with its
+    /// `comments/` complete; none when an answer of the item brought each of
+    /// them since that page.
     async fn listing_fetch(
         &self,
         item: ItemRef,
         mut ids: BTreeSet<u64>,
         then: Option<Box<Stage>>,
     ) -> Result<Feed> {
-        let id = ids.pop_first().ok_or_else(|| {
-            ProviderError::invalid_input("the first full listing fetches no comment")
-        })?;
+        if ids.is_empty() {
+            return Err(ProviderError::invalid_input(
+                "the first full listing fetches no comment",
+            ));
+        }
+        let comments = comments_path(&self.repo, item);
+        let known = listed(self.cx, &comments)?;
+        ids.retain(|id| !known.contains(id));
         let more_pages = matches!(
             then.as_deref(),
             Some(Stage::Ids { kind, items, after: Some(_), .. })
                 if *kind == item.kind && items.first() == Some(&item.number)
         );
+        let Some(id) = ids.pop_first() else {
+            if !more_pages {
+                self.cx.dir(&comments, ListingWrite::Complete)?;
+            }
+            return self.listing_part(then.map(|then| *then));
+        };
         let write = fetch_write(ids.is_empty() && !more_pages);
         fetch_comment(self.cx, &self.repo, item, id, write).await?;
         if ids.is_empty() {
