@@ -3,6 +3,8 @@
 //! This is the renderer-neutral listing policy shared by FUSE and NFS:
 //!
 //! - the authoritative-listing cache consult (mem then unified view cache),
+//!   after asking again, with their validators, for the cached pages past
+//!   their deadline,
 //! - the rate-limited serve-stale path (serve the last-known listing rather than
 //!   re-calling the provider and getting EAGAIN),
 //! - the cache-populate half of a fresh provider listing (drop reserved-`@`
@@ -18,7 +20,9 @@
 
 use crate::Runtime;
 use crate::cache::MountResources;
-use crate::ops::namespace::{DirEntry as ProviderEntry, DirListing as ProviderListing};
+use crate::ops::namespace::{
+    DirEntry as ProviderEntry, DirListing as ProviderListing, PageRequest,
+};
 use crate::view::{CachedCursor, DirentRecord, DirentsPayload, EntryMeta};
 use tracing::warn;
 
@@ -62,12 +66,14 @@ impl EngineNamespace {
     /// (coalesced, cache-consulted, and carrying the host-synthesized control /
     /// ignore entries as synthetic `Entry` origins); `Some(cursor)` continues
     /// pagination as a raw page drain. Returns the internal listing outcome.
+    /// A node under an anchor of another facet lists the path of its facts.
     pub(crate) async fn list(
         &self,
         node: &Node,
         cursor: Option<Cursor>,
         _ctx: &RequestCtx,
     ) -> Result<ListOutcome> {
+        let node = &node.at_fact();
         if node.host().is_some() {
             return Ok(ListOutcome::Host);
         }
@@ -85,7 +91,7 @@ impl EngineNamespace {
         }
 
         let entry = self.entry_for(node.mount())?;
-        let resources = entry.resources();
+        let resources = entry.resources()?;
         let path = node.path();
         let captured_epoch = resources.current_epoch();
 
@@ -105,18 +111,40 @@ impl EngineNamespace {
 
         // First-page browse listing. Drain pending invalidations so a stale mem
         // entry never satisfies the consult below, then serve an authoritative
-        // cached listing if one exists.
+        // cached listing if one exists, after asking again for each of its
+        // pages with a validator past its deadline.
         if entry.runtime().is_some() {
             self.drain_invalidations(node.mount());
         }
         let offline = entry.runtime().is_none();
-        if let Some(dirents) =
-            consult_authoritative_listing(resources, entry.runtime().as_deref(), path)?
+        // A fed listing is served once its feeds have answered, so it asks
+        // the provider for their claims.
+        let fed = !offline
+            && resources
+                .is_fed(path)
+                .map_err(|error| TreeError::internal(error.to_string()))?;
+        if !fed
+            && let Some(dirents) =
+                consult_authoritative_listing(resources, entry.runtime().as_deref(), path)?
         {
+            let dirents = match entry.runtime() {
+                Some(runtime)
+                    if dirents.is_authoritative_listing()
+                        && runtime.rate_limited_until().is_none() =>
+                {
+                    self.revalidate_pages(&runtime, path, dirents, captured_epoch)
+                        .await?
+                },
+                _ => dirents,
+            };
             crate::inspector::cache_event(CacheKind::BrowseHit);
             return Ok(ListOutcome::Listing(listing_from_dirents(
-                node, &dirents, offline,
-            )));
+                resources,
+                node,
+                node.path(),
+                &dirents,
+                offline,
+            )?));
         }
 
         let runtime = entry.runtime().ok_or_else(|| {
@@ -125,9 +153,59 @@ impl EngineNamespace {
         self.list_via_provider(&runtime, node, captured_epoch).await
     }
 
-    /// Continuation page: echo the cursor to the provider, return raw entries.
-    /// `Namespace::list_children` applies the continuation projection; this does
-    /// no dirents write and appends no synthetic entries.
+    /// Ask the provider again, in page order, for each page of a cached
+    /// listing whose validator is past its deadline, with its cursor and its
+    /// validator. `unchanged` renews the page with the validator of the
+    /// answer; a changed page replaces its entries, keeps the later pages only
+    /// while its next cursor stays, and records the directory as changed. A
+    /// failed answer, a rate limit included, is the error of the listing.
+    async fn revalidate_pages(
+        &self,
+        runtime: &Runtime,
+        path: &omnifs_core::path::Path,
+        mut dirents: DirentsPayload,
+        captured_epoch: u64,
+    ) -> Result<DirentsPayload> {
+        let mut index = 0;
+        while let Some(page) = dirents.pages.get(index) {
+            index += 1;
+            let Some(validator) = page
+                .validator
+                .as_ref()
+                .filter(|validator| validator.deadline <= crate::clock::now_millis())
+            else {
+                continue;
+            };
+            let request = PageRequest {
+                cursor: page.cursor.clone(),
+                validator: Some(validator.token.clone()),
+            };
+            crate::inspector::cache_event(CacheKind::BrowseMiss);
+            match runtime.list_children(path, request, captured_epoch).await {
+                Ok(crate::ops::namespace::ListOutcome::Entries(_)) => {
+                    runtime.record_dir_changed(path, false);
+                },
+                Ok(crate::ops::namespace::ListOutcome::Unchanged) => {},
+                Ok(
+                    crate::ops::namespace::ListOutcome::Subtree(_)
+                    | crate::ops::namespace::ListOutcome::Feed(_),
+                ) => {
+                    return Err(TreeError::internal(
+                        "revalidated listing page answered no page",
+                    ));
+                },
+                Err(error) => return Err(error.into()),
+            }
+            dirents = cached_dirents(&runtime.resources, path)?
+                .ok_or_else(|| TreeError::internal("revalidated listing left no cached listing"))?;
+        }
+        Ok(dirents)
+    }
+
+    /// Continuation page: echo the cursor to the provider, with the validator
+    /// of its cached page, and return raw entries. `Namespace::list_children`
+    /// applies the continuation projection; this does no dirents write and
+    /// appends no synthetic entries.
     async fn list_continuation(
         &self,
         runtime: &Runtime,
@@ -136,23 +214,39 @@ impl EngineNamespace {
         captured_epoch: u64,
     ) -> Result<Listing> {
         crate::inspector::cache_event(CacheKind::BrowseMiss);
-        let result = runtime
-            .list_children(path, Some(cursor.0), captured_epoch)
-            .await?;
-        match result {
+        let cached = cached_dirents(&runtime.resources, path)?;
+        let request = PageRequest {
+            validator: page_validator(cached.as_ref(), Some(&cursor.0)),
+            cursor: Some(cursor.0),
+        };
+        let page_cursor = request.cursor.clone();
+        match runtime.list_children(path, request, captured_epoch).await? {
             crate::ops::namespace::ListOutcome::Entries(listing) => Ok(Listing {
                 entries: provider_entries(path, &listing.entries),
                 next_cursor: listing.next_cursor.map(Cursor),
             }),
-            crate::ops::namespace::ListOutcome::Subtree(_) => Err(TreeError::internal(
-                "list continuation resolved to a host-tree handoff",
-            )),
+            crate::ops::namespace::ListOutcome::Unchanged => {
+                let dirents = cached_dirents(&runtime.resources, path)?;
+                let (page, next_cursor) = dirents
+                    .as_ref()
+                    .and_then(|dirents| dirents.page(page_cursor.as_ref()))
+                    .ok_or_else(|| TreeError::internal("unchanged page is no longer cached"))?;
+                Ok(Listing {
+                    entries: cached_entries(&runtime.resources, path, page.entries.iter())?,
+                    next_cursor: next_cursor.cloned().map(Cursor),
+                })
+            },
+            crate::ops::namespace::ListOutcome::Subtree(_)
+            | crate::ops::namespace::ListOutcome::Feed(_) => {
+                Err(TreeError::internal("list continuation answered no page"))
+            },
         }
     }
 
     /// Cold first-page listing through the provider, owning the cache-populate
-    /// half: rate-limit serve-stale, the reserved-`@` drop, the dirents write,
-    /// and the synthetic control / ignore append.
+    /// half: the validator of a cached first page, rate-limit serve-stale, the
+    /// reserved-`@` drop, the dirents write, and the synthetic control /
+    /// ignore append.
     async fn list_via_provider(
         &self,
         runtime: &Runtime,
@@ -160,15 +254,49 @@ impl EngineNamespace {
         captured_epoch: u64,
     ) -> Result<ListOutcome> {
         let path = node.path();
-        let cached_dirents = cached_dirents(&runtime.resources, path)?;
+        let cached = cached_dirents(&runtime.resources, path)?;
+        let request = PageRequest {
+            cursor: None,
+            validator: page_validator(cached.as_ref(), None),
+        };
 
         crate::inspector::cache_event(CacheKind::BrowseMiss);
-        let result = runtime.list_children(path, None, captured_epoch).await;
+        let result = runtime.list_children(path, request, captured_epoch).await;
 
         match result {
             Ok(crate::ops::namespace::ListOutcome::Entries(listing)) => Ok(ListOutcome::Listing(
-                snapshot_from_provider_listing(node, &listing),
+                snapshot_from_provider_listing(&runtime.resources, node, &listing)?,
             )),
+            Ok(crate::ops::namespace::ListOutcome::Unchanged) => {
+                let dirents = cached_dirents(&runtime.resources, path)?.ok_or_else(|| {
+                    TreeError::internal("unchanged first page is no longer cached")
+                })?;
+                Ok(ListOutcome::Listing(listing_from_dirents(
+                    &runtime.resources,
+                    node,
+                    node.path(),
+                    &dirents,
+                    false,
+                )?))
+            },
+            Ok(crate::ops::namespace::ListOutcome::Feed(claims)) => {
+                let (fact, _) = super::feed::answer_claims(
+                    runtime,
+                    path,
+                    super::feed::FedFact::Listing,
+                    &claims,
+                )
+                .await?;
+                let dirents = cached_dirents(&runtime.resources, &fact)?
+                    .ok_or_else(|| TreeError::not_found(path.as_str()))?;
+                Ok(ListOutcome::Listing(listing_from_dirents(
+                    &runtime.resources,
+                    node,
+                    &fact,
+                    &dirents,
+                    false,
+                )?))
+            },
             Ok(crate::ops::namespace::ListOutcome::Subtree(tref)) => {
                 runtime
                     .tree_ref(tref)
@@ -183,10 +311,14 @@ impl EngineNamespace {
                     "provider returned typed error for list_children"
                 );
                 // Serve stale so `ls` survives upstream throttling.
-                if rate_limited && let Some(dirents) = cached_dirents {
+                if rate_limited && let Some(dirents) = cached {
                     return Ok(ListOutcome::Listing(listing_from_dirents(
-                        node, &dirents, false,
-                    )));
+                        &runtime.resources,
+                        node,
+                        node.path(),
+                        &dirents,
+                        false,
+                    )?));
                 }
                 Err(error.into())
             },
@@ -199,7 +331,11 @@ impl EngineNamespace {
 /// included when paged, and never stripped back out even after the feed later
 /// exhausts, so they survive a later cached serve and control-name resolution),
 /// and surface the synthetic control / ignore entries.
-fn snapshot_from_provider_listing(node: &Node, listing: &ProviderListing) -> Listing {
+fn snapshot_from_provider_listing(
+    resources: &MountResources,
+    node: &Node,
+    listing: &ProviderListing,
+) -> Result<Listing> {
     let path = node.path();
     let mut dirent_records = Vec::with_capacity(listing.entries.len());
     for e in &listing.entries {
@@ -219,14 +355,34 @@ fn snapshot_from_provider_listing(node: &Node, listing: &ProviderListing) -> Lis
 
     let next_cursor = listing.next_cursor.clone();
     let paginated = next_cursor.is_some();
-    let mut entries: Vec<Entry> = dirent_records
+    let mut entries = dirent_records
         .into_iter()
-        .map(|r| Entry::provider(r.name, r.meta))
-        .collect();
+        .map(|r| listed_entry(resources, path, r.name, r.meta))
+        .collect::<Result<Vec<_>>>()?;
     entries.extend(synthetic_entries_for(node, paginated));
-    Listing {
+    Ok(Listing {
         entries,
         next_cursor: next_cursor.map(Cursor),
+    })
+}
+
+/// A listed child, marked fed when its facts come from feeds.
+fn listed_entry(
+    resources: &MountResources,
+    parent: &omnifs_core::path::Path,
+    name: String,
+    meta: EntryMeta,
+) -> Result<Entry> {
+    let child = parent
+        .join(&name)
+        .map_err(|error| TreeError::internal(error.to_string()))?;
+    if resources
+        .is_fed(&child)
+        .map_err(|error| TreeError::internal(error.to_string()))?
+    {
+        Ok(Entry::fed(name, meta))
+    } else {
+        Ok(Entry::provider(name, meta))
     }
 }
 
@@ -256,24 +412,23 @@ fn provider_entries(path: &omnifs_core::path::Path, entries: &[ProviderEntry]) -
         .collect()
 }
 
-/// Build a `Listing` from an accumulated/cached dirents record (the
-/// cache-hit and rate-limit-stale paths). The cached record
+/// Build a `Listing` from an accumulated/cached dirents record at `records`
+/// (the cache-hit, fed, and rate-limit-stale paths), each entry fed when its
+/// record under `records` is. The cached record
 /// keeps the `@next`/`@all` control records for the directory's whole
 /// paginated lifetime (`pagination.rs` never strips them, even at exhaustion,
 /// so a name a consumer resolved from an earlier listing keeps resolving).
 /// Offline serving suppresses those provider-dependent controls and the
 /// continuation cursor because cache-only traversal must terminate after the
 /// known snapshot.
-fn listing_from_dirents(node: &Node, dirents: &DirentsPayload, offline: bool) -> Listing {
-    let mut entries = Vec::with_capacity(dirents.entries.len());
-    for record in &dirents.entries {
-        if synthetic::is_reserved_provider_leaf(&record.name)
-            || (node.path().is_root() && synthetic::is_root_ignore_name(&record.name))
-        {
-            continue;
-        }
-        entries.push(Entry::provider(record.name.clone(), record.meta.clone()));
-    }
+fn listing_from_dirents(
+    resources: &MountResources,
+    node: &Node,
+    records: &omnifs_core::path::Path,
+    dirents: &DirentsPayload,
+    offline: bool,
+) -> Result<Listing> {
+    let mut entries = cached_entries(resources, records, dirents.entries())?;
 
     let mut synthetic_entries = Vec::new();
     if !offline && dirents.next_cursor.is_some() {
@@ -284,13 +439,41 @@ fn listing_from_dirents(node: &Node, dirents: &DirentsPayload, offline: bool) ->
     }
     entries.extend(synthetic_entries);
 
-    Listing {
+    Ok(Listing {
         entries,
         next_cursor: (!offline)
             .then(|| dirents.next_cursor.clone())
             .flatten()
             .map(Cursor),
-    }
+    })
+}
+
+/// Cached records as provider entries, without the reserved-`@` control
+/// records and, at the mount root, the host-owned ignore files.
+fn cached_entries<'a>(
+    resources: &MountResources,
+    path: &omnifs_core::path::Path,
+    records: impl Iterator<Item = &'a DirentRecord>,
+) -> Result<Vec<Entry>> {
+    records
+        .filter(|record| {
+            !(synthetic::is_reserved_provider_leaf(&record.name)
+                || path.is_root() && synthetic::is_root_ignore_name(&record.name))
+        })
+        .map(|record| listed_entry(resources, path, record.name.clone(), record.meta.clone()))
+        .collect()
+}
+
+/// The validator of the cached page of `cursor`, which a call for that page
+/// carries.
+fn page_validator(
+    dirents: Option<&DirentsPayload>,
+    cursor: Option<&CachedCursor>,
+) -> Option<String> {
+    dirents
+        .and_then(|dirents| dirents.page(cursor))
+        .and_then(|(page, _)| page.validator.as_ref())
+        .map(|validator| validator.token.clone())
 }
 
 /// Serve a directory listing from cache. Online serving still requires an

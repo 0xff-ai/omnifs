@@ -25,12 +25,16 @@ use crate::ui::output::{Output, ResultVerdict};
         ArgGroup::new("change")
             .required(true)
             .multiple(true)
-            .args(["scheme", "no_auth", "config_json", "clear_config", "limits_json", "clear_limits"])
+            .args(["provider", "scheme", "no_auth", "config_json", "clear_config", "limits_json", "clear_limits"])
     ),
-    after_help = "Example:\n  omnifs mount update github --config-json '{\"owner\":\"0xff-ai\"}'"
+    after_help = "Examples:\n  omnifs mount update github --config-json '{\"owner\":\"0xff-ai\"}'\n  omnifs mount update github --provider github"
 )]
 pub(crate) struct UpdateArgs {
     pub(crate) name: String,
+    /// The provider of the mount, by a path, a digest, or the name of an
+    /// embedded provider, as `omnifs mount add` takes it.
+    #[arg(long)]
+    pub(crate) provider: Option<String>,
     #[arg(long, conflicts_with = "no_auth")]
     pub(crate) scheme: Option<String>,
     #[arg(long)]
@@ -76,13 +80,22 @@ impl UpdateArgs {
             .get_mount(name.clone())
             .await?
             .ok_or_else(|| anyhow!("no mount named `{name}`"))?;
-        let metadata = rpc
-            .provider_metadata(current.definition.provider)
-            .await?
-            .ok_or_else(|| anyhow!("provider metadata is unavailable for `{name}`"))?;
-        let manifest = ProviderManifest::from_bytes(&metadata.manifest)
-            .context("parse daemon provider metadata")?;
-        let (patch, changed) = self.build_patch(&current, &manifest)?;
+        let (provider, manifest) = if let Some(selector) = self.provider.as_deref() {
+            let embedded = rpc.list_embedded_providers().await?;
+            let resolved = crate::provider_resolver::ProviderResolver::new(&rpc)
+                .resolve(selector, &embedded)
+                .await?;
+            (resolved.reference.id, resolved.manifest)
+        } else {
+            let metadata = rpc
+                .provider_metadata(current.definition.provider)
+                .await?
+                .ok_or_else(|| anyhow!("provider metadata is unavailable for `{name}`"))?;
+            let manifest = ProviderManifest::from_bytes(&metadata.manifest)
+                .context("parse daemon provider metadata")?;
+            (current.definition.provider, manifest)
+        };
+        let (patch, changed) = self.build_patch(&current, provider, &manifest)?;
 
         if changed.is_empty() {
             // No field differed from the current mount, so no mutation was
@@ -120,14 +133,8 @@ impl UpdateArgs {
                 Some(auth.account_label.clone()),
             )?;
             Some(
-                self.collect_submission(
-                    current.definition.provider,
-                    &manifest,
-                    &selected,
-                    auth,
-                    &output,
-                )
-                .await?,
+                self.collect_submission(provider, &manifest, &selected, auth, &output)
+                    .await?,
             )
         } else {
             None
@@ -145,7 +152,7 @@ impl UpdateArgs {
                 .get_mount(name.clone())
                 .await?
                 .ok_or_else(|| anyhow!("no mount named `{name}`"))?;
-            let (patch, changed) = this.build_patch(&fresh, manifest_ref)?;
+            let (patch, changed) = this.build_patch(&fresh, provider, manifest_ref)?;
             if changed.is_empty() {
                 return Ok(Vec::new());
             }
@@ -199,15 +206,22 @@ impl UpdateArgs {
     }
 
     /// Build the patch and the list of changed field names from a mount
-    /// record: pure so the pre-lease and under-lease reads share the exact
-    /// same diffing logic.
+    /// record, with `provider` and its manifest: pure so the pre-lease and
+    /// under-lease reads share the exact same diffing logic. The artifact of
+    /// the mount itself changes nothing.
     fn build_patch(
         &self,
         current: &omnifs_api::MountRecord,
+        provider: omnifs_core::ProviderId,
         manifest: &ProviderManifest,
     ) -> anyhow::Result<(MountPatch, Vec<&'static str>)> {
         let mut changed = Vec::new();
         let mut patch = MountPatch::default();
+
+        if provider != current.definition.provider {
+            patch.provider = Some(provider);
+            changed.push("provider");
+        }
 
         if self.no_auth {
             if current.definition.auth.is_some() {
@@ -350,4 +364,82 @@ fn emit_receipt(
         output.outro(format!("Updated `{name}` at revision {revision}."));
     }
     Ok(ExitCode::Success)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpdateArgs;
+    use omnifs_core::{MountName, MountRevision, MountVersion, MutationId, ProviderId};
+    use omnifs_provider::ProviderManifest;
+
+    fn args(provider: &str) -> UpdateArgs {
+        UpdateArgs {
+            name: "github".to_owned(),
+            provider: Some(provider.to_owned()),
+            scheme: None,
+            no_auth: false,
+            config_json: None,
+            clear_config: false,
+            limits_json: None,
+            clear_limits: false,
+            no_browser: false,
+            token: None,
+            token_env: None,
+            no_validate: false,
+            scopes: Vec::new(),
+        }
+    }
+
+    fn mount(provider: ProviderId) -> omnifs_api::MountRecord {
+        omnifs_api::MountRecord {
+            definition: omnifs_api::MountDefinition {
+                name: MountName::new("github").unwrap(),
+                provider,
+                auth: None,
+                limits: None,
+                config: Vec::new(),
+            },
+            provider: omnifs_api::ProviderReference {
+                id: provider,
+                name: "github".to_owned(),
+                version: None,
+            },
+            version: MountVersion::from_digest([1; 32]),
+            revision: MountRevision::new(1),
+            health: omnifs_api::MountHealth::Active,
+            auth_health: None,
+            last_mutation_id: MutationId::from_bytes([1; 16]),
+        }
+    }
+
+    fn manifest() -> ProviderManifest {
+        ProviderManifest::from_bytes(
+            br#"{
+                "id": "github",
+                "displayName": "GitHub",
+                "provider": "github.wasm",
+                "defaultMount": "github",
+                "projection": 1,
+                "refreshIntervalSecs": 0
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_artifact_of_the_mount_itself_changes_nothing() {
+        let current = ProviderId::from_wasm_bytes(b"current");
+        let (patch, changed) = args("github")
+            .build_patch(&mount(current), current, &manifest())
+            .unwrap();
+        assert!(changed.is_empty());
+        assert_eq!(patch.provider, None);
+
+        let another = ProviderId::from_wasm_bytes(b"another");
+        let (patch, changed) = args("github")
+            .build_patch(&mount(current), another, &manifest())
+            .unwrap();
+        assert_eq!(changed, ["provider"]);
+        assert_eq!(patch.provider, Some(another));
+    }
 }

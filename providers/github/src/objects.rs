@@ -20,8 +20,8 @@ pub(crate) struct ItemData {
     pub(crate) state: String,
     #[serde(default)]
     pub(crate) user: Option<User>,
-    /// Set on issue-list rows that are actually PRs; used by `Issue::load`
-    /// to enforce disjointness and by `Repo::issues` to filter rows.
+    /// Set on the issues that are pull requests: `Issue::load` keeps the
+    /// kinds disjoint and the feeds read the kind of a row from it.
     #[serde(default)]
     pub(crate) pull_request: Option<IgnoredAny>,
 }
@@ -31,32 +31,24 @@ impl ItemData {
         self.pull_request.is_some()
     }
 
-    pub(crate) fn title(&self) -> Result<FileProjection> {
-        Ok(FileProjection::text(self.title.clone(), TextFormat::Raw).build())
+    /// The login of the author, empty for an item without one.
+    pub(crate) fn login(&self) -> &str {
+        self.user.as_ref().map_or("", |u| u.login.as_str())
     }
 
-    pub(crate) fn state(&self) -> Result<FileProjection> {
-        Ok(FileProjection::text(self.state.clone(), TextFormat::Raw).build())
-    }
-
-    pub(crate) fn user(&self) -> Result<FileProjection> {
-        let login = self.user.as_ref().map_or("", |u| u.login.as_str());
-        Ok(FileProjection::text(login.to_owned(), TextFormat::Raw).build())
-    }
-
-    pub(crate) fn body(&self) -> Result<FileProjection> {
-        let body = self.body.as_deref().unwrap_or("");
-        Ok(FileProjection::body(body.to_owned())
-            .content_type(ContentType::Markdown)
-            .build())
+    /// The body, empty for an item without one.
+    pub(crate) fn body_text(&self) -> &str {
+        self.body.as_deref().unwrap_or("")
     }
 
     pub(crate) fn markdown(&self) -> Vec<u8> {
-        let user = self.user.as_ref().map_or("", |u| u.login.as_str());
-        let body = self.body.as_deref().unwrap_or("");
         format!(
             "# {}\n\n- Number: {}\n- State: {}\n- User: {}\n\n{}\n",
-            self.title, self.number, self.state, user, body
+            self.title,
+            self.number,
+            self.state,
+            self.login(),
+            self.body_text()
         )
         .into_bytes()
     }
@@ -66,24 +58,6 @@ impl ItemData {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct Issue(pub(crate) ItemData);
-
-impl Issue {
-    pub(crate) fn title(&self, _key: &crate::item::IssueKey) -> Result<FileProjection> {
-        self.0.title()
-    }
-
-    pub(crate) fn state(&self, _key: &crate::item::IssueKey) -> Result<FileProjection> {
-        self.0.state()
-    }
-
-    pub(crate) fn user(&self, _key: &crate::item::IssueKey) -> Result<FileProjection> {
-        self.0.user()
-    }
-
-    pub(crate) fn body(&self, _key: &crate::item::IssueKey) -> Result<FileProjection> {
-        self.0.body()
-    }
-}
 
 impl Representable<Markdown> for Issue {
     fn represent(&self) -> Vec<u8> {
@@ -95,24 +69,6 @@ impl Representable<Markdown> for Issue {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct PullRequest(pub(crate) ItemData);
-
-impl PullRequest {
-    pub(crate) fn title(&self, _key: &crate::item::PullKey) -> Result<FileProjection> {
-        self.0.title()
-    }
-
-    pub(crate) fn state(&self, _key: &crate::item::PullKey) -> Result<FileProjection> {
-        self.0.state()
-    }
-
-    pub(crate) fn user(&self, _key: &crate::item::PullKey) -> Result<FileProjection> {
-        self.0.user()
-    }
-
-    pub(crate) fn body(&self, _key: &crate::item::PullKey) -> Result<FileProjection> {
-        self.0.body()
-    }
-}
 
 impl Representable<Markdown> for PullRequest {
     fn represent(&self) -> Vec<u8> {
@@ -372,8 +328,7 @@ impl Representable<Markdown> for Owner {
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Repo {}
 
-/// One issue/PR comment. The list payload carries `id`, so a comment can be
-/// stored fresh at listing time and keyed by its own `comment_id`.
+/// One issue or pull request comment, keyed by its own `comment_id`.
 #[omnifs_sdk::object(kind = "github.comment", key = crate::item::CommentKey)]
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct Comment {
@@ -384,27 +339,15 @@ pub(crate) struct Comment {
 }
 
 impl Comment {
-    pub(crate) fn body_md(&self, _key: &crate::item::CommentKey) -> Result<FileProjection> {
-        let body = self.body.as_deref().unwrap_or("");
-        Ok(FileProjection::body(body.to_owned())
-            .content_type(ContentType::Markdown)
-            .dynamic()
-            .build())
-    }
-
-    pub(crate) fn author(&self, _key: &crate::item::CommentKey) -> Result<FileProjection> {
-        Ok(
-            FileProjection::text(self.user.login.clone(), TextFormat::Raw)
-                .dynamic()
-                .build(),
-        )
+    /// The body, empty for a comment without one.
+    pub(crate) fn body_text(&self) -> &str {
+        self.body.as_deref().unwrap_or("")
     }
 }
 
 impl Representable<Markdown> for Comment {
     fn represent(&self) -> Vec<u8> {
-        let body = self.body.as_deref().unwrap_or("");
-        format!("{}:\n{body}\n", self.user.login).into_bytes()
+        format!("{}:\n{}\n", self.user.login, self.body_text()).into_bytes()
     }
 }
 

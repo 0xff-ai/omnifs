@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result, ensure};
 use omnifs_core::fs;
 use omnifs_mtab::{RunnerClaim, RunnerRecord};
 use omnifs_thin::host_control::{
-    RunnerControlClient, RunnerPhase, StopOutcome, control_socket_for,
+    RunnerControlClient, RunnerPhase, RunnerState, StopOutcome, control_socket_for,
 };
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -38,12 +38,12 @@ impl HostDriver {
     }
 
     /// Prove a live, identity-matched runner, returning its confirmed record
-    /// and phase together so a caller that needs to act on the identity (for
+    /// and state together so a caller that needs to act on the identity (for
     /// example, stop it) does not have to re-read the record from disk.
     pub(crate) async fn confirmed(
         &self,
         spec: &fs::Spec,
-    ) -> Result<Option<(RunnerRecord, RunnerPhase)>> {
+    ) -> Result<Option<(RunnerRecord, RunnerState)>> {
         let mount_point = spec.location();
         let Some(record) = RunnerRecord::read(&self.state_dir)? else {
             if omnifs_nfs::mount_is_active_checked(mount_point)? {
@@ -67,7 +67,7 @@ impl HostDriver {
                 )
             })
             .with_hint("Run `omnifs doctor` to diagnose")?;
-        Ok(Some((record, state.phase)))
+        Ok(Some((record, state)))
     }
 
     pub(crate) async fn launch(
@@ -111,8 +111,43 @@ impl HostDriver {
         ensure_identity_unchanged(Some(&record), expected, "runner")?;
         let client = RunnerControlClient::new(&record);
         client.ping().await.context("reconfirm host filesystem")?;
-        let (_, outcome) = client.stop().await?;
+        let outcome = client.stop().await?;
         wait_for_cleanup(&self.state_dir, record.spec.location(), outcome).await
+    }
+
+    /// Ends a proven runner before a new one starts: a runner of an active NFS
+    /// mount that answers `Restart` releases the mount, which the new runner
+    /// serves in place; any other runner, as one of a build without `Restart`,
+    /// stops.
+    pub(crate) async fn end_for_restart(
+        &self,
+        record: &RunnerRecord,
+        state: &RunnerState,
+    ) -> Result<()> {
+        if state.restart && omnifs_nfs::mount_is_active_checked(record.spec.location())? {
+            self.release_confirmed(record).await
+        } else {
+            self.stop_confirmed(record).await
+        }
+    }
+
+    /// Restarts a proven runner of an active NFS mount in place: ask it to
+    /// release its mount, and wait for the exit of its process, so that a new
+    /// runner serves the mount at the address of its state with its
+    /// filehandle table.
+    pub(crate) async fn release_confirmed(&self, expected: &RunnerRecord) -> Result<()> {
+        let record = RunnerRecord::read(&self.state_dir)?
+            .context("runner record disappeared before its restart")?;
+        ensure_identity_unchanged(Some(&record), expected, "runner")?;
+        // The exit is watched before the runner is reconfirmed, so that the
+        // process it watches is the runner that answers, and before its
+        // restart, which leaves the mount to the next runner.
+        let exit = process_exit(record.pid)?.context("the runner ended before its restart")?;
+        let client = RunnerControlClient::new(&record);
+        client.ping().await.context("reconfirm host filesystem")?;
+        client.restart().await?;
+        drop(exit.readable().await?);
+        Ok(())
     }
 
     pub(crate) async fn cleanup_stale(&self, expected: &RunnerRecord) -> Result<()> {
@@ -346,6 +381,14 @@ async fn wait_for_cleanup(
     )
 }
 
+/// The exit of the process `pid`, an event of the kernel that becomes
+/// readable at it; none for a process that has already exited.
+fn process_exit(pid: u32) -> Result<Option<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>> {
+    Ok(omnifs_mtab::process_exit(pid)?
+        .map(|exit| tokio::io::unix::AsyncFd::with_interest(exit, tokio::io::Interest::READABLE))
+        .transpose()?)
+}
+
 pub(crate) async fn owned(filesystem: &ClientFilesystemState) -> Result<Vec<Candidate>> {
     let mut candidates = Vec::new();
     let entries = match std::fs::read_dir(filesystem.state_root()) {
@@ -394,6 +437,28 @@ pub(crate) async fn owned(filesystem: &ClientFilesystemState) -> Result<Vec<Cand
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exit of a process is an event that a wait takes at the exit, and
+    /// a process that has exited has none.
+    #[tokio::test]
+    async fn the_exit_of_a_runner_is_an_event() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("1")
+            .spawn()
+            .unwrap();
+        let exit = process_exit(child.id())
+            .unwrap()
+            .expect("a running process");
+        drop(
+            tokio::time::timeout(Duration::from_secs(10), exit.readable())
+                .await
+                .expect("the exit is an event")
+                .unwrap(),
+        );
+        child.wait().unwrap();
+        assert!(process_exit(child.id()).unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn busy_stop_waits_for_runner_cleanup() {
         let temp = tempfile::tempdir().unwrap();
@@ -413,6 +478,7 @@ mod tests {
             )
             .unwrap(),
             control_socket: state_dir.join("control.sock"),
+            program: None,
         };
         std::fs::write(
             state_dir.join("runner.json"),
@@ -434,6 +500,77 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    /// A runner of a build before `Restart`, which answers `Ping` without it,
+    /// ends at `Stop` when its filesystem restarts.
+    #[tokio::test]
+    async fn a_runner_of_a_build_without_restart_ends_at_stop() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let instance = "0123456789abcdef0123456789abcdef";
+        let spec = fs::Spec::new(
+            fs::Id::new("main").unwrap(),
+            fs::Protocol::Nfs,
+            fs::Runtime::Host,
+            temp.path().join("mount"),
+        )
+        .unwrap();
+        let record = RunnerRecord {
+            version: RunnerRecord::VERSION,
+            instance_id: instance.to_owned(),
+            pid: 42,
+            process_group: 42,
+            spec: spec.clone(),
+            control_socket: state_dir.join("control.sock"),
+            program: None,
+        };
+        let record_path = state_dir.join("runner.json");
+        std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(&record.control_socket).unwrap();
+        let runner = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            while requests.last().is_none_or(|kind| kind != "stop") {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut line = String::new();
+                tokio::io::BufReader::new(reader)
+                    .read_line(&mut line)
+                    .await
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let kind = request["request"]["kind"].as_str().unwrap().to_owned();
+                let reply = match kind.as_str() {
+                    "ping" => serde_json::json!({"kind": "pong"}),
+                    "stop" => {
+                        std::fs::remove_file(&record_path).unwrap();
+                        serde_json::json!({"kind": "stop", "value": "stopped"})
+                    },
+                    kind => panic!("a runner before `Restart` got `{kind}`"),
+                };
+                let envelope = serde_json::json!({
+                    "version": 1,
+                    "instance_id": instance,
+                    "phase": "mounted",
+                    "reply": reply,
+                });
+                writer
+                    .write_all(format!("{envelope}\n").as_bytes())
+                    .await
+                    .unwrap();
+                requests.push(kind);
+            }
+            requests
+        });
+
+        let driver = HostDriver::new(state_dir);
+        let (confirmed, state) = driver.confirmed(&spec).await.unwrap().unwrap();
+        assert!(!state.restart);
+        driver.end_for_restart(&confirmed, &state).await.unwrap();
+        assert_eq!(runner.await.unwrap(), ["ping", "ping", "stop"]);
     }
 
     #[tokio::test]
@@ -459,6 +596,7 @@ mod tests {
             )
             .unwrap(),
             control_socket: valid_dir.join("control.sock"),
+            program: None,
         };
         std::fs::write(
             valid_dir.join("runner.json"),

@@ -399,6 +399,62 @@ fn omnifs_export_invalidates_path_state_and_open_cache() {
     );
 }
 
+/// The parts of a feed record the listing of its fed directory as changed:
+/// the directory keeps its filehandle through them, and its children keep
+/// theirs.
+#[test]
+fn omnifs_export_keeps_a_fed_directory_live_through_its_feed() {
+    let harness = test_export();
+    let export = &harness.export;
+    let test_root = export
+        .lookup(export.root(), "test")
+        .expect("top-level mount lookup");
+    let shelves = export.lookup(test_root, "shelves").expect("shelves lookup");
+    let shelf = export.lookup(shelves, "s").expect("shelf lookup");
+    let books = export.lookup(shelf, "books").expect("books lookup");
+    let names = |listing: DirListing| {
+        listing
+            .entries
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>()
+    };
+    let mut events = harness.events.subscribe();
+    assert_eq!(
+        names(readdir(export, books, "the first answer of the feed")),
+        ["1", "2"]
+    );
+    let book = export.lookup(books, "1").expect("book lookup");
+    // Wait until the export has the change of the listing.
+    let books_path = omnifs_core::path::Path::parse("/test/shelves/s/books").unwrap();
+    harness.runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match events.recv().await.expect("namespace event") {
+                    omnifs_engine::NsEvent::AttrsChanged { path, .. }
+                    | omnifs_engine::NsEvent::InvalidateSubtree { path }
+                        if path == books_path =>
+                    {
+                        break;
+                    },
+                    _ => {},
+                }
+            }
+        })
+        .await
+        .expect("the change of books reaches the export");
+    });
+
+    assert_eq!(
+        names(readdir(export, books, "the listing after the feed")),
+        ["1", "2"]
+    );
+    assert_eq!(
+        export.lookup(books, "1").expect("book after the feed"),
+        book
+    );
+}
+
 #[test]
 fn omnifs_export_handles_concurrent_lookup_and_readdir_allocation() {
     let harness = test_export();

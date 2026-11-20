@@ -128,7 +128,8 @@
 //! | [`cx`] | Handler context: state access, callout builders, [`cx::join_all`] |
 //! | [`endpoint`] | Declared HTTP endpoints: typed request builder, conditional loads, rate-limit breaker |
 //! | [`browse`] | Wire-facing results and [`browse::Effects`] |
-//! | [`handler`] | Dir intent/cursor types, ranged-read sessions, [`handler::TreeRef`] |
+//! | [`feed`] | Object feeds: [`feed::FeedCx`] and the [`feed::Feed`] answer of a feed method |
+//! | [`handler`] | Dir intent/cursor types, ranged-read sessions, [`handler::Tree`] answers |
 //! | [`blob`] / [`git`] | Host-side large bytes and git clones |
 //! | [`error`] | [`error::ProviderError`]: kinds, retryability, HTTP status mapping |
 //!
@@ -185,6 +186,7 @@ pub mod config_resource;
 pub mod cx;
 pub mod endpoint;
 pub mod error;
+pub mod feed;
 pub mod file_attrs;
 pub mod git;
 pub mod handler;

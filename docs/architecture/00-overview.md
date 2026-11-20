@@ -44,7 +44,7 @@ The operation owner validates and lowers the complete terminal into one projecti
 The host owns storage as opaque facts and bytes.
 
 - One global `BodyStore` stores every complete body by BLAKE3 identity.
-- One projection keyspace stores object relations, typed lookup/attr/file/listing facts, blob request references, Git identities, and freshness for an exact spec/provider identity.
+- One projection keyspace stores object relations, typed lookup/attr/file/listing facts, blob request references, Git identities, and freshness for the canonical mount without its provider artifact, the number of the projection of its provider, and its credential generation.
 - Each projection has a derived process-local memory tier. Provider blob handles and Git tree handles never enter durable rows.
 
 On a warm object read, the host pushes cached canonical bytes into the provider's read operation. The provider decodes and renders from those bytes. There is no provider-to-host canonical-read callout and no host-side render operation.

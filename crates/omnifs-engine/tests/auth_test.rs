@@ -319,13 +319,7 @@ async fn fetch_blob_uses_same_oauth_retry_path() {
     let temp = tempfile::tempdir().unwrap();
     let caches = Caches::open(temp.path()).unwrap();
     let name = omnifs_core::MountName::new("test").unwrap();
-    let resources = mount(
-        &caches,
-        &name,
-        b"auth-test",
-        omnifs_core::ProviderId::from_wasm_bytes(b"auth-test-provider"),
-    )
-    .unwrap();
+    let resources = mount(&caches, &name, b"auth-test").unwrap();
     let executor = BlobExecutor::new(stack, resources, BlobLimits::default());
 
     let result = executor

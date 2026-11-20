@@ -16,9 +16,9 @@ use crate::{
     CredentialSubmission, DaemonHealth, DaemonInfo, DaemonInventory, DaemonPhase, DaemonRecovery,
     DaemonStatus, HealthReport, HealthState, MountCredential, MountDefinition, MountField,
     MountHealth, MountLimits, MountOpResult, MountPatch, MountRecord, MutationOp, MutationOpResult,
-    ProviderImportDisposition, ProviderImportReceipt, ProviderMetadata, ProviderReference,
-    RecoveryId, RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt, SecretBytes,
-    ServingOutcome,
+    PhaseEvent, ProviderImportDisposition, ProviderImportReceipt, ProviderMetadata,
+    ProviderReference, RecoveryId, RecoveryOffer, RepairAction, RepairDisposition, RepairReceipt,
+    SecretBytes, ServingOutcome,
 };
 use omnifs_core::{
     AuthRuntimeFingerprint, CredentialGeneration, CredentialVersion, MountName, MountRevision,
@@ -121,6 +121,39 @@ fn to_daemon_phase(v: DaemonPhase) -> i32 {
         DaemonPhase::RecoveryRequired => wire::DaemonPhase::DaemonRecoveryRequired as i32,
     }
 }
+/// A phase of a `WatchPhase` stream: an error with `recovery_required` alone.
+pub fn phase_event(v: &wire::PhaseEvent) -> Result<PhaseEvent, FromGrpcError> {
+    let phase = daemon_phase(
+        wire::DaemonPhase::try_from(v.phase).map_err(|_| FromGrpcError::Invalid("daemon phase"))?,
+    )?;
+    match (phase, &v.error) {
+        (DaemonPhase::Starting, None) => Ok(PhaseEvent::Starting),
+        (DaemonPhase::Ready, None) => Ok(PhaseEvent::Ready),
+        (DaemonPhase::RecoveryRequired, Some(error)) => Ok(PhaseEvent::RecoveryRequired {
+            error: error.clone(),
+        }),
+        (DaemonPhase::RecoveryRequired, None) => Err(FromGrpcError::Missing("phase error")),
+        (DaemonPhase::Starting | DaemonPhase::Ready, Some(_)) => {
+            Err(FromGrpcError::Invalid("phase error"))
+        },
+    }
+}
+pub fn to_phase_event(v: &PhaseEvent) -> wire::PhaseEvent {
+    match v {
+        PhaseEvent::Starting => wire::PhaseEvent {
+            phase: to_daemon_phase(DaemonPhase::Starting),
+            error: None,
+        },
+        PhaseEvent::Ready => wire::PhaseEvent {
+            phase: to_daemon_phase(DaemonPhase::Ready),
+            error: None,
+        },
+        PhaseEvent::RecoveryRequired { error } => wire::PhaseEvent {
+            phase: to_daemon_phase(DaemonPhase::RecoveryRequired),
+            error: Some(error.clone()),
+        },
+    }
+}
 fn health_state(v: wire::HealthState) -> Result<HealthState, FromGrpcError> {
     match v {
         wire::HealthState::HealthStarting => Ok(HealthState::Starting),
@@ -185,6 +218,7 @@ pub fn daemon_info(v: &wire::DaemonInfo) -> Result<DaemonInfo, FromGrpcError> {
             .as_deref()
             .map(|x| x.parse().map_err(|_| FromGrpcError::Invalid("attach tcp")))
             .transpose()?,
+        program: v.program.clone(),
     })
 }
 pub fn to_daemon_info(v: &DaemonInfo) -> wire::DaemonInfo {
@@ -195,6 +229,7 @@ pub fn to_daemon_info(v: &DaemonInfo) -> wire::DaemonInfo {
         executable: path_bytes(&v.executable).into(),
         attach_unix: v.attach_unix.as_ref().map(|x| path_bytes(x).into()),
         attach_tcp: v.attach_tcp.map(|x| x.to_string()),
+        program: v.program.clone(),
     }
 }
 fn recovery_offer(v: &wire::RecoveryOffer) -> Result<RecoveryOffer, FromGrpcError> {
@@ -1223,6 +1258,33 @@ mod tests {
         );
     }
     #[test]
+    fn phase_event_round_trips_with_the_error_of_recovery_alone() {
+        for event in [
+            PhaseEvent::Starting,
+            PhaseEvent::Ready,
+            PhaseEvent::RecoveryRequired {
+                error: "control store could not be opened".into(),
+            },
+        ] {
+            assert_eq!(phase_event(&to_phase_event(&event)).unwrap(), event);
+        }
+
+        let mut ready = to_phase_event(&PhaseEvent::Ready);
+        ready.error = Some("error".into());
+        assert!(matches!(
+            phase_event(&ready),
+            Err(FromGrpcError::Invalid("phase error"))
+        ));
+        let mut recovery = to_phase_event(&PhaseEvent::RecoveryRequired {
+            error: "error".into(),
+        });
+        recovery.error = None;
+        assert!(matches!(
+            phase_event(&recovery),
+            Err(FromGrpcError::Missing("phase error"))
+        ));
+    }
+    #[test]
     fn serving_outcome_round_trips_with_and_without_detail() {
         let serving = ServingOutcome {
             serving: true,
@@ -1433,6 +1495,9 @@ mod tests {
             executable: PathBuf::from("/bin/omnifs"),
             attach_unix: Some(PathBuf::from("/tmp/omnifs.sock")),
             attach_tcp: Some("127.0.0.1:1234".parse().unwrap()),
+            program: Some(
+                "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262".into(),
+            ),
         };
         let active_mutation = ActiveMutation {
             mutation_id: MutationId::from_bytes([7; 16]),

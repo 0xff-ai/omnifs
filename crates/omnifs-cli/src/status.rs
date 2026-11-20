@@ -376,6 +376,7 @@ mod tests {
                 state: crate::inventory::FilesystemState::Attached,
                 mount_count: 1,
                 fix: None,
+                current_program: None,
             }],
             Vec::new(),
         );
@@ -413,6 +414,7 @@ mod tests {
                 state: crate::inventory::FilesystemState::Attached,
                 mount_count: 2,
                 fix: None,
+                current_program: None,
             }],
             vec![
                 MountStatus {
@@ -522,6 +524,7 @@ mod tests {
                 state: crate::inventory::FilesystemState::Detached,
                 mount_count: 0,
                 fix: None,
+                current_program: None,
             }],
             Vec::new(),
         );
