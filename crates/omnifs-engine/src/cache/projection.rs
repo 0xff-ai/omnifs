@@ -161,6 +161,13 @@ impl ProjectionStore {
             .collect()
     }
 
+    /// The sequence number of the database, which each commit with a write
+    /// moves.
+    #[cfg(test)]
+    pub(crate) fn seqno(&self) -> u64 {
+        self.db.inner().seqno()
+    }
+
     pub(crate) fn transact<F, T>(&self, mut plan: F) -> Result<T, ProjectionStoreError>
     where
         F: FnMut(&mut OptimisticWriteTx, &OptimisticTxKeyspace) -> Result<T, ProjectionStoreError>,

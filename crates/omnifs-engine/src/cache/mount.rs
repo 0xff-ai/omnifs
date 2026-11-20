@@ -953,7 +953,7 @@ impl MountResources {
                 key.extend_from_slice(hex::encode(&object.0).as_bytes());
                 let value = postcard::to_allocvec(&(object.1.as_bytes(), object.2, &object.3))
                     .map_err(ProjectionError::from)?;
-                tx.insert(facts, key, value);
+                put(tx, facts, key, value)?;
             }
             for object in &objects {
                 if let ObjectMutation::Index { id, alias } = object {
@@ -964,7 +964,7 @@ impl MountResources {
                             )
                         })?;
                     let _ = (body, length, validator);
-                    insert_alias(tx, facts, id, alias);
+                    insert_alias(tx, facts, id, alias)?;
                 }
             }
 
@@ -974,7 +974,7 @@ impl MountResources {
             let mut written = Vec::with_capacity(prepared_records.len());
             for record in &prepared_records {
                 if fed_answer {
-                    tx.insert(facts, fed_key(&record.path), []);
+                    put(tx, facts, fed_key(&record.path), [])?;
                 } else if tx.get(facts, fed_key(&record.path))?.is_some() {
                     continue;
                 }
@@ -983,7 +983,7 @@ impl MountResources {
                 if matches!(&record.fact, DurableFact::Lookup(_))
                     && !transition_git_paths.contains(&record.path)
                 {
-                    tx.remove(facts, git_key(&record.path));
+                    delete(tx, facts, git_key(&record.path))?;
                 }
                 let key = fact_key(
                     record.path.as_str(),
@@ -991,34 +991,37 @@ impl MountResources {
                     record.aux.as_deref(),
                 );
                 let value = postcard::to_allocvec(&record.fact).map_err(ProjectionError::from)?;
-                tx.insert(facts, key, value);
+                put(tx, facts, key, value)?;
                 if let DurableFact::Lookup(lookup) = &record.fact
                     && let LookupPayload::Negative { id: Some(id) } = lookup
                 {
-                    tx.insert(
+                    put(
+                        tx,
                         facts,
                         negative_key(id, &record.path),
                         record.path.as_str().as_bytes(),
-                    );
+                    )?;
                 }
             }
             for (key, fact) in &prepared_blobs {
-                tx.insert(
+                put(
+                    tx,
                     facts,
                     key.clone(),
                     postcard::to_allocvec(fact).map_err(ProjectionError::from)?,
-                );
+                )?;
             }
             for (key, fact) in &prepared_git {
-                tx.insert(
+                put(
+                    tx,
                     facts,
                     key.clone(),
                     postcard::to_allocvec(fact).map_err(ProjectionError::from)?,
-                );
+                )?;
             }
             for mutation in &dirents {
                 if fed_answer {
-                    tx.insert(facts, fed_key(mutation.path()), []);
+                    put(tx, facts, fed_key(mutation.path()), [])?;
                     apply_dirents(tx, facts, mutation)?;
                 } else {
                     let mutation = with_fed_entries(tx, facts, mutation)?;
@@ -1031,7 +1034,12 @@ impl MountResources {
             if let Some(kept) = &kept {
                 let prefix = kept_prefix(&kept.object);
                 let next = tx.prefix(facts, prefix.as_slice()).count();
-                tx.insert(facts, kept_key(&kept.object, next), kept.part.as_slice());
+                put(
+                    tx,
+                    facts,
+                    kept_key(&kept.object, next),
+                    kept.part.as_slice(),
+                )?;
             }
             for freshness in &freshness {
                 if !fed_answer && tx.get(facts, fed_key(&freshness.path))?.is_some() {
@@ -1039,11 +1047,12 @@ impl MountResources {
                 }
                 let mut expiry = b"x:".to_vec();
                 expiry.extend_from_slice(freshness.path.as_str().as_bytes());
-                tx.insert(
+                put(
+                    tx,
                     facts,
                     expiry,
                     postcard::to_allocvec(&freshness.expires_at).map_err(ProjectionError::from)?,
-                );
+                )?;
             }
             let mut reconciled_paths =
                 reconcile_listing_relations(tx, facts, &written, &dirents, &mut removals)?;
@@ -1081,7 +1090,7 @@ impl MountResources {
                 }
             }
             for key in removals {
-                tx.remove(facts, key);
+                delete(tx, facts, key)?;
             }
             Ok(reconciled_paths)
         })?;
@@ -1423,6 +1432,32 @@ impl MountResources {
     }
 }
 
+/// Write `value` at `key` unless the projection has it there, so that a
+/// publication without a change commits nothing.
+fn put(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    key: impl AsRef<[u8]>,
+    value: impl AsRef<[u8]>,
+) -> Result<(), ProjectionError> {
+    if tx.get(facts, key.as_ref())?.as_deref() != Some(value.as_ref()) {
+        tx.insert(facts, key.as_ref(), value.as_ref());
+    }
+    Ok(())
+}
+
+/// Remove `key` unless the projection lacks it, as [`put`] writes.
+fn delete(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    key: impl AsRef<[u8]>,
+) -> Result<(), ProjectionError> {
+    if tx.get(facts, key.as_ref())?.is_some() {
+        tx.remove(facts, key.as_ref());
+    }
+    Ok(())
+}
+
 fn fact_key(path: &str, kind: RecordKind, aux: Option<&str>) -> Vec<u8> {
     let key = Key::with_aux(&Path::from_validated(path.to_owned()), kind, aux).wire_key();
     let mut result = b"r:".to_vec();
@@ -1584,7 +1619,7 @@ fn write_feed_states(
             ));
         },
     };
-    tx.insert(facts, key, postcard::to_allocvec(&state)?);
+    put(tx, facts, key, postcard::to_allocvec(&state)?)?;
     if feed.part.is_some() {
         let prefix = kept_prefix(&feed.object);
         let kept = tx
@@ -1592,18 +1627,20 @@ fn write_feed_states(
             .map(|guard| Ok(guard.key()?.to_vec()))
             .collect::<Result<Vec<_>, ProjectionError>>()?;
         for key in kept {
-            tx.remove(facts, key);
+            delete(tx, facts, key)?;
         }
     }
     for (path, anchor) in &feed.anchors {
-        tx.insert(
+        put(
+            tx,
             facts,
             anchor_key(path),
             postcard::to_allocvec(anchor.as_str())?,
-        );
+        )?;
     }
     for (id, token) in &feed.inner {
-        tx.insert(
+        put(
+            tx,
             facts,
             feed_key(id),
             postcard::to_allocvec(&FeedState {
@@ -1611,7 +1648,7 @@ fn write_feed_states(
                 ended: true,
                 deadline: feed.deadline,
             })?,
-        );
+        )?;
     }
     Ok(())
 }
@@ -1773,11 +1810,12 @@ fn insert_alias(
     facts: &fjall::OptimisticTxKeyspace,
     id: &[u8],
     path: &Path,
-) {
-    tx.insert(facts, index_key(path), id.to_vec());
+) -> Result<(), ProjectionError> {
+    put(tx, facts, index_key(path), id)?;
     let mut alias = alias_prefix(id);
     alias.extend_from_slice(path.as_str().as_bytes());
-    tx.insert(facts, alias, []);
+    put(tx, facts, alias, [])?;
+    Ok(())
 }
 
 fn validate_claim(
@@ -1873,7 +1911,7 @@ fn remove_negative_for_path(
         ));
     };
     if let LookupPayload::Negative { id: Some(id) } = lookup {
-        tx.remove(facts, negative_key(&id, path));
+        delete(tx, facts, negative_key(&id, path))?;
     }
     Ok(())
 }
@@ -2258,11 +2296,12 @@ fn apply_dirents(
             (path, current)
         },
     };
-    tx.insert(
+    put(
+        tx,
         facts,
         fact_key(path.as_str(), RecordKind::Dirents, None),
         postcard::to_allocvec(&DurableFact::Dirents(value))?,
-    );
+    )?;
     Ok(())
 }
 
@@ -2987,6 +3026,40 @@ mod tests {
             }),
             ..ProjectionTransition::default()
         }
+    }
+
+    #[test]
+    fn a_publication_without_a_change_commits_nothing() {
+        let (_dir, _caches, store) = open_store("unchanged");
+        let transition = || ProjectionTransition {
+            records: vec![RecordWrite {
+                path: p("/dir/child"),
+                aux: None,
+                fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+            }],
+            dirents: vec![DirentsMutation::MergeHints {
+                path: p("/dir"),
+                entries: vec![crate::view::DirentRecord {
+                    name: "child".into(),
+                    meta: EntryMeta::directory(),
+                }],
+                write: ListingWrite::Exhaustive,
+            }],
+            freshness: vec![Freshness {
+                path: p("/dir/child"),
+                expires_at: Some(1_000),
+            }],
+            ..ProjectionTransition::default()
+        };
+        store.publish(transition(), store.current_epoch()).unwrap();
+        let committed = store.projection.seqno();
+        store.publish(transition(), store.current_epoch()).unwrap();
+        assert_eq!(store.projection.seqno(), committed);
+
+        let mut changed = transition();
+        changed.freshness[0].expires_at = Some(2_000);
+        store.publish(changed, store.current_epoch()).unwrap();
+        assert_ne!(store.projection.seqno(), committed);
     }
 
     #[test]
