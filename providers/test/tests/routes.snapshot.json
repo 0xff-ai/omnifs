@@ -59,6 +59,12 @@
     "captures": []
   },
   {
+    "template": "/hello/validated",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": []
+  },
+  {
     "template": "/hello/unbounded",
     "kind": "Dir",
     "object_kind": null,
@@ -81,6 +87,30 @@
     "kind": "Dir",
     "object_kind": null,
     "captures": []
+  },
+  {
+    "template": "/shelves/{shelf}/books",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": [
+      {
+        "name": "shelf",
+        "type_name": "String",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "template": "/repos/{repo}/tree",
+    "kind": "Dir",
+    "object_kind": null,
+    "captures": [
+      {
+        "name": "repo",
+        "type_name": "String",
+        "choices": null
+      }
+    ]
   },
   {
     "template": "/scoped",
@@ -185,6 +215,24 @@
     "captures": []
   },
   {
+    "template": "/hello/validated-calls",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/shelf-log",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
+    "template": "/hello/shelf-change",
+    "kind": "File",
+    "object_kind": null,
+    "captures": []
+  },
+  {
     "template": "/scoped/item",
     "kind": "File",
     "object_kind": null,
@@ -256,6 +304,47 @@
       {
         "name": "idx",
         "type_name": "u64",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "template": "/shelves/{shelf}",
+    "kind": "Object",
+    "object_kind": "test.shelf",
+    "captures": [
+      {
+        "name": "shelf",
+        "type_name": "String",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "template": "/shelves/{shelf}/books/{book}",
+    "kind": "Object",
+    "object_kind": "test.book",
+    "captures": [
+      {
+        "name": "shelf",
+        "type_name": "String",
+        "choices": null
+      },
+      {
+        "name": "book",
+        "type_name": "u64",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "template": "/repos/{repo}",
+    "kind": "Object",
+    "object_kind": "test.repo",
+    "captures": [
+      {
+        "name": "repo",
+        "type_name": "String",
         "choices": null
       }
     ]

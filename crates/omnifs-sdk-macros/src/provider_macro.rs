@@ -62,6 +62,7 @@ pub struct ProviderArgs {
     display_name: Option<LitStr>,
     description: Option<LitStr>,
     mount: Option<LitStr>,
+    projection: Option<syn::LitInt>,
     capabilities: Vec<ParsedAccessNeed>,
     limits: ParsedLimitDeclarations,
     auth: Option<LitStr>,
@@ -75,6 +76,7 @@ impl Parse for ProviderArgs {
             display_name: None,
             description: None,
             mount: None,
+            projection: None,
             capabilities: Vec::new(),
             limits: ParsedLimitDeclarations::default(),
             auth: None,
@@ -106,6 +108,10 @@ impl Parse for ProviderArgs {
                     let _: Token![=] = input.parse()?;
                     args.mount = Some(input.parse()?);
                 },
+                "projection" => {
+                    let _: Token![=] = input.parse()?;
+                    args.projection = Some(input.parse()?);
+                },
                 "capabilities" => {
                     let content;
                     syn::parenthesized!(content in input);
@@ -128,7 +134,7 @@ impl Parse for ProviderArgs {
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "supported provider arguments are `id`/`display_name`/`description`/`mount`, `capabilities(...)`, `limits(...)`, `auth = ...`, and `events(...)`",
+                        "supported provider arguments are `id`/`display_name`/`description`/`mount`/`projection`, `capabilities(...)`, `limits(...)`, `auth = ...`, and `events(...)`",
                     ));
                 },
             }
@@ -472,6 +478,7 @@ struct ManifestFacts {
     default_mount: String,
     provider_file: String,
     version: Option<String>,
+    projection: u32,
 }
 
 impl ManifestFacts {
@@ -504,6 +511,16 @@ impl ManifestFacts {
             default_mount,
             provider_file: format!("{}.wasm", pkg_name.replace('-', "_")),
             version: std::env::var("CARGO_PKG_VERSION").ok(),
+            projection: args
+                .projection
+                .as_ref()
+                .ok_or_else(|| {
+                    syn::Error::new(
+                        Span::call_site(),
+                        "provider needs a `projection = N` annotation",
+                    )
+                })?
+                .base10_parse::<u32>()?,
         })
     }
 
@@ -527,8 +544,9 @@ impl ManifestFacts {
         if let Some(version) = &self.version {
             fields.push(("version", json_string(version)));
         }
-        fields.push(("witPackage", json_string("package omnifs:provider@0.7.0;")));
+        fields.push(("witPackage", json_string("package omnifs:provider@0.10.0;")));
         fields.push(("sdkVersion", json_string(env!("CARGO_PKG_VERSION"))));
+        fields.push(("projection", self.projection.to_string()));
         fields.push(("refreshIntervalSecs", refresh_interval_secs.to_string()));
         if !capabilities.is_empty() {
             fields.push(("capabilities", capabilities_json(capabilities)));
@@ -845,6 +863,7 @@ fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2
                 id: u64,
                 path: String,
                 cursor: Option<omnifs_sdk::omnifs::provider::types::Cursor>,
+                validator: Option<String>,
             ) -> (
                 core::result::Result<
                     omnifs_sdk::omnifs::provider::types::ListChildrenResult,
@@ -861,7 +880,8 @@ fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2
                     );
                 };
                 let sdk_cursor = cursor.map(omnifs_sdk::prelude::Cursor::from);
-                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
+                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state)
+                    .with_version(validator.map(omnifs_sdk::file_attrs::VersionToken::from));
                 match router.list_children(&cx, &path, sdk_cursor).await {
                     Ok(outcome) => {
                         let (result, effects) = outcome.into_result_and_effects();
@@ -1008,6 +1028,36 @@ fn generate_namespace(type_name: &syn::Ident, state_type: &Type) -> TokenStream2
             fn close_file(handle: u64) {
                 if let Some(handle_id) = ::std::num::NonZeroU64::new(handle) {
                     RANGE_HANDLES.with(|handles| handles.remove(handle_id));
+                }
+            }
+
+            async fn feed(
+                id: u64,
+                path: String,
+                token: Option<String>,
+                start: Option<String>,
+            ) -> (
+                core::result::Result<
+                    omnifs_sdk::omnifs::provider::types::FeedAnswer,
+                    omnifs_sdk::omnifs::provider::types::ProviderError,
+                >,
+                omnifs_sdk::omnifs::provider::types::Effects,
+            ) {
+                let (Ok(state), Ok(router)) = (state_handle(), router_handle()) else {
+                    return (
+                        Err(omnifs_sdk::error::ProviderError::internal(
+                            "provider not initialized",
+                        ).into()),
+                        omnifs_sdk::prelude::Effects::new().into_wit(),
+                    );
+                };
+                let cx = omnifs_sdk::__internal::Cx::<#state_type>::new(id, state);
+                match router.feed(&cx, &path, token, start).await {
+                    Ok((answer, effects)) => (Ok(answer), effects.into_wit()),
+                    Err(error) => (
+                        Err(error.into()),
+                        omnifs_sdk::prelude::Effects::new().into_wit(),
+                    ),
                 }
             }
         }

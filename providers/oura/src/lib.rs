@@ -35,6 +35,7 @@ struct Api;
     display_name = "Oura",
     description = "your Oura ring health data",
     mount = "oura",
+    projection = 1,
     capabilities(domain(
         "api.ouraring.com",
         "Fetch Oura API v2 user collection resources such as sleep, activity, readiness, heart rate, and device data."

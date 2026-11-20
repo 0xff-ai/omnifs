@@ -229,7 +229,7 @@ async fn imports_verifies_and_repairs_provider_rows() {
     let stored = store.load_provider(id).await.unwrap().unwrap();
     assert_eq!(stored.bytes, bytes);
     assert_eq!(stored.reference, outcome.reference);
-    assert_eq!(stored.manifest.id, "demo");
+    assert_eq!(stored.manifest.as_ref().unwrap().id, "demo");
     assert!(std::fs::read_dir(paths.staging()).unwrap().next().is_none());
 
     let outcome = upload_and_import(&store, id, &bytes).await;
@@ -273,6 +273,20 @@ async fn imports_verifies_and_repairs_provider_rows() {
     let metadata = store.load_provider_metadata(id).await.unwrap().unwrap();
     assert_eq!(metadata.reference, outcome.reference);
     assert_eq!(metadata.document, expected_metadata);
+
+    // The manifest of an earlier omnifs, without the number of its
+    // projection, keeps its row with the error that makes it invalid.
+    let mut earlier: serde_json::Value = serde_json::from_slice(&expected_metadata).unwrap();
+    earlier.as_object_mut().unwrap().remove("projection");
+    sqlx::query("UPDATE providers SET metadata = ?2 WHERE digest = ?1")
+        .bind(id.as_bytes().as_slice())
+        .bind(serde_json::to_vec(&earlier).unwrap())
+        .execute(&store.reads)
+        .await
+        .unwrap();
+    let stored = store.load_provider(id).await.unwrap().unwrap();
+    assert_eq!(stored.reference, outcome.reference);
+    assert!(stored.manifest.is_err());
     store.shutdown().await.unwrap();
 }
 
@@ -1438,6 +1452,7 @@ fn provider_wasm(description_bytes: usize) -> Vec<u8> {
         "description": "x".repeat(description_bytes),
         "provider": "demo.wasm",
         "defaultMount": "demo",
+        "projection": 1,
         "refreshIntervalSecs": 0
     }))
     .unwrap();

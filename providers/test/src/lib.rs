@@ -4,8 +4,10 @@
 //! representation, and computed faces; a child-object `comments` collection with a
 //! typed page cursor; scoped intent-tagged invalidation from `on_tick`;
 //! object-load prefetch via `preload_object`; an object alias; deferred, ranged,
-//! and live files; an object tree handoff; paged and partial listings with
-//! validators; rate limits; and object aliases.
+//! and live files; object tree handoffs, one with an unknown handle and one of
+//! a Git remote at the commit its upstream answers; paged and partial
+//! listings, with and without page validators; an object feed with fed faces;
+//! rate limits; and object aliases.
 //!
 //! It is the conformance fixture every host integration test drives, so every
 //! pinned behavior is preserved on the new surface: the root, hello, and items
@@ -32,6 +34,23 @@ struct Config {
 #[derive(Clone, Default)]
 struct State {
     fresh_full_reads: u64,
+    /// Calls of the `hello/validated` listing, which `hello/validated-calls`
+    /// reads.
+    validated_calls: u64,
+    /// Whether a revalidation of the first page of `hello/validated` has
+    /// answered `unchanged`; the next one answers a changed page.
+    validated_first_page_stood: bool,
+    /// Each call of a shelf or book feed as `object token start`, which
+    /// `shelf-log` reads.
+    shelf_log: Vec<String>,
+    /// The upstream version of the shelves, which a read of `shelf-change`
+    /// advances.
+    shelf_version: u64,
+    /// Whether the feed of the `flaky` shelf has stopped once.
+    flaky_stopped: bool,
+    /// Whether a later answer of the feed of the `wobbly` shelf has stopped
+    /// once.
+    wobbly_stopped: bool,
 }
 
 const LARGE_RANGED_SIZE: u64 = 64 * 1024 * 1024 + 1;
@@ -98,8 +117,11 @@ impl Item {
     /// Returns an intentionally unknown handle so host validation can exercise
     /// the retained object-directory tree-handoff boundary.
     #[allow(clippy::unused_async)]
-    async fn unknown_tree(_cx: Cx<State>, _key: ItemKey) -> Result<TreeRef> {
-        Ok(TreeRef::new(777))
+    async fn unknown_tree(_cx: Cx<State>, _key: ItemKey) -> Result<Tree> {
+        Ok(Tree::at(
+            TreeRef::new(777),
+            "0123456789abcdef0123456789abcdef01234567",
+        ))
     }
 
     /// The hand-written load `#[object]` forwards `Object::load` to. Item 404 is
@@ -345,6 +367,241 @@ async fn item_comments(
 }
 
 // ===========================================================================
+// Object family: `Shelf` and `Book`, fed by the feed of the shelf
+// ===========================================================================
+
+#[omnifs_sdk::object(kind = "test.shelf", key = ShelfKey)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Shelf {
+    name: String,
+}
+
+impl Shelf {
+    #[allow(clippy::unused_async)]
+    async fn load(
+        _cx: &Cx<State>,
+        key: &ShelfKey,
+        _since: Option<Validator>,
+    ) -> Result<Load<Self>> {
+        let bytes = format!(r#"{{"name":"{}"}}"#, key.shelf).into_bytes();
+        Ok(Load::fresh(
+            Self::decode(&bytes)?,
+            Canonical::new(bytes, None),
+        ))
+    }
+
+    /// The feed of a shelf: its first answer lists books 1 and 2 in two
+    /// parts, each with the inner token of its book, and a third part
+    /// completes `books`; the `flaky` shelf stops once before its second
+    /// part. After the first answer, an answer is `unchanged` until the
+    /// shelf version moves, and then renames book 1, adds book 3, and records
+    /// in `seen` the names the host listed for `books` in a part, and removes
+    /// book 2 in its last part; the `wobbly` shelf stops once at a rate limit
+    /// of a second before that last part.
+    #[allow(clippy::unused_async)]
+    async fn feed(cx: FeedCx<ShelfKey, State>) -> Result<Feed> {
+        let shelf = cx.key().shelf.clone();
+        let token = cx.token().map(str::to_owned);
+        let version = cx.state_mut(|state| {
+            state.shelf_log.push(format!(
+                "{shelf} {} {}",
+                token.as_deref().unwrap_or("-"),
+                cx.start().unwrap_or("-")
+            ));
+            state.shelf_version
+        });
+        let books = format!("/shelves/{shelf}/books");
+        let book = |number: u64, title: &str| -> Result<()> {
+            cx.dir(format!("{books}/{number}"), ListingWrite::Partial)?;
+            cx.file(format!("{books}/{number}/title"), title.as_bytes().to_vec())
+        };
+        let key = |number: u64| BookKey {
+            shelf: shelf.clone(),
+            book: number,
+        };
+        match token.as_deref() {
+            None => {
+                cx.dir(&books, ListingWrite::Partial)?;
+                book(1, "Book 1")?;
+                Ok(Feed::part("page-1")
+                    .more(true)
+                    .inner::<Book>(&key(1), "row-1")
+                    .into())
+            },
+            Some("page-1") => {
+                if shelf == "flaky"
+                    && !cx.state_mut(|state| std::mem::replace(&mut state.flaky_stopped, true))
+                {
+                    return Err(ProviderError::network("the shelf upstream stopped"));
+                }
+                cx.dir(&books, ListingWrite::Partial)?;
+                book(2, "Book 2")?;
+                Ok(Feed::part("page-2")
+                    .more(true)
+                    .inner::<Book>(&key(2), "row-2")
+                    .into())
+            },
+            Some("page-2") => {
+                cx.dir(&books, ListingWrite::Complete)?;
+                Ok(Feed::part(format!("version-{version}")).into())
+            },
+            Some(done) if done == format!("version-{version}") => Ok(Feed::unchanged()),
+            Some(change) if change == format!("change-{version}") => {
+                if shelf == "wobbly"
+                    && !cx.state_mut(|state| std::mem::replace(&mut state.wobbly_stopped, true))
+                {
+                    return Err(ProviderError::rate_limited("the shelf upstream is busy")
+                        .with_retry_after(Some(core::time::Duration::from_secs(1))));
+                }
+                cx.dir(&books, ListingWrite::Complete)?;
+                cx.remove(format!("{books}/2"))?;
+                Ok(Feed::part(format!("version-{version}")).into())
+            },
+            Some(_) => {
+                let seen = match cx.listing(&books, ListingForm::Names)? {
+                    Some(ListingFacts {
+                        entries: ListingEntries::Names(names),
+                        ..
+                    }) => names.join(","),
+                    other => {
+                        return Err(ProviderError::internal(format!("books listing {other:?}")));
+                    },
+                };
+                cx.file(format!("/shelves/{shelf}/seen"), seen.into_bytes())?;
+                cx.dir(&books, ListingWrite::Complete)?;
+                book(1, &format!("Book 1 v{version}"))?;
+                book(3, "Book 3")?;
+                Ok(Feed::part(format!("change-{version}")).more(true).into())
+            },
+        }
+    }
+}
+
+#[omnifs_sdk::path_captures]
+struct ShelfKey {
+    shelf: String,
+}
+
+#[omnifs_sdk::object(kind = "test.book", key = BookKey)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Book {
+    book: u64,
+}
+
+impl Book {
+    #[allow(clippy::unused_async)]
+    async fn load(_cx: &Cx<State>, key: &BookKey, _since: Option<Validator>) -> Result<Load<Self>> {
+        let bytes = format!(r#"{{"book":{}}}"#, key.book).into_bytes();
+        Ok(Load::fresh(
+            Self::decode(&bytes)?,
+            Canonical::new(bytes, None),
+        ))
+    }
+
+    /// The feed of one book, answering for its title before the first answer
+    /// of its shelf ends: it rewrites the title from the book's own upstream.
+    #[allow(clippy::unused_async)]
+    async fn feed(cx: FeedCx<BookKey, State>) -> Result<Feed> {
+        let BookKey { shelf, book } = cx.key();
+        let token = cx.token().unwrap_or("-").to_owned();
+        cx.state_mut(|state| {
+            state.shelf_log.push(format!(
+                "{shelf}/{book} {token} {}",
+                cx.start().unwrap_or("-")
+            ));
+        });
+        cx.file(
+            format!("/shelves/{shelf}/books/{book}/title"),
+            format!("Book {book} (own)").into_bytes(),
+        )?;
+        Ok(Feed::part(format!("own-{book}")).into())
+    }
+}
+
+#[omnifs_sdk::path_captures]
+struct BookKey {
+    shelf: String,
+    book: u64,
+}
+
+/// The calls of the shelf and book feeds so far, one per line.
+async fn shelf_log(cx: Cx<State>) -> Result<FileProjection> {
+    let log = cx.state(|state| state.shelf_log.join("\n"));
+    Ok(FileProjection::body(format!("{log}\n").into_bytes())
+        .dynamic()
+        .build())
+}
+
+/// Advance the upstream version of the shelves.
+async fn shelf_change(cx: Cx<State>) -> Result<FileProjection> {
+    let version = cx.state_mut(|state| {
+        state.shelf_version += 1;
+        state.shelf_version
+    });
+    Ok(FileProjection::body(format!("{version}\n").into_bytes())
+        .dynamic()
+        .build())
+}
+
+// ===========================================================================
+// Object family: `Repo`, with the tree of a Git remote
+// ===========================================================================
+
+#[omnifs_sdk::object(kind = "test.repo", key = RepoKey)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct Repo {
+    repo: String,
+}
+
+impl Repo {
+    fn load(
+        _cx: &Cx<State>,
+        key: &RepoKey,
+        _since: Option<Validator>,
+    ) -> impl core::future::Future<Output = Result<Load<Self>>> {
+        let bytes = format!(r#"{{"repo":"{}"}}"#, key.repo).into_bytes();
+        core::future::ready(
+            Self::decode(&bytes).map(|repo| Load::fresh(repo, Canonical::new(bytes, None))),
+        )
+    }
+
+    /// The tree of the repository at the commit its upstream answers: a
+    /// `304` to the commit of the tree stands, and a `200` names the commit
+    /// the open checks out.
+    async fn tree(cx: Cx<State>, key: RepoKey) -> Result<Tree> {
+        let mut request = cx.http().get(format!(
+            "https://httpbin.org/anything/repos/{}/commit",
+            key.repo
+        ));
+        if let Some(commit) = cx.version() {
+            request = request.header("if-none-match", commit.as_str());
+        }
+        let response = request.send().await?;
+        match response.status().as_u16() {
+            304 => Ok(Tree::unchanged()),
+            200 => {
+                let commit = String::from_utf8(response.into_body())
+                    .map_err(|_| ProviderError::invalid_input("the commit is not UTF-8"))?;
+                let opened = cx
+                    .git()
+                    .open_repo(format!("https://fixture.test/{}.git", key.repo))
+                    .commit(&commit)
+                    .await?;
+                Ok(Tree::at(TreeRef::new(opened.tree), commit))
+            },
+            status => Err(ProviderError::network(format!(
+                "the commit of the repository answered status {status}"
+            ))),
+        }
+    }
+}
+
+#[omnifs_sdk::path_captures]
+struct RepoKey {
+    repo: String,
+}
+
+// ===========================================================================
 // Provider
 // ===========================================================================
 
@@ -352,10 +609,17 @@ async fn item_comments(
     id = "test-provider",
     display_name = "A test provider with canned data",
     mount = "test",
-    capabilities(domain(
-        "httpbin.org",
-        "Synthetic fixture endpoint exercised by host guest-loader tests."
-    ),),
+    projection = 1,
+    capabilities(
+        domain(
+            "httpbin.org",
+            "Synthetic fixture endpoint exercised by host guest-loader tests."
+        ),
+        git_repo(
+            "https://fixture.test/*",
+            "Fixture repositories whose trees host tests open."
+        ),
+    ),
     limits(memory_mb(16, "Canned-data fixture needs only a small heap."),),
     events(timer(60, Self::on_tick))
 )]
@@ -423,11 +687,41 @@ impl TestProvider {
         r.file("/hello/live-log").ranged().handler(live_log)?;
         r.dir("/hello/bundle").handler(bundle)?;
         r.dir("/hello/feed").handler(feed)?;
+        r.dir("/hello/validated").handler(validated)?;
+        r.file("/hello/validated-calls").handler(validated_calls)?;
         r.dir("/hello/unbounded").handler(unbounded_feed)?;
         r.dir("/hello/throttled").handler(throttled)?;
         r.dir("/hello/snapshot").handler(snapshot)?;
         r.dir("/hello/snapshot/comments")
             .handler(snapshot_comments)?;
+
+        // Object feeds: the shelf feed answers for its books, the book feed
+        // for a title before the first answer of its shelf ends.
+        r.object::<Shelf>("/shelves/{shelf}", |o| {
+            o.stable();
+            o.file("shelf.json").canonical::<Json>()?;
+            o.file("seen").fed()?;
+            o.dir("books").fed()?;
+            o.feed(Shelf::feed).starts(["books"])?;
+            Ok(())
+        })?;
+        r.object::<Book>("/shelves/{shelf}/books/{book}", |o| {
+            o.stable();
+            o.fed();
+            o.file("book.json").canonical::<Json>()?;
+            o.file("title").fed()?;
+            o.feed(Book::feed).starts(["title"])?;
+            Ok(())
+        })?;
+        r.file("/hello/shelf-log").handler(shelf_log)?;
+        r.file("/hello/shelf-change").handler(shelf_change)?;
+
+        // A tree handoff at the commit the upstream of the repository answers.
+        r.object::<Repo>("/repos/{repo}", |o| {
+            o.stable();
+            o.dir("tree").tree(Repo::tree)?;
+            Ok(())
+        })?;
 
         r.dir("/scoped").handler(scoped)?;
         r.file("/scoped/item").handler(scoped_item)?;
@@ -650,6 +944,54 @@ async fn feed(cx: DirCx<State>) -> Result<DirListing> {
     } else {
         Ok(DirListing::paged(entries, Cursor::Page(page + 1)))
     }
+}
+
+/// Two pages with validators and an interval of one second: the first lists
+/// `v-0` and `v-1` with a cursor, the second `v-2`, complete. A call with the
+/// validator of its page answers `unchanged` with that validator, except the
+/// second revalidation of the first page, which answers a changed page with
+/// `v-1b` in place of `v-1` and the same cursor, and the third, which answers
+/// a complete page with `v-0` alone.
+async fn validated(cx: DirCx<State>) -> Result<DirListing> {
+    if !matches!(cx.intent(), DirIntent::List { .. }) {
+        return Ok(DirListing::exhaustive([]));
+    }
+    cx.state_mut(|state| state.validated_calls += 1);
+    let validator = |token: &str| PageValidator {
+        token: VersionToken::from(token),
+        interval: Some(1),
+    };
+    let page = |names: &[&str], token: &str| {
+        let entries = names.iter().map(|name| Entry::dir(*name));
+        let listing = match cx.cursor() {
+            None => DirListing::paged(entries, Cursor::Page(1)),
+            Some(_) => DirListing::exhaustive(entries),
+        };
+        listing.with_validator(validator(token))
+    };
+    let first_page_stood = cx.state(|state| state.validated_first_page_stood);
+    match (cx.cursor(), cx.version().map(VersionToken::as_str)) {
+        (None, None) => Ok(page(&["v-0", "v-1"], "first-v1")),
+        (None, Some("first-v1")) if !first_page_stood => {
+            cx.state_mut(|state| state.validated_first_page_stood = true);
+            Ok(DirListing::unchanged(validator("first-v1")))
+        },
+        (None, Some("first-v1")) => Ok(page(&["v-0", "v-1b"], "first-v2")),
+        (None, Some("first-v2")) => {
+            Ok(DirListing::exhaustive([Entry::dir("v-0")]).with_validator(validator("first-v3")))
+        },
+        (Some(Cursor::Page(1)), None) => Ok(page(&["v-2"], "second-v1")),
+        (_, Some(token)) => Ok(DirListing::unchanged(validator(token))),
+        (Some(_), None) => Err(ProviderError::not_found("hello/validated has two pages")),
+    }
+}
+
+/// The calls of the `hello/validated` listing so far.
+async fn validated_calls(cx: Cx<State>) -> Result<FileProjection> {
+    let calls = cx.state(|state| state.validated_calls);
+    Ok(FileProjection::body(format!("{calls}\n").into_bytes())
+        .dynamic()
+        .build())
 }
 
 async fn unbounded_feed(cx: DirCx<State>) -> Result<DirListing> {
