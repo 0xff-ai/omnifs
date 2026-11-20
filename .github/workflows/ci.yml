@@ -380,7 +380,7 @@ jobs:
           OMNIFS_BIN="$(pwd)/dist-cli/bin/omnifs" \
           OMNIFS_THIN_BIN="$(pwd)/dist-cli/bin/omnifs-thin" \
           cargo nextest run -p omnifs-itest \
-            -E 'binary(filesystem_matrix) + binary(control_plane) + binary(multi_filesystem) + binary(wire_reattach)' --no-capture
+            -E 'binary(filesystem_matrix) + binary(control_plane) + binary(multi_filesystem) + binary(wire_reattach) + binary(host_restart)' --no-capture
 
       - name: Upload conformance scorecards
         if: always()

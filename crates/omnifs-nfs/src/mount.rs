@@ -1,5 +1,6 @@
 use crate::adapter::Export;
 use crate::error::NfsFilesystemError;
+use crate::mount_events::{MountEvent, MountEvents};
 use crate::persist::{FH_STATE_FILE, FhState, PersistInit};
 use crate::protocol::consts::EXPORT_ROOT_ID;
 use crate::server::start_server;
@@ -11,13 +12,11 @@ use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 use tokio::runtime::Handle;
-
-const MOUNT_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 
 #[cfg(unix)]
 const STATE_DIR_MODE: u32 = 0o700;
@@ -98,29 +97,30 @@ pub fn mount_blocking(
     rt: Handle,
     options: &NfsMountOptions,
 ) -> Result<(), NfsFilesystemError> {
-    // No release comes for this mount: its sender lives as long as the mount.
-    let (_release, released) = mpsc::channel();
+    // No release comes for this mount.
+    let (events, _release) = MountEvents::new()?;
     mount_blocking_cancellable(
         mount_point,
         namespace,
         rt,
         options,
         &AtomicBool::new(false),
-        &released,
+        &events,
     )
 }
 
-/// Serves the mount until it exits. `cancelled` stops a startup; a message
-/// of `released` stops the server without an unmount, keeping the state of
-/// the mount and writing the filehandle table for the next process, which
-/// serves the mount at the same address by the restart path.
+/// Serves the mount until it exits, which `events` give. `cancelled` stops a
+/// startup; the release of `events` stops the server without an unmount,
+/// keeping the state of the mount and writing the filehandle table for the
+/// next process, which serves the mount at the same address by the restart
+/// path.
 pub fn mount_blocking_cancellable(
     mount_point: &Path,
     namespace: Arc<dyn Namespace>,
     rt: Handle,
     options: &NfsMountOptions,
     cancelled: &AtomicBool,
-    released: &mpsc::Receiver<()>,
+    events: &MountEvents,
 ) -> Result<(), NfsFilesystemError> {
     // A stat of an active mount whose server is down blocks: only a mount
     // point without a mount is created.
@@ -175,7 +175,7 @@ pub fn mount_blocking_cancellable(
                 error = %unmount_error,
                 "NFS mount completed while cancellation won; keeping the server alive until teardown succeeds"
             );
-            wait_for_mount_exit(mount_point, None);
+            wait_for_mount_exit(mount_point, events)?;
         }
         return Err(NfsFilesystemError::Mount(
             "mount startup was canceled".to_owned(),
@@ -190,7 +190,7 @@ pub fn mount_blocking_cancellable(
                 %error,
                 "NFS startup cancellation could not unmount; keeping the server alive until teardown succeeds"
             );
-            wait_for_mount_exit(mount_point, None);
+            wait_for_mount_exit(mount_point, events)?;
         }
         return Err(NfsFilesystemError::Mount(
             "mount startup was canceled".to_owned(),
@@ -203,7 +203,7 @@ pub fn mount_blocking_cancellable(
         "NFS loopback mount established"
     );
 
-    if wait_for_mount_exit(mount_point, Some(released)) == MountExit::Released {
+    if wait_for_mount_exit(mount_point, events)? == MountExit::Released {
         state_file.keep();
         tracing::info!(
             mount = %mount_point.display(),
@@ -614,15 +614,17 @@ fn normalize_mount_path(path: &Path) -> PathBuf {
     path.components().collect()
 }
 
-/// Waits for the end of the mount, which the mount table shows, or for a
-/// message of `released`, which wakes the wait at once; a mount without one,
-/// or once its sender is gone, waits for its end alone.
-fn wait_for_mount_exit(mount_point: &Path, mut released: Option<&mpsc::Receiver<()>>) -> MountExit {
+/// Waits for the end of the mount, which the mount table shows after an
+/// unmount, or for the release of `events`, events of the kernel.
+fn wait_for_mount_exit(
+    mount_point: &Path,
+    events: &MountEvents,
+) -> Result<MountExit, NfsFilesystemError> {
     loop {
         match mount_is_active_checked(mount_point) {
             Ok(false) => {
                 tracing::info!("NFS mount exited");
-                return MountExit::Exited;
+                return Ok(MountExit::Exited);
             },
             Ok(true) => {},
             Err(error) => {
@@ -633,11 +635,9 @@ fn wait_for_mount_exit(mount_point: &Path, mut released: Option<&mpsc::Receiver<
                 );
             },
         }
-        match released.map(|released| released.recv_timeout(MOUNT_WAIT_INTERVAL)) {
-            Some(Ok(())) => return MountExit::Released,
-            Some(Err(mpsc::RecvTimeoutError::Timeout)) => {},
-            Some(Err(mpsc::RecvTimeoutError::Disconnected)) => released = None,
-            None => thread::sleep(MOUNT_WAIT_INTERVAL),
+        match events.wait()? {
+            MountEvent::Released => return Ok(MountExit::Released),
+            MountEvent::Changed => {},
         }
     }
 }

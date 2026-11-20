@@ -29,7 +29,7 @@ pub(crate) struct Lifecycle {
 /// owner of its mount, which stops its server without an unmount.
 pub(crate) struct HostRestart {
     requests: mpsc::Receiver<RestartRequest>,
-    release: std::sync::mpsc::Sender<()>,
+    release: omnifs_nfs::Release,
 }
 
 pub(crate) struct LifecycleConfig<'a> {
@@ -38,7 +38,7 @@ pub(crate) struct LifecycleConfig<'a> {
     pub(crate) runner_control: Option<RunnerControlConfig>,
     /// The release of the owner of a mount that restarts in place, which a
     /// host runner takes `Restart` for.
-    pub(crate) release: Option<std::sync::mpsc::Sender<()>>,
+    pub(crate) release: Option<omnifs_nfs::Release>,
 }
 
 pub(crate) struct RunnerControlConfig {
@@ -158,7 +158,7 @@ pub(crate) async fn coordinate_mount(
 /// ends.
 async fn restart_request(
     restart: &mut Option<HostRestart>,
-) -> Option<(RestartRequest, std::sync::mpsc::Sender<()>)> {
+) -> Option<(RestartRequest, omnifs_nfs::Release)> {
     let restart = restart.as_mut()?;
     let request = restart.requests.recv().await?;
     Some((request, restart.release.clone()))
@@ -245,7 +245,13 @@ impl<'a> MountCoordinator<'a> {
                         self.lifecycle.host_restart = None;
                         continue;
                     };
-                    return self.release(request, &release).await;
+                    if let Err(error) = release.release() {
+                        request
+                            .complete(Err(format!("release the mount: {error}")))
+                            .await;
+                        continue;
+                    }
+                    return self.released(request).await;
                 }
                 signal = self.signals.recv() => {
                     if signal.is_none() {
@@ -266,17 +272,11 @@ impl<'a> MountCoordinator<'a> {
         }
     }
 
-    /// Stops the server of a mount that a new instance serves in place: the
-    /// owner of the mount, which `release` wakes, stops its server without an
-    /// unmount and writes its filehandle table, and the runner ends.
-    async fn release(
-        &mut self,
-        request: RestartRequest,
-        release: &std::sync::mpsc::Sender<()>,
-    ) -> anyhow::Result<()> {
+    /// Answers `request` once the owner of a mount that a new instance serves
+    /// in place, which its release woke, has stopped its server without an
+    /// unmount and written its filehandle table; the runner then ends.
+    async fn released(&mut self, request: RestartRequest) -> anyhow::Result<()> {
         self.lifecycle.phase.send_replace(RunnerPhase::Stopping);
-        // An owner that ended has its result in `mount_done`.
-        let _ = release.send(());
         let result = (&mut self.mount_done)
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("mount owner exited without a result")));

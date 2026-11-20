@@ -35,7 +35,8 @@ pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
     let runner_control = host_control.into_config()?;
     // An NFS mount restarts in place: a new instance serves it at the address
     // of its state with its filehandle table, once the release wakes its owner.
-    let (release, released) = std::sync::mpsc::channel();
+    let (events, release) =
+        omnifs_nfs::MountEvents::new().context("watch the mount table of the host")?;
     let mut lifecycle = {
         let _runtime_guard = runtime.enter();
         Lifecycle::prepare(LifecycleConfig {
@@ -84,7 +85,7 @@ pub(crate) fn run(args: crate::RunnerArgs) -> anyhow::Result<()> {
                 handle,
                 &options,
                 &cancelled,
-                &released,
+                &events,
             )
             .context("serve the NFS mount");
             let _ = mount_done_tx.send(result);
