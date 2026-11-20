@@ -1471,7 +1471,8 @@ fn graphql_not_found(repository: &Value) -> HttpResponse {
 /// A first full listing that stops at a comment by its ID continues from that
 /// comment alone at each next read of its folders: the read of a network that
 /// fails again takes its error. Meanwhile the `comments/` of the item is not
-/// complete, so that a read of it takes its comments whole from the item.
+/// complete, so that a read of it takes its comments whole from the item, and
+/// the listing then takes no comment by its ID that this read brought.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_first_full_listing_stopped_at_a_comment_by_its_id_continues_from_it() {
     let harness = github_harness();
@@ -1512,6 +1513,18 @@ async fn a_first_full_listing_stopped_at_a_comment_by_its_id_continues_from_it()
         );
     }
 
+    let (stopped, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/pulls/all"),
+        vec![empty(502, &[])],
+    )
+    .await;
+    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+    assert_eq!(
+        requests[0].url,
+        api("/repos/octocat/hello/issues/comments/12")
+    );
+
     let (comments, requests) = answering(
         &harness,
         names(&harness, "octocat/hello/issues/all/1/comments"),
@@ -1528,31 +1541,16 @@ async fn a_first_full_listing_stopped_at_a_comment_by_its_id_continues_from_it()
         api("/repos/octocat/hello/issues/1/comments?per_page=100&page=1")
     );
 
-    let (stopped, requests) = answering(
-        &harness,
-        names(&harness, "octocat/hello/pulls/all"),
-        vec![empty(502, &[])],
-    )
-    .await;
-    assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
-    assert_eq!(
-        requests[0].url,
-        api("/repos/octocat/hello/issues/comments/12")
-    );
-
     let (listing, requests) = answering(
         &harness,
         names(&harness, "octocat/hello/issues/all"),
-        vec![ok(&comment(12, 1, false, "third")), graphql(&counted(&[]))],
+        vec![graphql(&counted(&[]))],
     )
     .await;
     assert_eq!(listing.unwrap(), ["1"]);
-    assert_eq!(
-        requests[0].url,
-        api("/repos/octocat/hello/issues/comments/12")
-    );
+    assert_eq!(requests.len(), 1);
     assert!(
-        graphql_of(&requests[1])
+        graphql_of(&requests[0])
             .0
             .contains("page: pullRequests(first: 100, after: $after)")
     );
