@@ -181,7 +181,9 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
             assert!(names.contains(&"all"));
             assert!(names.contains(&"raw"));
         },
-        other @ ListChildrenResult::Subtree(_) => {
+        other @ (ListChildrenResult::Subtree(_)
+        | ListChildrenResult::Unchanged(_)
+        | ListChildrenResult::Feed(_)) => {
             panic!("expected domain listing, got {other:?}")
         },
     }
@@ -196,7 +198,9 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
                 .collect();
             assert_eq!(names, vec!["README.md"]);
         },
-        other @ ListChildrenResult::Subtree(_) => {
+        other @ (ListChildrenResult::Subtree(_)
+        | ListChildrenResult::Unchanged(_)
+        | ListChildrenResult::Feed(_)) => {
             panic!("expected reverse dir listing, got {other:?}")
         },
     }
@@ -213,7 +217,9 @@ async fn dns_provider_routes_static_and_dynamic_paths() {
                 "resolver reverse dir should not eagerly list dynamic children: {listing:?}"
             );
         },
-        other @ ListChildrenResult::Subtree(_) => {
+        other @ (ListChildrenResult::Subtree(_)
+        | ListChildrenResult::Unchanged(_)
+        | ListChildrenResult::Feed(_)) => {
             panic!("expected resolver reverse dir listing, got {other:?}")
         },
     }

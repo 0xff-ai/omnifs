@@ -104,7 +104,9 @@ pub enum AttachOutcome {
 fn inspector_line(item: omnifs_api::grpc::wire::InspectorStreamItem) -> Result<InspectorLine> {
     match item.value {
         Some(omnifs_api::grpc::wire::inspector_stream_item::Value::JsonLine(bytes)) => {
-            serde_json::from_slice(&bytes).context("invalid inspector JSON line")
+            serde_json::from_slice(&bytes)
+                .map(InspectorLine::Record)
+                .context("invalid inspector JSON line")
         },
         Some(omnifs_api::grpc::wire::inspector_stream_item::Value::Dropped(count)) => {
             Ok(InspectorLine::Dropped { count })
@@ -534,6 +536,31 @@ mod tests {
     use super::*;
     use omnifs_api::events::{InspectorEvent, InspectorRecord};
     use time::format_description::well_known::Rfc3339;
+
+    #[test]
+    fn a_line_of_the_stream_of_the_daemon_is_its_record() {
+        let record = InspectorRecord::new(
+            "2026-05-23T00:00:00Z",
+            1,
+            7,
+            InspectorEvent::FuseStart {
+                op: "lookup".into(),
+                mount: "github".into(),
+                path: "/a".into(),
+            },
+        );
+        let item = omnifs_api::grpc::wire::InspectorStreamItem {
+            value: Some(
+                omnifs_api::grpc::wire::inspector_stream_item::Value::JsonLine(
+                    serde_json::to_vec(&record).expect("record").into(),
+                ),
+            ),
+        };
+        assert_eq!(
+            inspector_line(item).expect("line"),
+            InspectorLine::Record(record)
+        );
+    }
 
     #[test]
     fn replay_reports_malformed_line_as_failed_terminal_message() {

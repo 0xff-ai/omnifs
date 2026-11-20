@@ -309,17 +309,15 @@ impl Fixture {
         loop {
             let output = self.run(&["fs", "ls", "--output", "json"]);
             if output.status.success()
-                && serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                    .ok()
-                    .is_some_and(|value| {
-                        value["result"]["filesystems"]
-                            .as_array()
-                            .is_some_and(|filesystems| {
-                                filesystems.iter().any(|filesystem| {
-                                    filesystem["id"] == id && filesystem["state"] == "attached"
-                                })
+                && serde_json::from_slice::<serde_json::Value>(&output.stdout).is_ok_and(|value| {
+                    value["result"]["filesystems"]
+                        .as_array()
+                        .is_some_and(|filesystems| {
+                            filesystems.iter().any(|filesystem| {
+                                filesystem["id"] == id && filesystem["state"] == "attached"
                             })
-                    })
+                        })
+                })
             {
                 return;
             }

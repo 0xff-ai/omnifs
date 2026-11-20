@@ -8,13 +8,13 @@ use crate::protocol::compound::handle_compound;
 use crate::protocol::consts::{
     CLAIM_NULL, FATTR4_FILEID, FATTR4_SIZE, FATTR4_TYPE, NF4REG, NFS4_OK, NFS4ERR_DELAY,
     NFS4ERR_FHEXPIRED, NFS4ERR_INVAL, NFS4ERR_MINOR_VERS_MISMATCH, NFS4ERR_NOENT,
-    NFS4ERR_NOFILEHANDLE, NFS4ERR_NOT_SAME, NFS4ERR_NOTDIR, NFS4ERR_NOTSUPP, NFS4ERR_OP_ILLEGAL,
+    NFS4ERR_NOFILEHANDLE, NFS4ERR_NOTDIR, NFS4ERR_NOTSUPP, NFS4ERR_OP_ILLEGAL,
     NFS4ERR_STALE_CLIENTID, NFS4ERR_SYMLINK, NFS4ERR_TOOSMALL, OP_CLOSE, OP_GETATTR, OP_GETFH,
     OP_ILLEGAL, OP_LOOKUP, OP_OPEN, OP_OPEN_CONFIRM, OP_PUTFH, OP_PUTROOTFH, OP_READ, OP_READDIR,
     OP_READLINK, OP_SECINFO,
 };
 use crate::protocol::filehandle::{client_id, decode_file_handle, file_handle, now_sec};
-use crate::protocol::ops::readdir;
+use crate::protocol::ops::{readdir, readdir_cookie};
 use crate::protocol::xdr::{XdrError, XdrReader, XdrWriter};
 use crate::trace::Trace;
 use std::collections::BTreeMap;
@@ -429,7 +429,6 @@ fn synthetic_protocol_edge_cases() {
         &export,
         Some(export.root()),
         0,
-        &[0xcc; 8],
         4096,
         &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
     );
@@ -445,11 +444,10 @@ fn synthetic_protocol_edge_cases() {
         &export,
         Some(export.root()),
         5,
-        &[0xbb; 8],
         4096,
         &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
     );
-    assert_eq!(status, NFS4ERR_NOT_SAME);
+    assert_eq!(status, NFS4_OK);
 }
 
 #[test]
@@ -512,7 +510,6 @@ fn synthetic_readdir_respects_maxcount() {
         &export,
         Some(export.root()),
         0,
-        &[0; 8],
         96,
         &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
     );
@@ -524,34 +521,70 @@ fn synthetic_readdir_respects_maxcount() {
 }
 
 #[test]
-fn synthetic_readdir_uses_snapshot_verifier_for_continuation() {
+fn synthetic_readdir_continues_from_the_cookie_of_a_name() {
     let export = StaticExport::fixture();
     let (status, first) = readdir(
         &export,
         Some(export.root()),
         0,
-        &[0xaa; 8],
         96,
         &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
     );
     assert_eq!(status, NFS4_OK);
     let first = decode_readdir_result(&first);
     assert_eq!(first.entries.len(), 1);
-    assert_eq!(first.entries[0].1, "README.txt");
+    assert!(!first.eof);
 
     let (status, second) = readdir(
         &export,
         Some(export.root()),
         first.entries[0].0,
-        &first.verifier,
         4096,
         &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
     );
     assert_eq!(status, NFS4_OK);
     let second = decode_readdir_result(&second);
-    assert_eq!(second.verifier, first.verifier);
-    assert_eq!(second.entries, vec![(4, "readme-link".to_string())]);
     assert!(second.eof);
+    let mut listed = [first.entries, second.entries].concat();
+    listed.sort();
+    assert_eq!(listed, listing(&["README.txt", "readme-link"]));
+
+    // The cookie of a name that left the directory continues the listing
+    // with the entries past it, as the cookie of a name in it does.
+    for (gone, rest) in [
+        (
+            readdir_cookie("README.txt") - 1,
+            &["README.txt", "readme-link"][..],
+        ),
+        (
+            readdir_cookie("readme-link") - 1,
+            &["README.txt", "readme-link"][..],
+        ),
+    ] {
+        let (status, result) = readdir(
+            &export,
+            Some(export.root()),
+            gone,
+            4096,
+            &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
+        );
+        assert_eq!(status, NFS4_OK);
+        let expected: Vec<_> = listing(rest)
+            .into_iter()
+            .filter(|(cookie, _)| *cookie > gone)
+            .collect();
+        assert_eq!(decode_readdir_result(&result).entries, expected);
+    }
+}
+
+/// The entries `names` of a listing with their cookies, in their order.
+fn listing(names: &[&str]) -> Vec<(u64, String)> {
+    let mut entries: Vec<_> = names
+        .iter()
+        .map(|name| (readdir_cookie(name), (*name).to_string()))
+        .collect();
+    entries.sort();
+    entries
 }
 
 #[test]
@@ -565,19 +598,12 @@ fn synthetic_readdir_non_exhaustive_listing_returns_known_snapshot() {
         &export,
         Some(export.root()),
         0,
-        &[0; 8],
         4096,
         &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
     );
     assert_eq!(status, NFS4_OK);
     let decoded = decode_readdir_result(&result);
-    assert_eq!(
-        decoded.entries,
-        vec![
-            (3, "README.txt".to_string()),
-            (4, "readme-link".to_string())
-        ]
-    );
+    assert_eq!(decoded.entries, listing(&["README.txt", "readme-link"]));
     assert!(decoded.eof);
 }
 
@@ -661,19 +687,12 @@ fn synthetic_readdir_sorts_entries_before_assigning_cookies() {
         &export,
         Some(export.root()),
         0,
-        &[0; 8],
         4096,
         &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
     );
     assert_eq!(status, NFS4_OK);
     let decoded = decode_readdir_result(&result);
-    assert_eq!(
-        decoded.entries,
-        vec![
-            (3, "README.txt".to_string()),
-            (4, "readme-link".to_string())
-        ]
-    );
+    assert_eq!(decoded.entries, listing(&["README.txt", "readme-link"]));
 }
 
 #[test]
@@ -683,7 +702,6 @@ fn synthetic_readdir_maxcount_exact_boundary_includes_trailer() {
         &export,
         Some(export.root()),
         0,
-        &[0; 8],
         4096,
         &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
     );
@@ -694,7 +712,6 @@ fn synthetic_readdir_maxcount_exact_boundary_includes_trailer() {
         &export,
         Some(export.root()),
         0,
-        &[0; 8],
         maxcount,
         &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
     );
@@ -705,7 +722,6 @@ fn synthetic_readdir_maxcount_exact_boundary_includes_trailer() {
         &export,
         Some(export.root()),
         0,
-        &[0; 8],
         maxcount - 1,
         &[FATTR4_TYPE, FATTR4_SIZE, FATTR4_FILEID],
     );

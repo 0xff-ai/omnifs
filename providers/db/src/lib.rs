@@ -106,6 +106,7 @@ pub(crate) struct TableDoc {
     display_name = "Database",
     description = "tables and rows of a local database",
     mount = "db",
+    projection = 1,
     capabilities(preopened_path(
         dynamic,
         "Expose the configured database file to the sandbox as a read-only WASI preopen, resolved from the `path` config field at mount-start."

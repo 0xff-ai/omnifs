@@ -422,11 +422,13 @@ impl PromptMode {
 /// pass it through short-lived progress handles instead of consulting
 /// process-global switches.
 #[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)] // the independent global flags of the invocation
 pub(crate) struct Output {
     mode: OutputMode,
     quiet: bool,
     no_input: bool,
     yes: bool,
+    wait_for_daemon: bool,
     command: &'static str,
     state: Arc<Mutex<OutputState>>,
     stdout: Arc<Mutex<OutputWriter>>,
@@ -440,6 +442,7 @@ impl std::fmt::Debug for Output {
             .field("quiet", &self.quiet)
             .field("no_input", &self.no_input)
             .field("yes", &self.yes)
+            .field("wait_for_daemon", &self.wait_for_daemon)
             .field("command", &self.command)
             .finish_non_exhaustive()
     }
@@ -452,6 +455,7 @@ impl Output {
             quiet,
             no_input: false,
             yes: false,
+            wait_for_daemon: false,
             command: "invocation",
             state: Arc::new(Mutex::new(OutputState::default())),
             stdout: Arc::new(Mutex::new(Box::new(io::stdout()))),
@@ -511,6 +515,12 @@ impl Output {
 
     pub(crate) const fn yes(&self) -> bool {
         self.yes
+    }
+
+    /// Whether the invocation waits for a daemon that another process
+    /// starts, without starting one.
+    pub(crate) const fn wait_for_daemon(&self) -> bool {
+        self.wait_for_daemon
     }
 
     pub(crate) const fn command(&self) -> &'static str {
@@ -664,6 +674,11 @@ impl Output {
 
     pub(crate) const fn with_yes(mut self, yes: bool) -> Self {
         self.yes = yes;
+        self
+    }
+
+    pub(crate) const fn with_wait_for_daemon(mut self, wait_for_daemon: bool) -> Self {
+        self.wait_for_daemon = wait_for_daemon;
         self
     }
 

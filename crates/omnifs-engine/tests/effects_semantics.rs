@@ -6,7 +6,7 @@ use omnifs_engine::{DirCursor, EntryKind, Namespace};
 use omnifs_itest::make_initialized_runtime;
 use omnifs_wit::host::types::{
     ByteSource, CanonicalStore, Effects, FileAttrs, FileOut, FileSize, FsKind, FsWrite, IdCapture,
-    LogicalId, Stability,
+    ListingWrite, LogicalId, Stability,
 };
 
 const CONFIG: &str = r#"{"provider":"test_provider.wasm","mount":"test"}"#;
@@ -46,7 +46,7 @@ async fn published_effects_atomically_expose_object_file_attrs_and_dirents() {
             FsWrite {
                 id: None,
                 path: "/hello/bundle".into(),
-                kind: FsKind::Directory(true),
+                kind: FsKind::Directory(ListingWrite::Exhaustive),
             },
             FsWrite {
                 id: Some(id()),
@@ -63,6 +63,7 @@ async fn published_effects_atomically_expose_object_file_attrs_and_dirents() {
             },
         ],
         invalidations: Vec::new(),
+        removals: Vec::new(),
     };
     publish_effects_for_test(
         &harness.runtime,

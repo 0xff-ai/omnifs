@@ -3,9 +3,9 @@ use crate::protocol::consts::{
     NFS4ERR_BAD_COOKIE, NFS4ERR_BAD_STATEID, NFS4ERR_BADHANDLE, NFS4ERR_DELAY, NFS4ERR_EXPIRED,
     NFS4ERR_FHEXPIRED, NFS4ERR_INVAL, NFS4ERR_IO, NFS4ERR_ISDIR, NFS4ERR_LOCK_NOTSUPP,
     NFS4ERR_MINOR_VERS_MISMATCH, NFS4ERR_NO_GRACE, NFS4ERR_NOENT, NFS4ERR_NOFILEHANDLE,
-    NFS4ERR_NOT_SAME, NFS4ERR_NOTDIR, NFS4ERR_NOTSUPP, NFS4ERR_OLD_STATEID, NFS4ERR_OP_ILLEGAL,
-    NFS4ERR_OPENMODE, NFS4ERR_RESOURCE, NFS4ERR_ROFS, NFS4ERR_STALE, NFS4ERR_STALE_CLIENTID,
-    NFS4ERR_SYMLINK, NFS4ERR_TOOSMALL, OPEN_STATE_LEASE_SECONDS, OPEN4_SHARE_ACCESS_READ,
+    NFS4ERR_NOTDIR, NFS4ERR_NOTSUPP, NFS4ERR_OLD_STATEID, NFS4ERR_OP_ILLEGAL, NFS4ERR_OPENMODE,
+    NFS4ERR_RESOURCE, NFS4ERR_ROFS, NFS4ERR_STALE, NFS4ERR_STALE_CLIENTID, NFS4ERR_SYMLINK,
+    NFS4ERR_TOOSMALL, OPEN_STATE_LEASE_SECONDS, OPEN4_SHARE_ACCESS_READ,
 };
 use dashmap::DashMap;
 use omnifs_vfs::{NsError, NsRetryClass};
@@ -32,7 +32,6 @@ pub enum Status {
     NoFileHandle,
     NoGrace,
     NotDir,
-    NotSame,
     NotSupported,
     OldStateId,
     OpenMode,
@@ -64,7 +63,6 @@ impl Status {
             Self::NoFileHandle => NFS4ERR_NOFILEHANDLE,
             Self::NoGrace => NFS4ERR_NO_GRACE,
             Self::NotDir => NFS4ERR_NOTDIR,
-            Self::NotSame => NFS4ERR_NOT_SAME,
             Self::NotSupported => NFS4ERR_NOTSUPP,
             Self::OldStateId => NFS4ERR_OLD_STATEID,
             Self::OpenMode => NFS4ERR_OPENMODE,
@@ -82,8 +80,7 @@ impl Status {
 /// Reactive NFS status mapping for definitive and transient [`NsError`] kinds.
 ///
 /// `RateLimited`, `Timeout`, and `Network` map to [`Status::Delay`] so the client
-/// retries. This path does not spawn background work; proactive `READDIR` deferral
-/// is separate (`delayed::PendingListings`).
+/// retries. This path does not spawn background work.
 impl From<&NsError> for Status {
     fn from(error: &NsError) -> Self {
         match error.retry_class() {
