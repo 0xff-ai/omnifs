@@ -1963,6 +1963,7 @@ mod tests {
     /// place. The nodes of the tree answer with the zero lifetime of dynamic
     /// entries.
     #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)]
     async fn a_tree_past_its_deadline_follows_the_commit_of_its_upstream() {
         use crate::authority::RuntimeAuthority;
         use crate::cache::identity::GitId;
