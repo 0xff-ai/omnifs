@@ -13,18 +13,18 @@
 #![allow(clippy::unnecessary_wraps, clippy::manual_async_fn)]
 
 use omnifs_sdk::__wit::provider::types as wit_types;
-use omnifs_sdk::browse::{CachedCanonical, List, ReadOutcome};
+use omnifs_sdk::browse::{CachedCanonical, List, PageValidator, ReadOutcome};
 use omnifs_sdk::captures::{Captures, FromCaptures, PathSegment};
 use omnifs_sdk::collection::{Collection, CollectionEntry, ListCx, NoCursor, PageCursor};
 use omnifs_sdk::cx::Cx;
 use omnifs_sdk::error::{ProviderError, Result};
-use omnifs_sdk::file_attrs::{FileSize, Stability};
-use omnifs_sdk::handler::MemoryRangeReader;
+use omnifs_sdk::file_attrs::{FileSize, Stability, VersionToken};
+use omnifs_sdk::handler::{DirCx, MemoryRangeReader, Tree, TreeRef};
 use omnifs_sdk::identity::{Facet, IdentityCaptures};
 use omnifs_sdk::object::{
     Canonical, FacetAxis, FacetMetadata, Key, Load, Object, ObjectEntry, ObjectKind, Validator,
 };
-use omnifs_sdk::projection::{FileProjection, StreamFile};
+use omnifs_sdk::projection::{DirListing, Entry, FileProjection, StreamFile};
 use omnifs_sdk::repr::{Json, Markdown, Representable};
 use omnifs_sdk::router::{CompiledRouter, Router};
 use std::cell::RefCell;
@@ -79,7 +79,9 @@ fn list_wit(list: List) -> (wit_types::ListChildrenResult, wit_types::Effects) {
 fn found(outcome: &wit_types::ReadFileOutcome) -> &wit_types::ReadFileResult {
     match outcome {
         wit_types::ReadFileOutcome::Found(result) => result,
-        wit_types::ReadFileOutcome::NotFound(_) => panic!("expected a found read outcome"),
+        wit_types::ReadFileOutcome::NotFound(_) | wit_types::ReadFileOutcome::Feed(_) => {
+            panic!("expected a found read outcome")
+        },
     }
 }
 
@@ -868,6 +870,158 @@ fn anchor_collection_page_is_partial_and_carries_cursor() {
 }
 
 // ===========================================================================
+// Page validators
+// ===========================================================================
+
+/// An anchor object whose load fails when it sees a validator: the validator
+/// of a listing page belongs to the page, never to the anchor object.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StrictOwner {
+    name: String,
+}
+impl Object for StrictOwner {
+    type Key = OwnerKey;
+    type State = ();
+    type Canonical = Json;
+    fn load(
+        cx: &Cx<()>,
+        key: &OwnerKey,
+        since: Option<Validator>,
+    ) -> impl Future<Output = Result<Load<Self>>> {
+        let seen = since.is_some() || cx.version().is_some();
+        let owner = key.owner.clone();
+        async move {
+            if seen {
+                return Err(ProviderError::internal(
+                    "the anchor object load saw the validator of a page",
+                ));
+            }
+            Ok(Load::fresh(
+                StrictOwner {
+                    name: owner.clone(),
+                },
+                Canonical::new(format!(r#"{{"name":"{owner}"}}"#).into_bytes(), None),
+            ))
+        }
+    }
+    fn decode(bytes: &[u8]) -> Result<Self> {
+        omnifs_sdk::object::decode_json(bytes)
+    }
+    fn kind() -> ObjectKind {
+        ObjectKind("test.strict_owner")
+    }
+}
+
+async fn list_repos_validated(
+    key: OwnerKey,
+    cx: ListCx<NoCursor, ()>,
+) -> Result<Collection<Repo, NoCursor>> {
+    if cx
+        .validator()
+        .is_some_and(|validator| validator.as_str() == "repos-v1")
+    {
+        return Ok(Collection::unchanged(PageValidator {
+            token: VersionToken::from("repos-v1"),
+            interval: Some(60),
+        }));
+    }
+    Ok(Collection::complete([CollectionEntry::key(RepoKey {
+        owner: key.owner.clone(),
+        repo: "gvfs".into(),
+    })])
+    .with_validator(PageValidator {
+        token: VersionToken::from("repos-v1"),
+        interval: Some(60),
+    }))
+}
+
+#[test]
+fn anchor_collection_page_validator_reaches_the_collection_and_not_the_anchor_load() {
+    let mut r = Router::<()>::new();
+    r.object::<StrictOwner>("/{owner}", |o| {
+        o.dynamic();
+        o.file("owner.json").canonical::<Json>()?;
+        o.dir("{repo}").collection(list_repos_validated)?;
+        Ok(())
+    })
+    .unwrap();
+    r.object::<Repo>("/{owner}/{repo}", |o| {
+        o.dynamic();
+        o.file("repo.json").canonical::<Json>()?;
+        Ok(())
+    })
+    .unwrap();
+    let r = r.compile().unwrap();
+
+    let cx = cx();
+    let (out, _effects) = list_wit(drive(&cx, r.list_children(&cx, "/o", None)));
+    let wit_types::ListChildrenResult::Entries(listing) = out else {
+        panic!("owner anchor lists entries");
+    };
+    let validator = listing.validator.expect("the page carries its validator");
+    assert_eq!(validator.token, "repos-v1");
+    assert_eq!(validator.interval, Some(60));
+
+    let cx = cx.with_version(Some(VersionToken::from("repos-v1")));
+    let (out, effects) = list_wit(drive(&cx, r.list_children(&cx, "/o", None)));
+    assert!(matches!(
+        out,
+        wit_types::ListChildrenResult::Unchanged(Some(wit_types::PageValidator {
+            ref token,
+            interval: Some(60),
+        })) if token == "repos-v1"
+    ));
+    assert!(
+        effects.canonical.is_empty(),
+        "an unchanged page answers without the load of the anchor object"
+    );
+}
+
+async fn validated_dir(cx: DirCx<()>) -> Result<DirListing> {
+    if cx
+        .version()
+        .is_some_and(|validator| validator.as_str() == "dir-v1")
+    {
+        return Ok(DirListing::unchanged(PageValidator {
+            token: VersionToken::from("dir-v1"),
+            interval: None,
+        }));
+    }
+    Ok(
+        DirListing::exhaustive([Entry::file("a")]).with_validator(PageValidator {
+            token: VersionToken::from("dir-v1"),
+            interval: None,
+        }),
+    )
+}
+
+#[test]
+fn dir_handler_page_validator_lowers_and_unchanged_answers_its_validator() {
+    let mut r = Router::<()>::new();
+    r.dir("/d").handler(validated_dir).unwrap();
+    let r = r.compile().unwrap();
+
+    let cx = cx();
+    let (out, _effects) = list_wit(drive(&cx, r.list_children(&cx, "/d", None)));
+    let wit_types::ListChildrenResult::Entries(listing) = out else {
+        panic!("the dir handler lists entries");
+    };
+    let validator = listing.validator.expect("the page carries its validator");
+    assert_eq!(validator.token, "dir-v1");
+    assert_eq!(validator.interval, None);
+
+    let cx = cx.with_version(Some(VersionToken::from("dir-v1")));
+    let (out, _effects) = list_wit(drive(&cx, r.list_children(&cx, "/d", None)));
+    assert!(matches!(
+        out,
+        wit_types::ListChildrenResult::Unchanged(Some(wit_types::PageValidator {
+            ref token,
+            interval: None,
+        })) if token == "dir-v1"
+    ));
+}
+
+// ===========================================================================
 // Direct face
 // ===========================================================================
 
@@ -1033,9 +1187,23 @@ async fn bare_live(_cx: Cx<()>, key: ItemKey) -> Result<FileProjection> {
 // Tree face (FIX A): an object dir tree face dispatches the subtree handoff
 // ===========================================================================
 
-/// A tree dir face's method: hand a host-resolved subtree off.
-async fn repo_tree(_cx: Cx<()>, _key: RepoKey) -> Result<omnifs_sdk::handler::TreeRef> {
-    Ok(omnifs_sdk::handler::TreeRef::new(7))
+const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// A tree dir face's method: hand a host-resolved subtree off at its commit,
+/// unchanged while the commit of the call stands.
+async fn repo_tree(cx: Cx<()>, _key: RepoKey) -> Result<Tree> {
+    if cx
+        .version()
+        .is_some_and(|version| version.as_str() == COMMIT)
+    {
+        return Ok(Tree::unchanged());
+    }
+    Ok(Tree::at(TreeRef::new(7), COMMIT))
+}
+
+/// Whether `subtree` hands off tree 7 at its commit.
+fn is_handoff(subtree: &wit_types::Subtree) -> bool {
+    subtree.tree == 7 && subtree.commit == COMMIT
 }
 
 fn tree_face_router() -> CompiledRouter<()> {
@@ -1061,7 +1229,7 @@ fn object_tree_face_lookup_returns_subtree_handoff() {
     let lookup = drive(&cx, r.lookup_child(&cx, "/torvalds/linux", "repo"));
     let (out, _effects) = lookup.into_result_and_effects();
     assert!(
-        matches!(out, wit_types::LookupChildResult::Subtree(7)),
+        matches!(&out, wit_types::LookupChildResult::Subtree(handoff) if is_handoff(handoff)),
         "the tree face must dispatch a subtree handoff, got {out:?} (FIX A)"
     );
 }
@@ -1073,8 +1241,29 @@ fn object_tree_face_list_returns_subtree_handoff() {
     let list = drive(&cx, r.list_children(&cx, "/torvalds/linux/repo", None));
     let (out, _effects) = list.into_result_and_effects();
     assert!(
-        matches!(out, wit_types::ListChildrenResult::Subtree(7)),
+        matches!(&out, wit_types::ListChildrenResult::Subtree(handoff) if is_handoff(handoff)),
         "listing the tree path returns the subtree handoff, got {out:?} (FIX A)"
+    );
+}
+
+/// The commit of the validator of `list-children` stands as `unchanged`; a
+/// lookup carries no validator, so a tree answering it unchanged errs.
+#[test]
+fn object_tree_face_answers_unchanged_for_the_commit_of_the_call() {
+    let r = tree_face_router();
+    let cx = cx().with_version(Some(VersionToken::from(COMMIT)));
+    let list = drive(&cx, r.list_children(&cx, "/torvalds/linux/repo", None));
+    let (out, _effects) = list.into_result_and_effects();
+    assert!(
+        matches!(out, wit_types::ListChildrenResult::Unchanged(None)),
+        "the commit of the call stands, got {out:?}"
+    );
+
+    let error = drive_result(&cx, r.lookup_child(&cx, "/torvalds/linux", "repo"))
+        .expect_err("a lookup takes no unchanged tree");
+    assert!(
+        error.to_string().contains("carries no validator"),
+        "{error}"
     );
 }
 
@@ -1084,14 +1273,18 @@ fn aliased_object_tree_face_replays_lookup_and_list_handoff() {
     let cx = cx();
     let lookup = drive(&cx, r.lookup_child(&cx, "/torvalds/mirrorlinux", "repo"));
     let (lookup, _) = lookup.into_result_and_effects();
-    assert!(matches!(lookup, wit_types::LookupChildResult::Subtree(7)));
+    assert!(
+        matches!(&lookup, wit_types::LookupChildResult::Subtree(handoff) if is_handoff(handoff))
+    );
 
     let list = drive(
         &cx,
         r.list_children(&cx, "/torvalds/mirrorlinux/repo", None),
     );
     let (list, _) = list.into_result_and_effects();
-    assert!(matches!(list, wit_types::ListChildrenResult::Subtree(7)));
+    assert!(
+        matches!(&list, wit_types::ListChildrenResult::Subtree(handoff) if is_handoff(handoff))
+    );
 }
 
 // ===========================================================================

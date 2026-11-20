@@ -7,10 +7,10 @@
 
 mod adapter;
 mod cache;
-mod delayed;
 mod error;
 mod export;
 mod mount;
+mod mount_events;
 mod persist;
 mod protocol;
 mod server;
@@ -26,6 +26,7 @@ pub use mount::{
     NfsMountOptions, mount_blocking, mount_blocking_cancellable, mount_is_active,
     mount_is_active_checked, mount_is_omnifs, unmount,
 };
+pub use mount_events::{MountEvents, Release};
 pub use protocol::consts::{
     NFS4_OK, NFS4ERR_ACCESS, NFS4ERR_INVAL, NFS4ERR_IO, NFS4ERR_ISDIR, NFS4ERR_NOENT,
     NFS4ERR_NOTDIR, NFS4ERR_RESOURCE, NFS4ERR_ROFS, NFS4ERR_STALE,

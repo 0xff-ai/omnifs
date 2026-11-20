@@ -263,6 +263,19 @@ impl<S> Router<S> {
             });
         }
 
+        // Register each fed dir face as a fed dir route at `template/name`:
+        // its listing answers the claims of its feeds, which compilation
+        // resolves, and its captures validate through the object's key until
+        // compilation finds the routes beneath it.
+        for name in handle.fed_dirs() {
+            let fed_path = format!("{mount}/{name}");
+            self.dirs.push(super::handlers::DirEntry {
+                pattern: Pattern::parse(&fed_path)?,
+                handler: DirHandler::Fed(Vec::new()),
+                validator: super::handlers::captures_validator::<O::Key>(),
+            });
+        }
+
         self.object_metadata.push(ObjectMountMetadata {
             pattern,
             kind: O::kind(),
@@ -317,6 +330,7 @@ impl<S> Router<S> {
     {
         self.validate_capture_compatibility()?;
         let collection_descriptors = self.resolve_collections()?;
+        self.resolve_feeds()?;
         let claims = self.route_claims()?;
 
         for (i, left) in claims.iter().enumerate() {
@@ -459,6 +473,132 @@ impl<S> Router<S> {
         Ok(())
     }
 
+    /// Resolve the feeds: check that each starting path names a fed face of
+    /// its object's subtree, give each fed face the claims of the feeds of
+    /// its ancestry, the outer object first, and validate the captures of a
+    /// fed dir route through the object routes beneath it.
+    fn resolve_feeds(&mut self) -> Result<()> {
+        let fed_faces = self.fed_face_templates();
+
+        // (object index, anchor template, declared starts) of every feed.
+        let feeds = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                entry.feed.as_ref().map(|feed| {
+                    let declared = feed
+                        .starts
+                        .iter()
+                        .map(|start| start.declared)
+                        .collect::<Vec<_>>();
+                    (index, entry.pattern.template(), declared)
+                })
+            })
+            .collect::<Vec<_>>();
+        // A feed claims a fed face when its anchor template can be a leading
+        // part of the face's paths, and the face is a starting path of the
+        // feed when the rest of its template is a declared starting path.
+        // Dispatch keeps the claims whose object the router resolves at the
+        // leading segments of the concrete path.
+        for (_, anchor, declared) in &feeds {
+            for start in declared {
+                if !fed_faces
+                    .iter()
+                    .any(|face| leading_template(anchor, face).as_deref() == Some(*start))
+                {
+                    return Err(ProviderError::invalid_input(format!(
+                        "feed of {anchor}: starting path {start:?} is not a fed face of its subtree"
+                    )));
+                }
+            }
+        }
+
+        let claims_of = |face: &str| -> Result<Vec<super::object::ClaimSpec>> {
+            let mut claims = feeds
+                .iter()
+                .filter_map(|(index, anchor, declared)| {
+                    let rest = leading_template(anchor, face)?;
+                    Some((
+                        anchor.split('/').count(),
+                        super::object::ClaimSpec {
+                            object: *index,
+                            starts: declared.contains(&rest.as_str()),
+                        },
+                    ))
+                })
+                .collect::<Vec<_>>();
+            if claims.is_empty() {
+                return Err(ProviderError::invalid_input(format!(
+                    "fed face {face} has no feed in its ancestry"
+                )));
+            }
+            claims.sort_by_key(|(depth, _)| *depth);
+            Ok(claims.into_iter().map(|(_, claim)| claim).collect())
+        };
+
+        for index in 0..self.objects.len() {
+            let anchor = self.objects[index].pattern.template();
+            if self.objects[index].anchor_claims.is_some() {
+                self.objects[index].anchor_claims = Some(claims_of(&anchor)?);
+            }
+            let fed_leaves = self.objects[index]
+                .leaves
+                .iter()
+                .filter(|leaf| leaf.kind == super::object::LeafKind::Fed)
+                .map(|leaf| leaf.name.clone())
+                .collect::<Vec<_>>();
+            for name in fed_leaves {
+                let claims = claims_of(&face_template(&anchor, &name))?;
+                self.objects[index].leaf_claims.insert(name, claims);
+            }
+        }
+        for index in 0..self.dirs.len() {
+            if self.dirs[index].fed_claims().is_none() {
+                continue;
+            }
+            let template = self.dirs[index].pattern.template();
+            self.dirs[index].handler = DirHandler::Fed(claims_of(&template)?);
+            let beneath = self
+                .objects
+                .iter()
+                .filter(|entry| {
+                    relative_template(&template, &entry.pattern.template())
+                        .is_some_and(|rest| !rest.is_empty())
+                })
+                .map(|entry| entry.validator.clone())
+                .collect::<Vec<_>>();
+            if !beneath.is_empty() {
+                self.dirs[index].validator =
+                    super::handlers::present_validator(&self.dirs[index].pattern, beneath);
+            }
+        }
+        Ok(())
+    }
+
+    /// The templates of every fed face: fed anchors, fed file faces, and fed
+    /// dir routes.
+    fn fed_face_templates(&self) -> BTreeSet<String> {
+        let mut fed_faces = BTreeSet::new();
+        for entry in &self.objects {
+            let anchor = entry.pattern.template();
+            if entry.anchor_claims.is_some() {
+                fed_faces.insert(anchor.clone());
+            }
+            for leaf in &entry.leaves {
+                if leaf.kind == super::object::LeafKind::Fed {
+                    fed_faces.insert(face_template(&anchor, &leaf.name));
+                }
+            }
+        }
+        for entry in &self.dirs {
+            if entry.fed_claims().is_some() {
+                fed_faces.insert(entry.pattern.template());
+            }
+        }
+        fed_faces
+    }
+
     /// Resolve every mounted collection against the object entries and lower it
     /// directly into the final nested or anchor route shape.
     fn resolve_collections(&mut self) -> Result<Vec<RouteDescriptor>>
@@ -578,6 +718,52 @@ impl<S> Router<S> {
         }
         Ok(descriptor)
     }
+}
+
+/// The template of a face named `name` under an anchor template (`""` names
+/// the anchor itself).
+fn face_template(anchor: &str, name: &str) -> String {
+    if name.is_empty() {
+        anchor.to_string()
+    } else {
+        format!("{}/{name}", anchor.trim_end_matches('/'))
+    }
+}
+
+/// The rest of the template `path` after the segments the template `anchor`
+/// can match (`""` for the anchor itself), or `None` when no path of `path`
+/// can start with a path of `anchor`: two literal segments must be equal,
+/// and a capture can take any segment.
+fn leading_template(anchor: &str, path: &str) -> Option<String> {
+    let anchor = anchor
+        .split('/')
+        .skip(1)
+        .filter(|segment| !segment.is_empty());
+    let mut segments = path
+        .split('/')
+        .skip(1)
+        .filter(|segment| !segment.is_empty());
+    for anchor_segment in anchor {
+        let segment = segments.next()?;
+        let literal = |segment: &str| !segment.contains('{');
+        if literal(anchor_segment) && literal(segment) && anchor_segment != segment {
+            return None;
+        }
+    }
+    Some(segments.collect::<Vec<_>>().join("/"))
+}
+
+/// The template of `path` relative to the ancestor template `anchor`, by
+/// whole segments (`""` for the anchor itself), or `None` when `anchor` is
+/// not an ancestor of `path`.
+fn relative_template(anchor: &str, path: &str) -> Option<String> {
+    let anchor = anchor.trim_end_matches('/');
+    if path == anchor {
+        return Some(String::new());
+    }
+    path.strip_prefix(anchor)?
+        .strip_prefix('/')
+        .map(ToOwned::to_owned)
 }
 
 /// A pending [`Router::dir`] registration.

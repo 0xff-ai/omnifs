@@ -52,16 +52,40 @@ fn entry_kind_from_meta(meta: &EntryMeta) -> EntryKind {
     }
 }
 
-fn attrs_from_cache(kind: EntryKind, attrs: Option<&FileAttrsCache>, change: u64) -> Attrs {
-    let ttl = attrs.map_or(TTL_STATIC, |attrs| {
-        if matches!(attrs.size(), FileSize::Exact(_))
-            && matches!(attrs.stability(), view_types::Stability::Stable)
-        {
-            TTL_STATIC
-        } else {
-            TTL_DYNAMIC
-        }
-    });
+/// Compute `Attrs` for a read answer at `id` with the `epoch` of its
+/// changes, folding in the size the read learned.
+fn read_attrs(
+    id: &Path,
+    kind: EntryKind,
+    attrs: Option<&FileAttrsCache>,
+    fed: bool,
+    epoch: u64,
+) -> Attrs {
+    attrs_from_cache(kind, attrs, change_counter_parts(id, attrs, epoch), fed)
+}
+
+/// Policied attrs for an entry. A fed entry has the zero lifetime of dynamic
+/// entries, so each access asks the namespace, which asks its feeds once they
+/// are past their deadline.
+fn attrs_from_cache(
+    kind: EntryKind,
+    attrs: Option<&FileAttrsCache>,
+    change: u64,
+    fed: bool,
+) -> Attrs {
+    let ttl = if fed {
+        TTL_DYNAMIC
+    } else {
+        attrs.map_or(TTL_STATIC, |attrs| {
+            if matches!(attrs.size(), FileSize::Exact(_))
+                && matches!(attrs.stability(), view_types::Stability::Stable)
+            {
+                TTL_STATIC
+            } else {
+                TTL_DYNAMIC
+            }
+        })
+    };
     let stability = attrs.map_or(Stability::Stable, FileAttrsCache::stability);
     let read_style = if attrs.is_some_and(FileAttrsCache::is_deferred_ranged) {
         ReadStyle::Ranged
@@ -194,9 +218,10 @@ struct NodeRecord {
     host: Option<HostRecord>,
 }
 
+/// A node of a tree: its path under the root of the tree and its kind. The
+/// tree is the current tree of its tree path.
 #[derive(Clone)]
 struct HostRecord {
-    tree_ref: TreeRef,
     relative: PathBuf,
     kind: HostKind,
 }
@@ -283,17 +308,17 @@ impl EngineNamespace {
             .ok_or_else(|| TreeError::offline_miss(format!("mount {mount} is cache-only")))
     }
 
+    /// The entry of `mount`: an active mount, or a mount without its provider,
+    /// which serves its projection as a cache-only entry.
     pub(crate) fn entry_for(&self, mount: &str) -> Result<&MountEntry, TreeError> {
         let entry = self
             .configured_entry(mount)
             .ok_or_else(|| TreeError::not_found(format!("no such mount: {mount}")))?;
         match entry.availability() {
-            crate::MountAvailability::Active => Ok(entry),
+            crate::MountAvailability::Active
+            | crate::MountAvailability::ProviderUnavailable { .. } => Ok(entry),
             crate::MountAvailability::AuthRequired => Err(TreeError::auth_required(format!(
                 "mount {mount} requires a compatible credential"
-            ))),
-            crate::MountAvailability::ProviderUnavailable => Err(TreeError::internal(format!(
-                "mount {mount} provider is unavailable"
             ))),
         }
     }
@@ -467,8 +492,7 @@ impl EngineNamespace {
             self.ids.get(&id).and_then(|r| r.attrs.clone()).as_ref(),
             node.attrs().cloned(),
         );
-        let incoming_host = node.host().map(|(tree_ref, relative, kind)| HostRecord {
-            tree_ref: tree_ref.clone(),
+        let incoming_host = node.host().map(|(_, relative, kind)| HostRecord {
             relative: relative.clone(),
             kind,
         });
@@ -501,19 +525,14 @@ impl EngineNamespace {
         let mut chain = Vec::new();
         let mut current = full_path.clone();
         let anchor = loop {
-            if let Some(record) = self.ids.get(&current)
-                && let Some(host) = &record.host
+            let host = self
+                .ids
+                .get(&current)
+                .and_then(|record| record.host.clone());
+            if let Some(host) = host
+                && let Some(node) = self.host_anchor(&current, host).await?
             {
-                break crate::Node::new(
-                    current.segments().next().unwrap_or_default().to_string(),
-                    host_node_path(&current),
-                    EntryMeta::directory(),
-                    NodeBody::Host {
-                        tree_ref: host.tree_ref.clone(),
-                        relative: host.relative.clone(),
-                        kind: host.kind,
-                    },
-                );
+                break node;
             }
             let Some((parent, name)) = current.parent_and_name() else {
                 break self
@@ -525,11 +544,71 @@ impl EngineNamespace {
             current = parent;
         };
 
+        // The lookup of a fed path has the feeds of each path above it
+        // answer, so the paths above it resolve from the projection.
+        let fed = self.is_fed(full_path)?;
         let mut node = anchor;
-        for name in chain.into_iter().rev() {
-            node = self.resolve_child(&node, &name, &RequestCtx).await?;
+        let mut names = chain.into_iter().rev().peekable();
+        while let Some(name) = names.next() {
+            node = if fed && names.peek().is_some() {
+                self.resolve_above_fed(&node, &name).await?
+            } else {
+                self.resolve_child(&node, &name, &RequestCtx).await?
+            };
         }
         Ok(node)
+    }
+
+    /// Whether the facts of `full_path` come from feeds alone.
+    fn is_fed(&self, full_path: &Path) -> Result<bool, NsError> {
+        let Some(mount) = full_path.segments().next() else {
+            return Ok(false);
+        };
+        let Some(entry) = self.configured_entry(mount) else {
+            return Ok(false);
+        };
+        if entry.runtime().is_none() {
+            return Ok(false);
+        }
+        Ok(entry
+            .resources()?
+            .is_fed(&mount_relative_path(mount, full_path))
+            .map_err(|error| TreeError::internal(error.to_string()))?)
+    }
+
+    /// The node of the host record at `full_path` in the current tree of its
+    /// tree path, the ancestor its relative path starts from; `None` once
+    /// that path has no open tree.
+    async fn host_anchor(
+        &self,
+        full_path: &Path,
+        host: HostRecord,
+    ) -> Result<Option<crate::Node>, NsError> {
+        let mount = full_path
+            .segments()
+            .next()
+            .expect("host paths have a mount segment");
+        let path = host_node_path(full_path);
+        let tree = host
+            .relative
+            .components()
+            .try_fold(path.clone(), |path, _| path.parent())
+            .ok_or_else(|| NsError::Internal {
+                message: format!("host record of {full_path} is deeper than its path"),
+            })?;
+        let tree_ref = self.current_tree(self.entry_for(mount)?, &tree).await?;
+        Ok(tree_ref.map(|tree_ref| {
+            crate::Node::new(
+                mount.to_string(),
+                path,
+                EntryMeta::directory(),
+                NodeBody::Host {
+                    tree_ref,
+                    relative: host.relative,
+                    kind: host.kind,
+                },
+            )
+        }))
     }
 
     // --- invalidation -------------------------------------------------------
@@ -546,7 +625,6 @@ impl EngineNamespace {
         let exact_paths: Vec<Path> = report
             .paths
             .iter()
-            .chain(report.changed_dirs.iter())
             .map(|rel| mount_full_path(mount, rel))
             .collect();
         let prefix_paths: Vec<Path> = report
@@ -609,6 +687,24 @@ impl EngineNamespace {
             // Evicting the handle closes it and aborts its pump (Drop).
             let _ = self.events.send(NsEvent::InvalidateSubtree { path: id });
         }
+
+        // A changed listing keeps the identity of its directory and of the
+        // nodes below it: its change counter moves, and filesystems drop their
+        // answers for it in place.
+        for (rel, fed) in &report.changed_dirs {
+            let dir = mount_full_path(mount, rel);
+            if !unique.insert(dir.clone()) {
+                continue;
+            }
+            self.node_epochs.insert(dir.clone(), epoch);
+            let attrs = attrs_from_cache(
+                EntryKind::Directory,
+                None,
+                change_counter_parts(&dir, None, epoch),
+                *fed,
+            );
+            let _ = self.events.send(NsEvent::AttrsChanged { path: dir, attrs });
+        }
     }
 
     fn sweep_idle_handles(&self) {
@@ -642,12 +738,26 @@ impl EngineNamespace {
         node: &crate::Node,
         attrs: Option<&FileAttrsCache>,
     ) -> Attrs {
-        let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
+        let epoch = self.node_epoch(id, node);
         attrs_from_cache(
             entry_kind_from_node(node),
             attrs,
             self.root_aware_change(id, node, attrs, epoch),
+            node.is_fed(),
         )
+    }
+
+    /// The epoch of the changes of `node` at `id`: that of its facts, which a
+    /// node under an anchor of another facet of an object shares with the
+    /// node under the anchor of its claim.
+    fn node_epoch(&self, id: &Path, node: &crate::Node) -> u64 {
+        let fact = mount_full_path(node.mount(), node.fact());
+        let at = if node.fact() == node.path() {
+            id
+        } else {
+            &fact
+        };
+        self.node_epochs.get(at).map_or(0, |epoch| *epoch)
     }
 
     /// The change counter for a node, folding the served-mount set into the
@@ -736,7 +846,8 @@ impl EngineNamespace {
             .learned_attrs
             .unwrap_or_else(|| handle.attrs().clone());
         self.store_learned(id, learned.clone());
-        let attrs = self.attrs_for_read(id, EntryKind::File, Some(&learned));
+        let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
+        let attrs = read_attrs(id, EntryKind::File, Some(&learned), false, epoch);
         Ok(ReadAnswer {
             bytes: chunk.bytes,
             eof: chunk.eof,
@@ -761,14 +872,14 @@ impl EngineNamespace {
         let end = start.saturating_add(len as usize).min(data.len());
         let bytes = data[start..end].to_vec();
         let eof = end >= data.len();
-        let attrs = self.attrs_for_read(id, entry_kind_from_node(node), attrs.as_ref());
+        let attrs = read_attrs(
+            id,
+            entry_kind_from_node(node),
+            attrs.as_ref(),
+            node.is_fed(),
+            self.node_epoch(id, node),
+        );
         Ok(ReadAnswer { bytes, eof, attrs })
-    }
-
-    /// Compute `Attrs` for a read answer, folding in the size the read learned.
-    fn attrs_for_read(&self, id: &Path, kind: EntryKind, attrs: Option<&FileAttrsCache>) -> Attrs {
-        let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
-        attrs_from_cache(kind, attrs, change_counter_parts(id, attrs, epoch))
     }
 
     fn store_learned(&self, id: &Path, learned: FileAttrsCache) {
@@ -829,6 +940,7 @@ impl EngineNamespace {
                 EntryKind::File,
                 Some(&grown),
                 change_counter_parts(&id, Some(&grown), node_epoch),
+                false,
             );
             let _ = events.send(NsEvent::AttrsChanged {
                 path: id.clone(),
@@ -885,7 +997,7 @@ impl EngineNamespace {
                     .into_iter()
                     .filter_map(|(name, child_relative, metadata)| {
                         let full = full_path.join(&name).ok()?;
-                        let child = self.intern_host(&full, child_relative, tree_ref, &metadata);
+                        let child = self.intern_host(&full, child_relative, &metadata);
                         Some(DirEntry {
                             name,
                             path: child,
@@ -917,7 +1029,7 @@ impl EngineNamespace {
             let entries = listing
                 .entries
                 .iter()
-                .map(|entry| self.dir_entry(&parent_full, &entry.name, &entry.meta))
+                .map(|entry| self.dir_entry(&parent_full, &entry.name, &entry.meta, entry.fed))
                 .collect();
             let tree_next = listing.next_cursor.map(|c| c.0);
             Ok(dir_page_with_budget(entries, tree_next, budget, false))
@@ -929,7 +1041,7 @@ impl EngineNamespace {
     }
 
     /// Turn a listing child into a `DirEntry`, allocating its id.
-    fn dir_entry(&self, parent_full: &Path, name: &str, meta: &EntryMeta) -> DirEntry {
+    fn dir_entry(&self, parent_full: &Path, name: &str, meta: &EntryMeta, fed: bool) -> DirEntry {
         let full = parent_full
             .join(name)
             .unwrap_or_else(|_| parent_full.clone());
@@ -953,6 +1065,7 @@ impl EngineNamespace {
             kind.clone(),
             merged.as_ref(),
             change_counter_parts(&id, merged.as_ref(), epoch),
+            fed,
         );
         DirEntry {
             attrs,
@@ -1171,16 +1284,9 @@ impl EngineNamespace {
         hasher.finish()
     }
 
-    fn intern_host(
-        &self,
-        full_path: &Path,
-        relative: PathBuf,
-        tree_ref: &TreeRef,
-        metadata: &HostMetadata,
-    ) -> Path {
+    fn intern_host(&self, full_path: &Path, relative: PathBuf, metadata: &HostMetadata) -> Path {
         let id = full_path.clone();
         let host = Some(HostRecord {
-            tree_ref: tree_ref.clone(),
             relative,
             kind: host_kind(&metadata.kind),
         });
@@ -1281,7 +1387,10 @@ impl HostMetadata {
             accessed: self.accessed,
             modified: self.modified,
             created: self.created,
-            ttl: TTL_STATIC,
+            // A node of a tree has the zero lifetime of dynamic entries, so
+            // each access reaches the namespace, which asks for the commit of
+            // the tree once its tree path is past its deadline.
+            ttl: TTL_DYNAMIC,
             change,
             direct_io: false,
             stability: Stability::Stable,
@@ -1506,7 +1615,10 @@ fn hash_attr_facts(hasher: &mut DefaultHasher, attrs: Option<&FileAttrsCache>, e
 
 #[cfg(test)]
 mod tests {
-    use super::{EngineNamespace, EntryKind, INSPECTOR_SYNTHETIC_ROOT, inspector_identity};
+    use super::{
+        DirCursor, EngineNamespace, EntryKind, INSPECTOR_SYNTHETIC_ROOT, NsEvent,
+        inspector_identity,
+    };
     use crate::MountTable;
     use crate::namespace::Namespace;
     use omnifs_core::path::Path;
@@ -1578,6 +1690,20 @@ mod tests {
         run_git(path, &["commit", "-m", "fixture"]);
     }
 
+    /// The commit `HEAD` of the repository at `path` names.
+    fn head(path: &StdPath) -> String {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output()
+            .expect("run git rev-parse");
+        assert!(output.status.success(), "git rev-parse failed");
+        String::from_utf8(output.stdout)
+            .expect("a commit is UTF-8")
+            .trim_end()
+            .to_string()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     // Keep the complete host-projection fixture together so clone identity,
     // subtree routing, file modes, symlinks, and ranged reads share one setup.
@@ -1585,9 +1711,9 @@ mod tests {
     async fn git_clone_tree_ref_namespace_fixture_preserves_host_projection() {
         use crate::authority::RuntimeAuthority;
         use crate::cache::identity::GitId;
+        use crate::cache::{GitWrite, ProjectionTransition};
         use crate::git::GitExecutor;
         use crate::tree::MATERIALIZE_MAX_BYTES;
-        use crate::tree_refs::TreeRefs;
         use omnifs_wit::host::types::{CalloutResult, GitOpenRequest};
         use std::io::{Seek, SeekFrom, Write};
         #[cfg(unix)]
@@ -1602,8 +1728,9 @@ mod tests {
             Arc::new(crate::GitCloner::new(temp.path().join("clones")).expect("git cloner"));
         let git_id = GitId::new("test", remote, Some("main"));
         let source_url = source.to_string_lossy().into_owned();
+        let commit = head(&source);
         let clone_path = cloner
-            .clone_if_needed(&git_id, &source_url, remote, Some("main"), 1)
+            .open_at(&git_id, &source_url, remote, Some("main"), &commit, 1)
             .expect("warm local clone");
 
         #[cfg(unix)]
@@ -1630,7 +1757,9 @@ mod tests {
             .expect("large tail offset");
         large.write_all(b"tail!").expect("large tail");
 
-        let trees = Arc::new(TreeRefs::new());
+        let registry = fixture_registry(temp.path());
+        let entry = registry.entry("test").expect("test mount");
+        let trees = Arc::clone(entry.trees());
         let reopened_root = clone_path.clone();
         let reopened_src = clone_path.join("src");
         let root_ref = trees
@@ -1659,6 +1788,7 @@ mod tests {
             &GitOpenRequest {
                 clone_url: remote.to_string(),
                 reference: Some("main".to_string()),
+                commit: commit.clone(),
             },
             2,
         ) {
@@ -1667,16 +1797,38 @@ mod tests {
         };
         assert_eq!(info.repo, info.tree);
         let tree_ref = trees.resolve(info.tree).expect("registered tree ref");
-        let namespace = EngineNamespace::online(
-            fixture_registry(temp.path()),
-            tokio::runtime::Handle::current(),
-        );
+        let namespace =
+            EngineNamespace::online(Arc::clone(&registry), tokio::runtime::Handle::current());
+        // The Git fact of the tree path serves the nodes of its tree.
+        let published = entry
+            .resources()
+            .expect("the projection of the mount")
+            .publish(
+                ProjectionTransition {
+                    git: vec![GitWrite {
+                        path: Path::parse("/checkout").expect("tree path"),
+                        id: git_id,
+                        relative_path: String::new(),
+                        commit,
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                entry
+                    .resources()
+                    .expect("the projection of the mount")
+                    .current_epoch(),
+            )
+            .expect("publish the Git fact");
+        assert!(matches!(
+            published,
+            crate::cache::PublicationOutcome::Committed { .. }
+        ));
         let checkout = Path::parse("/test/checkout").expect("checkout path");
         let checkout_metadata = namespace
             .host_stat(&tree_ref, StdPath::new(""))
             .await
             .expect("checkout stat");
-        namespace.intern_host(&checkout, PathBuf::new(), &tree_ref, &checkout_metadata);
+        namespace.intern_host(&checkout, PathBuf::new(), &checkout_metadata);
 
         let checkout_attrs = namespace
             .getattr(checkout.clone())
@@ -1765,6 +1917,198 @@ mod tests {
             .expect("large tail read");
         assert_eq!(tail.bytes, b"tail!");
         assert!(tail.eof);
+    }
+
+    /// Run a namespace operation, answering the commit requests of the tree
+    /// route of the test provider in order with `commits`, `304` for `None`,
+    /// and the open of each answered commit with `executor`. Returns the
+    /// output and the `if-none-match` of each commit request; an operation
+    /// that makes other requests times out.
+    async fn answering_commits<T>(
+        runtime: &crate::Engine,
+        executor: &crate::git::GitExecutor,
+        operation: impl std::future::Future<Output = T>,
+        commits: &[Option<&str>],
+    ) -> (T, Vec<Option<String>>) {
+        use omnifs_wit::host::types::{Callout, CalloutResult, HttpResponse};
+
+        let next = || async {
+            loop {
+                match runtime.try_recv_test_callout() {
+                    Some(callout) => break callout,
+                    None => tokio::time::sleep(std::time::Duration::from_millis(2)).await,
+                }
+            }
+        };
+        let answer = async {
+            let mut validators = Vec::new();
+            for commit in commits {
+                let request = next().await;
+                let Callout::Fetch(fetch) = request.callout() else {
+                    panic!("expected the commit request, got {:?}", request.callout());
+                };
+                validators.push(
+                    fetch
+                        .headers
+                        .iter()
+                        .find(|header| header.name.eq_ignore_ascii_case("if-none-match"))
+                        .map(|header| header.value.clone()),
+                );
+                let Some(commit) = commit else {
+                    request.answer(CalloutResult::HttpResponse(HttpResponse {
+                        status: 304,
+                        headers: Vec::new(),
+                        body: Vec::new(),
+                    }));
+                    continue;
+                };
+                request.answer(CalloutResult::HttpResponse(HttpResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: commit.as_bytes().to_vec(),
+                }));
+                let open = next().await;
+                let Callout::GitOpenRepo(git) = open.callout() else {
+                    panic!("expected the open at {commit}, got {:?}", open.callout());
+                };
+                assert_eq!(git.commit, *commit);
+                let opened = executor.open_repo(git, open.op_id());
+                open.answer(opened);
+            }
+            validators
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(operation, answer)
+        })
+        .await
+        .expect("the operation makes exactly the answered requests")
+    }
+
+    /// A tree that the listing of its parent names resolves through its own
+    /// lookup. Past the deadline of its tree path it asks for its commit
+    /// again: `unchanged` keeps the checkout, and a new commit is fetched into
+    /// the clone, checked out, and read in the tree, whose root it changes in
+    /// place. The nodes of the tree answer with the zero lifetime of dynamic
+    /// entries.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)]
+    async fn a_tree_past_its_deadline_follows_the_commit_of_its_upstream() {
+        use crate::authority::RuntimeAuthority;
+        use crate::cache::identity::GitId;
+        use crate::git::GitExecutor;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().expect("fixture tempdir");
+        let source = temp.path().join("source");
+        local_fixture_repo(&source);
+        let first = head(&source);
+
+        // The clone of the remote of the tree route, seeded from the local
+        // repository it fetches its commits from.
+        let remote = "https://fixture.test/fixture.git";
+        let cloner =
+            Arc::new(crate::GitCloner::new(temp.path().join("clones")).expect("git cloner"));
+        cloner
+            .open_at(
+                &GitId::new("test", remote, None),
+                &source.to_string_lossy(),
+                remote,
+                None,
+                &first,
+                1,
+            )
+            .expect("seed the clone");
+        let registry = fixture_registry(temp.path());
+        let runtime = registry.get("test").expect("test runtime");
+        let entry = registry.entry("test").expect("test mount");
+        let executor = GitExecutor::new(
+            cloner,
+            RuntimeAuthority::for_test(&[], &["https://fixture.test/*"], &[]),
+            Arc::clone(entry.trees()),
+            "test",
+        );
+        let namespace =
+            EngineNamespace::online(Arc::clone(&registry), tokio::runtime::Handle::current());
+
+        // The listing of the anchor names the tree, which still resolves
+        // through its own lookup.
+        let anchor = Path::parse("/test/repos/fixture").unwrap();
+        let (listing, validators) = answering_commits(
+            &runtime,
+            &executor,
+            namespace.readdir(anchor, DirCursor::start(), 0),
+            &[],
+        )
+        .await;
+        assert!(
+            listing
+                .expect("anchor listing")
+                .entries
+                .iter()
+                .any(|entry| entry.name == "tree")
+        );
+        assert!(validators.is_empty());
+        let (tree, validators) = answering_commits(
+            &runtime,
+            &executor,
+            namespace.lookup(Path::parse("/test/repos/fixture").unwrap(), "tree"),
+            &[Some(&first)],
+        )
+        .await;
+        let tree = tree.expect("tree lookup");
+        assert_eq!(validators, [None], "a lookup carries no commit");
+        assert_eq!(tree.attrs().expect("tree attrs").ttl, Duration::ZERO);
+        let (readme, validators) = answering_commits(
+            &runtime,
+            &executor,
+            namespace.lookup(tree.path.clone(), "README.md"),
+            &[],
+        )
+        .await;
+        let readme = readme.expect("README lookup");
+        assert!(validators.is_empty(), "the tree serves within its deadline");
+        assert_eq!(readme.attrs().expect("README attrs").ttl, Duration::ZERO);
+        let read = || Namespace::read(namespace.as_ref(), readme.path.clone(), 0, 64);
+        let mut events = namespace.subscribe();
+
+        tokio::time::sleep(Duration::from_millis(3_300)).await;
+        let (kept, validators) = answering_commits(&runtime, &executor, read(), &[None]).await;
+        assert_eq!(kept.expect("README read").bytes, b"Hello from cache\n");
+        assert_eq!(validators, [Some(first.clone())]);
+
+        std::fs::write(source.join("README.md"), b"Hello from the second commit\n")
+            .expect("second README");
+        run_git(&source, &["commit", "-am", "second"]);
+        let second = head(&source);
+        tokio::time::sleep(Duration::from_millis(3_300)).await;
+        let (moved, validators) =
+            answering_commits(&runtime, &executor, read(), &[Some(&second)]).await;
+        assert_eq!(
+            moved.expect("README read").bytes,
+            b"Hello from the second commit\n"
+        );
+        assert_eq!(validators, [Some(first)]);
+        let fact = entry
+            .resources()
+            .expect("the projection of the mount")
+            .git_for_path(&Path::parse("/repos/fixture/tree").unwrap())
+            .expect("Git fact read")
+            .expect("the Git fact of the tree");
+        assert_eq!(fact.commit, second);
+        let (_, validators) = answering_commits(&runtime, &executor, read(), &[]).await;
+        assert!(
+            validators.is_empty(),
+            "the new commit renews the deadline of the tree"
+        );
+        let changed = std::iter::from_fn(|| events.try_recv())
+            .filter(
+                |event| matches!(event, NsEvent::AttrsChanged { path, .. } if *path == tree.path),
+            )
+            .count();
+        assert_eq!(
+            changed, 1,
+            "the new commit alone changes the root of the tree"
+        );
     }
 
     #[test]

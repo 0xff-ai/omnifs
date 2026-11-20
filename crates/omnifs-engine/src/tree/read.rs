@@ -11,7 +11,7 @@ use crate::cache::{
     RecordWrite,
 };
 use crate::clock::now_millis;
-use crate::ops::namespace::{ReadBytes, ReadOutcome};
+use crate::ops::namespace::{ReadBytes, ReadOutcome, ReadReply};
 use crate::pagination::NextPageOutcome;
 use crate::view as view_types;
 use crate::view::{AttrPayload, EntryMeta, FileAttrsCache, FilePayload, LookupPayload};
@@ -131,8 +131,10 @@ impl EngineNamespace {
     ///
     /// The renderer still owns its kernel-side handle caches (the per-`fh` whole
     /// buffer FUSE keeps, the inode size promotion) and kernel offset/size
-    /// slicing; the internal read path returns the whole rendered file.
+    /// slicing; the internal read path returns the whole rendered file. A node
+    /// under an anchor of another facet reads the path of its facts.
     pub(crate) async fn read(&self, node: &Node, _ctx: &RequestCtx) -> Result<ReadResult> {
+        let node = &node.at_fact();
         // A host-synthesized node (a mount-root ignore file or a `@next`/`@all`
         // pagination control) is served by `Tree`, never the provider. The
         // renderer materializes the result into a per-handle buffer so a partial
@@ -148,11 +150,29 @@ impl EngineNamespace {
         }
 
         let entry = self.entry_for(node.mount())?;
-        let resources = entry.resources();
+        let resources = entry.resources()?;
         let offline = entry.runtime().is_none();
         let path = node.path();
         let captured_epoch = resources.current_epoch();
         let attr_store = FileAttrStore::new(resources, path);
+        // A fed file is served once its feeds have answered, so its read asks
+        // the provider for their claims.
+        if let Some(runtime) = entry.runtime()
+            && resources
+                .is_fed(path)
+                .map_err(|error| TreeError::internal(error.to_string()))?
+        {
+            let content_type = path.content_type_mime(None).to_string();
+            return match runtime
+                .read_file(path, content_type, captured_epoch)
+                .await?
+            {
+                ReadReply::File(result) => finish_read(&runtime, path, result),
+                ReadReply::Feed(claims) => {
+                    serve_fed_read(&runtime, path, &claims, captured_epoch).await
+                },
+            };
+        }
         let now = now_millis();
         let expired = !offline
             && resources
@@ -190,7 +210,10 @@ impl EngineNamespace {
         // fenced against an invalidation that lands mid-read.
         crate::inspector::cache_event(CacheKind::FileMiss);
         let result = match runtime.read_file(path, content_type, captured_epoch).await {
-            Ok(result) => result,
+            Ok(ReadReply::File(result)) => result,
+            Ok(ReadReply::Feed(claims)) => {
+                return serve_fed_read(&runtime, path, &claims, captured_epoch).await;
+            },
             Err(EngineError::ProviderError(error)) => {
                 warn!(
                     path = %path,
@@ -258,6 +281,35 @@ impl EngineNamespace {
             },
         }
     }
+}
+
+/// Serve a fed file from its fact in the projection once the answering feed
+/// among `claims` has answered, or as not found.
+async fn serve_fed_read(
+    runtime: &Runtime,
+    path: &omnifs_core::path::Path,
+    claims: &[crate::ops::feed::FeedClaim],
+    captured_epoch: u64,
+) -> Result<ReadResult> {
+    let (fact, _) =
+        super::feed::answer_claims(runtime, path, super::feed::FedFact::File, claims).await?;
+    let path = &fact;
+    let resources = &runtime.resources;
+    let attr_store = &FileAttrStore::new(resources, path);
+    let now = now_millis();
+    let attrs = attr_store.cached(now, true)?;
+    if let Some(result) = projected_read(
+        attr_store,
+        resources,
+        path,
+        attrs.as_ref(),
+        false,
+        captured_epoch,
+    )? {
+        return Ok(result);
+    }
+    cached_read(resources, path, attrs.as_ref(), false, now)?
+        .ok_or_else(|| TreeError::not_found(path.as_str()))
 }
 
 fn projected_read(

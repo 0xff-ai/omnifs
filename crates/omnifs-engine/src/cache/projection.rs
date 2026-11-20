@@ -7,7 +7,6 @@ use fjall::{
     PersistMode,
 };
 use omnifs_core::MountName;
-use omnifs_core::ProviderId;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -16,34 +15,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static MANIFEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub const PROJECTION_MANIFEST_VERSION: u32 = 1;
+pub const PROJECTION_MANIFEST_VERSION: u32 = 2;
 
+/// The manifest of a projection: its mount and the digest of its source,
+/// which names the number of the projection of the provider of the mount.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProjectionManifest {
     pub version: u32,
     pub mount: MountName,
     pub spec_digest: String,
-    pub provider_id: ProviderId,
 }
 
 impl ProjectionManifest {
-    fn new(mount: &MountName, spec_source: &[u8], provider_id: ProviderId) -> Self {
+    fn new(mount: &MountName, spec_source: &[u8]) -> Self {
         Self {
             version: PROJECTION_MANIFEST_VERSION,
             mount: mount.clone(),
             spec_digest: blake3::hash(spec_source).to_hex().to_string(),
-            provider_id,
         }
     }
 
-    fn validate(
-        &self,
-        mount: &MountName,
-        spec_source: &[u8],
-        provider_id: ProviderId,
-    ) -> Result<(), ProjectionStoreError> {
-        let expected = Self::new(mount, spec_source, provider_id);
+    fn validate(&self, mount: &MountName, spec_source: &[u8]) -> Result<(), ProjectionStoreError> {
+        let expected = Self::new(mount, spec_source);
         if self != &expected {
             return Err(ProjectionStoreError::ManifestMismatch);
         }
@@ -63,9 +57,8 @@ impl ProjectionStore {
         id: ProjectionId,
         mount: &MountName,
         spec_source: &[u8],
-        provider_id: ProviderId,
     ) -> Result<Self, ProjectionStoreError> {
-        if id != ProjectionId::new(spec_source, provider_id) {
+        if id != ProjectionId::new(spec_source) {
             return Err(ProjectionStoreError::InvalidIdentity);
         }
         let root = crate::cache::canonical_directory(&root.as_ref().join(id.hex()))?;
@@ -95,7 +88,7 @@ impl ProjectionStore {
                 serde_json::from_slice(&bytes).map_err(ProjectionStoreError::Manifest)?
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let manifest = ProjectionManifest::new(mount, spec_source, provider_id);
+                let manifest = ProjectionManifest::new(mount, spec_source);
                 let bytes = serde_json::to_vec_pretty(&manifest)
                     .map_err(ProjectionStoreError::Serialize)?;
                 let temporary = root.join(format!(
@@ -146,7 +139,7 @@ impl ProjectionStore {
         if manifest.version != PROJECTION_MANIFEST_VERSION {
             return Err(ProjectionStoreError::Version(manifest.version));
         }
-        manifest.validate(mount, spec_source, provider_id)?;
+        manifest.validate(mount, spec_source)?;
         let facts = database.keyspace(
             &format!("facts.{}", id.hex()),
             KeyspaceCreateOptions::default,
@@ -166,6 +159,13 @@ impl ProjectionStore {
         tx.prefix(&self.facts, prefix)
             .map(|guard| Ok(guard.key()?.to_vec()))
             .collect()
+    }
+
+    /// The sequence number of the database, which each commit with a write
+    /// moves.
+    #[cfg(test)]
+    pub(crate) fn seqno(&self) -> u64 {
+        self.db.inner().seqno()
     }
 
     pub(crate) fn transact<F, T>(&self, mut plan: F) -> Result<T, ProjectionStoreError>

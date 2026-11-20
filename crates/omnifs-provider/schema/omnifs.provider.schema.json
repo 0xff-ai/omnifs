@@ -48,6 +48,12 @@
     "limits": {
       "$ref": "#/$defs/LimitDeclarations"
     },
+    "projection": {
+      "description": "The number of the projection of the provider: the facts, tokens and\nvalidators of a mount stay with an artifact of the same number.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
     "provider": {
       "description": "Filename of the provider WASM component.",
       "type": "string"
@@ -86,6 +92,7 @@
     "displayName",
     "provider",
     "defaultMount",
+    "projection",
     "refreshIntervalSecs"
   ],
   "$defs": {

@@ -4,7 +4,7 @@
 //! surfaces. Collection is deliberately at the edge; all joins, sorting, and
 //! verdict decisions below are pure.
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 #[cfg(test)]
 use omnifs_api::DaemonPhase;
 use omnifs_api::{CredentialHealth, DaemonInventory, HealthState, MountHealth, MountRecord};
@@ -12,6 +12,7 @@ use omnifs_core::MountRevision;
 use omnifs_core::fs;
 use serde::Serialize;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::client_fs_state::ClientFilesystemState;
@@ -34,6 +35,9 @@ pub(crate) struct Inventory {
 pub(crate) struct DaemonFacts {
     pub(crate) status: Option<DaemonInventory>,
     pub(crate) probe: DaemonProbe,
+    /// Whether the daemon runs the program of this command; none without the
+    /// status of a daemon.
+    pub(crate) current_program: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -126,6 +130,7 @@ impl DaemonFacts {
                     executable: "/bin/omnifs".into(),
                     attach_unix: None,
                     attach_tcp: None,
+                    program: None,
                 },
                 phase: DaemonPhase::Ready,
                 durable_revision: None,
@@ -141,7 +146,11 @@ impl DaemonFacts {
                 active_mutation: None,
             }),
         };
-        Self { status, probe }
+        Self {
+            status,
+            probe,
+            current_program: None,
+        }
     }
 }
 
@@ -151,16 +160,19 @@ impl From<Result<Option<DaemonInventory>, anyhow::Error>> for DaemonFacts {
             Ok(Some(status)) => Self {
                 status: Some(status),
                 probe: DaemonProbe::Responding,
+                current_program: None,
             },
             Ok(None) => Self {
                 status: None,
                 probe: DaemonProbe::Stopped,
+                current_program: None,
             },
             Err(error) => Self {
                 status: None,
                 probe: DaemonProbe::Unreachable {
                     message: format!("{error:#}"),
                 },
+                current_program: None,
             },
         }
     }
@@ -193,6 +205,9 @@ pub(crate) struct FilesystemStatus {
     pub(crate) state: FilesystemState,
     pub(crate) mount_count: usize,
     pub(crate) fix: Option<String>,
+    /// Whether the host instance of the filesystem runs the program of this
+    /// command; none without a host instance.
+    pub(crate) current_program: Option<bool>,
 }
 
 impl PartialOrd for FilesystemStatus {
@@ -543,7 +558,10 @@ pub(crate) enum NextAction {
 impl Inventory {
     pub(crate) async fn collect_rpc() -> Result<Self> {
         let endpoint = Bootstrap::<Client>::for_client()?;
-        let configured_filesystems = ClientFilesystemState::resolve()?.registry().list()?;
+        let client_state = ClientFilesystemState::resolve()?;
+        let configured_filesystems = client_state.registry().list()?;
+        let program = omnifs_core::executable_program().context("read the executable of omnifs")?;
+        let instances = host_instance_programs(&client_state, &configured_filesystems, &program)?;
         let rpc = crate::rpc::RpcClient::resolve()?;
         let (daemon, mounts, daemon_status, daemon_known, active_mutation) =
             match rpc.inventory().await {
@@ -551,6 +569,9 @@ impl Inventory {
                     let mounts = MountStatus::all_observed(&inventory);
                     let active_mutation = inventory.active_mutation;
                     let daemon = DaemonFacts {
+                        current_program: Some(
+                            inventory.info.program.as_deref() == Some(program.as_str()),
+                        ),
                         status: Some(inventory.clone()),
                         probe: DaemonProbe::Responding,
                     };
@@ -573,6 +594,7 @@ impl Inventory {
                         DaemonFacts {
                             status: None,
                             probe,
+                            current_program: None,
                         },
                         Vec::new(),
                         None,
@@ -587,6 +609,7 @@ impl Inventory {
             daemon_status.as_ref(),
             daemon_known,
             mount_count,
+            &instances,
         );
         let mut inventory = Self {
             home: endpoint.bootstrap_dir().to_path_buf(),
@@ -745,12 +768,38 @@ impl Inventory {
     }
 }
 
-/// Build canonical filesystem rows from the daemon's live attachments.
+/// Whether the host instance of each configured host filesystem with one runs
+/// `program`, from the record of the instance.
+fn host_instance_programs(
+    client_state: &ClientFilesystemState,
+    configured: &[fs::Spec],
+    program: &str,
+) -> Result<BTreeMap<fs::Id, bool>> {
+    let mut programs = BTreeMap::new();
+    for spec in configured
+        .iter()
+        .filter(|spec| spec.runtime() == fs::Runtime::Host)
+    {
+        let record = omnifs_mtab::RunnerRecord::read(&client_state.state_dir(spec.id()))
+            .with_context(|| format!("read the host instance of filesystem `{}`", spec.id()))?;
+        if let Some(record) = record {
+            programs.insert(
+                spec.id().clone(),
+                record.program.as_deref() == Some(program),
+            );
+        }
+    }
+    Ok(programs)
+}
+
+/// Build canonical filesystem rows from the daemon's live attachments, with
+/// the program of each host instance in `instances`.
 pub(crate) fn filesystem_statuses(
     configured: &[fs::Spec],
     daemon: Option<&DaemonInventory>,
     daemon_known: bool,
     mount_count: usize,
+    instances: &BTreeMap<fs::Id, bool>,
 ) -> Vec<FilesystemStatus> {
     let mut rows = configured
         .iter()
@@ -786,6 +835,7 @@ pub(crate) fn filesystem_statuses(
                 } else {
                     state.fix().map(str::to_owned)
                 },
+                current_program: instances.get(spec.id()).copied(),
             }
         })
         .collect::<Vec<_>>();
@@ -801,6 +851,7 @@ pub(crate) fn filesystem_statuses(
                     state: FilesystemState::Failed,
                     mount_count,
                     fix: Some("omnifs doctor".to_owned()),
+                    current_program: None,
                 }),
         );
     }
@@ -874,6 +925,7 @@ mod tests {
                     executable: "/bin/omnifs".into(),
                     attach_unix: None,
                     attach_tcp: None,
+                    program: None,
                 },
                 phase: DaemonPhase::Ready,
                 durable_revision: None,
@@ -894,7 +946,7 @@ mod tests {
 
     #[test]
     fn daemon_down_inventory_has_no_filesystem_rows() {
-        let rows = filesystem_statuses(&[], None, true, 1);
+        let rows = filesystem_statuses(&[], None, true, 1, &BTreeMap::new());
         assert!(rows.is_empty());
     }
 
@@ -907,7 +959,7 @@ mod tests {
             PathBuf::from("/mnt/local"),
         )
         .unwrap();
-        let rows = filesystem_statuses(&[spec], None, true, 1);
+        let rows = filesystem_statuses(&[spec], None, true, 1, &BTreeMap::new());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].spec.id().as_str(), "local");
         assert_eq!(rows[0].state, FilesystemState::Detached);
@@ -933,7 +985,7 @@ mod tests {
             .unwrap(),
         );
 
-        let rows = filesystem_statuses(&[spec], Some(&daemon), true, 1);
+        let rows = filesystem_statuses(&[spec], Some(&daemon), true, 1, &BTreeMap::new());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].state, FilesystemState::Failed);
         assert_eq!(rows[0].fix.as_deref(), Some("omnifs doctor"));
@@ -981,6 +1033,7 @@ mod tests {
             state: FilesystemState::Failed,
             mount_count: 1,
             fix: Some("omnifs fs detach --name test".into()),
+            current_program: None,
         });
         assert_eq!(unmanaged.verdict(), ResultVerdict::Degraded);
         let mut unreachable = base;
@@ -1014,6 +1067,7 @@ mod tests {
             state: FilesystemState::Attached,
             mount_count: 1,
             fix: None,
+            current_program: None,
         };
 
         let healthy = Inventory::test(

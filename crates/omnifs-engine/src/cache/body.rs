@@ -3,7 +3,8 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 pub(crate) use crate::view::BodyId;
 
@@ -49,6 +50,54 @@ impl BodyStore {
     /// Existing content is immutable and therefore treated as an idempotent
     /// successful publication after the temporary file is removed.
     pub(crate) fn publish(&self, bytes: &[u8]) -> Result<BodyId, BodyStoreError> {
+        let (id, linked) = self.link(bytes)?;
+        if linked {
+            sync_directory(&self.root)?;
+        }
+        Ok(id)
+    }
+
+    /// Publish each of `bodies` as [`publish`](Self::publish) does, with one
+    /// thread for each thread of the computer, and with one sync of the
+    /// directory after the links of all of them.
+    pub(crate) fn publish_all(&self, bodies: &[&[u8]]) -> Result<(), BodyStoreError> {
+        let threads = std::thread::available_parallelism()?;
+        let next = AtomicUsize::new(0);
+        let linked = AtomicBool::new(false);
+        let failure = OnceLock::new();
+        std::thread::scope(|scope| {
+            for _ in 0..threads.get().min(bodies.len()) {
+                scope.spawn(|| {
+                    while let Some(bytes) = bodies.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        match self.link(bytes) {
+                            Ok((_, true)) => linked.store(true, Ordering::Relaxed),
+                            Ok((_, false)) => {},
+                            Err(error) => {
+                                let _ = failure.set(error);
+                            },
+                        }
+                        if failure.get().is_some() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let synced = if linked.load(Ordering::Relaxed) {
+            sync_directory(&self.root)
+        } else {
+            Ok(())
+        };
+        if let Some(error) = failure.into_inner() {
+            return Err(error);
+        }
+        Ok(synced?)
+    }
+
+    /// Write and sync the file of `bytes` and link it at its id. Returns
+    /// whether the directory took a link or a removal, which its sync makes
+    /// durable.
+    fn link(&self, bytes: &[u8]) -> Result<(BodyId, bool), BodyStoreError> {
         let id = BodyId::from_bytes(bytes);
         let destination = self.path(id);
         match fs::symlink_metadata(&destination) {
@@ -57,7 +106,7 @@ impl BodyStore {
             },
             Ok(_) => {
                 Self::verify_file(&destination, id, bytes.len() as u64)?;
-                return Ok(id);
+                return Ok((id, false));
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => {},
             Err(error) => return Err(error.into()),
@@ -76,17 +125,14 @@ impl BodyStore {
             match fs::hard_link(&temporary, &destination) {
                 Ok(()) => {
                     fs::remove_file(&temporary)?;
-                    sync_directory(&self.root)?;
-                    Ok(id)
+                    Ok((id, true))
                 },
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     let winner = Self::verify_destination(&destination, id, bytes.len() as u64);
                     let removed = fs::remove_file(&temporary);
-                    let synced = sync_directory(&self.root);
                     winner?;
                     removed?;
-                    synced?;
-                    Ok(id)
+                    Ok((id, true))
                 },
                 Err(error) => Err(error.into()),
             }
@@ -374,6 +420,25 @@ impl std::fmt::Display for BodyId {
 #[cfg(test)]
 mod tests {
     use super::BodyStore;
+
+    #[test]
+    fn publish_all_publishes_each_body_once_beside_a_body_of_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BodyStore::open(dir.path()).unwrap();
+        let known = store.publish(b"known").unwrap();
+        let bodies: Vec<Vec<u8>> = (0..64_u8).map(|byte| vec![byte; 3]).collect();
+        let mut all: Vec<&[u8]> = bodies.iter().map(Vec::as_slice).collect();
+        all.push(b"known");
+        all.push(&bodies[0]);
+        store.publish_all(&all).unwrap();
+        for bytes in &bodies {
+            let id = super::BodyId::from_bytes(bytes);
+            assert_eq!(store.read(id, Some(3)).unwrap(), *bytes);
+        }
+        assert_eq!(store.read(known, Some(5)).unwrap(), b"known");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 65);
+        store.publish_all(&[]).unwrap();
+    }
 
     #[test]
     fn publish_reopens_and_verifies_content_addressed_body() {

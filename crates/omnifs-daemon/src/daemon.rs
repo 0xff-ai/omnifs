@@ -442,12 +442,9 @@ fn mount_health_projection(
         omnifs_engine::MountAvailability::AuthRequired => {
             (MountHealth::AuthRequired, Some(CredentialHealth::Missing))
         },
-        omnifs_engine::MountAvailability::ProviderUnavailable => (
-            MountHealth::ProviderUnavailable {
-                reason: "provider artifact is unavailable".to_owned(),
-            },
-            None,
-        ),
+        omnifs_engine::MountAvailability::ProviderUnavailable { reason } => {
+            (MountHealth::ProviderUnavailable { reason }, None)
+        },
     }
 }
 

@@ -134,7 +134,7 @@ pub(crate) enum FilesystemDriver {
 pub(crate) enum Confirmed {
     Host(
         omnifs_mtab::RunnerRecord,
-        omnifs_thin::host_control::RunnerPhase,
+        omnifs_thin::host_control::RunnerState,
     ),
     Docker(DockerContainerIdentity, bool),
     Libkrun(omnifs_libkrun::HelperRecord),
@@ -174,7 +174,7 @@ impl FilesystemDriver {
             Self::Host(runner) => Ok(runner
                 .confirmed(spec)
                 .await?
-                .map(|(record, phase)| Confirmed::Host(record, phase))),
+                .map(|(record, state)| Confirmed::Host(record, state))),
             Self::Docker(client) => Ok(client
                 .confirmed(client_state.profile_root(), client_owner, spec)
                 .await?
@@ -198,7 +198,7 @@ impl FilesystemDriver {
         confirmed: Confirmed,
     ) -> Result<()> {
         match (self, confirmed) {
-            (Self::Host(runner), Confirmed::Host(record, _phase)) => {
+            (Self::Host(runner), Confirmed::Host(record, _state)) => {
                 runner.stop_confirmed(&record).await
             },
             (Self::Docker(client), Confirmed::Docker(identity, _running)) => {
@@ -213,6 +213,27 @@ impl FilesystemDriver {
                 "confirmed identity belongs to a different filesystem driver than `{}`",
                 spec.id()
             ),
+        }
+    }
+
+    /// Ends a proven instance before a new one starts: a host instance of an
+    /// active NFS mount that answers `Restart` releases the mount, which the
+    /// new instance serves in place; any other instance stops.
+    pub(crate) async fn end_for_restart(
+        &self,
+        client_state: &ClientFilesystemState,
+        client_owner: ClientOwnerId,
+        spec: &fs::Spec,
+        confirmed: Confirmed,
+    ) -> Result<()> {
+        match (self, confirmed) {
+            (Self::Host(runner), Confirmed::Host(record, state)) => {
+                runner.end_for_restart(&record, &state).await
+            },
+            (_, confirmed) => {
+                self.stop_confirmed(client_state, client_owner, spec, confirmed)
+                    .await
+            },
         }
     }
 

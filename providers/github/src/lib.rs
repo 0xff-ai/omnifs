@@ -3,11 +3,12 @@
 //! github-provider: GitHub virtual filesystem provider for omnifs.
 
 use omnifs_sdk::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub(crate) use omnifs_sdk::prelude::Result;
 
 mod api;
+mod feed;
 mod item;
 mod objects;
 
@@ -17,28 +18,31 @@ use objects::{
     ReviewComment, WorkflowRun,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum OwnerKind {
     User,
     Org,
 }
 
-/// State filter for resources.
+impl OwnerKind {
+    /// The REST scope of the owner's resources.
+    pub(crate) const fn scope(self) -> &'static str {
+        match self {
+            Self::User => "users",
+            Self::Org => "orgs",
+        }
+    }
+}
+
+/// State filter for resources. `all` comes first: the facts of an issue or a
+/// pull request live under its folder in `all/`, which `open/` shares.
 #[omnifs_sdk::path_segment]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[strum(serialize_all = "snake_case")]
 pub enum StateFilter {
-    Open,
     All,
-}
-
-impl StateFilter {
-    const fn rest_state(self) -> &'static str {
-        match self {
-            Self::Open => "open",
-            Self::All => "all",
-        }
-    }
+    Open,
 }
 
 #[omnifs_sdk::provider(
@@ -46,6 +50,7 @@ impl StateFilter {
     display_name = "GitHub",
     description = "repos, issues, and pull requests",
     mount = "github",
+    projection = 1,
     capabilities(
         domain(
             "api.github.com",
@@ -78,39 +83,47 @@ impl GithubProvider {
             o.dir("repo").tree(Repo::tree)?;
             o.dir("issues")
                 .choices(StateFilter::choices().expect("StateFilter has finite choices"))?;
-            o.dir("issues/{filter}").collection(Repo::issues)?;
+            o.dir("issues/{filter}").fed()?;
             o.dir("pulls")
                 .choices(StateFilter::choices().expect("StateFilter has finite choices"))?;
-            o.dir("pulls/{filter}").collection(Repo::pulls)?;
+            o.dir("pulls/{filter}").fed()?;
             o.dir("actions/runs").collection(Repo::workflow_runs)?;
+            o.feed(Repo::feed)
+                .starts(["issues/{filter}", "pulls/{filter}"])?;
             Ok(())
         })?;
 
         r.object::<Issue>("/{owner}/{repo}/issues/{filter}/{number}", |o| {
             o.dynamic();
+            o.fed();
             o.file("item.json").canonical::<Json>()?;
             o.file("item.md").representation::<Markdown>()?;
-            o.file("title").computed(Issue::title)?;
-            o.file("state").computed(Issue::state)?;
-            o.file("user").computed(Issue::user)?;
-            o.file("body").lazy().computed(Issue::body)?;
-            o.dir("comments").collection(Issue::comments)?;
+            o.file("title").fed()?;
+            o.file("state").fed()?;
+            o.file("user").fed()?;
+            o.file("body").fed()?;
+            o.dir("comments").fed()?;
+            o.feed(Issue::feed)
+                .starts(["", "title", "body", "state", "user", "comments"])?;
             Ok(())
         })?;
 
         r.object::<PullRequest>("/{owner}/{repo}/pulls/{filter}/{number}", |o| {
             o.dynamic();
+            o.fed();
             o.file("item.json").canonical::<Json>()?;
             o.file("item.md").representation::<Markdown>()?;
-            o.file("title").computed(PullRequest::title)?;
-            o.file("state").computed(PullRequest::state)?;
-            o.file("user").computed(PullRequest::user)?;
-            o.file("body").lazy().computed(PullRequest::body)?;
+            o.file("title").fed()?;
+            o.file("state").fed()?;
+            o.file("user").fed()?;
+            o.file("body").fed()?;
             o.file("diff.patch").blob(PullRequest::diff)?;
-            o.dir("comments").collection(PullRequest::comments)?;
+            o.dir("comments").fed()?;
             o.dir("files").collection(PullRequest::files)?;
             o.dir("reviews").collection(PullRequest::reviews)?;
             o.dir("checks").collection(PullRequest::checks)?;
+            o.feed(PullRequest::feed)
+                .starts(["", "title", "body", "state", "user", "comments"])?;
             Ok(())
         })?;
 
@@ -181,10 +194,11 @@ impl GithubProvider {
             "/{owner}/{repo}/{item_kind}/{filter}/{number}/comments/{comment_id}",
             |o| {
                 o.dynamic();
+                o.fed();
                 o.file("comment.json").canonical::<Json>()?;
                 o.file("comment.md").representation::<Markdown>()?;
-                o.file("body.md").lazy().computed(Comment::body_md)?;
-                o.file("author").computed(Comment::author)?;
+                o.file("body.md").fed()?;
+                o.file("author").fed()?;
                 Ok(())
             },
         )?;
@@ -398,7 +412,6 @@ pub(crate) async fn resolve_owner_kind(cx: &Cx, owner: &OwnerName) -> Result<Opt
 pub(crate) const FILE_PAGE_SIZE: u64 = 100;
 pub(crate) const REVIEW_PAGE_SIZE: u64 = 100;
 pub(crate) const CHECK_RUN_PAGE_SIZE: u64 = 100;
-pub(crate) const COMMENT_PAGE_SIZE: u64 = 100;
 pub(crate) const NOTIFICATION_PAGE_SIZE: u64 = 50;
 
 #[derive(Debug, Deserialize)]

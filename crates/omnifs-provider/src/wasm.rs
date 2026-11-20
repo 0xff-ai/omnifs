@@ -124,6 +124,7 @@ mod tests {
         "displayName": "Demo",
         "provider": "demo.wasm",
         "defaultMount": "demo",
+        "projection": 1,
         "refreshIntervalSecs": 0
     }"#;
 

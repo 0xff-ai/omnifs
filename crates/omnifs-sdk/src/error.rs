@@ -250,10 +250,9 @@ impl From<ProviderError> for WitProviderError {
     }
 }
 
-impl From<CalloutError> for ProviderError {
-    fn from(error: CalloutError) -> Self {
-        let message = format!("callout error: {}", error.message);
-        match error.kind {
+impl ProviderError {
+    fn from_wit_kind(kind: ErrorKind, message: String) -> Self {
+        match kind {
             ErrorKind::NotFound => Self::not_found(message),
             ErrorKind::NotADirectory => Self::not_a_directory(message),
             ErrorKind::NotAFile => Self::not_a_file(message),
@@ -267,6 +266,23 @@ impl From<CalloutError> for ProviderError {
             ErrorKind::VersionMismatch => Self::version_mismatch(message),
             ErrorKind::Internal => Self::internal(message),
         }
+    }
+}
+
+impl From<CalloutError> for ProviderError {
+    fn from(error: CalloutError) -> Self {
+        Self::from_wit_kind(error.kind, format!("callout error: {}", error.message))
+    }
+}
+
+/// A host import's error, such as a `projection.listing` refusal.
+impl From<WitProviderError> for ProviderError {
+    fn from(error: WitProviderError) -> Self {
+        Self::from_wit_kind(error.kind, error.message).with_retry_after(
+            error
+                .retry_after
+                .map(|secs| Duration::from_secs(u64::from(secs))),
+        )
     }
 }
 

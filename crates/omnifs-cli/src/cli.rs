@@ -9,6 +9,7 @@ use crate::error::ExitCode;
 use crate::ui::output::{Output, OutputMode};
 
 #[derive(Parser)]
+#[allow(clippy::struct_excessive_bools)] // independent global flags of the command line
 #[command(
     name = "omnifs",
     version,
@@ -50,6 +51,10 @@ pub struct Cli {
     #[arg(long, global = true, help_heading = "Global options")]
     pub yes: bool,
 
+    /// Wait for a daemon that another process starts, without starting one.
+    #[arg(long, global = true, help_heading = "Global options")]
+    pub wait_for_daemon: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -57,13 +62,15 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Show daemon, mount, and auth status
-    Status,
+    Status(commands::status::StatusArgs),
 
     /// Stop the daemon and clean up
     ///
     /// Asks attached filesystems to stop, drains them for a bounded time, then
     /// stops the daemon. Busy stragglers are reported for `omnifs doctor`.
-    Down,
+    /// With `--keep-filesystems`, the filesystems stay attached and reconnect
+    /// to the next daemon.
+    Down(commands::down::DownArgs),
     /// Tail the daemon log
     Logs(commands::logs::LogsArgs),
     /// Stream FUSE, provider, and callout events
@@ -140,8 +147,8 @@ impl Cli {
 impl Commands {
     fn labels(&self) -> (Option<&'static str>, &'static str) {
         match self {
-            Self::Status => (Some("status"), "status"),
-            Self::Down => (Some("down"), "down"),
+            Self::Status(_) => (Some("status"), "status"),
+            Self::Down(_) => (Some("down"), "down"),
             Self::Logs(_) => (Some("logs"), "logs"),
             Self::Inspect(_) => (Some("inspect"), "inspect"),
             Self::Mount(args) => (
@@ -202,8 +209,8 @@ impl Commands {
                 let verdict = commands::doctor::run(output).await?;
                 Ok(exit_for_verdict(verdict))
             },
-            Self::Status => commands::status::run(output).await,
-            Self::Down => commands::down::run(output).await,
+            Self::Status(args) => commands::status::run(args, output).await,
+            Self::Down(args) => commands::down::run(args, output).await,
             Self::Logs(args) => args.run(&output).await.map(|()| ExitCode::Success),
             Self::Inspect(args) => args.run(output).await.map(|()| ExitCode::Success),
             Self::Mount(args) => args.run(output).await,
@@ -476,6 +483,7 @@ mod tests {
             state: crate::inventory::FilesystemState::Failed,
             mount_count: 0,
             fix: Some("omnifs logs (container exited)".to_owned()),
+            current_program: None,
         };
         let inventory = crate::inventory::Inventory::test(
             crate::inventory::DaemonHealth::Running,
