@@ -198,6 +198,12 @@ pub(crate) struct Freshness {
     pub expires_at: Option<u64>,
 }
 
+/// The bytes of the block cache of the projection database (1 GiB). The
+/// 32 MiB of the database without a size hold less than the blocks of the
+/// listings of one large mount, whose every read then reads its block from
+/// its file again.
+const PROJECTION_BLOCK_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum RecordKind {
@@ -435,8 +441,9 @@ impl Caches {
         if projection_metadata.file_type().is_symlink() || !projection_metadata.is_dir() {
             anyhow::bail!("projection store root is not a regular directory");
         }
-        let projection_database =
-            OptimisticTxDatabase::builder(projection_root.join("database")).open()?;
+        let projection_database = OptimisticTxDatabase::builder(projection_root.join("database"))
+            .cache_size(PROJECTION_BLOCK_CACHE_BYTES)
+            .open()?;
         let body = Arc::new(BodyStore::open(dir.join("bodies"))?);
         Ok(Arc::new(Self {
             body,
