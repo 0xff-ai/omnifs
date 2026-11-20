@@ -39,6 +39,7 @@ struct WebPathKey {
     display_name = "Web",
     description = "configured web pages, fetched as files",
     mount = "web",
+    projection = 1,
     capabilities(domain(
         dynamic,
         "Fetch only the HTTPS domains enumerated by each mount's `domains` config."

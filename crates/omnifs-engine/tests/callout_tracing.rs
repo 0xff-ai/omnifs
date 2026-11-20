@@ -158,6 +158,7 @@ fn git_open_request() -> wit_types::GitOpenRequest {
     wit_types::GitOpenRequest {
         clone_url: "https://user:pass@github.com/example/repo.git".to_string(),
         reference: Some("main".to_string()),
+        commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
     }
 }
 

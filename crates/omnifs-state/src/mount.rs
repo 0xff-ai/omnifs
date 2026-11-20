@@ -15,6 +15,7 @@ use crate::row::{RowExt as _, decode_error, sql_int};
 use crate::{MountMutationOutcome, MountWriteError};
 
 const CANONICAL_MOUNT_V1_PREFIX: &[u8] = b"omnifs.mount.v1\0";
+const PROJECTION_MOUNT_V1_PREFIX: &[u8] = b"omnifs.mount-projection.v1\0";
 const MOUNT_VERSION_DOMAIN: &str = "omnifs mount version v1";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +72,22 @@ impl StoredMount {
         })
     }
 
+    /// The canonical mount without the content ID and the version of the
+    /// artifact of its provider, which the projection of the mount takes
+    /// with the number of the projection of its provider.
+    pub fn canonical_without_artifact(&self) -> anyhow::Result<Vec<u8>> {
+        let canonical = CanonicalMountV1::from_document(&self.document)?;
+        let payload = postcard::to_allocvec(&ProjectionMountV1 {
+            name: canonical.name,
+            provider_name: canonical.provider_name,
+            credential: canonical.credential,
+            limits: canonical.limits,
+            config: canonical.config,
+        })
+        .context("encode the canonical mount without its artifact")?;
+        Ok([PROJECTION_MOUNT_V1_PREFIX, &payload].concat())
+    }
+
     fn decode_row(row: &SqliteRow) -> anyhow::Result<Self> {
         decode(
             row.bytes("canonical")?,
@@ -100,6 +117,16 @@ struct CanonicalMountV1 {
     /// integers stay distinct from floats. Turning that feature on anywhere in
     /// the workspace would silently change these bytes and invalidate every
     /// stored mount version.
+    config: String,
+}
+
+/// The canonical mount without the artifact of its provider.
+#[derive(Debug, Serialize)]
+struct ProjectionMountV1 {
+    name: String,
+    provider_name: String,
+    credential: Option<CanonicalCredentialV1>,
+    limits: Option<CanonicalLimitsV1>,
     config: String,
 }
 
@@ -448,6 +475,42 @@ mod tests {
             text.contains(EXPECTED),
             "canonical config text changed; expected to find {EXPECTED} in {text}"
         );
+    }
+
+    /// The canonical mount without its artifact leaves out the content ID and
+    /// the version of the artifact of its provider alone: another artifact of
+    /// its provider keeps it, and another provider or config changes it.
+    #[test]
+    fn the_canonical_mount_without_its_artifact_leaves_out_the_artifact_alone() {
+        let stored = |document: &MountDocument| {
+            StoredMount::prepare(
+                document.clone(),
+                MountRevision::new(1),
+                MutationId::from_bytes([1; 16]),
+            )
+            .unwrap()
+        };
+        let mount = document(serde_json::json!({"a": 1}));
+        let mut moved = mount.clone();
+        moved.provider.id = ProviderId::from_wasm_bytes(b"another artifact");
+        moved.provider.meta.version = Some(ProviderVersion::new("2"));
+        let mut renamed = mount.clone();
+        renamed.provider.meta.name = ProviderName::new("other").unwrap();
+        let configured = document(serde_json::json!({"a": 2}));
+
+        let without = stored(&mount).canonical_without_artifact().unwrap();
+        assert!(without.starts_with(PROJECTION_MOUNT_V1_PREFIX));
+        assert_ne!(stored(&mount).canonical, stored(&moved).canonical);
+        assert_eq!(
+            stored(&moved).canonical_without_artifact().unwrap(),
+            without
+        );
+        for other in [renamed, configured] {
+            assert_ne!(
+                stored(&other).canonical_without_artifact().unwrap(),
+                without
+            );
+        }
     }
 
     #[test]

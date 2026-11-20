@@ -5,7 +5,6 @@ use omnifs_api::DaemonPhase;
 use omnifs_bootstrap::{Bootstrap, Client};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
 use crate::error::{ExitCode, WithExitCode as _};
@@ -26,36 +25,13 @@ pub(crate) async fn start(output: &Output) -> anyhow::Result<()> {
         .acquire_spawn_lock()
         .context("acquire daemon spawn lock")?;
     let rpc = RpcClient::resolve()?;
-    let mut child = if control_reachable(&endpoint).await? {
+    let mut child = if rpc.control_reachable().await? {
         None
     } else {
         output.narrate("Starting the daemon");
         Some(spawn()?)
     };
     wait_until_ready(&rpc, child.as_mut()).await
-}
-
-async fn control_reachable(endpoint: &Bootstrap<Client>) -> anyhow::Result<bool> {
-    match UnixStream::connect(endpoint.control_socket()).await {
-        Ok(stream) => {
-            drop(stream);
-            Ok(true)
-        },
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            Ok(false)
-        },
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "probe daemon control socket {}",
-                endpoint.control_socket().display()
-            )
-        }),
-    }
 }
 
 fn spawn() -> anyhow::Result<Child> {

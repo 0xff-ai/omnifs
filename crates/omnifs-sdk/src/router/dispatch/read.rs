@@ -17,7 +17,8 @@ impl<S> CompiledRouter<S> {
     /// A plain file route wins first: its handler runs and the projection
     /// lowers to a one-shot content terminal. Otherwise the path resolves
     /// through the object read path as a leaf under an object anchor:
-    /// representation by `stem.ext` name, projected field by name.
+    /// representation by `stem.ext` name, projected field by name; a fed leaf
+    /// answers the claims of its feeds.
     ///
     /// `cached` is the host-pushed canonical for that object id; the object
     /// path uses it to re-render without an upstream call. Plain file routes
@@ -62,6 +63,12 @@ impl<S> CompiledRouter<S> {
                 ObjectReadTarget::Stream(_) => Err(ProviderError::invalid_input(format!(
                     "stream face at {path:?} must be read through open-file, not read-file"
                 ))),
+                ObjectReadTarget::Fed(name) => {
+                    let claims = route.entry.leaf_claims.get(&name).ok_or_else(|| {
+                        ProviderError::internal(format!("fed face {name:?} has no claims"))
+                    })?;
+                    Ok(ReadOutcome::Feed(shape.feed_claims(claims, &abs, true)?))
+                },
                 canonical_target => super::route_future(
                     route.entry.pattern.template(),
                     (route.entry.read)(

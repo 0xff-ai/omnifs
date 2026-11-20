@@ -7,7 +7,7 @@ SDK for building [omnifs](https://github.com/0xff-ai/omnifs) providers. Provider
 ```rust
 use omnifs_sdk::prelude::*;
 
-#[provider(id = "my-provider")]
+#[provider(id = "my-provider", projection = 1)]
 impl MyProvider {
     fn start(r: &mut Router) -> Result<()> {
         r.file("/hello.txt").handler(hello)?;

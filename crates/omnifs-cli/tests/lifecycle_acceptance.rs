@@ -85,7 +85,8 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
     }
 
-    async fn start_daemon(&self) -> DaemonGuard {
+    /// A daemon child of the profile, whatever its phase.
+    fn spawn_daemon(&self) -> DaemonGuard {
         let child = Command::new(omnifs_bin())
             .arg("daemon")
             .env("OMNIFS_HOME", self.home_path())
@@ -95,10 +96,14 @@ impl Fixture {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn omnifs daemon");
-        let mut guard = DaemonGuard {
+        DaemonGuard {
             child: Some(child),
             endpoint: self.endpoint(),
-        };
+        }
+    }
+
+    async fn start_daemon(&self) -> DaemonGuard {
+        let mut guard = self.spawn_daemon();
         wait_until_ready(&guard.endpoint).await;
         // A child that exits during the readiness loop must fail the test with
         // its status instead of leaking a process into the next scenario.
@@ -319,6 +324,89 @@ fn assert_success(output: &Output, command: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The result of `omnifs --output json status --ready`.
+fn ready_status(fixture: &Fixture) -> serde_json::Value {
+    let status = fixture.run(&["--output", "json", "status", "--ready"]);
+    let json: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap_or_else(|error| {
+        panic!(
+            "status --ready must produce JSON: {error}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&status.stdout),
+            String::from_utf8_lossy(&status.stderr)
+        )
+    });
+    json["result"].clone()
+}
+
+/// Waits for `daemon` to bind its control socket, whatever its phase.
+async fn wait_for_control_socket(daemon: &DaemonGuard) {
+    let socket = daemon.endpoint.control_socket();
+    let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+    while !socket.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "daemon did not bind its control socket within {}s",
+            STARTUP_TIMEOUT.as_secs()
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// `status --ready` of a daemon that has just bound its control socket gives
+/// its status once its `WatchPhase` stream gives it ready.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_ready_gives_a_starting_daemon_once_it_is_ready() {
+    let fixture = Fixture::new();
+    let mut daemon = fixture.spawn_daemon();
+    wait_for_control_socket(&daemon).await;
+    let status = ready_status(&fixture);
+    assert_eq!(status["daemon"]["status"]["phase"], "ready");
+    daemon.stop().await;
+}
+
+/// `status --ready` of a ready daemon gives its status at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_ready_gives_a_ready_daemon_at_once() {
+    let fixture = Fixture::new();
+    let mut daemon = fixture.start_daemon().await;
+    let status = ready_status(&fixture);
+    assert_eq!(status["daemon"]["status"]["phase"], "ready");
+    daemon.stop().await;
+}
+
+/// `status --ready` of a daemon whose control store cannot be opened gives
+/// its status with the phase `recovery_required` and the error of its
+/// recovery in the health of its state.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_ready_gives_a_recovering_daemon_with_its_error() {
+    let fixture = Fixture::new();
+    let store = fixture.home_path().join("daemon-state/control-store");
+    std::fs::create_dir_all(&store).expect("control store folder");
+    std::fs::write(store.join("state.sqlite3"), b"not sqlite").expect("corrupt control store");
+    let mut daemon = fixture.spawn_daemon();
+    wait_for_control_socket(&daemon).await;
+    let status = ready_status(&fixture);
+    assert_eq!(status["daemon"]["status"]["phase"], "recovery_required");
+    let error = status["daemon"]["status"]["health"]["mounts"]["message"]
+        .as_str()
+        .expect("the health of the state of the daemon");
+    assert!(
+        error.starts_with("control store could not be opened: "),
+        "{error}"
+    );
+    daemon.stop().await;
+}
+
+/// `status --ready` without a daemon gives the status at once and starts
+/// none.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_ready_without_a_daemon_gives_the_status_at_once() {
+    let fixture = Fixture::new();
+    let status = ready_status(&fixture);
+    assert!(status["daemon"]["status"].is_null(), "{status}");
+    assert_eq!(status["daemon"]["probe"]["state"], "stopped");
+    assert!(!fixture.endpoint().control_socket().exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1,7 +1,6 @@
 //! Git repository cloning with host-owned opaque identities.
 
 use crate::cache::{canonical_directory, ensure_directory, identity::GitId};
-use crate::log_redaction::LogUrl;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -10,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tracing::warn;
 use url::Url;
 
 const CLONE_TIMEOUT: Duration = Duration::from_mins(2);
@@ -19,16 +17,24 @@ const CLONE_BINDING_FILE: &str = "binding.json";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CloneError {
-    #[error("clone failed (exit {status})")]
-    Failed { status: ExitStatus },
-    #[error("clone timed out after {timeout_secs}s")]
-    Timeout { timeout_secs: u64 },
+    #[error("git {command} failed (exit {status})")]
+    Failed {
+        command: &'static str,
+        status: ExitStatus,
+    },
+    #[error("git {command} timed out after {timeout_secs}s")]
+    Timeout {
+        command: &'static str,
+        timeout_secs: u64,
+    },
     #[error("failed to spawn git")]
     Spawn(#[from] std::io::Error),
     #[error("failed to wait for git")]
     Wait(#[source] std::io::Error),
     #[error("invalid git reference")]
     InvalidReference,
+    #[error("invalid git commit")]
+    InvalidCommit,
     #[error("invalid git remote")]
     InvalidRemote,
     #[error("existing clone identity is unavailable")]
@@ -81,6 +87,20 @@ impl GitCloner {
         Ok(())
     }
 
+    /// A commit is the full object name of a commit: 40 lowercase hex digits,
+    /// or 64 in a SHA-256 repository.
+    pub(crate) fn validate_commit(commit: &str) -> Result<(), CloneError> {
+        if matches!(commit.len(), 40 | 64)
+            && commit
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            Ok(())
+        } else {
+            Err(CloneError::InvalidCommit)
+        }
+    }
+
     pub(crate) fn canonical_remote(raw: &str) -> Result<String, CloneError> {
         let remote = raw.trim();
         if remote.is_empty()
@@ -116,13 +136,17 @@ impl GitCloner {
         })
     }
 
-    /// Return the local cache path for a host-derived identity, cloning if needed.
-    pub(crate) fn clone_if_needed(
+    /// Return the local cache path for a host-derived identity with `commit`
+    /// checked out: a missing clone is cloned first, and a clone whose `HEAD`
+    /// is another commit fetches `commit` and checks it out, all under the
+    /// lock of the clone.
+    pub(crate) fn open_at(
         &self,
         id: &GitId,
         clone_url: &str,
         canonical_remote: &str,
         reference: Option<&str>,
+        commit: &str,
         operation_id: u64,
     ) -> Result<PathBuf, CloneError> {
         ensure_directory(&self.cache_dir).map_err(CloneError::Cache)?;
@@ -136,22 +160,44 @@ impl GitCloner {
         let _guard = lock.lock();
 
         match std::fs::symlink_metadata(&cache_path) {
-            Ok(_) if Self::is_valid_clone(&cache_path, canonical_remote, reference) => {
-                return Ok(cache_path.join(CLONE_REPO_DIR));
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Ok(_) if Self::is_valid_clone(&cache_path, canonical_remote, reference) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::clone_into(
+                &cache_path,
+                &cache_id,
+                clone_url,
+                canonical_remote,
+                reference,
+                operation_id,
+            )?,
             Ok(_) | Err(_) => return Err(CloneError::ExistingEntry),
         }
 
-        let span = crate::inspector::clone_span(operation_id, &cache_id, clone_url);
-        let temporary = Self::temp_sibling_path(&cache_path);
+        let repo = cache_path.join(CLONE_REPO_DIR);
+        if Self::head(&repo)?.trim_ascii_end() != commit.as_bytes() {
+            Self::run_git(&repo, "fetch", &["--depth=1", "origin", commit])?;
+            Self::run_git(&repo, "checkout", &["--detach", commit])?;
+        }
+        Ok(repo)
+    }
+
+    /// Clone the remote into `cache_path`, published whole by rename.
+    fn clone_into(
+        cache_path: &Path,
+        cache_id: &str,
+        clone_url: &str,
+        canonical_remote: &str,
+        reference: Option<&str>,
+        operation_id: u64,
+    ) -> Result<(), CloneError> {
+        let span = crate::inspector::clone_span(operation_id, cache_id, clone_url);
+        let temporary = Self::temp_sibling_path(cache_path);
         let temporary_repo = temporary.join(CLONE_REPO_DIR);
         std::fs::create_dir(&temporary).map_err(CloneError::Publish)?;
         let outcome = span.in_scope(|| {
             Self::run_clone(clone_url, reference, &temporary_repo).and_then(|()| {
                 Self::write_binding(&Self::binding_path(&temporary), canonical_remote, reference)
                     .map_err(CloneError::Publish)?;
-                Self::publish_dir_by_rename(&temporary, &cache_path).map_err(CloneError::Publish)
+                Self::publish_dir_by_rename(&temporary, cache_path).map_err(CloneError::Publish)
             })
         });
         crate::inspector::record_outcome(
@@ -162,12 +208,10 @@ impl GitCloner {
                 omnifs_api::events::InspectorOutcome::Network
             },
         );
-        if let Err(error) = outcome {
+        if outcome.is_err() {
             Self::remove_path_best_effort(&temporary);
-            return Err(error);
         }
-
-        Ok(cache_path.join(CLONE_REPO_DIR))
+        outcome
     }
 
     pub fn cache_dir(&self) -> &Path {
@@ -302,13 +346,38 @@ impl GitCloner {
         if let Some(reference) = reference {
             command.args(["--branch", reference]);
         }
-        let mut child = command
-            .arg("--")
-            .arg(url)
-            .arg(dest)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        command.arg("--").arg(url).arg(dest);
+        Self::supervise(command, "clone")
+    }
+
+    /// The commit `HEAD` of the clone at `repo` names, as `git rev-parse`
+    /// prints it.
+    fn head(repo: &Path) -> Result<Vec<u8>, CloneError> {
+        let output = Command::new("git")
+            .current_dir(repo)
+            .args(["rev-parse", "HEAD"])
+            .stderr(Stdio::null())
+            .output()?;
+        if !output.status.success() {
+            return Err(CloneError::Failed {
+                command: "rev-parse",
+                status: output.status,
+            });
+        }
+        Ok(output.stdout)
+    }
+
+    /// Run `git {command} {args}` in the clone at `repo`.
+    fn run_git(repo: &Path, command: &'static str, args: &[&str]) -> Result<(), CloneError> {
+        let mut git = Command::new("git");
+        git.current_dir(repo).arg(command).args(args);
+        Self::supervise(git, command)
+    }
+
+    /// Run a git `command` to its end with its standard error drained, killed
+    /// past `CLONE_TIMEOUT`.
+    fn supervise(mut git: Command, command: &'static str) -> Result<(), CloneError> {
+        let mut child = git.stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
         let stderr_handle = child.stderr.take();
         let stderr_thread = std::thread::spawn(move || {
             if let Some(mut pipe) = stderr_handle {
@@ -322,24 +391,15 @@ impl GitCloner {
             }
         });
         let start = Instant::now();
-        loop {
+        let outcome = loop {
             match child.try_wait() {
-                Ok(Some(status)) => {
-                    let _ = stderr_thread.join();
-                    if status.success() {
-                        return Ok(());
-                    }
-                    Self::remove_path_best_effort(dest);
-                    warn!(url = %LogUrl(url), %status, "git clone failed");
-                    return Err(CloneError::Failed { status });
-                },
+                Ok(Some(status)) if status.success() => break Ok(()),
+                Ok(Some(status)) => break Err(CloneError::Failed { command, status }),
                 Ok(None) if start.elapsed() > CLONE_TIMEOUT => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = stderr_thread.join();
-                    Self::remove_path_best_effort(dest);
-                    warn!(url = %LogUrl(url), "git clone timed out");
-                    return Err(CloneError::Timeout {
+                    break Err(CloneError::Timeout {
+                        command,
                         timeout_secs: CLONE_TIMEOUT.as_secs(),
                     });
                 },
@@ -347,12 +407,12 @@ impl GitCloner {
                 Err(error) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let _ = stderr_thread.join();
-                    Self::remove_path_best_effort(dest);
-                    return Err(CloneError::Wait(error));
+                    break Err(CloneError::Wait(error));
                 },
             }
-        }
+        };
+        let _ = stderr_thread.join();
+        outcome
     }
 }
 

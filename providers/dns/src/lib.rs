@@ -99,6 +99,7 @@ struct ResolverReverseKey {
     display_name = "DNS",
     description = "DNS records for any domain",
     mount = "dns",
+    projection = 1,
     capabilities(
         domain(
             "cloudflare-dns.com",
