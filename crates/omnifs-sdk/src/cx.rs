@@ -1,8 +1,8 @@
 //! Handler execution context and concurrent callout polling.
 //!
 //! [`Cx<State>`](Cx) is what an async handler holds: typed provider state
-//! plus op-level metadata such as the host-assigned operation id and cached
-//! validator. Awaiting a callout future awaits a WIT async host import; the
+//! plus op-level metadata such as the host-assigned operation id and the
+//! validator of the cached page a `list-children` call asks for. Awaiting a callout future awaits a WIT async host import; the
 //! component runtime suspends the operation while the host executes the effect.
 //!
 //! [`join_all`] polls sibling callout futures in one operation so the async
@@ -42,8 +42,10 @@ impl<S> Clone for Cx<S> {
 /// [`Cx`] shares the same operation identity (see [`Cx::erase_state`]).
 struct CxShared {
     id: u64,
-    /// The host-pushed validator for this path's anchor, if held. Set by host
-    /// glue via [`Cx::with_version`]; read by handlers through [`Cx::version`].
+    /// The validator the host sent with a `list-children` call: the token of
+    /// the cached page of its cursor, or the commit of a tree. Set by host
+    /// glue via [`Cx::with_version`]; read by handlers through
+    /// [`Cx::version`].
     version: Option<crate::file_attrs::VersionToken>,
 }
 
@@ -56,8 +58,8 @@ impl<S> Cx<S> {
         }
     }
 
-    /// Attach the host-pushed validator for this anchor. Called by host glue
-    /// before a handler or `Object::load` runs; the validator is read back via
+    /// Attach the validator the host sent with a `list-children` call. Called
+    /// by host glue before a handler runs; the validator is read back via
     /// [`Self::version`]. Rebuilds the shared cell because the validator is
     /// fixed for the lifetime of a single operation.
     #[doc(hidden)]
@@ -83,9 +85,13 @@ impl<S> Cx<S> {
         }
     }
 
-    /// The host-pushed validator for this path's anchor, if held. A handler
-    /// maps it to `If-None-Match` through
-    /// [`crate::endpoint::RequestBuilder::maybe_if_none_match`].
+    /// The validator of the cached page a `list-children` call asks for, sent
+    /// once that page is past its deadline. A dir handler maps it to
+    /// `If-None-Match` through
+    /// [`crate::endpoint::RequestBuilder::maybe_if_none_match`] and answers
+    /// [`crate::projection::DirListing::unchanged`] while it still matches. For
+    /// a tree it is the commit of the tree, and a tree method answers
+    /// [`crate::handler::Tree::unchanged`] while that commit stands.
     pub fn version(&self) -> Option<&crate::file_attrs::VersionToken> {
         self.shared.version.as_ref()
     }

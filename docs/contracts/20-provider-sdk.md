@@ -33,9 +33,19 @@ Route dispatch has one owner for precedence. Lookup, listing, read, and open mus
 
 Keep `r.dir`, `r.file`, and `r.treeref` as the path-oriented face for non-object routes. Use typed `omnifs_core::path::Path` or parsed segments after parse boundaries. Split and join provider paths as strings only at WIT or display boundaries.
 
+### Page validators
+
+A listing page may carry a `PageValidator`: an opaque token, such as the `ETag` of its upstream answer, with the seconds of the interval its upstream asks between requests. A collection gives it with `Collection::with_validator` and a dir handler with `DirListing::with_validator`. Once the page is past its deadline, the host sends the token back as the `validator` of `list-children` for the cursor of that page; a collection reads it with `ListCx::validator` and a dir handler with `DirCx::version`, and each answers `Collection::unchanged` or `DirListing::unchanged` while the upstream still matches it, with the validator that the page keeps from then on. The validator reaches only the owners of a page, a dir route and the collection of an object anchor, never the anchor object's own load, which an unchanged page answers without. `RequestBuilder::page` is the conditional terminal of a page: `304` answers unchanged, and `200` the decoded body with the `ETag` of the answer as its validator, both with the headers of the answer.
+
+### Feeds
+
+An object whose upstream reports its changes keeps the facts of its fed faces in the host projection through one feed. `o.feed(method).starts([...])` declares the feed with its starting paths relative to the object (`""` names the anchor itself), and the feed answers for the fed paths of the object's subtree. `.fed()` on a file face feeds its lookup and its bytes, on a dir face its listing, and `o.fed()` the lookup of the anchor, in place of a computed, canonical, or collection face; the listing of a fed anchor lists its faces without a load of its object. `Router::compile` checks each starting path against a fed face of its object's subtree and gives each fed face its claims: the feeds of its ancestry, the outer object first.
+
+An operation on a fed path answers `feed(claims)` without a request, with `starts` for an operation on a starting path; the host decides which feed answers and when. The `feed` export runs the feed of the object route at its `path` with a `FeedCx`: that anchor path, whose facets are at their first choice and which the paths of the facts extend since a key may normalize a capture, the key, the token the host kept, the declared starting path of the operation that started the answer, `FeedCx::listing` over the projection, and the facts of the part, stable inline files and directories with a `ListingWrite` (`Partial`, `Exhaustive`, or `Complete`) written at mount-absolute paths, and removals. The method answers `Feed::unchanged()` or `Feed::part(token)` with `more` and the inner tokens of the objects of inner feeds by object type and key; the SDK names in the part each directory it writes at an anchor of an object with a facet at another choice than the first, with the anchor at the first choice of each facet. The provider macro generates `feed` for every provider; a path without a feed is not found.
+
 ### Provider metadata
 
-Provider manifests are generated from `#[omnifs_sdk::provider]` annotations, each `#[omnifs_sdk::config]` type's static config dialect, and a literal wire-shaped auth JSON declaration. `capabilities(...)` declares authority needs only; scalar ceilings use `limits(...)`. The provider macro assembles one JSON byte array at compile time and emits it as the `omnifs.provider-metadata.v1` custom section. The final component is self-describing before host instantiation, and the host parser owns validation and conversion into `ProviderManifest`.
+Provider manifests are generated from `#[omnifs_sdk::provider]` annotations, whose `projection = N` names the number of the projection of the provider: a mount keeps its projection on an artifact with the same number, and a provider moves the number when its facts, tokens, or validators change their meaning, each `#[omnifs_sdk::config]` type's static config dialect, and a literal wire-shaped auth JSON declaration. `capabilities(...)` declares authority needs only; scalar ceilings use `limits(...)`. The provider macro assembles one JSON byte array at compile time and emits it as the `omnifs.provider-metadata.v1` custom section. The final component is self-describing before host instantiation, and the host parser owns validation and conversion into `ProviderManifest`.
 
 Every auth injection domain must be covered by a declared domain capability need in the same manifest. Metadata validation rejects a scheme whose `injectDomains` entry is not matched by the provider's domain needs, and the error names the scheme key and domain.
 
@@ -93,6 +103,7 @@ Each lifecycle, namespace, and notify export returns only its operation-specific
 - `crates/omnifs-sdk/src/router`
 - `crates/omnifs-sdk/src/object.rs`
 - `crates/omnifs-sdk/src/endpoint.rs`
+- `crates/omnifs-sdk/src/feed.rs`
 - `crates/omnifs-sdk/src/http.rs`
 - `crates/omnifs-sdk/src/cx.rs`
 - `crates/omnifs-sdk-macros/src/provider_macro.rs`
@@ -111,5 +122,6 @@ Each lifecycle, namespace, and notify export returns only its operation-specific
 - `just build providers`
 - `just validate providers`
 - Provider initialization/compilation tests after route-surface changes.
-- WIT-boundary tests for object, collection, file-object, preload, effects, `ByteSource`, `DirListing`, and canonical `view_leaves` changes.
+- WIT-boundary tests for object, collection, file-object, preload, effects, `ByteSource`, `DirListing`, page validator, and canonical `view_leaves` changes.
+- Router tests for feed declarations, fed-face claims, and the `feed` export after feed changes.
 - Manifest schema generation/checks when provider config metadata changes.

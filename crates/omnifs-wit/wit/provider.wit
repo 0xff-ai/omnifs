@@ -1,4 +1,4 @@
-package omnifs:provider@0.7.0;
+package omnifs:provider@0.10.0;
 
 // === Shared types ===
 
@@ -45,6 +45,9 @@ interface types {
         canonical: list<canonical-store>,
         fs: list<fs-write>,
         invalidations: list<invalidation>,
+        /// Paths whose facts, with the facts beneath them, leave the
+        /// projection; each leaves its parent listing as complete as it was.
+        removals: list<string>,
     }
 
     record logical-id {
@@ -71,10 +74,8 @@ interface types {
 
     /// Write a materialized file or directory into the view cache.
     ///
-    /// For `directory`, the bool is `listing-exhaustive`: when true the host
-    /// treats the files written at `<path>/<name>` in the same batch as the
-    /// authoritative listing of `path`, so a later readdir serves from cache
-    /// without re-invoking `list-children`.
+    /// For `directory`, the `listing-write` says how the children written at
+    /// `<path>/<name>` in the same batch join the listing of `path`.
     record fs-write {
         id: option<logical-id>,
         path: string,
@@ -83,7 +84,19 @@ interface types {
 
     variant fs-kind {
         file(file-out),
-        directory(bool),
+        directory(listing-write),
+    }
+
+    /// How the children of a directory write join its listing.
+    enum listing-write {
+        /// They join the listing, which stays as complete as it was unless
+        /// they add names to it.
+        partial,
+        /// They are the whole listing, so a later readdir serves from cache
+        /// without re-invoking `list-children`.
+        exhaustive,
+        /// They join the listing, which is complete after them.
+        complete,
     }
 
     variant path-or-prefix {
@@ -205,12 +218,15 @@ interface types {
 
     // --- Terminal payloads ---
 
-    /// Lookup-child result. `subtree(tree-ref)` answers the lookup/list
-    /// operation. It is result data, not itself the host mutation.
+    /// Lookup-child result. `subtree` answers the lookup/list operation. It
+    /// is result data, not itself the host mutation.
     variant lookup-child-result {
         entry(lookup-entry),
-        subtree(tree-ref),
+        subtree(subtree),
         not-found(option<logical-id>),
+        /// The path is fed: the host serves it from the projection once the
+        /// answering feed among these claims has answered.
+        feed(list<feed-claim>),
     }
 
     /// The non-subtree, non-miss shape of a lookup: the found entry plus
@@ -221,9 +237,22 @@ interface types {
         exhaustive: bool,
     }
 
+    /// A Git tree handoff: the tree of an open and the commit it checked
+    /// out, which the host sends back as the `validator` of `list-children`
+    /// of the tree path once the tree is past its deadline.
+    record subtree {
+        tree: tree-ref,
+        commit: string,
+    }
+
+    /// List-children result. `unchanged` answers a call with a `validator`:
+    /// the cached page of that validator stands, with the validator it keeps
+    /// from then on, or, without one, the commit of the tree of the path does.
     variant list-children-result {
         entries(dir-listing),
-        subtree(tree-ref),
+        subtree(subtree),
+        unchanged(option<page-validator>),
+        feed(list<feed-claim>),
     }
 
     /// A directory listing returned by a provider, pairing child entries
@@ -234,6 +263,17 @@ interface types {
         /// Resume token for a paged (non-exhaustive) listing; the host
         /// echoes it back as the `cursor` argument to continue.
         next-cursor: option<cursor>,
+        /// The validator of this page: once the page is past its deadline,
+        /// the host asks for it again with the token as the `validator` of
+        /// `list-children`.
+        validator: option<page-validator>,
+    }
+
+    /// The validator of a listing page, with the seconds of the interval of
+    /// its upstream, which set the deadline of the page.
+    record page-validator {
+        token: version-token,
+        interval: option<u32>,
     }
 
     /// Completed full-read result: the materialized bytes for the requested
@@ -248,6 +288,75 @@ interface types {
     variant read-file-outcome {
         found(read-file-result),
         not-found(option<logical-id>),
+        feed(list<feed-claim>),
+    }
+
+    // --- Feeds ---
+
+    /// The resume state of a feed, opaque to the host, which keeps it per
+    /// feed object and echoes it on the next `feed` call.
+    type feed-token = string;
+
+    /// The object of a feed: its logical id and the path of its anchor.
+    record feed-object {
+        id: logical-id,
+        path: string,
+    }
+
+    /// A feed that answers for the path of an operation. `starts` marks an
+    /// operation on a starting path of the feed.
+    record feed-claim {
+        object: feed-object,
+        starts: bool,
+    }
+
+    /// The answer of one `feed` call: the facts of the feed stand, or one
+    /// part of the answer, whose facts are the effects of the call.
+    variant feed-answer {
+        unchanged,
+        part(feed-part),
+    }
+
+    /// One part of an answer: the token after it, whether more parts follow
+    /// in the same answer, the tokens of the objects of inner feeds it
+    /// brought, as the items of a page of rows, and each anchor of another
+    /// facet of an object that it writes.
+    record feed-part {
+        token: feed-token,
+        more: bool,
+        inner: list<feed-state>,
+        anchors: list<facet-anchor>,
+    }
+
+    /// An anchor of an object at another choice of a facet than the first,
+    /// and the anchor of the claim of the object, with each facet at its first
+    /// choice, where the facts of the object live.
+    record facet-anchor {
+        path: string,
+        anchor: string,
+    }
+
+    /// The token of an inner feed, keyed by the logical id of its object.
+    record feed-state {
+        id: logical-id,
+        token: feed-token,
+    }
+
+    /// What `projection.listing` returns of a listing.
+    enum listing-form {
+        count,
+        names,
+    }
+
+    /// A listing of the projection with its completeness.
+    record listing-facts {
+        complete: bool,
+        entries: listing-entries,
+    }
+
+    variant listing-entries {
+        count(u64),
+        names(list<string>),
     }
 
     /// Opened ranged-read handle. `open-file` is only valid for files
@@ -283,9 +392,11 @@ interface types {
         value: string,
     }
 
+    /// Open a repository with `commit` checked out.
     record git-open-request {
         clone-url: string,
         reference: option<string>,
+        commit: string,
     }
 
     /// HTTP fetch that lands its response body in the host's disk-backed
@@ -353,13 +464,15 @@ interface lifecycle {
 }
 
 interface namespace {
-    use types.{canonical-input, correlation-id, cursor, effects, file-handle,
-        list-children-result, lookup-child-result, open-file-result, provider-error,
-        read-chunk-result, read-file-outcome};
+    use types.{canonical-input, correlation-id, cursor, effects, feed-answer, feed-token,
+        file-handle, list-children-result, lookup-child-result, open-file-result,
+        provider-error, read-chunk-result, read-file-outcome, version-token};
 
     lookup-child: async func(id: correlation-id, parent-path: string, name: string)
         -> tuple<result<lookup-child-result, provider-error>, effects>;
-    list-children: async func(id: correlation-id, path: string, cursor: option<cursor>)
+    /// `validator` is the validator of the cached page of `cursor`, or the
+    /// commit of the tree of `path`.
+    list-children: async func(id: correlation-id, path: string, cursor: option<cursor>, validator: option<version-token>)
         -> tuple<result<list-children-result, provider-error>, effects>;
     read-file: async func(id: correlation-id, path: string, content-type: string, cached-canonical: option<canonical-input>)
         -> tuple<result<read-file-outcome, provider-error>, effects>;
@@ -368,6 +481,10 @@ interface namespace {
     read-chunk: async func(id: correlation-id, handle: file-handle, offset: u64, len: u32)
         -> tuple<result<read-chunk-result, provider-error>, effects>;
     close-file: func(handle: file-handle);
+    /// One call of the feed of the object anchored at `path`, from `token`.
+    /// `start` is the path of the operation that starts the answer.
+    feed: async func(id: correlation-id, path: string, token: option<feed-token>, start: option<string>)
+        -> tuple<result<feed-answer, provider-error>, effects>;
 }
 
 interface notify {
@@ -385,6 +502,16 @@ interface log {
     log: func(entry: log-entry);
 }
 
+/// Reads of the projection the host keeps, for a feed operation.
+interface projection {
+    use types.{correlation-id, listing-facts, listing-form, provider-error};
+
+    /// The listing of `path` in the projection, for a path in the subtree of
+    /// the object of the feed operation `id`; none for a path without one.
+    listing: func(id: correlation-id, path: string, form: listing-form)
+        -> result<option<listing-facts>, provider-error>;
+}
+
 interface callouts {
     use types.{blob-fetch-request, callout-result, correlation-id, git-open-request, http-request};
 
@@ -398,6 +525,7 @@ interface callouts {
 world provider {
     import log;
     import callouts;
+    import projection;
     export lifecycle;
     export namespace;
     export notify;

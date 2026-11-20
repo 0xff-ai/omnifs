@@ -53,6 +53,8 @@ pub(crate) async fn prepare_credential_revocation(
         .with_context(|| format!("provider {} is not retained", stored.summary.provider))?;
     let scheme = provider
         .manifest
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("provider manifest is invalid: {error}"))?
         .auth
         .as_ref()
         .and_then(|manifest| manifest.scheme(stored.summary.id.scheme()))

@@ -38,6 +38,7 @@ fn provider_wasm() -> Vec<u8> {
         "description": "A test provider",
         "provider": "demo.wasm",
         "defaultMount": "demo",
+        "projection": 1,
         "refreshIntervalSecs": 0,
         "capabilities": [{
             "kind": "domain",

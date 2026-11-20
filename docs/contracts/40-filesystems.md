@@ -35,7 +35,7 @@ Every attached filesystem has a separate process, container, or VM. Host filesys
 
 `NsError::OfflineMiss` is a terminal daemon-lifetime cache-only miss, distinct from `NotFound` and from retryable upstream errors. FUSE maps it to `EIO`; NFS maps it to `NFS4ERR_IO`.
 
-Disconnects and broadcast lag are represented by a root reset on the same event stream as ordinary subtree invalidations. FUSE keeps one background event owner and settles each namespace operation before publishing protocol state. NFS preserves path-backed filehandles, opens, stateids, leases, and clients across root refresh while resetting derived sizes, its bounded protocol reply cache, and its listing state. `PendingListings` and the reply cache advance local generations on every subtree invalidation, so a late completion cannot populate fresh state.
+Disconnects and broadcast lag are represented by a root reset on the same event stream as ordinary subtree invalidations. FUSE keeps one background event owner and settles each namespace operation before publishing protocol state. NFS preserves path-backed filehandles, opens, stateids, leases, and clients across root refresh while resetting derived sizes and its bounded protocol reply cache. The reply cache advances its generation on every subtree invalidation, so a late completion cannot populate fresh state.
 
 The public identity is the persisted, fully resolved `fs::Spec`: ID, protocol, runtime, and location. Every launcher supplies all four through named flags. Transport never infers identity. Mount and filesystem commands start the daemon when needed. Explicit `down` asks the daemon to stop and drain attached filesystems before it exits, while preserving every client-owned spec.
 
@@ -88,17 +88,13 @@ Keep `/proc/mounts` parsing, NFS mount state-file schema/IO, and shared platform
 
 The `omnifs-mtab` state files under a per-ID leaf are filesystem discovery and teardown state. Mount records carry mount point, address, and pid; the host runner record carries the exact spec, random process instance, process group, and control socket. The NFS filehandle-identity table (`omnifs-nfs/src/persist.rs`) is protocol identity, so it stays in `omnifs-nfs` with the filehandles, stateids, and inode table. It lives in the same ID leaf alongside the mtab files and mirrors their write discipline, but its schema and IO are NFS-crate-owned. Records degrade individually; healthy siblings are never hidden.
 
-### NFS deferral and `NFS4ERR_DELAY`
+### NFS `NFS4ERR_DELAY`
 
-The NFS filesystem uses `NFS4ERR_DELAY` in two distinct ways. Do not conflate them.
+When the namespace returns a transient upstream error (`RateLimited`, `Timeout`, `Network`), the NFS adapter maps it to `NFS4ERR_DELAY` through `Status::from(&NsError)`. The client retry starts fresh; no background work continues past the reply. Every other answer waits for the namespace, `READDIR` included: a `READDIR` deferred past a wait budget would come back after the deadline of the listing its first try brought, and ask for it again at every retry.
 
-**Reactive delay.** When the namespace returns a transient upstream error (`RateLimited`, `Timeout`, `Network`), the NFS adapter maps it to `NFS4ERR_DELAY` through `Status::from(&NsError)`. The client retry starts fresh; no background work continues past the reply.
+**Concurrent dispatch.** Per-connection RPC dispatch runs each call on its own handler thread; replies carry their own XID. One slow op does not head-of-line block other RPCs on the same TCP connection.
 
-**Proactive deferral.** Provider-backed `READDIR` uses the NFS-local `delayed::PendingListings` table with an inline wait budget (`NFS_INLINE_BUDGET`). Past the budget the handler replies `NFS4ERR_DELAY` while the listing task keeps running. On success, the engine namespace caches dirents so the retry hits warm cache. Only `READDIR` gets proactive deferral today: successful listings write authoritative dirents into the engine namespace cache; cold `LOOKUP` lacks the same cache-convergence guarantee.
-
-**Concurrent dispatch.** Per-connection RPC dispatch runs each call on its own handler thread; replies carry their own XID. One slow op does not head-of-line block other RPCs on the same TCP connection. Proactive deferral is about not holding a single `READDIR` reply past the inline budget, not about serializing the connection.
-
-**Ownership.** `async_singleflight::Group` owns exact-key OAuth refresh dedupe in `omnifs-auth`. `omnifs-nfs::delayed::PendingListings` owns exact-path listing slots, detached completion, the mutex-owned generation, and the inline wait budget for proactive `DELAY` signalling. The engine namespace computes truth and owns cache; it does not know about `NFS4ERR_DELAY` or wait budgets. Reactive `Status::from(&NsError)` maps transient upstream errors without background continuation. FUSE owns its own blocking tolerance; it has no `DELAY` equivalent.
+**Ownership.** `async_singleflight::Group` owns exact-key OAuth refresh dedupe in `omnifs-auth`. The engine namespace computes truth and owns cache; it does not know about `NFS4ERR_DELAY`. `Status::from(&NsError)` maps transient upstream errors without background continuation. FUSE owns its own blocking tolerance; it has no `DELAY` equivalent.
 
 ## Must not
 
@@ -111,8 +107,7 @@ The NFS filesystem uses `NFS4ERR_DELAY` in two distinct ways. Do not conflate th
 - Treat container FUSE as a filesystem runtime attached to the host-native daemon, never as the daemon architecture.
 - Remove live NFS test serialization casually.
 - Claim NFS gives FUSE-equivalent permission isolation.
-- Put wait budgets or `DELAY` policy in `omnifs-engine`.
-- Assume every `NFS4ERR_DELAY` implies background continuation past the reply.
+- Put `DELAY` policy in `omnifs-engine`.
 
 ## Code
 

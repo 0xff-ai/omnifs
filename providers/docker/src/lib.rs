@@ -214,6 +214,7 @@ struct ProjectServiceKey {
     display_name = "Docker",
     description = "local containers, images, and logs",
     mount = "docker",
+    projection = 1,
     capabilities(unix_socket(
         dynamic,
         "Talk to the configured Docker daemon socket for container, image, and compose reads."
