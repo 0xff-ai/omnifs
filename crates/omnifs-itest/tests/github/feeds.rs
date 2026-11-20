@@ -176,8 +176,9 @@ fn ids(ids: &[(u64, &str)], next: Option<&str>) -> Value {
 /// comments by page, then the counts of the issues and of the pull requests.
 /// An item with another count than its `comments/` takes its IDs: a comment
 /// that a deletion moved past a page comes by its ID before the next page of
-/// the IDs, and the deleted comment leaves. The four folders are complete after the last part, and `open/`
-/// shares the facts of `all/`. The facts live under the owner as the paths
+/// the IDs, the comments of the projection do not, whatever their
+/// `updatedAt`, and the deleted comment leaves. The four folders are complete
+/// after the last part, and `open/` shares the facts of `all/`. The facts live under the owner as the paths
 /// name it, `OctoCat`, while the requests name the owner of the key,
 /// `octocat`.
 #[tokio::test(flavor = "multi_thread")]
@@ -196,9 +197,10 @@ async fn the_first_full_listing_takes_the_rows_then_the_comments_then_the_counts
             }
         })
         .collect::<Vec<_>>();
+    // Each comment was edited after the last row, at 10:00.
     let ids_of_1 = (1..=102)
         .filter(|id| *id != 50)
-        .map(|id| (id, "2026-11-18T08:30:00Z"))
+        .map(|id| (id, "2026-11-18T10:30:00Z"))
         .collect::<Vec<_>>();
     let (listing, requests) = answering(
         &harness,
@@ -1468,7 +1470,8 @@ fn graphql_not_found(repository: &Value) -> HttpResponse {
 
 /// A first full listing that stops at a comment by its ID continues from that
 /// comment alone at each next read of its folders: the read of a network that
-/// fails again takes its error.
+/// fails again takes its error. Meanwhile the `comments/` of the item is not
+/// complete, so that a read of it takes its comments whole from the item.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_first_full_listing_stopped_at_a_comment_by_its_id_continues_from_it() {
     let harness = github_harness();
@@ -1508,6 +1511,22 @@ async fn a_first_full_listing_stopped_at_a_comment_by_its_id_continues_from_it()
             api(&format!("/repos/octocat/hello/issues/comments/{id}"))
         );
     }
+
+    let (comments, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all/1/comments"),
+        vec![ok(&json!([
+            comment(10, 1, false, "first"),
+            comment(11, 1, false, "second"),
+            comment(12, 1, false, "third"),
+        ]))],
+    )
+    .await;
+    assert_eq!(comments.unwrap(), ["10", "11", "12"]);
+    assert_eq!(
+        requests[0].url,
+        api("/repos/octocat/hello/issues/1/comments?per_page=100&page=1")
+    );
 
     let (stopped, requests) = answering(
         &harness,
