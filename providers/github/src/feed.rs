@@ -1699,8 +1699,9 @@ impl PullRequest {
 /// its `comments/`, the pages of its comments; else its answer, and for a
 /// change of an item with its comments in the projection and a count
 /// `comments` other than `0`, the comments since the `updated_at` of its token
-/// and its IDs; a first answer from its `comments/` takes its answer, then the
-/// pages of its comments. Each answer makes a part of each request.
+/// and its IDs. Its first answer, which the lookup of its folder starts as
+/// each operation resolves its path from the root, takes its answer alone.
+/// Each answer makes a part of each request.
 async fn item_feed<K>(cx: &FeedCx<K>, repo: &Repository, item: ItemRef) -> Result<Feed> {
     let token = cx
         .token()
@@ -1734,16 +1735,7 @@ async fn item_feed<K>(cx: &FeedCx<K>, repo: &Repository, item: ItemRef) -> Resul
     match item_answer(cx, repo, item, None).await? {
         ItemAnswer::Found(row, etag) => {
             write_found(cx, repo, item, &row)?;
-            let mut token = row.token(etag);
-            // The answer of an item with the count `comments` `0` empties its
-            // `comments/`, and completes it.
-            if cx.start() == Some("comments") && row.comments != 0 {
-                token.next = Some(ItemRequest::Comments {
-                    page: 1,
-                    brought: BTreeSet::new(),
-                });
-            }
-            item_part(&token)
+            item_part(&row.token(etag))
         },
         ItemAnswer::Removed => removal(cx, repo, item),
         ItemAnswer::Unchanged => Err(unconditional_304("the item")),
