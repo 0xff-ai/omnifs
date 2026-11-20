@@ -1415,6 +1415,63 @@ async fn a_later_answer_of_an_item_stopped_by_the_network_continues_from_its_nex
     later_answer_continued(&harness).await;
 }
 
+/// The first answer of an item, which the lookup of its folder starts for a
+/// read of its `title` or of its `comments/`, takes its `GET` alone. Stopped
+/// by the network at that `GET`, it gives each such read its error until its
+/// end, and the next read continues it with that `GET` alone; its
+/// `comments/` then takes the pages of its comments.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_answer_of_an_item_stopped_by_the_network_gives_its_error_until_its_end() {
+    let harness = github_harness();
+    let get = api("/repos/octocat/hello/issues/3");
+    let comments = "octocat/hello/issues/all/3/comments";
+    let (title, title_requests) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/3/title"),
+        vec![empty(502, &[])],
+    )
+    .await;
+    let (listing, listing_requests) =
+        answering(&harness, names(&harness, comments), vec![empty(502, &[])]).await;
+    for (stopped, requests) in [
+        (title.map(drop), title_requests),
+        (listing.map(drop), listing_requests),
+    ] {
+        assert!(matches!(stopped, Err(NsError::Network)), "{stopped:?}");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, get);
+    }
+
+    let (title, requests) = answering(
+        &harness,
+        read(&harness, "octocat/hello/issues/all/3/title"),
+        vec![ok(&item(
+            3,
+            "Three",
+            "open",
+            "2026-11-18T09:00:00Z",
+            1,
+            false,
+        ))],
+    )
+    .await;
+    assert_eq!(title.unwrap(), "Three");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url, get);
+
+    let (listing, requests) = answering(
+        &harness,
+        names(&harness, comments),
+        vec![ok(&json!([comment(30, 3, false, "first")]))],
+    )
+    .await;
+    assert_eq!(listing.unwrap(), ["30"]);
+    assert_eq!(
+        requests[0].url,
+        api("/repos/octocat/hello/issues/3/comments?per_page=100&page=1")
+    );
+}
+
 /// A read of the `body.md` of a comment by its path alone, as by a filehandle
 /// held across a change of the projection, looks up each segment from the
 /// root: the item takes its answer, and the comment, which the `comments/` of
