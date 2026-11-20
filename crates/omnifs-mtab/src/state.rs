@@ -167,9 +167,11 @@ impl MountState {
     }
 }
 
+/// The mount state file of this process, removed when it drops unless kept.
 #[derive(Debug)]
 pub struct StateFile {
     path: PathBuf,
+    kept: bool,
 }
 
 impl StateFile {
@@ -219,17 +221,25 @@ impl StateFile {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(STATE_FILE_MODE))?;
         }
-        Ok(Self { path })
+        Ok(Self { path, kept: false })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Keeps the file for the next process of the mount, which serves the mount
+    /// at its address.
+    pub fn keep(mut self) {
+        self.kept = true;
+    }
 }
 
 impl Drop for StateFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if !self.kept {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 

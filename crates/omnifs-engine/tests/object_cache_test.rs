@@ -33,6 +33,7 @@ async fn plain_path_lookup_ignores_unrelated_indexed_validator() {
         }],
         fs: Vec::new(),
         invalidations: Vec::new(),
+        removals: Vec::new(),
     };
     publish_effects_for_test(
         &harness.runtime,

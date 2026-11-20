@@ -8,7 +8,7 @@ use super::metrics::LatencyWindow;
 
 const MAX_OPEN_CALLS: usize = 8_192;
 
-const EXPORT_PORTS: [&str; 8] = [
+const EXPORT_PORTS: [&str; 9] = [
     "initialize",
     "lookup_child",
     "list_children",
@@ -16,6 +16,7 @@ const EXPORT_PORTS: [&str; 8] = [
     "open_file",
     "read_chunk",
     "close_file",
+    "feed",
     "on_event",
 ];
 const UNTRACED_EXPORTS: [&str; 2] = ["initialize", "close_file"];

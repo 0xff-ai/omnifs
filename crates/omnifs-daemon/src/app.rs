@@ -374,16 +374,17 @@ impl StartupFailure {
         }
     }
 
+    /// The recovery of the failure, whose store health reports its error.
     fn recovery(&self) -> DaemonRecovery {
         match self {
-            Self::Store(_) => DaemonRecovery {
+            Self::Store(error) => DaemonRecovery {
                 phase: DaemonPhase::RecoveryRequired,
                 durable_revision: None,
                 serving_revision: None,
                 failed_mutation: None,
                 store_health: HealthReport::new(
                     HealthState::Unhealthy,
-                    "control store could not be opened",
+                    format!("control store could not be opened: {error:#}"),
                 ),
                 repair: Some(RecoveryOffer {
                     id: next_recovery_id(),
@@ -391,10 +392,10 @@ impl StartupFailure {
                 }),
             },
             Self::Runtime {
+                error,
                 durable_revision,
                 serving_revision,
                 failed_mutation,
-                ..
             } => DaemonRecovery {
                 phase: DaemonPhase::RecoveryRequired,
                 durable_revision: *durable_revision,
@@ -402,7 +403,7 @@ impl StartupFailure {
                 failed_mutation: *failed_mutation,
                 store_health: HealthReport::new(
                     HealthState::Unhealthy,
-                    "daemon runtime could not start",
+                    format!("daemon runtime could not start: {error:#}"),
                 ),
                 repair: None,
             },

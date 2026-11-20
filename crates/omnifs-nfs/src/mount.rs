@@ -1,5 +1,6 @@
 use crate::adapter::Export;
 use crate::error::NfsFilesystemError;
+use crate::mount_events::{MountEvent, MountEvents};
 use crate::persist::{FH_STATE_FILE, FhState, PersistInit};
 use crate::protocol::consts::EXPORT_ROOT_ID;
 use crate::server::start_server;
@@ -16,8 +17,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use tokio::runtime::Handle;
-
-const MOUNT_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 
 #[cfg(unix)]
 const STATE_DIR_MODE: u32 = 0o700;
@@ -98,17 +97,36 @@ pub fn mount_blocking(
     rt: Handle,
     options: &NfsMountOptions,
 ) -> Result<(), NfsFilesystemError> {
-    mount_blocking_cancellable(mount_point, namespace, rt, options, &AtomicBool::new(false))
+    // No release comes for this mount.
+    let (events, _release) = MountEvents::new()?;
+    mount_blocking_cancellable(
+        mount_point,
+        namespace,
+        rt,
+        options,
+        &AtomicBool::new(false),
+        &events,
+    )
 }
 
+/// Serves the mount until it exits, which `events` give. `cancelled` stops a
+/// startup; the release of `events` stops the server without an unmount,
+/// keeping the state of the mount and writing the filehandle table for the
+/// next process, which serves the mount at the same address by the restart
+/// path.
 pub fn mount_blocking_cancellable(
     mount_point: &Path,
     namespace: Arc<dyn Namespace>,
     rt: Handle,
     options: &NfsMountOptions,
     cancelled: &AtomicBool,
+    events: &MountEvents,
 ) -> Result<(), NfsFilesystemError> {
-    std::fs::create_dir_all(mount_point)?;
+    // A stat of an active mount whose server is down blocks: only a mount
+    // point without a mount is created.
+    if !mount_is_active_checked(mount_point)? {
+        std::fs::create_dir_all(mount_point)?;
+    }
     ensure_private_state_dir(&options.state_dir)?;
     let bind = options.bind_for_mount(mount_point)?;
 
@@ -157,7 +175,7 @@ pub fn mount_blocking_cancellable(
                 error = %unmount_error,
                 "NFS mount completed while cancellation won; keeping the server alive until teardown succeeds"
             );
-            wait_for_mount_exit(mount_point);
+            wait_for_mount_exit(mount_point, events)?;
         }
         return Err(NfsFilesystemError::Mount(
             "mount startup was canceled".to_owned(),
@@ -172,14 +190,12 @@ pub fn mount_blocking_cancellable(
                 %error,
                 "NFS startup cancellation could not unmount; keeping the server alive until teardown succeeds"
             );
-            wait_for_mount_exit(mount_point);
+            wait_for_mount_exit(mount_point, events)?;
         }
         return Err(NfsFilesystemError::Mount(
             "mount startup was canceled".to_owned(),
         ));
     }
-
-    disable_spotlight(mount_point);
 
     tracing::info!(
         mount = %mount_point.display(),
@@ -187,9 +203,23 @@ pub fn mount_blocking_cancellable(
         "NFS loopback mount established"
     );
 
-    wait_for_mount_exit(mount_point);
+    if wait_for_mount_exit(mount_point, events)? == MountExit::Released {
+        state_file.keep();
+        tracing::info!(
+            mount = %mount_point.display(),
+            "NFS server released the mount without an unmount"
+        );
+    }
     drop(server);
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MountExit {
+    /// The mount is no longer active.
+    Exited,
+    /// The process released the mount, which stays active.
+    Released,
 }
 
 pub fn unmount(mount_point: &Path) -> Result<(), NfsFilesystemError> {
@@ -227,7 +257,11 @@ struct MountCommand {
 impl MountCommand {
     #[cfg(target_os = "macos")]
     fn for_platform(mount_point: &Path, addr: SocketAddr) -> Self {
-        Self::macos(mount_point, addr.port())
+        Self::macos(
+            mount_point,
+            addr.port(),
+            MacosRunner::for_mount_point(mount_point),
+        )
     }
 
     #[cfg(target_os = "linux")]
@@ -236,19 +270,26 @@ impl MountCommand {
     }
 
     #[cfg(any(target_os = "macos", test))]
-    fn macos(mount_point: &Path, port: u16) -> Self {
+    fn macos(mount_point: &Path, port: u16, runner: MacosRunner) -> Self {
+        let (program, mut args) = runner.invocation("mount_nfs");
+        args.extend([
+            OsString::from("-o"),
+            OsString::from(MountOptions::macos(port).render()),
+            OsString::from(export_source()),
+            mount_point.as_os_str().to_owned(),
+        ]);
         Self {
-            program: "sudo",
-            args: vec![
-                OsString::from("-n"),
-                OsString::from("mount_nfs"),
-                OsString::from("-o"),
-                OsString::from(MountOptions::macos(port).render()),
-                OsString::from(export_source()),
-                mount_point.as_os_str().to_owned(),
-            ],
-            failure_context: "mount_nfs via `sudo -n` (a password prompt needs `sudo -v` first; \
-                              an `Invalid argument` above means an unsupported mount option)",
+            program,
+            args,
+            failure_context: match runner {
+                MacosRunner::User => {
+                    "mount_nfs (an `Invalid argument` above means an unsupported mount option)"
+                },
+                MacosRunner::Sudo => {
+                    "mount_nfs via `sudo -n` (a password prompt needs `sudo -v` first; \
+                     an `Invalid argument` above means an unsupported mount option)"
+                },
+            },
         }
     }
 
@@ -405,69 +446,43 @@ impl MountOptions {
     }
 }
 
+/// Who runs a macOS mount helper: the current user when they own the mount
+/// point, as macOS lets a user mount onto a directory they own, and `sudo -n`
+/// otherwise, such as for a mount point in `/Volumes`.
 #[cfg(any(target_os = "macos", test))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SpotlightCommand {
-    program: &'static str,
-    args: Vec<OsString>,
-    failure_context: &'static str,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacosRunner {
+    User,
+    Sudo,
 }
 
 #[cfg(any(target_os = "macos", test))]
-impl SpotlightCommand {
-    fn macos(mount_point: &Path) -> Self {
-        Self {
-            program: "sudo",
-            args: vec![
-                OsString::from("-n"),
-                OsString::from("mdutil"),
-                OsString::from("-d"),
-                OsString::from("-i"),
-                OsString::from("off"),
-                mount_point.as_os_str().to_owned(),
-            ],
-            failure_context: "mdutil Spotlight exclusion via `sudo -n`",
+impl MacosRunner {
+    #[cfg(target_os = "macos")]
+    fn for_mount_point(mount_point: &Path) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+
+        match std::fs::metadata(mount_point) {
+            Ok(metadata) if metadata.uid() == current_euid() => Self::User,
+            _ => Self::Sudo,
         }
     }
 
-    #[cfg(target_os = "macos")]
-    fn run(&self) -> Result<(), NfsFilesystemError> {
-        let output = Command::new(self.program)
-            .args(&self.args)
-            .output()
-            .map_err(|error| NfsFilesystemError::Mount(error.to_string()))?;
-        let details = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        if output.status.success() || details.contains("Indexing and searching disabled.") {
-            Ok(())
-        } else {
-            Err(NfsFilesystemError::Mount(format!(
-                "{} exited with {}",
-                self.failure_context, output.status
-            )))
+    /// The program and the leading arguments that run `tool`.
+    fn invocation(self, tool: &'static str) -> (&'static str, Vec<OsString>) {
+        match self {
+            Self::User => (tool, Vec::new()),
+            Self::Sudo => ("sudo", vec![OsString::from("-n"), OsString::from(tool)]),
         }
     }
 }
 
-fn disable_spotlight(mount_point: &Path) {
-    #[cfg(target_os = "macos")]
-    match SpotlightCommand::macos(mount_point).run() {
-        Ok(()) => tracing::info!(
-            mount = %mount_point.display(),
-            "disabled Spotlight activity and indexing"
-        ),
-        Err(error) => tracing::warn!(
-            mount = %mount_point.display(),
-            %error,
-            "could not disable Spotlight activity and indexing"
-        ),
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    let _ = mount_point;
+// SAFETY: geteuid(2) takes no arguments, reads only kernel-maintained process
+// state, and is always safe to call on any POSIX system.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn current_euid() -> u32 {
+    unsafe { libc::geteuid() }
 }
 
 fn export_source() -> String {
@@ -599,12 +614,17 @@ fn normalize_mount_path(path: &Path) -> PathBuf {
     path.components().collect()
 }
 
-fn wait_for_mount_exit(mount_point: &Path) {
+/// Waits for the end of the mount, which the mount table shows after an
+/// unmount, or for the release of `events`, events of the kernel.
+fn wait_for_mount_exit(
+    mount_point: &Path,
+    events: &MountEvents,
+) -> Result<MountExit, NfsFilesystemError> {
     loop {
         match mount_is_active_checked(mount_point) {
             Ok(false) => {
                 tracing::info!("NFS mount exited");
-                return;
+                return Ok(MountExit::Exited);
             },
             Ok(true) => {},
             Err(error) => {
@@ -615,7 +635,10 @@ fn wait_for_mount_exit(mount_point: &Path) {
                 );
             },
         }
-        thread::sleep(MOUNT_WAIT_INTERVAL);
+        match events.wait()? {
+            MountEvent::Released => return Ok(MountExit::Released),
+            MountEvent::Changed => {},
+        }
     }
 }
 
@@ -639,7 +662,7 @@ fn ensure_private_state_dir(state_dir: &Path) -> Result<(), NfsFilesystemError> 
 #[cfg(test)]
 mod tests {
     use super::{
-        MountCommand, MountOptions, MountTableEntry, NfsMountOptions, SpotlightCommand,
+        MacosRunner, MountCommand, MountOptions, MountTableEntry, NfsMountOptions,
         mount_is_active_checked, mount_table_contains, parse_macos_mounts,
     };
     use omnifs_mtab::StateFile;
@@ -673,7 +696,7 @@ mod tests {
 
     #[test]
     fn macos_mount_command_uses_documented_loopback_options() {
-        let command = MountCommand::macos(Path::new("/Volumes/omnifs"), 2050);
+        let command = MountCommand::macos(Path::new("/Volumes/omnifs"), 2050, MacosRunner::Sudo);
         assert_eq!(command.program, "sudo");
         assert_eq!(
             args_as_strings(&command),
@@ -689,17 +712,38 @@ mod tests {
     }
 
     #[test]
-    fn macos_spotlight_command_disables_search_and_indexing() {
-        let command = SpotlightCommand::macos(Path::new("/Volumes/omnifs"));
-        assert_eq!(command.program, "sudo");
+    fn macos_mount_command_runs_directly_on_an_owned_mount_point() {
+        let mount = MountCommand::macos(Path::new("/Users/me/omnifs"), 2050, MacosRunner::User);
+        assert_eq!(mount.program, "mount_nfs");
         assert_eq!(
-            command
-                .args
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
-            vec!["-n", "mdutil", "-d", "-i", "off", "/Volumes/omnifs",]
+            args_as_strings(&mount),
+            vec![
+                "-o",
+                "vers=4,tcp,port=2050,sec=sys,ro,nobrowse,intr,nocallback,noac,nonegnamecache,retrycnt=0,timeo=5,retrans=1",
+                "127.0.0.1:/omnifs",
+                "/Users/me/omnifs",
+            ]
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_runner_follows_the_owner_of_the_mount_point() {
+        let owned = tempfile::tempdir().unwrap();
+        assert_eq!(
+            MacosRunner::for_mount_point(owned.path()),
+            MacosRunner::User
+        );
+        assert_eq!(
+            MacosRunner::for_mount_point(Path::new("/nonexistent/omnifs")),
+            MacosRunner::Sudo
+        );
+        if super::current_euid() != 0 {
+            assert_eq!(
+                MacosRunner::for_mount_point(Path::new("/")),
+                MacosRunner::Sudo
+            );
+        }
     }
 
     #[test]

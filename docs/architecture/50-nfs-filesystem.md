@@ -62,11 +62,11 @@ Mitigated by mount options today:
 - **Host metadata traversal.** macOS Spotlight can recursively walk a mounted
   NFS namespace and retain directory references after the serving process dies,
   which makes a dead loopback mount harder to tear down. The macOS mount uses
-  `nobrowse`, the export serves a synthetic lookup-only
-  `/.metadata_never_index` marker, and the runner asks `mdutil` to disable
-  indexing and searching. The marker is filesystem-owned and omitted from
-  provider listings; the `mdutil` command is best effort because macOS can
-  report a disabled NFS volume as having no manageable metadata store.
+  `nobrowse`, and the export serves a synthetic lookup-only
+  `/.metadata_never_index` marker; these two alone exclude the mount from
+  Spotlight. The marker is filesystem-owned and omitted from provider
+  listings. The runner runs no `mdutil`: an `mdutil` that hung in `open()` on
+  the mount kept the thread that waits for a release from taking `Restart`.
 
 Deferred by the read-only contract (these arrive with any write path and must be designed for, not discovered):
 
@@ -79,6 +79,8 @@ Structurally addressed for the restartable out-of-process filesystem:
 
 - **Size pinned across OPEN.** The macOS client latches the file size it held before OPEN for the lifetime of that open, and serves that pinned value even to `fstat` on the open fd, so a cold unknown-length file's reads would stay clamped to the 1-byte size-unknown sentinel. `Export::lookup` (`crates/omnifs-nfs/src/adapter.rs`) probes with a one-byte read whenever `getattr_exact` still reports the sentinel, so the exact size is learned and cached before the client's pre-OPEN attrs are captured; `Export::open_state` repeats the same probe as a backstop for opens that arrive without a fresh lookup. Proven by the engine's `one_byte_probe_read_learns_size_for_next_getattr` (`crates/omnifs-engine/tests/namespace_surface.rs`) plus the adapter's `lookup_probes_unknown_size_file_and_learns_exact_size` (`crates/omnifs-nfs/src/adapter.rs`).
 - **Path identity across restarts.** A kernel client holds filehandles across a filesystem or daemon restart. The NFS runner persists validated namespace `Path` values with its protocol-local parent/name/scope and inode identity, so a fresh engine can rediscover provider anchors and host descendants without a daemon-local identity table. A daemon disconnect publishes the existing root `NsEvent::InvalidateSubtree`; NFS drains it inline while preserving path-backed protocol identity. The runner also recovers the NFS server address recorded for an active mount and serves the export without remounting.
+- **The end of a mount.** The owner of a mount waits for its end as an event of the kernel, a kqueue `EVFILT_FS` with `VQ_UNMOUNT` on macOS and `POLLPRI` of `/proc/self/mountinfo` on Linux, and reads the mount table at each of them.
+- **Restart in place.** `omnifs fs restart` replaces the host instance of an active mount without an unmount: at `Restart` on its control socket, which wakes the owner of the mount with an event of the kernel, a kqueue `EVFILT_USER` on macOS and an eventfd on Linux, the instance stops waiting for the mount to exit, shuts down the connections of its server after the operations in flight, keeps the state file of the mount and writes its filehandle table as its export drops, answers `Restart` without a time-out, and ends; `omnifs fs restart` waits for the exit of its process as an event of the kernel, a kqueue on macOS and a pidfd on Linux. The next instance takes the restart path above at the same address, and creates the mount point only for a mount that is not active, since a stat of a mount between two instances waits for a server. A file in use keeps reading across the restart, which the `host_restart` live acceptance proves.
 
 Open, inherent to the transport:
 

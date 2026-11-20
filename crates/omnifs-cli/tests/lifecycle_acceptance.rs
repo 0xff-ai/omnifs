@@ -85,7 +85,8 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("spawn omnifs {}: {error}", args.join(" ")))
     }
 
-    async fn start_daemon(&self) -> DaemonGuard {
+    /// A daemon child of the profile, whatever its phase.
+    fn spawn_daemon(&self) -> DaemonGuard {
         let child = Command::new(omnifs_bin())
             .arg("daemon")
             .env("OMNIFS_HOME", self.home_path())
@@ -95,10 +96,14 @@ impl Fixture {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn omnifs daemon");
-        let mut guard = DaemonGuard {
+        DaemonGuard {
             child: Some(child),
             endpoint: self.endpoint(),
-        };
+        }
+    }
+
+    async fn start_daemon(&self) -> DaemonGuard {
+        let mut guard = self.spawn_daemon();
         wait_until_ready(&guard.endpoint).await;
         // A child that exits during the readiness loop must fail the test with
         // its status instead of leaking a process into the next scenario.
@@ -321,6 +326,163 @@ fn assert_success(output: &Output, command: &str) {
     );
 }
 
+/// The result of `omnifs --output json status --ready`.
+fn ready_status(fixture: &Fixture) -> serde_json::Value {
+    let status = fixture.run(&["--output", "json", "status", "--ready"]);
+    let json: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap_or_else(|error| {
+        panic!(
+            "status --ready must produce JSON: {error}\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&status.stdout),
+            String::from_utf8_lossy(&status.stderr)
+        )
+    });
+    json["result"].clone()
+}
+
+/// Waits for `daemon` to bind its control socket, whatever its phase.
+async fn wait_for_control_socket(daemon: &DaemonGuard) {
+    let socket = daemon.endpoint.control_socket();
+    let deadline = tokio::time::Instant::now() + STARTUP_TIMEOUT;
+    while !socket.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "daemon did not bind its control socket within {}s",
+            STARTUP_TIMEOUT.as_secs()
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// `status --ready` of a daemon that has just bound its control socket gives
+/// its status once its `WatchPhase` stream gives it ready.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_ready_gives_a_starting_daemon_once_it_is_ready() {
+    let fixture = Fixture::new();
+    let mut daemon = fixture.spawn_daemon();
+    wait_for_control_socket(&daemon).await;
+    let status = ready_status(&fixture);
+    assert_eq!(status["daemon"]["status"]["phase"], "ready");
+    daemon.stop().await;
+}
+
+/// `status --ready` of a ready daemon gives its status at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_ready_gives_a_ready_daemon_at_once() {
+    let fixture = Fixture::new();
+    let mut daemon = fixture.start_daemon().await;
+    let status = ready_status(&fixture);
+    assert_eq!(status["daemon"]["status"]["phase"], "ready");
+    daemon.stop().await;
+}
+
+/// `status --ready` of a daemon whose control store cannot be opened gives
+/// its status with the phase `recovery_required` and the error of its
+/// recovery in the health of its state.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_ready_gives_a_recovering_daemon_with_its_error() {
+    let fixture = Fixture::new();
+    let store = fixture.home_path().join("daemon-state/control-store");
+    std::fs::create_dir_all(&store).expect("control store folder");
+    std::fs::write(store.join("state.sqlite3"), b"not sqlite").expect("corrupt control store");
+    let mut daemon = fixture.spawn_daemon();
+    wait_for_control_socket(&daemon).await;
+    let status = ready_status(&fixture);
+    assert_eq!(status["daemon"]["status"]["phase"], "recovery_required");
+    let error = status["daemon"]["status"]["health"]["mounts"]["message"]
+        .as_str()
+        .expect("the health of the state of the daemon");
+    assert!(
+        error.starts_with("control store could not be opened: "),
+        "{error}"
+    );
+    daemon.stop().await;
+}
+
+/// A command with `--wait-for-daemon` started without the folder of its
+/// profile starts no daemon, and ends with the daemon that another process
+/// starts after it, once that daemon is ready.
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_for_daemon_ends_with_the_daemon_of_another_process_once_it_is_ready() {
+    let parent = tempfile::tempdir().expect("parent of the profile");
+    let profile = parent.path().join("profile");
+    let mut command = Command::new(omnifs_bin())
+        .args([
+            "--wait-for-daemon",
+            "--output",
+            "json",
+            "mount",
+            "rm",
+            "absent",
+            "--dry-run",
+        ])
+        .env("OMNIFS_HOME", &profile)
+        .env("NO_COLOR", "1")
+        .env("RUST_LOG", "warn")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn omnifs with --wait-for-daemon");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        command.try_wait().expect("poll the command").is_none(),
+        "the command waits for a daemon"
+    );
+    assert!(!profile.exists(), "the command starts no daemon");
+
+    let endpoint = Bootstrap::<Client>::under_root(&profile);
+    let mut daemon = DaemonGuard {
+        child: Some(
+            Command::new(omnifs_bin())
+                .arg("daemon")
+                .env("OMNIFS_HOME", &profile)
+                .env("RUST_LOG", "warn")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn omnifs daemon"),
+        ),
+        endpoint: endpoint.clone(),
+    };
+    let output = tokio::time::timeout(
+        STARTUP_TIMEOUT,
+        tokio::task::spawn_blocking(move || command.wait_with_output()),
+    )
+    .await
+    .expect("the command ends with the daemon")
+    .expect("join the command")
+    .expect("wait for the command");
+    assert_success(&output, "mount rm --dry-run with --wait-for-daemon");
+    let inventory = client(&endpoint.control_socket())
+        .await
+        .expect("connect to the daemon")
+        .get_inventory(unary(wire::Empty {}))
+        .await
+        .expect("the inventory of the daemon")
+        .into_inner()
+        .inventory
+        .expect("an inventory");
+    assert_eq!(
+        grpc::daemon_inventory(&inventory)
+            .expect("a valid inventory")
+            .phase,
+        omnifs_api::DaemonPhase::Ready,
+        "the command ends once the daemon is ready"
+    );
+    daemon.stop().await;
+}
+
+/// `status --ready` without a daemon gives the status at once and starts
+/// none.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_ready_without_a_daemon_gives_the_status_at_once() {
+    let fixture = Fixture::new();
+    let status = ready_status(&fixture);
+    assert!(status["daemon"]["status"].is_null(), "{status}");
+    assert_eq!(status["daemon"]["probe"]["state"], "stopped");
+    assert!(!fixture.endpoint().control_socket().exists());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_starts_and_reports_ready_inventory() {
     let fixture = Fixture::new();
@@ -502,6 +664,86 @@ async fn provenance_converges_for_committed_and_not_committed_batches() {
         "a batch that never applied must leave no row for its target"
     );
 
+    daemon.stop().await;
+}
+
+/// `status` gives whether the daemon and the host instance of a filesystem
+/// run the program of the command: the instance of a record with the program
+/// of `omnifs` runs it, and one of a record without a program does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_gives_the_program_of_the_daemon_and_of_a_host_instance() {
+    let fixture = Fixture::new();
+    let location = fixture.home_path().join("mount-point");
+    std::fs::create_dir_all(&location).expect("mount point");
+    let location_arg = location.to_string_lossy().into_owned();
+    #[cfg(target_os = "macos")]
+    let protocol = "nfs";
+    #[cfg(not(target_os = "macos"))]
+    let protocol = "fuse";
+    let create = fixture.run(&[
+        "--output",
+        "json",
+        "fs",
+        "create",
+        "--name",
+        "kept",
+        "--protocol",
+        protocol,
+        "--runtime",
+        "host",
+        "--location",
+        &location_arg,
+    ]);
+    assert_success(&create, "fs create");
+    let mut daemon = fixture.start_daemon().await;
+    let program = blake3::hash(&std::fs::read(omnifs_bin()).expect("read omnifs"))
+        .to_hex()
+        .to_string();
+    let state_dir = fixture.home_path().join("client/filesystems/state/kept");
+    std::fs::create_dir_all(&state_dir).expect("state folder");
+    let record = |program: Option<&str>| {
+        serde_json::json!({
+            "version": 1,
+            "instance_id": "0123456789abcdef0123456789abcdef",
+            "pid": 42,
+            "process_group": 42,
+            "spec": {
+                "id": "kept",
+                "protocol": protocol,
+                "runtime": "host",
+                "location": location_arg,
+            },
+            "control_socket": state_dir.join("control.sock"),
+            "program": program,
+        })
+    };
+    let status = || {
+        let status = fixture.run(&["--output", "json", "status"]);
+        serde_json::from_slice::<serde_json::Value>(&status.stdout)
+            .expect("status --output json must produce JSON")["result"]
+            .clone()
+    };
+
+    std::fs::write(
+        state_dir.join("runner.json"),
+        record(Some(&program)).to_string(),
+    )
+    .expect("write the record of a host instance");
+    let current = status();
+    assert_eq!(current["daemon"]["current_program"], true, "{current}");
+    assert_eq!(
+        current["filesystems"][0]["current_program"], true,
+        "{current}"
+    );
+
+    std::fs::write(state_dir.join("runner.json"), record(None).to_string())
+        .expect("write the record of a host instance");
+    let earlier = status();
+    assert_eq!(
+        earlier["filesystems"][0]["current_program"], false,
+        "{earlier}"
+    );
+    std::fs::remove_file(state_dir.join("runner.json")).expect("remove the record");
     daemon.stop().await;
 }
 

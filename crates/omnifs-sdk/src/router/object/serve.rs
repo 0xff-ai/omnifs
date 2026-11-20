@@ -489,11 +489,11 @@ impl<O: Object> ServeCtx<'_, O> {
                 let value = O::decode(bytes)?;
                 self.serve_computed(&value, key, &name, effects)
             },
-            ObjectReadTarget::Direct(name) | ObjectReadTarget::Stream(name) => {
-                Err(ProviderError::internal(format!(
-                    "face {name:?} must be served through its own handler, not canonical bytes"
-                )))
-            },
+            ObjectReadTarget::Direct(name)
+            | ObjectReadTarget::Stream(name)
+            | ObjectReadTarget::Fed(name) => Err(ProviderError::internal(format!(
+                "face {name:?} must be served through its own handler, not canonical bytes"
+            ))),
         }
     }
 

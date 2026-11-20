@@ -74,15 +74,11 @@ impl<'a> XdrReader<'a> {
         let len = self.u32()? as usize;
         let byte_len = len.checked_mul(4).ok_or(XdrError::Underflow)?;
         let bytes = self.take(byte_len)?;
-        let mut words = Vec::with_capacity(len);
-        for chunk in bytes.chunks_exact(4) {
-            words.push(u32::from_be_bytes(
-                chunk
-                    .try_into()
-                    .expect("bitmap chunks are exactly one u32 long"),
-            ));
-        }
-        Ok(words)
+        let (chunks, _) = bytes.as_chunks::<4>();
+        Ok(chunks
+            .iter()
+            .map(|chunk| u32::from_be_bytes(*chunk))
+            .collect())
     }
 
     pub(crate) fn fattr(&mut self) -> Result<(Vec<u32>, Vec<u8>), XdrError> {
