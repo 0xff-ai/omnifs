@@ -1217,11 +1217,11 @@ impl MountResources {
         self.memory.mem_invalidate(&Key::with_aux(path, kind, aux));
     }
 
-    pub(crate) fn memory_invalidate_entries_if<P>(&self, predicate: P)
+    pub(crate) fn memory_invalidate_paths_if<P>(&self, predicate: P)
     where
-        P: Fn(&Key, &Arc<Record>) -> bool + Send + Sync + 'static,
+        P: Fn(&Path) -> bool + Send + Sync + 'static,
     {
-        self.memory.mem_invalidate_entries_if(predicate);
+        self.memory.mem_invalidate_paths_if(predicate);
     }
     // --- Canonical object cache -----------------------------------------------
 

@@ -25,7 +25,7 @@ impl InvalidationReport {
 
 impl EngineNamespace {
     /// SYNC drain of pending runtime invalidations for a mount. Does the
-    /// Tree-owned mem eviction (`Runtime::mem_invalidate_entries_if`) and
+    /// Tree-owned mem eviction (`MountResources::memory_invalidate_paths_if`) and
     /// returns the neutral `InvalidationReport` so the renderer drives its own
     /// kernel notifier + prunes its inode/filehandle/stateid tables. NOT async:
     /// the underlying `Runtime::drain_invalidated_{prefixes,paths}` /
@@ -45,12 +45,11 @@ impl EngineNamespace {
             crate::inspector::cache_event(CacheKind::Invalidated);
             // Tree-owned mem eviction; the kernel-notify half stays
             // renderer-side and consumes the returned report.
-            runtime.resources.memory_invalidate_entries_if({
+            runtime.resources.memory_invalidate_paths_if({
                 let paths = paths.clone();
                 let prefixes = prefixes.clone();
-                move |k, _| {
-                    paths.contains(&k.path)
-                        || prefixes.iter().any(|prefix| k.path.has_prefix(prefix))
+                move |path| {
+                    paths.contains(path) || prefixes.iter().any(|prefix| path.has_prefix(prefix))
                 }
             });
         }
