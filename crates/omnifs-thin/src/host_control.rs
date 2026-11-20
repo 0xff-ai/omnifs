@@ -348,7 +348,7 @@ async fn read_reply_line(
 }
 
 pub fn control_socket_for(state_dir: &Path, instance_id: &str) -> PathBuf {
-    state_dir.join(format!("control-{instance_id}.sock"))
+    state_dir.join(format!("control-{}.sock", &instance_id[..8]))
 }
 
 #[cfg(test)]
@@ -406,5 +406,14 @@ mod tests {
         completion.await.unwrap();
         server.await.unwrap();
         drop(phase_tx);
+    }
+
+    #[test]
+    fn control_socket_fits_the_macos_socket_path_limit() {
+        let state_dir =
+            Path::new("/Users/abcdefghijklmnopq/.omnifs/client/filesystems/state/sources");
+        let socket = control_socket_for(state_dir, "0123456789abcdef0123456789abcdef");
+        assert_eq!(socket.file_name().unwrap(), "control-01234567.sock");
+        assert!(socket.as_os_str().len() < 104, "{}", socket.display());
     }
 }

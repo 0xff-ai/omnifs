@@ -1,9 +1,9 @@
 //! Git operations via the system `git` CLI.
 //!
-//! The `open_repo` callout clones a remote if needed and returns a tree-ref
-//! handle that the namespace host-tree handoff resolves to a filesystem path.
-//! traversal and blob reads run through bind-mount reads of the clone
-//! directory, not through the WIT.
+//! The `open_repo` callout clones a remote if needed, checks out the commit
+//! it names, and returns a tree-ref handle that the namespace host-tree
+//! handoff resolves to a filesystem path. Traversal and blob reads run
+//! through bind-mount reads of the clone directory, not through the WIT.
 
 use crate::authority::RuntimeAuthority;
 use crate::cache::identity::GitId;
@@ -73,14 +73,17 @@ impl GitExecutor {
             GitCloner::validate_reference(reference)
                 .map_err(|error| GitError::Invalid(error.to_string()))?;
         }
+        GitCloner::validate_commit(&req.commit)
+            .map_err(|error| GitError::Invalid(error.to_string()))?;
         let id = GitId::new(&self.mount_scope, &remote, req.reference.as_deref());
         let cache_path = self
             .cloner
-            .clone_if_needed(
+            .open_at(
                 &id,
                 &req.clone_url,
                 &remote,
                 req.reference.as_deref(),
+                &req.commit,
                 operation_id,
             )
             .map_err(|error| {
@@ -88,7 +91,7 @@ impl GitExecutor {
                     cache_id = %id,
                     clone_url = %LogUrl(&req.clone_url),
                     error = %error,
-                    "clone failed"
+                    "git open failed"
                 );
                 GitError::from(error)
             })?;
@@ -196,6 +199,7 @@ mod tests {
                 &wit_types::GitOpenRequest {
                     clone_url: remote.to_string(),
                     reference: None,
+                    commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
                 },
                 1,
             );

@@ -59,6 +59,7 @@ pub struct Runtime {
     trees: Arc<TreeRefs>,
     pub(crate) invalidation: InvalidationState,
     pub(crate) namespace_flights: crate::ops::namespace::NamespaceFlights,
+    pub(crate) feed_operations: Arc<crate::ops::feed::FeedOperations>,
     // Per-mount rate-limit window. `Some(open_until)` while the mount's
     // provider is throttled (set from a 429's Retry-After); reads serve stale
     // cache instead of EAGAIN until it clears. std Mutex: the critical section
@@ -263,8 +264,15 @@ impl Runtime {
         if let Some(test_callouts) = test_callouts {
             callout_host = callout_host.with_test_callouts(test_callouts);
         }
+        let feed_operations = Arc::new(crate::ops::feed::FeedOperations::default());
         instance
-            .set_callouts(callout_host)
+            .set_host(
+                callout_host,
+                crate::ops::feed::ProjectionReads::new(
+                    Arc::clone(&resources),
+                    Arc::clone(&feed_operations),
+                ),
+            )
             .map_err(BuildError::from)?;
         let runtime = Self {
             instance,
@@ -277,6 +285,7 @@ impl Runtime {
             trees,
             invalidation: InvalidationState::default(),
             namespace_flights: crate::ops::namespace::NamespaceFlights::new(),
+            feed_operations,
             rate_limit_until: std::sync::Mutex::new(None),
             test_callouts: test_rx.map(std::sync::Mutex::new),
         };
