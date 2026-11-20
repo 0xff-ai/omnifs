@@ -204,12 +204,14 @@ impl RpcClient {
 
     /// Waits for the daemon to be ready or to require recovery, as its
     /// `WatchPhase` stream gives it, up to the end of the daemon; without a
-    /// daemon to answer, it returns at once.
+    /// daemon to answer, a control socket that is missing or refuses the
+    /// connection of the request, it returns at once.
     pub(crate) async fn settled_phase(&self) -> anyhow::Result<()> {
-        if !self.control_reachable().await? {
-            return Ok(());
-        }
-        let mut client = self.client().await?;
+        let mut client = match self.client().await {
+            Ok(client) => client,
+            Err(error) if without_daemon(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        };
         let phases = client
             .watch_phase(Request::new(wire::Empty {}))
             .await
@@ -491,12 +493,30 @@ impl RpcClient {
     }
 }
 
+/// The root cause of a failed connection, an I/O error with its kind when it
+/// is one.
 fn connect_error(error: &tonic::transport::Error) -> anyhow::Error {
     let mut cause: &(dyn std::error::Error + 'static) = error;
     while let Some(source) = cause.source() {
         cause = source;
     }
-    anyhow::anyhow!("{cause}")
+    match cause.downcast_ref::<std::io::Error>() {
+        Some(error) => std::io::Error::new(error.kind(), error.to_string()).into(),
+        None => anyhow::anyhow!("{cause}"),
+    }
+}
+
+/// Whether the connection to the control socket found no daemon: the socket
+/// is missing or refuses the connection.
+fn without_daemon(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+        })
+    })
 }
 
 fn retained_provider_metadata(
@@ -810,8 +830,10 @@ mod tests {
     }
 
     /// `settled_phase` answers at once without a daemon, for a control
-    /// socket that is missing or refuses a connection, and gives each other
-    /// error of the connection, as a path too long for a socket.
+    /// socket that is missing or refuses the connection of its request, and
+    /// gives each other error of that connection, as a path too long for a
+    /// socket. The socket that refuses is bound without a listener, so that
+    /// it refuses each connection.
     #[tokio::test]
     async fn settled_phase_answers_at_once_only_without_a_daemon() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -819,7 +841,8 @@ mod tests {
         let socket = endpoint.control_socket().clone();
         let rpc = RpcClient::from_endpoint(endpoint);
         rpc.settled_phase().await.unwrap();
-        drop(std::os::unix::net::UnixListener::bind(&socket).expect("bind control socket"));
+        let bound = tokio::net::UnixSocket::new_stream().expect("control socket");
+        bound.bind(&socket).expect("bind control socket");
         rpc.settled_phase().await.unwrap();
 
         let long = RpcClient::from_endpoint(Bootstrap::<Client>::under_root(
@@ -827,7 +850,7 @@ mod tests {
         ));
         let error = long.settled_phase().await.unwrap_err();
         assert!(
-            format!("{error:#}").contains("probe daemon control socket"),
+            format!("{error:#}").contains("connect to daemon at"),
             "{error:#}"
         );
     }
