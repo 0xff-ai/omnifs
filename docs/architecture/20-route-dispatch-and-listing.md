@@ -56,6 +56,10 @@ A directory listing merges literal route-table siblings with provider-enumerated
 
 Do not duplicate static sibling merge logic across list and lookup paths. The route dispatcher owns it once.
 
+## Fed paths
+
+A fed face answers lookup, listing, or read with the claims of the feeds of its ancestry instead of running a handler, so the provider's answer costs no request. The claims are resolved once when the router compiles, outer object first; dispatch keeps each claim whose object the router resolves at the leading segments of the operation's path, renders its object id and anchor path from them, the anchor path with the facets of its route at their first choice, and answers not found for a fed path no feed answers for. A child of a fed dir that matches no route of its own answers the claims of the dir without starting its feeds. The facts behind a fed path, including whether it exists, come from the projection the feeds keep.
+
 ## Negative results
 
 Negative lookup is authoritative only when no route candidate, explicit child, dynamic capture sibling, or parent handler can own the child.

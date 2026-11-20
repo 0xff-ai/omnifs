@@ -176,6 +176,7 @@ pub struct CategoryKey {
     display_name = "arXiv",
     description = "arXiv papers and abstracts as files",
     mount = "arxiv",
+    projection = 1,
     capabilities(
         domain(
             "export.arxiv.org",
@@ -229,9 +230,11 @@ impl PaperKey {
 }
 
 impl CategoryKey {
-    #[allow(clippy::unused_async)]
-    async fn sub(_cx: DirCx, _key: CategoryKey) -> Result<DirListing> {
-        Ok(DirListing::exhaustive([Entry::dir("papers")]))
+    fn sub(
+        _cx: DirCx,
+        _key: CategoryKey,
+    ) -> impl core::future::Future<Output = Result<DirListing>> {
+        core::future::ready(Ok(DirListing::exhaustive([Entry::dir("papers")])))
     }
 
     async fn recent(cx: DirCx, key: CategoryKey) -> Result<DirListing> {

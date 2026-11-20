@@ -35,6 +35,7 @@ struct Api;
     display_name = "Oura",
     description = "your Oura ring health data",
     mount = "oura",
+    projection = 1,
     capabilities(domain(
         "api.ouraring.com",
         "Fetch Oura API v2 user collection resources such as sleep, activity, readiness, heart rate, and device data."
@@ -232,9 +233,9 @@ struct DayKey {
 }
 
 impl DayKey {
-    #[allow(clippy::unused_async, clippy::unused_self)]
-    async fn entries(self, _cx: DirCx) -> Result<DirListing> {
-        Ok(DirListing::exhaustive(Collection::entries()))
+    #[allow(clippy::unused_self)]
+    fn entries(self, _cx: DirCx) -> impl core::future::Future<Output = Result<DirListing>> {
+        core::future::ready(Ok(DirListing::exhaustive(Collection::entries())))
     }
 }
 

@@ -60,6 +60,7 @@ fn path_invalidation(path: &str) -> Effects {
         canonical: Vec::new(),
         fs: Vec::new(),
         invalidations: vec![Invalidation::Listing(PathOrPrefix::Path(path.to_string()))],
+        removals: Vec::new(),
     }
 }
 

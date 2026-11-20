@@ -419,7 +419,13 @@ async fn restart(args: NameArgs, output: Output) -> Result<ExitCode> {
         .inventory()
         .await
         .context("daemon did not become ready before restarting a filesystem")?;
-    stop_runtime(&client_state, &spec, output.clone()).await?;
+    let client_owner = client_owner_id()?;
+    let driver = FilesystemDriver::for_spec(&client_state, &spec, output.clone())?;
+    if let Some(confirmed) = driver.confirmed(&client_state, client_owner, &spec).await? {
+        driver
+            .end_for_restart(&client_state, client_owner, &spec, confirmed)
+            .await?;
+    }
     Box::pin(launch_and_confirm(
         &client_state,
         &spec,
@@ -557,11 +563,12 @@ async fn shell(args: ShellArgs, output: Output) -> Result<ExitCode> {
     ensure_attached(&spec).await?;
 
     let (command, label) = match (&driver, confirmed) {
-        (FilesystemDriver::Host(_), Confirmed::Host(_, phase)) => {
+        (FilesystemDriver::Host(_), Confirmed::Host(_, state)) => {
             ensure!(
-                phase == omnifs_thin::host_control::RunnerPhase::Mounted,
-                "filesystem `{}` is not mounted; runner phase is {phase:?}",
-                spec.id()
+                state.phase == omnifs_thin::host_control::RunnerPhase::Mounted,
+                "filesystem `{}` is not mounted; runner phase is {:?}",
+                spec.id(),
+                state.phase
             );
             return if let Some(program) = args.command.first() {
                 let mut command = Command::new(program);

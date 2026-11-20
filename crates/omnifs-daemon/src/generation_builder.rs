@@ -140,7 +140,7 @@ impl GenerationDraft {
             ..
         } = self;
 
-        let mut providers: HashMap<ProviderId, Option<LoadedProvider>> = HashMap::new();
+        let mut providers: HashMap<ProviderId, Result<LoadedProvider, String>> = HashMap::new();
         for mount in &mounts {
             let id = mount.document.provider.id;
             if let std::collections::hash_map::Entry::Vacant(entry) = providers.entry(id) {
@@ -148,7 +148,10 @@ impl GenerationDraft {
                     .load_provider(id)
                     .await
                     .with_context(|| format!("load provider {id}"))?;
-                entry.insert(provider.map(LoadedProvider::from));
+                entry.insert(match provider {
+                    Some(provider) => LoadedProvider::try_from(provider),
+                    None => Err("its provider artifact is not retained".to_owned()),
+                });
             }
         }
 
@@ -260,17 +263,20 @@ pub(crate) async fn prepare_credential_document(
         material: submission.material,
         overrides: submission.overrides,
     };
+    let manifest = provider
+        .manifest
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("provider manifest is invalid: {error}"))?;
     let fingerprint = auth_fingerprint(
         submission.provider,
-        provider
-            .manifest
+        manifest
             .auth
             .as_ref()
             .and_then(|manifest| manifest.scheme(&submission.scheme))
             .with_context(|| format!("provider declares no auth scheme `{}`", submission.scheme))?,
         &payload.overrides,
     )?;
-    let kind = validate_payload(&provider, &submission.scheme, &payload)?;
+    let kind = validate_payload(manifest, &submission.scheme, &payload)?;
     let scopes = material_scopes(&payload.material);
     let material = encode_payload(&payload)?;
     Ok(CredentialDocument {
@@ -317,13 +323,18 @@ struct LoadedProvider {
     bytes: Arc<[u8]>,
 }
 
-impl From<StoredProvider> for LoadedProvider {
-    fn from(provider: StoredProvider) -> Self {
-        Self {
+impl TryFrom<StoredProvider> for LoadedProvider {
+    type Error = String;
+
+    /// The provider of a valid manifest; the error of an invalid one.
+    fn try_from(provider: StoredProvider) -> Result<Self, String> {
+        Ok(Self {
             reference: provider.reference,
-            manifest: provider.manifest,
+            manifest: provider
+                .manifest
+                .map_err(|error| format!("its provider manifest is invalid: {error}"))?,
             bytes: Arc::from(provider.bytes.into_boxed_slice()),
-        }
+        })
     }
 }
 
@@ -339,12 +350,15 @@ pub(crate) fn credential_scopes(stored: &StoredCredential) -> anyhow::Result<Vec
     Ok(material_scopes(&payload.material))
 }
 
+/// The input of a mount: unavailable with the error of its provider, whose
+/// artifact is not retained or whose manifest is invalid.
 fn build_mount_input(
     mount: StoredMount,
-    provider: Option<&LoadedProvider>,
+    provider: Result<&LoadedProvider, &String>,
     credentials: &HashMap<CredentialId, CredentialRuntime>,
     service: &Arc<CredentialService>,
 ) -> anyhow::Result<MountBuildInput> {
+    let canonical = Arc::from(mount.canonical_without_artifact()?.into_boxed_slice());
     let config = RuntimeMountConfig {
         name: mount.document.name.clone(),
         provider: mount.document.provider.clone(),
@@ -354,14 +368,18 @@ fn build_mount_input(
             .limits
             .and_then(|limits| limits.max_fetch_blob_bytes),
     };
-    let canonical = Arc::from(mount.canonical.into_boxed_slice());
-    let Some(provider) = provider else {
-        return Ok(MountBuildInput {
-            config,
-            canonical,
-            provider: None,
-            state: MountBuildState::ProviderUnavailable,
-        });
+    let provider = match provider {
+        Ok(provider) => provider,
+        Err(reason) => {
+            return Ok(MountBuildInput {
+                config,
+                canonical,
+                provider: None,
+                state: MountBuildState::ProviderUnavailable {
+                    reason: reason.clone(),
+                },
+            });
+        },
     };
     let provider_input = Some(ProviderBuildInput {
         bytes: Arc::clone(&provider.bytes),
@@ -373,9 +391,17 @@ fn build_mount_input(
             credential_generation: None,
         },
         Some(id) => {
-            let bound = credentials
-                .get(id)
-                .filter(|credential| credential.provider == provider.reference.id);
+            // A credential stays bound to a mount that moves to another
+            // artifact of its provider with the auth scheme of its issue.
+            let bound = match credentials.get(id) {
+                Some(credential)
+                    if credential.provider == provider.reference.id
+                        || issued_scheme(provider, credential)? =>
+                {
+                    Some(credential)
+                },
+                _ => None,
+            };
             match bound {
                 None => MountBuildState::AuthRequired,
                 Some(credential) => {
@@ -396,6 +422,26 @@ fn build_mount_input(
     })
 }
 
+/// Whether `provider` declares the auth scheme that `credential` was issued
+/// against with the artifact of its issue.
+fn issued_scheme(
+    provider: &LoadedProvider,
+    credential: &CredentialRuntime,
+) -> anyhow::Result<bool> {
+    let Some(scheme) = provider
+        .manifest
+        .auth
+        .as_ref()
+        .and_then(|manifest| manifest.scheme(credential.id.scheme()))
+    else {
+        return Ok(false);
+    };
+    Ok(
+        auth_fingerprint(credential.provider, scheme, &credential.overrides)?
+            == credential.fingerprint,
+    )
+}
+
 fn build_auth_binding(
     provider: &LoadedProvider,
     credential: &CredentialRuntime,
@@ -408,7 +454,7 @@ fn build_auth_binding(
         .and_then(|manifest| manifest.scheme(credential.id.scheme()))
         .context("credential scheme is absent from the pinned provider")?;
     anyhow::ensure!(
-        auth_fingerprint(provider.reference.id, scheme, &credential.overrides)?
+        auth_fingerprint(credential.provider, scheme, &credential.overrides)?
             == credential.fingerprint,
         "credential auth runtime no longer matches the pinned provider"
     );
@@ -444,12 +490,11 @@ fn build_auth_binding(
 }
 
 fn validate_payload(
-    provider: &StoredProvider,
+    manifest: &omnifs_provider::ProviderManifest,
     scheme_key: &str,
     payload: &CredentialPayload,
 ) -> anyhow::Result<AuthKind> {
-    let scheme = provider
-        .manifest
+    let scheme = manifest
         .auth
         .as_ref()
         .and_then(|manifest| manifest.scheme(scheme_key))

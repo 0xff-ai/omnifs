@@ -15,7 +15,7 @@ use std::thread;
 use std::time::Duration;
 
 const MAX_CONNECTIONS: usize = 64;
-const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECTION_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Upper bound on concurrently-dispatched RPC handler threads across all
 /// connections. A provider-backed `readdir`/`lookup`/`read` can block on cold
@@ -28,8 +28,15 @@ const MAX_INFLIGHT_RPCS: usize = 128;
 pub struct RunningNfsServer {
     addr: SocketAddr,
     shutdown: Arc<AtomicBool>,
-    workers: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
+    workers: Arc<Mutex<Vec<Connection>>>,
     thread: Option<thread::JoinHandle<()>>,
+}
+
+/// The worker of one client connection, with the connection, which a stop of
+/// the server shuts down so that the worker ends while its client stays.
+struct Connection {
+    worker: thread::JoinHandle<()>,
+    stream: TcpStream,
 }
 
 impl RunningNfsServer {
@@ -42,6 +49,9 @@ impl Drop for RunningNfsServer {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         let _ = TcpStream::connect(self.addr);
+        for connection in self.workers.lock().expect("workers lock").iter() {
+            let _ = connection.stream.shutdown(std::net::Shutdown::Both);
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -95,18 +105,21 @@ pub fn start_server(
                         ));
                         continue;
                     }
-                    if let Err(error) = stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT)) {
+                    if let Err(error) = stream.set_write_timeout(Some(CONNECTION_WRITE_TIMEOUT)) {
                         trace.line(&format!(
                             "connection_config_error peer={peer:?} err={error}"
                         ));
                         continue;
                     }
-                    if let Err(error) = stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT)) {
-                        trace.line(&format!(
-                            "connection_config_error peer={peer:?} err={error}"
-                        ));
-                        continue;
-                    }
+                    let connection = match stream.try_clone() {
+                        Ok(connection) => connection,
+                        Err(error) => {
+                            trace.line(&format!(
+                                "connection_config_error peer={peer:?} err={error}"
+                            ));
+                            continue;
+                        },
+                    };
                     let export = Arc::clone(&export);
                     let slots = Arc::clone(&slots);
                     let trace = trace.clone();
@@ -118,7 +131,13 @@ pub fn start_server(
                             trace.line(&format!("connection_closed peer={peer:?} err={error}"));
                         }
                     });
-                    thread_workers.lock().expect("workers lock").push(worker);
+                    thread_workers
+                        .lock()
+                        .expect("workers lock")
+                        .push(Connection {
+                            worker,
+                            stream: connection,
+                        });
                 },
                 Err(error) => {
                     if thread_shutdown.load(Ordering::Acquire) {
@@ -170,53 +189,34 @@ fn serve_connection(
         })
         .expect("spawn nfs writer thread");
 
-    // Per-connection count of dispatched-but-unfinished handlers. The idle read
-    // timeout reaps the connection only when this is zero; otherwise the
-    // connection stays open so an outstanding slow handler can still deliver its
-    // reply here.
-    let inflight = Arc::new(AtomicUsize::new(0));
-
+    // The connection lasts until its client closes it or the server stops: an
+    // NFSv4.0 client keeps its connection across its idle time, and takes a
+    // close by the server as a server that does not respond.
     let outcome = loop {
         match read_rpc_record(&mut stream) {
             Ok(Some(record)) => {
                 // Backpressure: block the reader when the global dispatch cap is
                 // saturated rather than spawning unboundedly.
                 let slot = slots.acquire();
-                inflight.fetch_add(1, Ordering::AcqRel);
-                let guard = InflightGuard {
-                    _slot: slot,
-                    inflight: Arc::clone(&inflight),
-                };
                 let responses = responses.clone();
                 let export = Arc::clone(export);
                 let handler_trace = trace.clone();
                 let spawned = thread::Builder::new()
                     .name("nfs-rpc".to_string())
                     .spawn(move || {
-                        let _guard = guard;
+                        let _slot = slot;
                         let response = handle_rpc_record(&record, &*export, &handler_trace);
                         // The writer may have already exited on a broken socket;
                         // a dropped reply is recovered by client retransmit.
                         let _ = responses.send(response);
                     });
                 if spawned.is_err() {
-                    // Guard/sender drop here, releasing the slot and inflight
-                    // count; the client retransmits the unanswered call.
+                    // The slot and the sender drop here; the client
+                    // retransmits the unanswered call.
                     trace.line("rpc_dispatch_spawn_failed");
                 }
             },
             Ok(None) => break Ok(()),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                if inflight.load(Ordering::Acquire) == 0 {
-                    trace.line("connection_idle_timeout");
-                    break Ok(());
-                }
-            },
             Err(error) => break Err(error),
         }
     };
@@ -267,19 +267,6 @@ impl Drop for RpcSlot {
     }
 }
 
-/// Held by a dispatched handler thread; on drop it releases the global slot and
-/// decrements the connection's in-flight count.
-struct InflightGuard {
-    _slot: RpcSlot,
-    inflight: Arc<AtomicUsize>,
-}
-
-impl Drop for InflightGuard {
-    fn drop(&mut self) {
-        self.inflight.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 struct ConnectionPermit {
     active: Arc<AtomicUsize>,
 }
@@ -310,23 +297,23 @@ impl Drop for ConnectionPermit {
     }
 }
 
-fn prune_finished_workers(workers: &Mutex<Vec<thread::JoinHandle<()>>>) {
+fn prune_finished_workers(workers: &Mutex<Vec<Connection>>) {
     let mut workers = workers.lock().expect("workers lock");
     let mut index = 0;
     while index < workers.len() {
-        if workers[index].is_finished() {
-            let worker = workers.swap_remove(index);
-            let _ = worker.join();
+        if workers[index].worker.is_finished() {
+            let connection = workers.swap_remove(index);
+            let _ = connection.worker.join();
         } else {
             index += 1;
         }
     }
 }
 
-fn join_workers(workers: &Mutex<Vec<thread::JoinHandle<()>>>) {
+fn join_workers(workers: &Mutex<Vec<Connection>>) {
     let workers = std::mem::take(&mut *workers.lock().expect("workers lock"));
-    for worker in workers {
-        let _ = worker.join();
+    for connection in workers {
+        let _ = connection.worker.join();
     }
 }
 
@@ -409,5 +396,28 @@ mod tests {
         let bind = "0.0.0.0:0".parse().expect("bind addr");
         let result = start_server(Arc::new(EmptyExport), bind, None);
         assert!(matches!(result, Err(NfsFilesystemError::Io(_))));
+    }
+
+    #[test]
+    fn a_connection_without_a_request_lasts_until_the_stop_of_the_server() {
+        use std::io::Read;
+
+        let bind = "127.0.0.1:0".parse().expect("bind addr");
+        let server = start_server(Arc::new(EmptyExport), bind, None).expect("server");
+        let mut client = TcpStream::connect(server.addr()).expect("connect");
+        // The server takes the connection before the read below: the worker
+        // of the connection is the one that the stop joins.
+        let (stopped, at_stop) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let read = client.read(&mut [0_u8; 1]);
+            // The read ends only at the close by the server, after the stop.
+            at_stop
+                .try_recv()
+                .expect("the server closed before its stop");
+            read
+        });
+        stopped.send(()).expect("reader");
+        drop(server);
+        assert_eq!(reader.join().expect("reader").expect("read"), 0);
     }
 }
