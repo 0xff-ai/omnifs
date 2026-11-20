@@ -145,6 +145,13 @@ enum CheckRequest {
         after: Option<String>,
         numbers: BTreeSet<u64>,
     },
+    /// The first of the items of a kind that its numbers brought and that
+    /// neither the projection nor the rows of the check have, by its number,
+    /// with the ones after it: the pages of the rows omit some items.
+    Items {
+        kind: ItemKind,
+        numbers: BTreeSet<u64>,
+    },
 }
 
 /// The token of the feed of an item: the `ETag` of its last answer, none for
@@ -1376,9 +1383,17 @@ impl RepoFeed<'_> {
                     return self.check_part(check);
                 }
                 self.remove_unnumbered(&check, kind, &numbers)?;
-                let next = match kind {
-                    ItemKind::Issues => self.numbers_from(&check, ItemKind::Pulls)?,
-                    ItemKind::Pulls => None,
+                let listed = listed(self.cx, &folder(&self.repo, kind, StateFilter::All))?;
+                numbers.retain(|number| {
+                    !listed.contains(number) && !check.changed.contains_key(number)
+                });
+                let next = if numbers.is_empty() {
+                    match kind {
+                        ItemKind::Issues => self.numbers_from(&check, ItemKind::Pulls)?,
+                        ItemKind::Pulls => None,
+                    }
+                } else {
+                    Some(CheckRequest::Items { kind, numbers })
                 };
                 return match next {
                     Some(next) => {
@@ -1387,6 +1402,40 @@ impl RepoFeed<'_> {
                     },
                     None => self.check_end(&check),
                 };
+            },
+            CheckRequest::Items { kind, mut numbers } => {
+                let number = numbers.pop_first().ok_or_else(|| {
+                    ProviderError::invalid_input("the check takes no item by its number")
+                })?;
+                let item = ItemRef { kind, number };
+                let ItemAnswer::Found(row, _) =
+                    item_answer(self.cx, &self.repo, item, None).await?
+                else {
+                    return Err(ProviderError::invalid_input(format!(
+                        "GitHub GraphQL numbers the item {number}, which GitHub answers without"
+                    )));
+                };
+                write_item(self.cx, &self.repo, &row, ListingWrite::Complete)?;
+                check.changed.insert(
+                    number,
+                    Changed {
+                        kind,
+                        comments: row.comments,
+                        brought: BTreeSet::new(),
+                        taken: false,
+                        ids: None,
+                    },
+                );
+                if !numbers.is_empty() {
+                    check.next = CheckRequest::Items { kind, numbers };
+                    return self.check_part(check);
+                }
+                if kind == ItemKind::Issues
+                    && let Some(next) = self.numbers_from(&check, ItemKind::Pulls)?
+                {
+                    check.next = next;
+                    return self.check_part(check);
+                }
             },
         }
         match self.after_ids(&check)? {

@@ -1019,6 +1019,65 @@ async fn a_check_takes_each_page_of_its_rows_and_the_numbers_of_the_pull_request
     );
 }
 
+/// The pages of the rows omit some items of a repository. A check whose
+/// counts are other than the counts of the projection takes each item that
+/// the numbers bring and the projection lacks by its number, with its
+/// comments, and the next check, with the same counts, asks for no numbers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_takes_by_its_number_an_item_that_the_rows_omit() {
+    let harness = github_harness();
+    let one = || item(1, "One", "open", "2026-11-18T09:00:00Z", 0, false);
+    first_full_listing(&harness, &json!([one()]), &json!([]), &[(1, 0)], &[]).await;
+
+    let totals = || {
+        graphql(&json!({
+            "issues": { "totalCount": 2 },
+            "pullRequests": { "totalCount": 0 },
+        }))
+    };
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let (listing, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![
+            answer(200, &[("ETag", r#""rows-1""#)], &json!([one()])),
+            ok(&json!([])),
+            totals(),
+            graphql(&json!({
+                "page": {
+                    "nodes": [{ "number": 1 }, { "number": 5 }],
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                },
+            })),
+            ok(&item(5, "Five", "closed", "2026-11-17T08:00:00Z", 0, false)),
+        ],
+    )
+    .await;
+    assert_eq!(listing.unwrap(), ["1", "5"]);
+    let (query, _) = graphql_of(&requests[3]);
+    assert!(
+        query.contains("page: issues(first: 100, after: $after) { nodes { number }"),
+        "{query}"
+    );
+    assert_eq!(requests[4].url, api("/repos/octocat/hello/issues/5"));
+    assert_eq!(
+        served(&harness, read(&harness, "octocat/hello/issues/all/5/title"))
+            .await
+            .unwrap(),
+        "Five"
+    );
+
+    tokio::time::sleep(PAST_DEADLINE).await;
+    let (listing, requests) = answering(
+        &harness,
+        names(&harness, "octocat/hello/issues/all"),
+        vec![not_modified(), totals()],
+    )
+    .await;
+    assert_eq!(listing.unwrap(), ["1", "5"]);
+    assert_eq!(requests.len(), 2);
+}
+
 /// A check makes a part of each request and publishes its parts with its
 /// last one. A `RATE_LIMITED` answer of GitHub GraphQL after its rows and
 /// comments stops it with the window of its `x-ratelimit-reset`, in which a
