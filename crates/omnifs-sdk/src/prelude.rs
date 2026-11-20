@@ -1,5 +1,5 @@
 pub use crate::NoConfig;
-pub use crate::browse::Effects;
+pub use crate::browse::{Effects, ListingWrite, PageValidator};
 pub use crate::captures::{Captures, FromCaptures, PathSegment};
 pub use crate::collection::{
     Collection, CollectionEntry, CollectionPage, Cursor as ListCursor, ListCx, NoCursor, PageCursor,
@@ -8,9 +8,10 @@ pub use crate::cx::Cx;
 pub use crate::cx::join_all;
 pub use crate::endpoint::{
     BlobHandle, BlobRequestBuilder, Endpoint, EndpointHandle, EndpointHooks, HttpResponse,
-    RequestBuilder,
+    PageAnswer, RequestBuilder,
 };
 pub use crate::error::{ProviderError, ProviderErrorKind, Result};
+pub use crate::feed::{Feed, FeedCx, FeedPart, ListingEntries, ListingFacts, ListingForm};
 pub use crate::file_attrs::{
     FileAttrs, FileSize, MAX_PROJECTED_BYTES, MAX_VERSION_TOKEN_BYTES, Stability, VersionToken,
 };
@@ -28,8 +29,8 @@ pub use crate::repr::{
     Atom, Format, Json, Markdown, RenderTable, Representable, Yaml, pretty_json,
 };
 pub use crate::router::{
-    CompiledRouter, DirFace, DirRoute, FileFace, FileRoute, ObjectBlock, ObjectHandle, Router,
-    object,
+    CompiledRouter, DirFace, DirRoute, FeedFace, FileFace, FileRoute, ObjectBlock, ObjectHandle,
+    Router, object,
 };
 pub use omnifs_core::ContentType;
 pub use omnifs_core::path::{ParseError, Path, Segment};

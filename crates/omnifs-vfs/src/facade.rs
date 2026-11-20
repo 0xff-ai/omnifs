@@ -200,7 +200,8 @@ pub enum NsEvent {
     /// The subtree rooted at `path` may have changed; drop protocol-cached state
     /// for it and re-resolve.
     InvalidateSubtree { path: Path },
-    /// `node`'s attributes changed in place (a live file grew).
+    /// `node`'s attributes changed in place: a live file grew, or a
+    /// directory's listing changed while its identity stands.
     AttrsChanged { path: Path, attrs: Attrs },
 }
 

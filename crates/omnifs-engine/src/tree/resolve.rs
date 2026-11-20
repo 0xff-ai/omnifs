@@ -44,7 +44,8 @@ impl EngineNamespace {
             )));
         };
 
-        self.resolve_child_in(mount, entry, &parent, name).await
+        self.resolve_child_in(mount, entry, &parent, None, name)
+            .await
     }
 
     /// Resolve a child of an already-resolved parent directory `Node` to a
@@ -87,18 +88,29 @@ impl EngineNamespace {
             return self.mount_root_node(name.to_string());
         }
         let entry = self.entry_for(parent.mount())?;
-        self.resolve_child_in(parent.mount().to_string(), entry, parent.path(), name)
-            .await
+        self.resolve_child_in(
+            parent.mount().to_string(),
+            entry,
+            parent.path(),
+            Some(parent.fact()),
+            name,
+        )
+        .await
     }
 
     /// Shared body for [`resolve`](Self::resolve) and
     /// [`resolve_child`](Self::resolve_child): resolve `name` under `parent`
-    /// (a mount-relative directory path) on the runtime serving `mount`.
+    /// (a mount-relative directory path) on the runtime serving `mount`. A
+    /// fed `parent` gives the path of its facts. A path under an anchor of
+    /// another facet of an object resolves as the same path under the anchor
+    /// of the claim of the object, without the provider, and the anchor
+    /// itself keeps that anchor as the path of its facts.
     async fn resolve_child_in(
         &self,
         mount: String,
         entry: &crate::registry::MountEntry,
         parent: &Path,
+        parent_fact: Option<&Path>,
         name: &str,
     ) -> Result<Node> {
         let resources = entry.resources();
@@ -134,49 +146,62 @@ impl EngineNamespace {
             };
         }
 
+        let fact = match parent_fact {
+            Some(parent_fact) => parent_fact.join(name).map_err(|error| {
+                TreeError::invalid_input(format!("resolve_child: invalid name {name:?}: {error}"))
+            })?,
+            None => under_facet_anchor(resources, &rel)?,
+        };
+        if fact != rel {
+            let (fact_parent, _) = fact
+                .parent_and_name()
+                .ok_or_else(|| TreeError::internal(format!("{fact} has no parent")))?;
+            let node =
+                Box::pin(self.resolve_child_in(mount, entry, &fact_parent, None, name)).await?;
+            return Ok(node.at(rel));
+        }
+        let anchor = resources
+            .facet_anchor(&rel)
+            .map_err(|error| TreeError::internal(error.to_string()))?;
+        let node = self
+            .resolve_own_child(mount, entry, parent, name, rel)
+            .await?;
+        Ok(match anchor {
+            Some(anchor) => node.with_fact(anchor),
+            None => node,
+        })
+    }
+
+    /// Resolve `name` under `parent` at its own path, `rel`.
+    async fn resolve_own_child(
+        &self,
+        mount: String,
+        entry: &crate::registry::MountEntry,
+        parent: &Path,
+        name: &str,
+        rel: Path,
+    ) -> Result<Node> {
+        let resources = entry.resources();
         let offline = entry.runtime().is_none();
-        let expired = !offline
+        // A fed fact is served once its feeds have answered, so its lookup
+        // asks the provider for their claims.
+        let fed = !offline
             && resources
-                .view_expired(&rel, crate::clock::now_millis())
+                .is_fed(&rel)
                 .map_err(|error| TreeError::internal(error.to_string()))?;
-        if let Some(node) = cached_lookup_node(
-            resources,
-            entry.trees(),
-            mount.as_str(),
-            &rel,
-            offline,
-            expired,
-        )? {
+        if !fed && let Some(node) = cached_child_node(entry, &mount, parent, name, &rel)? {
             return Ok(node);
-        }
-
-        let cached_parent = cached_dirents(resources, parent)?;
-        if let Some(meta) = cached_parent.as_ref().and_then(|dirents| {
-            dirents
-                .entries
-                .iter()
-                .find(|entry| entry.name == name)
-                .map(|entry| entry.meta.clone())
-        }) {
-            crate::inspector::cache_event(CacheKind::BrowseHit);
-            return Ok(Node::new(mount, rel, meta, NodeBody::Provider));
-        }
-
-        if offline {
-            if cached_parent
-                .as_ref()
-                .is_some_and(DirentsPayload::is_complete_offline)
-            {
-                return Err(TreeError::not_found(rel.as_str()));
-            }
-            return Err(TreeError::offline_miss(format!(
-                "offline lookup has no complete fact for {rel}"
-            )));
         }
 
         crate::inspector::cache_event(CacheKind::BrowseMiss);
         let runtime = entry.runtime().expect("online entry has a runtime");
         match runtime.lookup_child(parent, name).await? {
+            LookupOutcome::Entry(entry) if fed => Ok(Node::fed(
+                mount,
+                entry.path().clone(),
+                entry.path().clone(),
+                entry.meta().clone(),
+            )),
             LookupOutcome::Entry(entry) => Ok(Node::new(
                 mount,
                 entry.path().clone(),
@@ -206,6 +231,16 @@ impl EngineNamespace {
                     None => Err(TreeError::not_found(rel.as_str())),
                 }
             },
+            LookupOutcome::Feed(claims) => {
+                let (at, fact) = super::feed::answer_claims(
+                    &runtime,
+                    &rel,
+                    super::feed::FedFact::Lookup,
+                    &claims,
+                )
+                .await?;
+                fed_lookup_node(resources, mount, rel, &at, fact)
+            },
         }
     }
 
@@ -230,15 +265,15 @@ impl EngineNamespace {
                         crate::view::LookupPayload::Positive(meta) if meta.is_directory()
                     )
                 });
+            // Git facts persist across a restart while open trees live only in
+            // memory, so a fact without an open tree falls through to the
+            // provider, which opens the repository again.
             if positive_directory
                 && let Some(git) = resources
                     .git_for_path(&rel)
                     .map_err(|error| TreeError::internal(error.to_string()))?
+                && let Some(tree_ref) = entry.trees().by_identity(&git.id, &git.relative_path)
             {
-                let tree_ref = entry
-                    .trees()
-                    .by_identity(&git.id, &git.relative_path)
-                    .ok_or_else(|| TreeError::internal("validated Git tree is not open"))?;
                 return Ok(Node::new(
                     mount,
                     rel,
@@ -263,6 +298,99 @@ impl EngineNamespace {
     }
 }
 
+/// A child served from the cache without the provider: its cached lookup, or
+/// its entry in the parent's cached listing. Offline, a child the cache does
+/// not answer is not found under a complete listing and a miss otherwise.
+fn cached_child_node(
+    entry: &crate::registry::MountEntry,
+    mount: &str,
+    parent: &Path,
+    name: &str,
+    rel: &Path,
+) -> Result<Option<Node>> {
+    let resources = entry.resources();
+    let offline = entry.runtime().is_none();
+    let expired = !offline
+        && resources
+            .view_expired(rel, crate::clock::now_millis())
+            .map_err(|error| TreeError::internal(error.to_string()))?;
+    if let Some(node) = cached_lookup_node(resources, entry.trees(), mount, rel, offline, expired)?
+    {
+        return Ok(Some(node));
+    }
+
+    let cached_parent = cached_dirents(resources, parent)?;
+    if let Some(meta) = cached_parent.as_ref().and_then(|dirents| {
+        dirents
+            .entries()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.meta.clone())
+    }) {
+        crate::inspector::cache_event(CacheKind::BrowseHit);
+        return Ok(Some(Node::new(
+            mount.to_string(),
+            rel.clone(),
+            meta,
+            NodeBody::Provider,
+        )));
+    }
+
+    if offline {
+        if cached_parent
+            .as_ref()
+            .is_some_and(DirentsPayload::is_complete_offline)
+        {
+            return Err(TreeError::not_found(rel.as_str()));
+        }
+        return Err(TreeError::offline_miss(format!(
+            "offline lookup has no complete fact for {rel}"
+        )));
+    }
+    Ok(None)
+}
+
+/// `rel` with the leading segments of the nearest anchor of another facet
+/// above it replaced by the anchor of its claim; `rel` itself without one.
+fn under_facet_anchor(resources: &MountResources, rel: &Path) -> Result<Path> {
+    let mut above = rel.parent_and_name().map(|(parent, _)| parent);
+    while let Some(path) = above {
+        if let Some(anchor) = resources
+            .facet_anchor(&path)
+            .map_err(|error| TreeError::internal(error.to_string()))?
+        {
+            return rel
+                .segments()
+                .skip(path.segments().count())
+                .try_fold(anchor, |at, segment| {
+                    at.join(segment)
+                        .map_err(|error| TreeError::internal(error.to_string()))
+                });
+        }
+        above = path.parent_and_name().map(|(parent, _)| parent);
+    }
+    Ok(rel.clone())
+}
+
+/// A fed child served from its lookup at `at` in the projection once its
+/// feeds have answered, with its facts at `fact`, or not found.
+fn fed_lookup_node(
+    resources: &MountResources,
+    mount: String,
+    rel: Path,
+    at: &Path,
+    fact: Path,
+) -> Result<Node> {
+    match resources
+        .lookup_payload(at)
+        .map_err(|error| TreeError::internal(error.to_string()))?
+    {
+        Some(crate::view::LookupPayload::Positive(meta)) => Ok(Node::fed(mount, rel, fact, meta)),
+        Some(crate::view::LookupPayload::Negative { .. }) | None => {
+            Err(TreeError::not_found(rel.as_str()))
+        },
+    }
+}
+
 fn cached_lookup_node(
     resources: &MountResources,
     trees: &crate::tree_refs::TreeRefs,
@@ -284,9 +412,12 @@ fn cached_lookup_node(
                 .git_for_path(rel)
                 .map_err(|error| TreeError::internal(error.to_string()))?
             {
-                let tree_ref = trees
-                    .by_identity(&git.id, &git.relative_path)
-                    .ok_or_else(|| TreeError::internal("validated Git tree is not open"))?;
+                // Git facts persist across a restart while open trees live only
+                // in memory: without an open tree, the lookup is a miss, and the
+                // provider opens the repository again.
+                let Some(tree_ref) = trees.by_identity(&git.id, &git.relative_path) else {
+                    return Ok(None);
+                };
                 return Ok(Some(Node::new(
                     mount.to_string(),
                     rel.clone(),
@@ -319,4 +450,55 @@ fn cached_dirents(resources: &MountResources, parent: &Path) -> Result<Option<Di
     resources
         .dirents_payload(parent)
         .map_err(|error| TreeError::internal(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::identity::GitId;
+    use crate::cache::{
+        Caches, FactPayload, GitWrite, ProjectionId, ProjectionTransition, RecordWrite,
+    };
+    use crate::tree_refs::TreeRefs;
+    use crate::view::LookupPayload;
+    use omnifs_core::{MountName, ProviderId};
+
+    #[test]
+    fn a_git_fact_without_an_open_tree_is_a_lookup_miss() {
+        // A restart keeps the Git fact of a path but no open tree in memory.
+        let dir = tempfile::tempdir().unwrap();
+        let caches = Caches::open(dir.path()).unwrap();
+        let provider_id = ProviderId::from_wasm_bytes(b"m");
+        let resources = caches
+            .mount(
+                &MountName::new("m").unwrap(),
+                ProjectionId::new(b"m", provider_id),
+                provider_id,
+                b"m",
+            )
+            .unwrap();
+        let path = Path::parse("/owner/repo/repo").unwrap();
+        resources
+            .publish(
+                ProjectionTransition {
+                    records: vec![RecordWrite {
+                        path: path.clone(),
+                        aux: None,
+                        fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+                    }],
+                    git: vec![GitWrite {
+                        path: path.clone(),
+                        id: GitId::new("m", "https://example.test/repo.git", None),
+                        relative_path: String::new(),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                resources.current_epoch(),
+            )
+            .unwrap();
+
+        let node = cached_lookup_node(&resources, &TreeRefs::new(), "m", &path, false, false)
+            .expect("a Git fact without an open tree is no internal error");
+        assert!(node.is_none());
+    }
 }

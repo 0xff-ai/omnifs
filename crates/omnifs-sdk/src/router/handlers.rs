@@ -93,6 +93,42 @@ pub(super) fn captures_validator<C: FromCaptures>() -> RouteValidator {
     }
 }
 
+/// A validator that accepts the captures any of `validators` accepts as
+/// present captures, describing the captures of `pattern` they describe. A
+/// fed dir route validates its captures through the routes beneath it.
+// Route validators share `Arc` closures with the rest of the route table; a
+// provider component is single-threaded, so this one never crosses threads.
+#[allow(clippy::arc_with_non_send_sync)]
+pub(super) fn present_validator(
+    pattern: &super::pattern::Pattern,
+    validators: Vec<RouteValidator>,
+) -> RouteValidator {
+    let names = pattern
+        .capture_descriptors(&[])
+        .into_iter()
+        .map(|capture| capture.name)
+        .collect::<Vec<_>>();
+    let mut capture_descriptors = Vec::new();
+    for validator in &validators {
+        for capture in validator.capture_descriptors() {
+            if names.contains(&capture.name)
+                && !capture_descriptors
+                    .iter()
+                    .any(|known: &CaptureDescriptor| known.name == capture.name)
+            {
+                capture_descriptors.push(capture.clone());
+            }
+        }
+    }
+    let present: Arc<dyn Fn(&Captures) -> bool> =
+        Arc::new(move |caps: &Captures| validators.iter().any(|v| v.accepts_present(caps)));
+    RouteValidator {
+        full: present.clone(),
+        present,
+        capture_descriptors,
+    }
+}
+
 /// The validator for capture-less handlers: every path the pattern matches
 /// is accepted.
 pub(super) fn accept_validator() -> RouteValidator {
@@ -193,6 +229,9 @@ pub(super) struct DirEntry<S> {
 pub(super) enum DirHandler<S> {
     Listing(BoxedDirHandler<S>),
     Tree(BoxedTreeHandler<S>),
+    /// A fed dir face: its listing answers the claims of its feeds, resolved
+    /// at compile time.
+    Fed(Vec<super::object::ClaimSpec>),
 }
 
 pub(super) enum DirAnswer {
@@ -203,6 +242,14 @@ pub(super) enum DirAnswer {
 impl<S> DirEntry<S> {
     pub(super) fn is_tree(&self) -> bool {
         matches!(&self.handler, DirHandler::Tree(_))
+    }
+
+    /// The claims of a fed dir face.
+    pub(super) fn fed_claims(&self) -> Option<&[super::object::ClaimSpec]> {
+        match &self.handler {
+            DirHandler::Fed(claims) => Some(claims),
+            DirHandler::Listing(_) | DirHandler::Tree(_) => None,
+        }
     }
 
     pub(super) async fn invoke(
@@ -216,6 +263,9 @@ impl<S> DirEntry<S> {
                 .await
                 .map(DirAnswer::Listing),
             DirHandler::Tree(handler) => (handler)(cx, captures).await.map(DirAnswer::Tree),
+            DirHandler::Fed(_) => Err(crate::error::ProviderError::internal(
+                "a fed dir answers the claims of its feeds, not a handler",
+            )),
         }
     }
 }

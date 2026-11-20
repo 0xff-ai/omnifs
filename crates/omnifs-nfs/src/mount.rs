@@ -227,7 +227,11 @@ struct MountCommand {
 impl MountCommand {
     #[cfg(target_os = "macos")]
     fn for_platform(mount_point: &Path, addr: SocketAddr) -> Self {
-        Self::macos(mount_point, addr.port())
+        Self::macos(
+            mount_point,
+            addr.port(),
+            MacosRunner::for_mount_point(mount_point),
+        )
     }
 
     #[cfg(target_os = "linux")]
@@ -236,19 +240,26 @@ impl MountCommand {
     }
 
     #[cfg(any(target_os = "macos", test))]
-    fn macos(mount_point: &Path, port: u16) -> Self {
+    fn macos(mount_point: &Path, port: u16, runner: MacosRunner) -> Self {
+        let (program, mut args) = runner.invocation("mount_nfs");
+        args.extend([
+            OsString::from("-o"),
+            OsString::from(MountOptions::macos(port).render()),
+            OsString::from(export_source()),
+            mount_point.as_os_str().to_owned(),
+        ]);
         Self {
-            program: "sudo",
-            args: vec![
-                OsString::from("-n"),
-                OsString::from("mount_nfs"),
-                OsString::from("-o"),
-                OsString::from(MountOptions::macos(port).render()),
-                OsString::from(export_source()),
-                mount_point.as_os_str().to_owned(),
-            ],
-            failure_context: "mount_nfs via `sudo -n` (a password prompt needs `sudo -v` first; \
-                              an `Invalid argument` above means an unsupported mount option)",
+            program,
+            args,
+            failure_context: match runner {
+                MacosRunner::User => {
+                    "mount_nfs (an `Invalid argument` above means an unsupported mount option)"
+                },
+                MacosRunner::Sudo => {
+                    "mount_nfs via `sudo -n` (a password prompt needs `sudo -v` first; \
+                     an `Invalid argument` above means an unsupported mount option)"
+                },
+            },
         }
     }
 
@@ -415,18 +426,21 @@ struct SpotlightCommand {
 
 #[cfg(any(target_os = "macos", test))]
 impl SpotlightCommand {
-    fn macos(mount_point: &Path) -> Self {
+    fn macos(mount_point: &Path, runner: MacosRunner) -> Self {
+        let (program, mut args) = runner.invocation("mdutil");
+        args.extend([
+            OsString::from("-d"),
+            OsString::from("-i"),
+            OsString::from("off"),
+            mount_point.as_os_str().to_owned(),
+        ]);
         Self {
-            program: "sudo",
-            args: vec![
-                OsString::from("-n"),
-                OsString::from("mdutil"),
-                OsString::from("-d"),
-                OsString::from("-i"),
-                OsString::from("off"),
-                mount_point.as_os_str().to_owned(),
-            ],
-            failure_context: "mdutil Spotlight exclusion via `sudo -n`",
+            program,
+            args,
+            failure_context: match runner {
+                MacosRunner::User => "mdutil Spotlight exclusion",
+                MacosRunner::Sudo => "mdutil Spotlight exclusion via `sudo -n`",
+            },
         }
     }
 
@@ -452,9 +466,53 @@ impl SpotlightCommand {
     }
 }
 
-fn disable_spotlight(mount_point: &Path) {
+/// Who runs a macOS mount helper: the current user when they own the mount
+/// point, as macOS lets a user mount onto a directory they own, and `sudo -n`
+/// otherwise, such as for a mount point in `/Volumes`.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacosRunner {
+    User,
+    Sudo,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl MacosRunner {
     #[cfg(target_os = "macos")]
-    match SpotlightCommand::macos(mount_point).run() {
+    fn for_mount_point(mount_point: &Path) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+
+        match std::fs::metadata(mount_point) {
+            Ok(metadata) if metadata.uid() == current_euid() => Self::User,
+            _ => Self::Sudo,
+        }
+    }
+
+    /// The program and the leading arguments that run `tool`.
+    fn invocation(self, tool: &'static str) -> (&'static str, Vec<OsString>) {
+        match self {
+            Self::User => (tool, Vec::new()),
+            Self::Sudo => ("sudo", vec![OsString::from("-n"), OsString::from(tool)]),
+        }
+    }
+}
+
+// SAFETY: geteuid(2) takes no arguments, reads only kernel-maintained process
+// state, and is always safe to call on any POSIX system.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn current_euid() -> u32 {
+    unsafe { libc::geteuid() }
+}
+
+fn disable_spotlight(mount_point: &Path) {
+    // Once mounted, the owner of `mount_point` is the one the export reports, so
+    // it no longer tells who mounted: try as the current user, then `sudo -n`.
+    #[cfg(target_os = "macos")]
+    match SpotlightCommand::macos(mount_point, MacosRunner::User)
+        .run()
+        .or_else(|_| SpotlightCommand::macos(mount_point, MacosRunner::Sudo).run())
+    {
         Ok(()) => tracing::info!(
             mount = %mount_point.display(),
             "disabled Spotlight activity and indexing"
@@ -639,8 +697,8 @@ fn ensure_private_state_dir(state_dir: &Path) -> Result<(), NfsFilesystemError> 
 #[cfg(test)]
 mod tests {
     use super::{
-        MountCommand, MountOptions, MountTableEntry, NfsMountOptions, SpotlightCommand,
-        mount_is_active_checked, mount_table_contains, parse_macos_mounts,
+        MacosRunner, MountCommand, MountOptions, MountTableEntry, NfsMountOptions,
+        SpotlightCommand, mount_is_active_checked, mount_table_contains, parse_macos_mounts,
     };
     use omnifs_mtab::StateFile;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -673,7 +731,7 @@ mod tests {
 
     #[test]
     fn macos_mount_command_uses_documented_loopback_options() {
-        let command = MountCommand::macos(Path::new("/Volumes/omnifs"), 2050);
+        let command = MountCommand::macos(Path::new("/Volumes/omnifs"), 2050, MacosRunner::Sudo);
         assert_eq!(command.program, "sudo");
         assert_eq!(
             args_as_strings(&command),
@@ -690,7 +748,7 @@ mod tests {
 
     #[test]
     fn macos_spotlight_command_disables_search_and_indexing() {
-        let command = SpotlightCommand::macos(Path::new("/Volumes/omnifs"));
+        let command = SpotlightCommand::macos(Path::new("/Volumes/omnifs"), MacosRunner::Sudo);
         assert_eq!(command.program, "sudo");
         assert_eq!(
             command
@@ -700,6 +758,51 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["-n", "mdutil", "-d", "-i", "off", "/Volumes/omnifs",]
         );
+    }
+
+    #[test]
+    fn macos_commands_run_directly_on_an_owned_mount_point() {
+        let mount = MountCommand::macos(Path::new("/Users/me/omnifs"), 2050, MacosRunner::User);
+        assert_eq!(mount.program, "mount_nfs");
+        assert_eq!(
+            args_as_strings(&mount),
+            vec![
+                "-o",
+                "vers=4,tcp,port=2050,sec=sys,ro,nobrowse,intr,nocallback,noac,nonegnamecache,retrycnt=0,timeo=5,retrans=1",
+                "127.0.0.1:/omnifs",
+                "/Users/me/omnifs",
+            ]
+        );
+        let spotlight = SpotlightCommand::macos(Path::new("/Users/me/omnifs"), MacosRunner::User);
+        assert_eq!(spotlight.program, "mdutil");
+        assert_eq!(
+            spotlight
+                .args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["-d", "-i", "off", "/Users/me/omnifs"]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_runner_follows_the_owner_of_the_mount_point() {
+        let owned = tempfile::tempdir().unwrap();
+        assert_eq!(
+            MacosRunner::for_mount_point(owned.path()),
+            MacosRunner::User
+        );
+        assert_eq!(
+            MacosRunner::for_mount_point(Path::new("/nonexistent/omnifs")),
+            MacosRunner::Sudo
+        );
+        if super::current_euid() != 0 {
+            assert_eq!(
+                MacosRunner::for_mount_point(Path::new("/")),
+                MacosRunner::Sudo
+            );
+        }
     }
 
     #[test]

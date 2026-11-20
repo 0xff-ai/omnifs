@@ -52,16 +52,40 @@ fn entry_kind_from_meta(meta: &EntryMeta) -> EntryKind {
     }
 }
 
-fn attrs_from_cache(kind: EntryKind, attrs: Option<&FileAttrsCache>, change: u64) -> Attrs {
-    let ttl = attrs.map_or(TTL_STATIC, |attrs| {
-        if matches!(attrs.size(), FileSize::Exact(_))
-            && matches!(attrs.stability(), view_types::Stability::Stable)
-        {
-            TTL_STATIC
-        } else {
-            TTL_DYNAMIC
-        }
-    });
+/// Compute `Attrs` for a read answer at `id` with the `epoch` of its
+/// changes, folding in the size the read learned.
+fn read_attrs(
+    id: &Path,
+    kind: EntryKind,
+    attrs: Option<&FileAttrsCache>,
+    fed: bool,
+    epoch: u64,
+) -> Attrs {
+    attrs_from_cache(kind, attrs, change_counter_parts(id, attrs, epoch), fed)
+}
+
+/// Policied attrs for an entry. A fed entry has the zero lifetime of dynamic
+/// entries, so each access asks the namespace, which asks its feeds once they
+/// are past their deadline.
+fn attrs_from_cache(
+    kind: EntryKind,
+    attrs: Option<&FileAttrsCache>,
+    change: u64,
+    fed: bool,
+) -> Attrs {
+    let ttl = if fed {
+        TTL_DYNAMIC
+    } else {
+        attrs.map_or(TTL_STATIC, |attrs| {
+            if matches!(attrs.size(), FileSize::Exact(_))
+                && matches!(attrs.stability(), view_types::Stability::Stable)
+            {
+                TTL_STATIC
+            } else {
+                TTL_DYNAMIC
+            }
+        })
+    };
     let stability = attrs.map_or(Stability::Stable, FileAttrsCache::stability);
     let read_style = if attrs.is_some_and(FileAttrsCache::is_deferred_ranged) {
         ReadStyle::Ranged
@@ -283,17 +307,18 @@ impl EngineNamespace {
             .ok_or_else(|| TreeError::offline_miss(format!("mount {mount} is cache-only")))
     }
 
+    /// The entry of `mount`: an active mount, or a mount without its provider,
+    /// which serves its projection as a cache-only entry.
     pub(crate) fn entry_for(&self, mount: &str) -> Result<&MountEntry, TreeError> {
         let entry = self
             .configured_entry(mount)
             .ok_or_else(|| TreeError::not_found(format!("no such mount: {mount}")))?;
         match entry.availability() {
-            crate::MountAvailability::Active => Ok(entry),
+            crate::MountAvailability::Active | crate::MountAvailability::ProviderUnavailable => {
+                Ok(entry)
+            },
             crate::MountAvailability::AuthRequired => Err(TreeError::auth_required(format!(
                 "mount {mount} requires a compatible credential"
-            ))),
-            crate::MountAvailability::ProviderUnavailable => Err(TreeError::internal(format!(
-                "mount {mount} provider is unavailable"
             ))),
         }
     }
@@ -546,7 +571,6 @@ impl EngineNamespace {
         let exact_paths: Vec<Path> = report
             .paths
             .iter()
-            .chain(report.changed_dirs.iter())
             .map(|rel| mount_full_path(mount, rel))
             .collect();
         let prefix_paths: Vec<Path> = report
@@ -609,6 +633,24 @@ impl EngineNamespace {
             // Evicting the handle closes it and aborts its pump (Drop).
             let _ = self.events.send(NsEvent::InvalidateSubtree { path: id });
         }
+
+        // A changed listing keeps the identity of its directory and of the
+        // nodes below it: its change counter moves, and filesystems drop their
+        // answers for it in place.
+        for (rel, fed) in &report.changed_dirs {
+            let dir = mount_full_path(mount, rel);
+            if !unique.insert(dir.clone()) {
+                continue;
+            }
+            self.node_epochs.insert(dir.clone(), epoch);
+            let attrs = attrs_from_cache(
+                EntryKind::Directory,
+                None,
+                change_counter_parts(&dir, None, epoch),
+                *fed,
+            );
+            let _ = self.events.send(NsEvent::AttrsChanged { path: dir, attrs });
+        }
     }
 
     fn sweep_idle_handles(&self) {
@@ -642,12 +684,26 @@ impl EngineNamespace {
         node: &crate::Node,
         attrs: Option<&FileAttrsCache>,
     ) -> Attrs {
-        let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
+        let epoch = self.node_epoch(id, node);
         attrs_from_cache(
             entry_kind_from_node(node),
             attrs,
             self.root_aware_change(id, node, attrs, epoch),
+            node.is_fed(),
         )
+    }
+
+    /// The epoch of the changes of `node` at `id`: that of its facts, which a
+    /// node under an anchor of another facet of an object shares with the
+    /// node under the anchor of its claim.
+    fn node_epoch(&self, id: &Path, node: &crate::Node) -> u64 {
+        let fact = mount_full_path(node.mount(), node.fact());
+        let at = if node.fact() == node.path() {
+            id
+        } else {
+            &fact
+        };
+        self.node_epochs.get(at).map_or(0, |epoch| *epoch)
     }
 
     /// The change counter for a node, folding the served-mount set into the
@@ -736,7 +792,8 @@ impl EngineNamespace {
             .learned_attrs
             .unwrap_or_else(|| handle.attrs().clone());
         self.store_learned(id, learned.clone());
-        let attrs = self.attrs_for_read(id, EntryKind::File, Some(&learned));
+        let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
+        let attrs = read_attrs(id, EntryKind::File, Some(&learned), false, epoch);
         Ok(ReadAnswer {
             bytes: chunk.bytes,
             eof: chunk.eof,
@@ -761,14 +818,14 @@ impl EngineNamespace {
         let end = start.saturating_add(len as usize).min(data.len());
         let bytes = data[start..end].to_vec();
         let eof = end >= data.len();
-        let attrs = self.attrs_for_read(id, entry_kind_from_node(node), attrs.as_ref());
+        let attrs = read_attrs(
+            id,
+            entry_kind_from_node(node),
+            attrs.as_ref(),
+            node.is_fed(),
+            self.node_epoch(id, node),
+        );
         Ok(ReadAnswer { bytes, eof, attrs })
-    }
-
-    /// Compute `Attrs` for a read answer, folding in the size the read learned.
-    fn attrs_for_read(&self, id: &Path, kind: EntryKind, attrs: Option<&FileAttrsCache>) -> Attrs {
-        let epoch = self.node_epochs.get(id).map_or(0, |e| *e);
-        attrs_from_cache(kind, attrs, change_counter_parts(id, attrs, epoch))
     }
 
     fn store_learned(&self, id: &Path, learned: FileAttrsCache) {
@@ -829,6 +886,7 @@ impl EngineNamespace {
                 EntryKind::File,
                 Some(&grown),
                 change_counter_parts(&id, Some(&grown), node_epoch),
+                false,
             );
             let _ = events.send(NsEvent::AttrsChanged {
                 path: id.clone(),
@@ -917,7 +975,7 @@ impl EngineNamespace {
             let entries = listing
                 .entries
                 .iter()
-                .map(|entry| self.dir_entry(&parent_full, &entry.name, &entry.meta))
+                .map(|entry| self.dir_entry(&parent_full, &entry.name, &entry.meta, entry.fed))
                 .collect();
             let tree_next = listing.next_cursor.map(|c| c.0);
             Ok(dir_page_with_budget(entries, tree_next, budget, false))
@@ -929,7 +987,7 @@ impl EngineNamespace {
     }
 
     /// Turn a listing child into a `DirEntry`, allocating its id.
-    fn dir_entry(&self, parent_full: &Path, name: &str, meta: &EntryMeta) -> DirEntry {
+    fn dir_entry(&self, parent_full: &Path, name: &str, meta: &EntryMeta, fed: bool) -> DirEntry {
         let full = parent_full
             .join(name)
             .unwrap_or_else(|_| parent_full.clone());
@@ -953,6 +1011,7 @@ impl EngineNamespace {
             kind.clone(),
             merged.as_ref(),
             change_counter_parts(&id, merged.as_ref(), epoch),
+            fed,
         );
         DirEntry {
             attrs,

@@ -1,4 +1,4 @@
-//! `lookup_child`, `list_children`, `read_file`, and `open_file` dispatch.
+//! `lookup_child`, `list_children`, `read_file`, `open_file`, and `feed` dispatch.
 //!
 //! Each entry point resolves an absolute path against the compiled route
 //! tables through a shared `Shape` view (`route_shape`), with the
@@ -16,6 +16,7 @@
 //!   those static siblings and are non-exhaustive whenever a capture
 //!   sibling exists at the next depth.
 
+mod feed;
 mod list;
 mod lookup;
 mod read;

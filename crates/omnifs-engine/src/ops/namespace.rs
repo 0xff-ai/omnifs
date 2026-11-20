@@ -37,7 +37,7 @@ impl From<anyhow::Error> for SharedError {
 }
 
 impl SharedError {
-    fn into_engine(self) -> EngineError {
+    pub(super) fn into_engine(self) -> EngineError {
         match self {
             Self::Provider(error) => EngineError::ProviderError(error),
             Self::Other(message) => EngineError::ProviderProtocol(message),
@@ -45,7 +45,7 @@ impl SharedError {
     }
 }
 
-type Shared<T> = std::result::Result<T, SharedError>;
+pub(super) type Shared<T> = std::result::Result<T, SharedError>;
 
 struct Flight<V> {
     state: Mutex<FlightState<V>>,
@@ -83,7 +83,7 @@ impl<V> Flight<V> {
     }
 }
 
-struct ExactFlights<K, V> {
+pub(super) struct ExactFlights<K, V> {
     slots: Mutex<HashMap<K, Arc<Flight<V>>>>,
 }
 
@@ -126,7 +126,7 @@ where
         })
     }
 
-    async fn run<R, RFut, F, Fut>(&self, key: K, reserve: R, work: F) -> Shared<V>
+    pub(super) async fn run<R, RFut, F, Fut>(&self, key: K, reserve: R, work: F) -> Shared<V>
     where
         R: FnOnce() -> RFut,
         RFut: Future,
@@ -203,7 +203,9 @@ enum ReadKey {
 pub(crate) struct NamespaceFlights {
     lookup: ExactFlights<Path, LookupOutcome>,
     list: ExactFlights<Path, ListOutcome>,
-    read: ExactFlights<ReadKey, ReadOutcome>,
+    read: ExactFlights<ReadKey, ReadReply>,
+    /// One answer per feed object id.
+    pub(super) feed: ExactFlights<ObjectId, ()>,
 }
 
 impl NamespaceFlights {
@@ -212,6 +214,7 @@ impl NamespaceFlights {
             lookup: ExactFlights::default(),
             list: ExactFlights::default(),
             read: ExactFlights::default(),
+            feed: ExactFlights::default(),
         }
     }
 }
@@ -228,10 +231,22 @@ pub struct DirListing {
     pub next_cursor: Option<CachedCursor>,
 }
 
+/// The page a `list-children` call asks for: its cursor (`None` for the first
+/// page) and the validator of the cached page of that cursor.
+#[derive(Debug, Clone)]
+pub(crate) struct PageRequest {
+    pub cursor: Option<CachedCursor>,
+    pub validator: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum ListOutcome {
     Entries(DirListing),
     Subtree(u64),
+    /// The cached page of the validator of the call stands.
+    Unchanged,
+    /// The listing is fed: the feeds that answer for it, the outer first.
+    Feed(Vec<super::feed::FeedClaim>),
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +261,13 @@ pub struct ReadOutcome {
     pub attrs: FileAttrsCache,
     pub bytes: ReadBytes,
     pub content_type: Option<String>,
+}
+
+/// A read answer: the file, or the feeds that answer for a fed file.
+#[derive(Debug, Clone)]
+pub enum ReadReply {
+    File(ReadOutcome),
+    Feed(Vec<super::feed::FeedClaim>),
 }
 
 #[derive(Debug, Clone)]
@@ -303,29 +325,23 @@ impl Runtime {
         Ok(result)
     }
 
+    /// Ask the provider for one page of `path`. A first page runs in the one
+    /// flight of its path; a later page runs under the publication permit of
+    /// its path.
     pub(crate) async fn list_children(
         &self,
         path: &Path,
-        cursor: Option<CachedCursor>,
+        request: PageRequest,
         captured_epoch: u64,
     ) -> Result<ListOutcome> {
-        let is_continuation = cursor.is_some();
         let runtime = self;
-        let result = if is_continuation {
+        let result = if request.cursor.is_some() {
             let _permit = runtime
                 .resources
                 .reserve(PublicationKey::Path(path.clone()))
                 .await;
-
             runtime
-                .run_list_children(
-                    path,
-                    cursor
-                        .clone()
-                        .map(crate::wit_protocol::cached_cursor_to_wit),
-                    cursor,
-                    captured_epoch,
-                )
+                .run_list_children(path, request, captured_epoch)
                 .await?
         } else {
             self.namespace_flights
@@ -339,12 +355,7 @@ impl Runtime {
                     },
                     || async {
                         let result = runtime
-                            .run_list_children(
-                                path,
-                                cursor.map(crate::wit_protocol::cached_cursor_to_wit),
-                                None,
-                                captured_epoch,
-                            )
+                            .run_list_children(path, request, captured_epoch)
                             .await
                             .map_err(SharedError::from)?;
                         Ok(result)
@@ -361,7 +372,7 @@ impl Runtime {
         path: &Path,
         content_type: String,
         captured_epoch: u64,
-    ) -> Result<ReadOutcome> {
+    ) -> Result<ReadReply> {
         let now = now_millis();
         let cached_canonical = self
             .resources
@@ -388,7 +399,7 @@ impl Runtime {
         mode: ReadMode,
         cached_canonical: Option<crate::cache::CachedCanonical>,
         captured_epoch: u64,
-    ) -> Result<ReadOutcome> {
+    ) -> Result<ReadReply> {
         let now = now_millis();
         if self
             .resources

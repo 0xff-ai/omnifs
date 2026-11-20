@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::object_id::ObjectId;
-use crate::view::{MAX_EAGER_RESPONSE_BYTES, MAX_VERSION_TOKEN_BYTES};
+use crate::view::{MAX_EAGER_RESPONSE_BYTES, MAX_FEED_TOKEN_BYTES, MAX_VERSION_TOKEN_BYTES};
 use crate::wit_protocol::{try_file_attrs_from_attrs, try_file_attrs_from_file_out};
 use omnifs_core::path::{Path, Segment};
 use omnifs_wit::host::types as wit_types;
@@ -12,17 +12,20 @@ pub(crate) struct ReturnValidator<'a, F> {
     effects: &'a wit_types::Effects,
     eager_bytes: usize,
     tree_exists: F,
+    /// The effects are the facts of a feed part: their files are fed files.
+    fed: bool,
 }
 
 impl<'a, F> ReturnValidator<'a, F>
 where
     F: Fn(u64) -> bool,
 {
-    pub(crate) fn new(effects: &'a wit_types::Effects, tree_exists: F) -> Self {
+    pub(crate) fn new(effects: &'a wit_types::Effects, tree_exists: F, fed: bool) -> Self {
         Self {
             effects,
             eager_bytes: 0,
             tree_exists,
+            fed,
         }
     }
 
@@ -31,12 +34,93 @@ where
         effects: &'a wit_types::Effects,
         tree_exists: F,
     ) -> std::result::Result<Self, String> {
+        Self::checked(result, effects, tree_exists, false)
+    }
+
+    fn checked<T>(
+        result: &std::result::Result<T, wit_types::ProviderError>,
+        effects: &'a wit_types::Effects,
+        tree_exists: F,
+        fed: bool,
+    ) -> std::result::Result<Self, String> {
         if result.is_err() && !effects_empty(effects) {
             return Err("provider error returns must not carry effects".to_string());
         }
-        let mut validator = Self::new(effects, tree_exists);
+        let mut validator = Self::new(effects, tree_exists, fed);
         validator.effects()?;
         Ok(validator)
+    }
+
+    /// The claims of a fed answer: at least one, each with an object kind
+    /// and an anchor path, and no effects, since fed facts come from feeds.
+    fn claims(&self, claims: &[wit_types::FeedClaim]) -> std::result::Result<(), String> {
+        if claims.is_empty() {
+            return Err("a feed answer carries no claims".to_string());
+        }
+        if !effects_empty(self.effects) {
+            return Err("a feed answer must not carry effects".to_string());
+        }
+        for claim in claims {
+            Self::feed_object(&claim.object)?;
+        }
+        Ok(())
+    }
+
+    fn object_id(id: &wit_types::LogicalId) -> std::result::Result<(), String> {
+        if id.kind.is_empty() {
+            return Err("feed object id.kind must not be empty".to_string());
+        }
+        Ok(())
+    }
+
+    fn feed_object(object: &wit_types::FeedObject) -> std::result::Result<(), String> {
+        Self::object_id(&object.id)?;
+        Path::parse(&object.path).map(|_| ()).map_err(|_| {
+            format!(
+                "feed object path {:?} is not a valid protocol path",
+                object.path
+            )
+        })
+    }
+
+    fn feed_token(token: &str) -> std::result::Result<(), String> {
+        if token.is_empty() {
+            return Err("feed token must not be empty".to_string());
+        }
+        if token.len() > MAX_FEED_TOKEN_BYTES {
+            return Err(format!("feed token exceeds {MAX_FEED_TOKEN_BYTES} bytes"));
+        }
+        Ok(())
+    }
+
+    /// `tokened` says whether the call carried a token, the only call
+    /// `unchanged` can answer.
+    pub(crate) fn feed(
+        result: &std::result::Result<wit_types::FeedAnswer, wit_types::ProviderError>,
+        tokened: bool,
+    ) -> std::result::Result<(), String> {
+        let Ok(answer) = result else { return Ok(()) };
+        match answer {
+            wit_types::FeedAnswer::Unchanged if !tokened => {
+                Err("feed answered unchanged to a call without a token".to_string())
+            },
+            wit_types::FeedAnswer::Unchanged => Ok(()),
+            wit_types::FeedAnswer::Part(part) => {
+                Self::feed_token(&part.token)?;
+                for state in &part.inner {
+                    Self::object_id(&state.id)?;
+                    Self::feed_token(&state.token)?;
+                }
+                for anchor in &part.anchors {
+                    for path in [&anchor.path, &anchor.anchor] {
+                        Path::parse(path).map_err(|_| {
+                            format!("facet anchor {path:?} is not a valid protocol path")
+                        })?;
+                    }
+                }
+                Ok(())
+            },
+        }
     }
 
     pub(crate) fn lookup(
@@ -55,13 +139,17 @@ where
             },
             wit_types::LookupChildResult::Subtree(tree) => self.subtree_tree(*tree)?,
             wit_types::LookupChildResult::NotFound(_) => {},
+            wit_types::LookupChildResult::Feed(claims) => self.claims(claims)?,
         }
         Ok(())
     }
 
+    /// `validated` says whether the call carried the validator of a cached
+    /// page, the only call `unchanged` can answer.
     pub(crate) fn list(
         &mut self,
         result: &std::result::Result<wit_types::ListChildrenResult, wit_types::ProviderError>,
+        validated: bool,
     ) -> std::result::Result<(), String> {
         let Ok(result) = result else { return Ok(()) };
         match result {
@@ -70,8 +158,22 @@ where
                     Self::segment_name(&entry.name)?;
                     self.entry(&entry.kind)?;
                 }
+                if let Some(validator) = &listing.validator {
+                    Self::version_token(&validator.token)
+                        .map_err(|error| format!("page validator: {error}"))?;
+                }
             },
             wit_types::ListChildrenResult::Subtree(tree) => self.subtree_tree(*tree)?,
+            wit_types::ListChildrenResult::Unchanged(_) if !validated => {
+                return Err(
+                    "list-children answered unchanged to a call without a validator".into(),
+                );
+            },
+            wit_types::ListChildrenResult::Unchanged(validator) => {
+                Self::version_token(&validator.token)
+                    .map_err(|error| format!("page validator: {error}"))?;
+            },
+            wit_types::ListChildrenResult::Feed(claims) => self.claims(claims)?,
         }
         Ok(())
     }
@@ -84,6 +186,7 @@ where
         match result {
             wit_types::ReadFileOutcome::Found(result) => self.read_file_result(result),
             wit_types::ReadFileOutcome::NotFound(_) => Ok(()),
+            wit_types::ReadFileOutcome::Feed(claims) => self.claims(claims),
         }
     }
 
@@ -176,8 +279,19 @@ where
                 Self::check_path_id_conflict(&canonical_path_to_id, &write.path, &id_bytes)?;
             }
             if let wit_types::FsKind::File(file) = &write.kind {
-                self.file_out(file)
-                    .map_err(|e| format!("fs-write {:?}: {e}", write.path))?;
+                if self.fed {
+                    Self::fed_file(file)
+                } else {
+                    self.file_out(file)
+                }
+                .map_err(|e| format!("fs-write {:?}: {e}", write.path))?;
+            }
+        }
+        for removal in &effects.removals {
+            let path = Path::parse(removal)
+                .map_err(|_| format!("removal path {removal:?} is not a valid protocol path"))?;
+            if path.is_root() {
+                return Err("a removal must not name the mount root".to_string());
             }
         }
         for invalidation in &effects.invalidations {
@@ -252,6 +366,28 @@ where
             })
     }
 
+    /// A fed file: stable inline bytes of the declared exact size, which the
+    /// projection holds whole. Fed files are facts, not eager preloads.
+    fn fed_file(file: &wit_types::FileOut) -> std::result::Result<(), String> {
+        let wit_types::ByteSource::Inline(bytes) = &file.bytes else {
+            return Err("a fed file carries inline bytes".to_string());
+        };
+        let len = u64::try_from(bytes.len()).map_err(|_| "fed file length does not fit u64")?;
+        if !matches!(file.attrs.size, wit_types::FileSize::Exact(size) if size == len)
+            || !matches!(file.attrs.stability, wit_types::Stability::Stable)
+            || file.attrs.version_token.is_some()
+        {
+            return Err("a fed file is a stable file of its exact size without a version".into());
+        }
+        if len > crate::tree::MATERIALIZE_MAX_BYTES {
+            return Err(format!(
+                "fed file exceeds {} bytes",
+                crate::tree::MATERIALIZE_MAX_BYTES
+            ));
+        }
+        Ok(())
+    }
+
     fn file_out(&mut self, file: &wit_types::FileOut) -> std::result::Result<(), String> {
         if matches!(file.bytes, wit_types::ByteSource::Blob(_)) {
             Self::file_attrs_metadata(&file.attrs)
@@ -288,15 +424,20 @@ where
     }
 
     fn file_attrs_metadata(attrs: &wit_types::FileAttrs) -> std::result::Result<(), String> {
-        if let Some(token) = &attrs.version_token {
-            if token.is_empty() {
-                return Err("version token must not be empty".to_string());
-            }
-            if token.len() > MAX_VERSION_TOKEN_BYTES {
-                return Err(format!(
-                    "version token exceeds {MAX_VERSION_TOKEN_BYTES} bytes"
-                ));
-            }
+        attrs
+            .version_token
+            .as_deref()
+            .map_or(Ok(()), Self::version_token)
+    }
+
+    fn version_token(token: &str) -> std::result::Result<(), String> {
+        if token.is_empty() {
+            return Err("version token must not be empty".to_string());
+        }
+        if token.len() > MAX_VERSION_TOKEN_BYTES {
+            return Err(format!(
+                "version token exceeds {MAX_VERSION_TOKEN_BYTES} bytes"
+            ));
         }
         Ok(())
     }
@@ -329,13 +470,28 @@ where
 pub(crate) fn validate_list<F>(
     result: &std::result::Result<wit_types::ListChildrenResult, wit_types::ProviderError>,
     effects: &wit_types::Effects,
+    validated: bool,
     tree_exists: F,
 ) -> std::result::Result<(), String>
 where
     F: Fn(u64) -> bool,
 {
     let mut v = ReturnValidator::common(result, effects, tree_exists)?;
-    v.list(result)
+    v.list(result, validated)
+}
+/// Validate one feed call: `tokened` says whether the call carried a token.
+/// The effects of a part are its fed facts.
+pub(crate) fn validate_feed<F>(
+    result: &std::result::Result<wit_types::FeedAnswer, wit_types::ProviderError>,
+    effects: &wit_types::Effects,
+    tokened: bool,
+    tree_exists: F,
+) -> std::result::Result<(), String>
+where
+    F: Fn(u64) -> bool,
+{
+    let _ = ReturnValidator::checked(result, effects, tree_exists, true)?;
+    ReturnValidator::<F>::feed(result, tokened)
 }
 pub(crate) fn validate_read<F>(
     result: &std::result::Result<wit_types::ReadFileOutcome, wit_types::ProviderError>,
@@ -395,7 +551,10 @@ where
 }
 
 fn effects_empty(effects: &wit_types::Effects) -> bool {
-    effects.canonical.is_empty() && effects.fs.is_empty() && effects.invalidations.is_empty()
+    effects.canonical.is_empty()
+        && effects.fs.is_empty()
+        && effects.invalidations.is_empty()
+        && effects.removals.is_empty()
 }
 
 #[cfg(test)]
@@ -408,6 +567,7 @@ mod tests {
             canonical: Vec::new(),
             fs: Vec::new(),
             invalidations: Vec::new(),
+            removals: Vec::new(),
         }
     }
 
@@ -469,9 +629,10 @@ mod tests {
                 )],
                 exhaustive: true,
                 next_cursor: None,
+                validator: None,
             },
         ));
-        let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+        let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
         assert!(error.contains("inline bytes require FileSize::Exact"));
     }
 
@@ -489,9 +650,10 @@ mod tests {
                 )],
                 exhaustive: true,
                 next_cursor: None,
+                validator: None,
             },
         ));
-        let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+        let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
         assert!(error.contains("Stability::Live requires"));
     }
 
@@ -569,10 +731,47 @@ mod tests {
                 )],
                 exhaustive: true,
                 next_cursor: None,
+                validator: None,
             },
         ));
-        let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+        let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
         assert!(error.contains("version token must not be empty"));
+    }
+
+    #[test]
+    fn unchanged_answers_only_a_validated_call_and_page_validators_are_version_tokens() {
+        let unchanged = Ok(wit_types::ListChildrenResult::Unchanged(
+            wit_types::PageValidator {
+                token: "v1".to_owned(),
+                interval: Some(60),
+            },
+        ));
+        let error = validate_list(&unchanged, &effects(), false, |_| true).unwrap_err();
+        assert!(error.contains("without a validator"));
+        validate_list(&unchanged, &effects(), true, |_| true).unwrap();
+
+        for (token, message) in [
+            (String::new(), "must not be empty"),
+            ("v".repeat(MAX_VERSION_TOKEN_BYTES + 1), "exceeds"),
+        ] {
+            let validator = wit_types::PageValidator {
+                token,
+                interval: None,
+            };
+            let result = Ok(wit_types::ListChildrenResult::Entries(
+                wit_types::DirListing {
+                    entries: vec![entry("child")],
+                    exhaustive: true,
+                    next_cursor: None,
+                    validator: Some(validator.clone()),
+                },
+            ));
+            let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
+            assert!(error.contains("page validator") && error.contains(message));
+            let unchanged = Ok(wit_types::ListChildrenResult::Unchanged(validator));
+            let error = validate_list(&unchanged, &effects(), true, |_| true).unwrap_err();
+            assert!(error.contains("page validator") && error.contains(message));
+        }
     }
 
     #[test]
@@ -641,9 +840,10 @@ mod tests {
                 entries: vec![entry("nested/name")],
                 exhaustive: true,
                 next_cursor: None,
+                validator: None,
             },
         ));
-        let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+        let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
         assert!(error.contains("nested/name"));
 
         for control in ["@next", "@all"] {
@@ -652,9 +852,10 @@ mod tests {
                     entries: vec![entry(control)],
                     exhaustive: true,
                     next_cursor: None,
+                    validator: None,
                 },
             ));
-            let error = validate_list(&result, &effects(), |_| true).unwrap_err();
+            let error = validate_list(&result, &effects(), false, |_| true).unwrap_err();
             assert!(error.contains(control));
         }
 
@@ -663,8 +864,9 @@ mod tests {
                 entries: vec![entry("@cloudflare")],
                 exhaustive: true,
                 next_cursor: None,
+                validator: None,
             },
         ));
-        validate_list(&result, &effects(), |_| true).unwrap();
+        validate_list(&result, &effects(), false, |_| true).unwrap();
     }
 }

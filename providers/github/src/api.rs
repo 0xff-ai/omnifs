@@ -9,7 +9,7 @@
 //! `error_for_status` mapping.
 
 use core::time::Duration;
-use http::{Response, StatusCode};
+use http::{HeaderMap, Response, StatusCode};
 use omnifs_sdk::endpoint::EndpointHooks;
 use omnifs_sdk::error::ProviderError;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,37 +25,53 @@ pub struct GitHubApi;
 
 impl EndpointHooks for GitHubApi {
     /// Map a GitHub rate-limit response to a typed `RateLimited` error so the
-    /// endpoint breaker arms on it; `None` for everything else, leaving the
-    /// SDK's default 4xx/5xx mapping in charge.
+    /// endpoint breaker arms on it, or to the error of a header of its window
+    /// that does not parse; `None` for everything else, leaving the SDK's
+    /// default 4xx/5xx mapping in charge.
     fn classify(&self, resp: &Response<Vec<u8>>) -> Option<ProviderError> {
         if !is_rate_limited(resp) {
             return None;
         }
-        let retry_after = parse_github_retry(resp);
-        Some(ProviderError::rate_limited(rate_limit_message(resp)).with_retry_after(retry_after))
+        Some(match retry_window(resp.headers()) {
+            Ok(retry_after) => {
+                ProviderError::rate_limited(rate_limit_message(resp)).with_retry_after(retry_after)
+            },
+            Err(error) => error,
+        })
     }
 }
 
-/// Structured backoff window for a github rate-limit response. Prefers an
-/// explicit `Retry-After` (secondary limits / abuse detection); falls back to
-/// the primary limit's `x-ratelimit-reset` epoch minus now. Without this the
-/// host applies its short default cooldown and re-hammers github every few
-/// seconds for the whole (up to ~1h) primary-limit window instead of waiting
-/// out the real reset.
-fn parse_github_retry(resp: &Response<Vec<u8>>) -> Option<Duration> {
-    if let Some(secs) = header_u64(resp, "retry-after") {
-        return Some(Duration::from_secs(secs));
+/// The backoff window of a rate-limited answer from its `headers`: an explicit
+/// `Retry-After` (secondary limits / abuse detection), else the primary
+/// limit's `x-ratelimit-reset` epoch minus now, zero for a reset that passed;
+/// none without them, for the short default cooldown of the host. A header of
+/// the window that is not text, or that does not parse as seconds, fails.
+pub(crate) fn retry_window(headers: &HeaderMap) -> Result<Option<Duration>, ProviderError> {
+    let seconds = |name: &str| -> Result<Option<u64>, ProviderError> {
+        let Some(value) = headers.get(name) else {
+            return Ok(None);
+        };
+        let text = value.to_str().map_err(|error| {
+            ProviderError::invalid_input(format!("the header {name} is not text: {error}"))
+        })?;
+        text.trim().parse::<u64>().map(Some).map_err(|error| {
+            ProviderError::invalid_input(format!("the header {name} {text:?}: {error}"))
+        })
+    };
+    if let Some(secs) = seconds("retry-after")? {
+        return Ok(Some(Duration::from_secs(secs)));
     }
-    let reset_epoch = header_u64(resp, "x-ratelimit-reset")?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    reset_epoch.checked_sub(now).map(Duration::from_secs)
-}
-
-fn header_u64(resp: &Response<Vec<u8>>, header: &str) -> Option<u64> {
-    resp.headers()
-        .get(header)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
+    let Some(reset) = seconds("x-ratelimit-reset")? else {
+        return Ok(None);
+    };
+    // The reset is a second of the epoch: the window counts whole seconds to
+    // it, so that it never ends before the reset.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| ProviderError::internal(format!("the clock: {error}")))?;
+    Ok(Some(Duration::from_secs(
+        reset.saturating_sub(now.as_secs()),
+    )))
 }
 
 fn is_rate_limited(resp: &Response<Vec<u8>>) -> bool {
@@ -93,5 +109,26 @@ fn append_header_hint(resp: &Response<Vec<u8>>, message: &mut String, header: &s
         message.push_str(label);
         message.push('=');
         message.push_str(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_window;
+    use http::{HeaderMap, HeaderValue};
+
+    /// A header of the window of a rate limit that is not text, or that does
+    /// not parse as seconds, fails.
+    #[test]
+    fn a_header_of_the_window_that_is_not_text_or_seconds_fails() {
+        for (name, value) in [
+            ("retry-after", HeaderValue::from_bytes(b"2\xff").unwrap()),
+            ("x-ratelimit-reset", HeaderValue::from_static("soon")),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, value);
+            assert!(retry_window(&headers).is_err(), "{name}");
+        }
+        assert_eq!(retry_window(&HeaderMap::new()).unwrap(), None);
     }
 }

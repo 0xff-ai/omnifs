@@ -552,7 +552,7 @@ mod tests {
         "provider": "demo.wasm",
         "defaultMount": "demo",
         "version": "0.3.1",
-        "witPackage": "package omnifs:provider@0.7.0;",
+        "witPackage": "package omnifs:provider@0.9.0;",
         "sdkVersion": "0.2.1",
         "refreshIntervalSecs": 0
     }"#;
@@ -727,11 +727,11 @@ mod tests {
         let contract = ProviderManifest::from_bytes(DEMO_MANIFEST_CONTRACT_EVIDENCE).unwrap();
         assert_eq!(
             contract.wit_package.as_deref(),
-            Some("package omnifs:provider@0.7.0;")
+            Some("package omnifs:provider@0.9.0;")
         );
         assert_eq!(contract.sdk_version.as_deref(), Some("0.2.1"));
         let reencoded = serde_json::to_value(&contract).unwrap();
-        assert_eq!(reencoded["witPackage"], "package omnifs:provider@0.7.0;");
+        assert_eq!(reencoded["witPackage"], "package omnifs:provider@0.9.0;");
         assert_eq!(reencoded["refreshIntervalSecs"], 0);
         assert_eq!(reencoded["sdkVersion"], "0.2.1");
     }

@@ -7,7 +7,6 @@
 
 mod adapter;
 mod cache;
-mod delayed;
 mod error;
 mod export;
 mod mount;

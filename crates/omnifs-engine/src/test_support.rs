@@ -233,18 +233,24 @@ impl Runtime {
         &self,
         path: &omnifs_core::path::Path,
         cursor: Option<&wit_types::Cursor>,
+        validator: Option<&str>,
     ) -> crate::runtime::Result<TestOp<'_, wit_types::ListChildrenResult>> {
         let id = self.next_operation_id();
         let path_text = path.as_str().to_owned();
         let cursor = cursor.cloned();
+        let validator = validator.map(ToOwned::to_owned);
         if self.test_callouts.is_some() {
             let callout_path = path_text.clone();
             return TestOp::start_callout(self, id, move |instance| async move {
-                instance.list_children(id, callout_path, cursor).await
+                instance
+                    .list_children(id, callout_path, cursor, validator)
+                    .await
             });
         }
-        let transport =
-            futures::executor::block_on(self.instance.list_children(id, path_text, cursor))?;
+        let transport = futures::executor::block_on(
+            self.instance
+                .list_children(id, path_text, cursor, validator),
+        )?;
         TestOp::from_transport(self, id, Ok(transport))
     }
 
