@@ -550,6 +550,11 @@ impl HttpResponse {
         self.inner.headers().get(name).and_then(|v| v.to_str().ok())
     }
 
+    /// The headers of the response, as they came.
+    pub fn headers(&self) -> &http::HeaderMap {
+        self.inner.headers()
+    }
+
     pub fn body(&self) -> &[u8] {
         self.inner.body()
     }
