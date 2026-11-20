@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::authority::RuntimeAuthority;
 use crate::callouts::{CalloutHost, ParkSignal};
+use crate::ops::feed::ProjectionReads;
 use futures::StreamExt;
 use tracing::Instrument;
 use wasmtime::component::{Linker, ResourceTable};
@@ -32,8 +33,9 @@ pub struct Instance {
 }
 
 enum Command {
-    SetCallouts {
+    SetHost {
         callouts: CalloutHost,
+        projection: ProjectionReads,
         reply: std::sync::mpsc::Sender<std::result::Result<(), EngineError>>,
     },
     Initialize {
@@ -51,6 +53,7 @@ enum Command {
         id: u64,
         path: String,
         cursor: Option<wit_types::Cursor>,
+        validator: Option<String>,
         span: tracing::Span,
         reply: tokio::sync::oneshot::Sender<ListTransport>,
     },
@@ -81,6 +84,14 @@ enum Command {
         event: wit_types::ProviderEvent,
         span: tracing::Span,
         reply: tokio::sync::oneshot::Sender<EventTransport>,
+    },
+    Feed {
+        id: u64,
+        path: String,
+        token: Option<String>,
+        start: Option<String>,
+        span: tracing::Span,
+        reply: tokio::sync::oneshot::Sender<FeedTransport>,
     },
     Shutdown {
         reply: std::sync::mpsc::Sender<std::result::Result<(), EngineError>>,
@@ -136,6 +147,13 @@ type ChunkTransport = std::result::Result<
 type EventTransport = std::result::Result<
     (
         std::result::Result<(), wit_types::ProviderError>,
+        wit_types::Effects,
+    ),
+    EngineError,
+>;
+type FeedTransport = std::result::Result<
+    (
+        std::result::Result<wit_types::FeedAnswer, wit_types::ProviderError>,
         wit_types::Effects,
     ),
     EngineError,
@@ -228,6 +246,7 @@ impl Instance {
         id: u64,
         path: String,
         cursor: Option<wit_types::Cursor>,
+        validator: Option<String>,
     ) -> ListTransport {
         let (reply, recv) = tokio::sync::oneshot::channel();
         self.tx
@@ -235,6 +254,7 @@ impl Instance {
                 id,
                 path,
                 cursor,
+                validator,
                 span: tracing::Span::current(),
                 reply,
             })
@@ -334,6 +354,31 @@ impl Instance {
         })?
     }
 
+    pub(crate) async fn feed(
+        &self,
+        id: u64,
+        path: String,
+        token: Option<String>,
+        start: Option<String>,
+    ) -> FeedTransport {
+        let (reply, recv) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(Command::Feed {
+                id,
+                path,
+                token,
+                start,
+                span: tracing::Span::current(),
+                reply,
+            })
+            .map_err(|_| {
+                EngineError::ProviderProtocol("provider instance driver stopped".to_string())
+            })?;
+        recv.await.map_err(|_| {
+            EngineError::ProviderProtocol("provider operation reply dropped".to_string())
+        })?
+    }
+
     pub fn initialize(&self) -> InitializeTransport {
         self.call_sync(|reply| Command::Initialize {
             config_bytes: self.config_bytes.clone(),
@@ -341,11 +386,16 @@ impl Instance {
         })
     }
 
-    pub(crate) fn set_callouts(
+    pub(crate) fn set_host(
         &self,
         callouts: CalloutHost,
+        projection: ProjectionReads,
     ) -> std::result::Result<(), EngineError> {
-        self.call_sync(|reply| Command::SetCallouts { callouts, reply })
+        self.call_sync(|reply| Command::SetHost {
+            callouts,
+            projection,
+            reply,
+        })
     }
 
     pub fn shutdown(&self) -> std::result::Result<(), EngineError> {
@@ -387,6 +437,7 @@ async fn build_driver_state(
             wasi,
             table: ResourceTable::new(),
             callouts: None,
+            projection: None,
         },
     );
 
@@ -411,9 +462,11 @@ async fn drive_instance(
                 tokio::select! {
                     Some(command) = rx.recv() => {
                         match command {
-                            Command::SetCallouts { callouts, reply } => {
+                            Command::SetHost { callouts, projection, reply } => {
                                 accessor.with(|mut access| {
-                                    access.get().callouts = Some(callouts);
+                                    let state = access.get();
+                                    state.callouts = Some(callouts);
+                                    state.projection = Some(projection);
                                 });
                                 let _ = reply.send(Ok(()));
                             },
@@ -448,12 +501,12 @@ async fn drive_instance(
                                     let _ = reply.send(result);
                                 }.instrument(span)));
                             },
-                            Command::ListChildren { id, path, cursor, span, reply } => {
+                            Command::ListChildren { id, path, cursor, validator, span, reply } => {
                                 let namespace = Arc::clone(&bindings);
                                 calls.push(Box::pin(async move {
                                     let result = namespace
                                         .omnifs_provider_namespace()
-                                        .call_list_children(accessor, id, path, cursor)
+                                        .call_list_children(accessor, id, path, cursor, validator)
                                         .await
                                         .map_err(Into::into);
                                     let _ = reply.send(result);
@@ -487,6 +540,17 @@ async fn drive_instance(
                                     let result = namespace
                                         .omnifs_provider_namespace()
                                         .call_read_chunk(accessor, id, handle, offset, length)
+                                        .await
+                                        .map_err(Into::into);
+                                    let _ = reply.send(result);
+                                }.instrument(span)));
+                            },
+                            Command::Feed { id, path, token, start, span, reply } => {
+                                let namespace = Arc::clone(&bindings);
+                                calls.push(Box::pin(async move {
+                                    let result = namespace
+                                        .omnifs_provider_namespace()
+                                        .call_feed(accessor, id, path, token, start)
                                         .await
                                         .map_err(Into::into);
                                     let _ = reply.send(result);

@@ -1,8 +1,10 @@
 //! Derived in-memory projection records.
 
-use super::mount::{Key, Record};
+use super::mount::{Key, Record, RecordKind};
+use moka::ops::compute::Op;
 use moka::sync::Cache as MokaCache;
 use omnifs_core::path::Path;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Maximum total byte weight of the `mem` tier per provider instance (32 MiB).
@@ -11,9 +13,14 @@ pub const VIEW_MEM_MAX_WEIGHT: u64 = 32 * 1024 * 1024;
 /// Records larger than this threshold are not inserted into `mem` (256 KiB).
 pub const VIEW_MEM_SKIP_THRESHOLD: usize = 256 * 1024;
 
-/// Derived Moka records. Durable facts are owned by `ProjectionStore`.
+/// The records of one path, by their kind and auxiliary key.
+type PathRecords = HashMap<(RecordKind, Option<String>), Arc<Record>>;
+
+/// Derived Moka records, by path, so that the removal of the records of a
+/// path is one removal by its key. Durable facts are owned by
+/// `ProjectionStore`.
 pub struct MemoryTier {
-    mem: MokaCache<Key, Arc<Record>>,
+    mem: MokaCache<Path, Arc<PathRecords>>,
 }
 
 impl MemoryTier {
@@ -23,14 +30,18 @@ impl MemoryTier {
         }
     }
 
-    fn build_mem() -> MokaCache<Key, Arc<Record>> {
+    fn build_mem() -> MokaCache<Path, Arc<PathRecords>> {
         MokaCache::builder()
             .max_capacity(VIEW_MEM_MAX_WEIGHT)
             .support_invalidation_closures()
-            .weigher(|key: &Key, value: &Arc<Record>| -> u32 {
-                let key_size = 1 + key.path.len() + key.aux.as_ref().map_or(0, String::len);
-                let val_size = 2 + value.payload.len();
-                (key_size + val_size).try_into().unwrap_or(u32::MAX)
+            .weigher(|path: &Path, records: &Arc<PathRecords>| -> u32 {
+                let size: usize = records
+                    .iter()
+                    .map(|((_, aux), record)| {
+                        3 + path.len() + aux.as_ref().map_or(0, String::len) + record.payload.len()
+                    })
+                    .sum();
+                size.try_into().unwrap_or(u32::MAX)
             })
             .build()
     }
@@ -38,56 +49,70 @@ impl MemoryTier {
     // --- Derived memory operations ---------------------------------------
 
     pub fn mem_get(&self, key: &Key) -> Option<Arc<Record>> {
-        self.mem.get(key)
+        self.mem
+            .get(&key.path)?
+            .get(&(key.kind, key.aux.clone()))
+            .cloned()
     }
 
     pub fn mem_put(&self, key: &Key, record: &Record) {
         if record.payload.len() <= VIEW_MEM_SKIP_THRESHOLD {
-            self.mem.insert(key.clone(), Arc::new(record.clone()));
+            self.mem.entry_by_ref(&key.path).and_upsert_with(|current| {
+                let mut records =
+                    current.map_or_else(PathRecords::new, |entry| (**entry.value()).clone());
+                records.insert((key.kind, key.aux.clone()), Arc::new(record.clone()));
+                Arc::new(records)
+            });
         }
     }
 
     /// Remove the exact key from the mem only. Does not touch the database.
     pub fn mem_invalidate(&self, key: &Key) {
-        self.mem.invalidate(key);
+        self.mem
+            .entry_by_ref(&key.path)
+            .and_compute_with(|current| {
+                let Some(entry) = current else {
+                    return Op::Nop;
+                };
+                let mut records = (**entry.value()).clone();
+                records.remove(&(key.kind, key.aux.clone()));
+                if records.is_empty() {
+                    Op::Remove
+                } else {
+                    Op::Put(Arc::new(records))
+                }
+            });
     }
 
-    /// Remove all mem entries matching `predicate`. Does not touch the
-    /// database.
-    pub fn mem_invalidate_entries_if<P>(&self, predicate: P)
+    /// Remove the mem records of all paths matching `predicate`. Does not
+    /// touch the database.
+    pub fn mem_invalidate_paths_if<P>(&self, predicate: P)
     where
-        P: Fn(&Key, &Arc<Record>) -> bool + Send + Sync + 'static,
+        P: Fn(&Path) -> bool + Send + Sync + 'static,
     {
         self.mem
-            .invalidate_entries_if(predicate)
+            .invalidate_entries_if(move |path, _| predicate(path))
             .expect("invalidation closures enabled at cache construction");
     }
 
-    /// Remove all records at `prefix` or beneath it on a segment boundary from
-    /// both the mem and the database.
+    /// Remove all mem records at `prefix` or beneath it on a segment
+    /// boundary.
     ///
     /// `prefix` may be a mount-scoped or unscoped omnifs path. Matching uses
     /// typed path segment boundaries.
     pub fn invalidate_prefix(&self, prefix: &Path) {
-        // Mem: use predicate-based eviction on path prefix.
         let prefix_owned = prefix.clone();
         self.mem
-            .invalidate_entries_if(move |k, _| k.path.has_prefix(&prefix_owned))
+            .invalidate_entries_if(move |path, _| path.has_prefix(&prefix_owned))
             .expect("invalidation closures enabled at cache construction");
         // Flush pending maintenance so the predicate is applied immediately
         // (moka applies invalidate_entries_if lazily otherwise).
         self.mem.run_pending_tasks();
     }
 
-    /// Remove all records whose logical path equals `path` from both tiers.
+    /// Remove all mem records whose logical path equals `path`.
     pub fn delete_exact(&self, path: &Path) {
-        // Mem: exact-path eviction across all record kinds.
-        let path_owned = path.clone();
-        self.mem
-            .invalidate_entries_if(move |k, _| k.path == path_owned)
-            .expect("invalidation closures enabled at cache construction");
-        // Flush pending maintenance so the predicate is applied immediately.
-        self.mem.run_pending_tasks();
+        self.mem.invalidate(path);
     }
 }
 
@@ -129,5 +154,19 @@ mod tests {
         assert!(memory.mem_get(&key("/owner/repo")).is_none());
         assert!(memory.mem_get(&key("/owner/repo/issues")).is_none());
         assert!(memory.mem_get(&key("/owner/repobaz")).is_some());
+
+        let file = Key::with_aux(
+            &Path::parse("/owner/repobaz").unwrap(),
+            RecordKind::File,
+            Some("aux"),
+        );
+        memory.mem_put(&file, &small);
+        memory.mem_invalidate(&key("/owner/repobaz"));
+        assert!(memory.mem_get(&key("/owner/repobaz")).is_none());
+        assert!(memory.mem_get(&file).is_some());
+        memory.mem_put(&key("/owner/repobaz"), &small);
+        memory.delete_exact(&Path::parse("/owner/repobaz").unwrap());
+        assert!(memory.mem_get(&key("/owner/repobaz")).is_none());
+        assert!(memory.mem_get(&file).is_none());
     }
 }

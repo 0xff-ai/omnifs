@@ -36,10 +36,13 @@ pub struct ProviderImportOutcome {
     pub disposition: ProviderImportDisposition,
 }
 
+/// The metadata of a retained provider: its reference, its manifest, or the
+/// error that makes the manifest of an earlier omnifs invalid, and the
+/// manifest document.
 #[derive(Debug, Clone)]
 pub struct StoredProviderMetadata {
     pub reference: ProviderRef,
-    pub manifest: ProviderManifest,
+    pub manifest: Result<ProviderManifest, String>,
     pub document: Vec<u8>,
 }
 
@@ -80,16 +83,17 @@ impl StoredProviderMetadata {
             .map_err(|_| anyhow::anyhow!("stored provider digest has {length} bytes"))?;
         let name = ProviderName::new(name).context("stored provider has invalid name")?;
         let version = version.map(ProviderVersion::new);
-        let manifest = ProviderManifest::from_bytes(&metadata)
-            .context("stored provider metadata is invalid")?;
-        anyhow::ensure!(
-            manifest.id == name.as_str(),
-            "stored provider name does not match metadata"
-        );
-        anyhow::ensure!(
-            manifest.version.as_deref() == version.as_ref().map(ProviderVersion::as_str),
-            "stored provider version does not match metadata"
-        );
+        let manifest = ProviderManifest::from_bytes(&metadata).map_err(|error| error.to_string());
+        if let Ok(manifest) = &manifest {
+            anyhow::ensure!(
+                manifest.id == name.as_str(),
+                "stored provider name does not match metadata"
+            );
+            anyhow::ensure!(
+                manifest.version.as_deref() == version.as_ref().map(ProviderVersion::as_str),
+                "stored provider version does not match metadata"
+            );
+        }
         Ok(Self {
             reference: ProviderRef {
                 id: ProviderId::from_digest(digest),
@@ -116,10 +120,12 @@ impl FromRow<'_, SqliteRow> for StoredProviderMetadata {
     }
 }
 
+/// A retained provider: its reference, its manifest or the error that makes
+/// it invalid, and its artifact.
 #[derive(Debug)]
 pub struct StoredProvider {
     pub reference: ProviderRef,
-    pub manifest: ProviderManifest,
+    pub manifest: Result<ProviderManifest, String>,
     pub bytes: Vec<u8>,
 }
 

@@ -103,15 +103,22 @@ pub(crate) struct DaemonTeardown {
     endpoint: Bootstrap<Client>,
     initial_identity: Option<Instance>,
     initial: Option<Inventory>,
+    /// Whether the shutdown asks the attached filesystems to stop.
+    stop_filesystems: bool,
 }
 
 impl DaemonTeardown {
-    pub(crate) fn with_inventory(endpoint: Bootstrap<Client>, inventory: Inventory) -> Self {
+    pub(crate) fn with_inventory(
+        endpoint: Bootstrap<Client>,
+        inventory: Inventory,
+        stop_filesystems: bool,
+    ) -> Self {
         Self {
             rpc: crate::rpc::RpcClient::from_endpoint(endpoint.clone()),
             initial_identity: endpoint.read_process_identity().ok().flatten(),
             endpoint,
             initial: Some(inventory),
+            stop_filesystems,
         }
     }
 
@@ -150,7 +157,7 @@ impl DaemonTeardown {
         let mut outcomes = Vec::new();
         match self.initial_or_pid().await {
             Ok(Some(pid)) => {
-                let outcome = self.shutdown_and_wait(pid, true).await;
+                let outcome = self.shutdown_and_wait(pid, self.stop_filesystems).await;
                 if matches!(
                     outcome,
                     TeardownOutcome::DaemonStopped { .. } | TeardownOutcome::DaemonAlreadyStopped
@@ -472,6 +479,7 @@ mod tests {
             endpoint,
             initial_identity: None,
             initial: None,
+            stop_filesystems: true,
         };
         teardown.remove_identity_for_expected_process(42).unwrap();
     }

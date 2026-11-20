@@ -7,7 +7,8 @@ pub mod state;
 pub mod unmount;
 
 pub use runner::{
-    RunnerClaim, RunnerRecord, RunnerRecordError, RunnerRecordFile, process_group_exists,
+    RunnerClaim, RunnerRecord, RunnerRecordError, RunnerRecordFile, process_exit,
+    process_group_exists,
 };
 pub use state::{MountKind, MountState, StateError, StateFile};
 pub use unmount::{Platform, UnmountCommand, UnmountError};

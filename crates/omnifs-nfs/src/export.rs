@@ -82,8 +82,7 @@ impl Status {
 /// Reactive NFS status mapping for definitive and transient [`NsError`] kinds.
 ///
 /// `RateLimited`, `Timeout`, and `Network` map to [`Status::Delay`] so the client
-/// retries. This path does not spawn background work; proactive `READDIR` deferral
-/// is separate (`delayed::PendingListings`).
+/// retries. This path does not spawn background work.
 impl From<&NsError> for Status {
     fn from(error: &NsError) -> Self {
         match error.retry_class() {

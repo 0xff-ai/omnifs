@@ -33,10 +33,9 @@ use super::projection::{ProjectionStore, ProjectionStoreError};
 use crate::cache::memory::MemoryTier;
 use crate::object_id::ObjectId;
 use crate::view::{
-    AttrPayload, ByteSource, CachedCursor, DirentsPayload, EntryMeta, FileAttrsCache, FilePayload,
-    FileSize, LookupPayload,
+    AttrPayload, ByteSource, CachedCursor, DirentsPage, DirentsPayload, EntryMeta, FileAttrsCache,
+    FilePayload, FileSize, ListingWrite, LookupPayload,
 };
-use omnifs_core::ProviderId;
 
 /// Result of a warm canonical lookup: the object id, the canonical bytes, and
 /// the optional validator.
@@ -105,10 +104,13 @@ pub(crate) struct BlobFact {
     pub metadata: BlobMetadata,
 }
 
+/// The Git tree of a path: its clone, its relative path in the clone, and
+/// the commit of its last handoff.
 #[derive(Debug, Clone)]
 pub(crate) struct GitFact {
     pub id: GitId,
     pub relative_path: String,
+    pub commit: String,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +125,7 @@ pub(crate) struct GitWrite {
     pub path: Path,
     pub id: GitId,
     pub relative_path: String,
+    pub commit: String,
 }
 
 #[derive(Debug, Clone)]
@@ -134,15 +137,46 @@ pub(crate) enum DirentsMutation {
     MergeHints {
         path: Path,
         entries: Vec<crate::view::DirentRecord>,
-        exhaustive: bool,
+        write: ListingWrite,
     },
+    /// The next page of a listing, asked for with the listing's next cursor.
     AppendPage {
         path: Path,
-        expected_cursor: CachedCursor,
-        entries: Vec<crate::view::DirentRecord>,
+        page: DirentsPage,
         next_cursor: Option<CachedCursor>,
         exhaustive: bool,
     },
+    /// A changed cached page, asked for with its validator: it replaces the
+    /// page of its cursor and keeps the later pages only while its next
+    /// cursor stays.
+    ReplacePage {
+        path: Path,
+        page: DirentsPage,
+        next_cursor: Option<CachedCursor>,
+        exhaustive: bool,
+    },
+    /// An `unchanged` answer for the cached page of `cursor`: the page keeps
+    /// its entries, takes `interval` when the answer carries one, and gets a
+    /// new deadline from its interval.
+    RenewPage {
+        path: Path,
+        cursor: Option<CachedCursor>,
+        token: String,
+        interval: Option<u32>,
+        now_millis: u64,
+    },
+}
+
+impl DirentsMutation {
+    pub(crate) fn path(&self) -> &Path {
+        match self {
+            Self::Replace { path, .. }
+            | Self::MergeHints { path, .. }
+            | Self::AppendPage { path, .. }
+            | Self::ReplacePage { path, .. }
+            | Self::RenewPage { path, .. } => path,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +267,15 @@ pub(crate) struct ProjectionTransition {
     pub invalidations: Vec<Invalidation>,
     pub blobs: Vec<BlobWrite>,
     pub git: Vec<GitWrite>,
+    /// Paths whose facts, with the facts beneath them, leave the projection;
+    /// each leaves its parent listing as complete as it was.
+    pub removals: Vec<Path>,
+    /// The answer of a feed: its records and listings are fed facts, and the
+    /// feed states it brought.
+    pub feed: Option<FeedWrite>,
+    /// A part of a later answer of a feed, kept apart from the facts until
+    /// the part that ends its answer.
+    pub kept: Option<KeptWrite>,
 }
 
 impl ProjectionTransition {
@@ -244,7 +287,50 @@ impl ProjectionTransition {
             && self.invalidations.is_empty()
             && self.blobs.is_empty()
             && self.git.is_empty()
+            && self.removals.is_empty()
+            && self.feed.is_none()
+            && self.kept.is_none()
     }
+}
+
+/// The state of a feed: the token of its last part, whether its first
+/// answer ended, and its deadline, after which an operation that does not
+/// start it asks it for an answer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FeedState {
+    pub token: String,
+    pub ended: bool,
+    pub deadline: u64,
+}
+
+/// The feed states one answer of a feed publishes: its own, renewed by an
+/// `unchanged` answer or advanced by a part, which drops its kept parts, and
+/// the inner states the part brought, each a token whose first answer ended.
+/// Every state gets `deadline`. `anchors` pairs each anchor of another facet
+/// that the part writes with the anchor of the claim of its object.
+#[derive(Debug, Clone)]
+pub(crate) struct FeedWrite {
+    pub object: Vec<u8>,
+    pub part: Option<FeedPartWrite>,
+    pub inner: Vec<(Vec<u8>, String)>,
+    pub anchors: Vec<(Path, Path)>,
+    pub deadline: u64,
+}
+
+/// A part of a later answer of the feed of `object`, encoded by its feed
+/// operation, which the projection keeps in order until the part that ends
+/// the answer publishes it.
+#[derive(Debug, Clone)]
+pub(crate) struct KeptWrite {
+    pub object: Vec<u8>,
+    pub part: Vec<u8>,
+}
+
+/// The token after a part, and whether more parts follow in its answer.
+#[derive(Debug, Clone)]
+pub(crate) struct FeedPartWrite {
+    pub token: String,
+    pub more: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -262,6 +348,7 @@ enum DurableFact {
     Git {
         id: GitId,
         relative_path: String,
+        commit: String,
     },
 }
 
@@ -364,10 +451,9 @@ impl Caches {
         self: &Arc<Self>,
         mount: &MountName,
         projection_id: ProjectionId,
-        provider_id: ProviderId,
         spec_source: &[u8],
     ) -> anyhow::Result<Arc<MountResources>> {
-        let resources = self.prepare_mount(mount, projection_id, provider_id, spec_source)?;
+        let resources = self.prepare_mount(mount, projection_id, spec_source)?;
         resources.activate();
         Ok(resources)
     }
@@ -380,11 +466,10 @@ impl Caches {
         self: &Arc<Self>,
         mount: &MountName,
         projection_id: ProjectionId,
-        provider_id: ProviderId,
         spec_source: &[u8],
     ) -> anyhow::Result<Arc<MountResources>> {
         let fence = self.resource_fence(projection_id);
-        MountResources::new(self, mount, projection_id, provider_id, spec_source, fence)
+        MountResources::new(self, mount, projection_id, spec_source, fence)
     }
 
     fn resource_fence(&self, projection_id: ProjectionId) -> Arc<ResourceFence> {
@@ -524,7 +609,6 @@ impl MountResources {
         caches: &Caches,
         mount: &MountName,
         projection_id: ProjectionId,
-        provider_id: ProviderId,
         spec_source: &[u8],
         fence: Arc<ResourceFence>,
     ) -> anyhow::Result<Arc<Self>> {
@@ -534,7 +618,6 @@ impl MountResources {
             projection_id,
             mount,
             spec_source,
-            provider_id,
         )?;
         Ok(Self::from_projection(caches, projection, fence))
     }
@@ -718,10 +801,31 @@ impl MountResources {
             invalidations,
             blobs,
             git,
+            removals: removed_paths,
+            feed,
+            kept,
         } = transition;
         // Bodies become immutable and addressable before the projection
         // transaction can publish a reference to them. This work intentionally
         // happens before taking the coherence mutex.
+        let mut bodies = Vec::<&[u8]>::new();
+        for object in &objects {
+            if let ObjectMutation::Canonical { bytes, .. } = object {
+                bodies.push(bytes);
+            }
+        }
+        for record in &records {
+            match &record.fact {
+                FactPayload::Lookup(LookupPayload::Positive(meta)) => {
+                    bodies.extend(inline_bytes(meta));
+                },
+                FactPayload::Attr(value) => bodies.extend(inline_bytes(&value.meta)),
+                FactPayload::File(value) => bodies.push(&value.content),
+                FactPayload::Lookup(LookupPayload::Negative { .. })
+                | FactPayload::FileBody { .. } => {},
+            }
+        }
+        self.body.publish_all(&bodies)?;
         let mut prepared_objects = Vec::new();
         for object in &objects {
             if let ObjectMutation::Canonical {
@@ -795,6 +899,7 @@ impl MountResources {
                     DurableFact::Git {
                         id: git.id,
                         relative_path: git.relative_path.clone(),
+                        commit: git.commit.clone(),
                     },
                 ))
             })
@@ -817,12 +922,7 @@ impl MountResources {
             memory_paths.insert(record.path.clone());
         }
         for mutation in &dirents {
-            let path = match mutation {
-                DirentsMutation::Replace { path, .. }
-                | DirentsMutation::MergeHints { path, .. }
-                | DirentsMutation::AppendPage { path, .. } => path,
-            };
-            memory_paths.insert(path.clone());
+            memory_paths.insert(mutation.path().clone());
         }
         for freshness in &freshness {
             memory_paths.insert(freshness.path.clone());
@@ -844,6 +944,7 @@ impl MountResources {
                 },
             }
         }
+        memory_prefixes.extend(removed_paths.iter().cloned());
 
         let next_epoch = if invalidations.is_empty() {
             None
@@ -870,7 +971,7 @@ impl MountResources {
                 key.extend_from_slice(hex::encode(&object.0).as_bytes());
                 let value = postcard::to_allocvec(&(object.1.as_bytes(), object.2, &object.3))
                     .map_err(ProjectionError::from)?;
-                tx.insert(facts, key, value);
+                put(tx, facts, key, value)?;
             }
             for object in &objects {
                 if let ObjectMutation::Index { id, alias } = object {
@@ -881,16 +982,26 @@ impl MountResources {
                             )
                         })?;
                     let _ = (body, length, validator);
-                    insert_alias(tx, facts, id, alias);
+                    insert_alias(tx, facts, id, alias)?;
                 }
             }
 
+            // A feed answer writes fed facts; any other transition leaves
+            // the fed facts of a path to its feeds.
+            let fed_answer = feed.is_some();
+            let mut written = Vec::with_capacity(prepared_records.len());
             for record in &prepared_records {
+                if fed_answer {
+                    put(tx, facts, fed_key(&record.path), [])?;
+                } else if tx.get(facts, fed_key(&record.path))?.is_some() {
+                    continue;
+                }
+                written.push(record);
                 remove_negative_for_path(tx, facts, &record.path)?;
                 if matches!(&record.fact, DurableFact::Lookup(_))
                     && !transition_git_paths.contains(&record.path)
                 {
-                    tx.remove(facts, git_key(&record.path));
+                    delete(tx, facts, git_key(&record.path))?;
                 }
                 let key = fact_key(
                     record.path.as_str(),
@@ -898,45 +1009,71 @@ impl MountResources {
                     record.aux.as_deref(),
                 );
                 let value = postcard::to_allocvec(&record.fact).map_err(ProjectionError::from)?;
-                tx.insert(facts, key, value);
+                put(tx, facts, key, value)?;
                 if let DurableFact::Lookup(lookup) = &record.fact
                     && let LookupPayload::Negative { id: Some(id) } = lookup
                 {
-                    tx.insert(
+                    put(
+                        tx,
                         facts,
                         negative_key(id, &record.path),
                         record.path.as_str().as_bytes(),
-                    );
+                    )?;
                 }
             }
             for (key, fact) in &prepared_blobs {
-                tx.insert(
+                put(
+                    tx,
                     facts,
                     key.clone(),
                     postcard::to_allocvec(fact).map_err(ProjectionError::from)?,
-                );
+                )?;
             }
             for (key, fact) in &prepared_git {
-                tx.insert(
+                put(
+                    tx,
                     facts,
                     key.clone(),
                     postcard::to_allocvec(fact).map_err(ProjectionError::from)?,
-                );
+                )?;
             }
             for mutation in &dirents {
-                apply_dirents(tx, facts, mutation)?;
+                if fed_answer {
+                    put(tx, facts, fed_key(mutation.path()), [])?;
+                    apply_dirents(tx, facts, mutation)?;
+                } else {
+                    let mutation = with_fed_entries(tx, facts, mutation)?;
+                    apply_dirents(tx, facts, &mutation)?;
+                }
+            }
+            if let Some(feed) = &feed {
+                write_feed_states(tx, facts, feed)?;
+            }
+            if let Some(kept) = &kept {
+                let prefix = kept_prefix(&kept.object);
+                let next = tx.prefix(facts, prefix.as_slice()).count();
+                put(
+                    tx,
+                    facts,
+                    kept_key(&kept.object, next),
+                    kept.part.as_slice(),
+                )?;
             }
             for freshness in &freshness {
+                if !fed_answer && tx.get(facts, fed_key(&freshness.path))?.is_some() {
+                    continue;
+                }
                 let mut expiry = b"x:".to_vec();
                 expiry.extend_from_slice(freshness.path.as_str().as_bytes());
-                tx.insert(
+                put(
+                    tx,
                     facts,
                     expiry,
                     postcard::to_allocvec(&freshness.expires_at).map_err(ProjectionError::from)?,
-                );
+                )?;
             }
             let mut reconciled_paths =
-                reconcile_listing_relations(tx, facts, &prepared_records, &dirents, &mut removals)?;
+                reconcile_listing_relations(tx, facts, &written, &dirents, &mut removals)?;
             // Apply invalidation scanners after all transition writes. Fjall's
             // transaction reads see those writes, so same-terminal aliases,
             // records, Git facts, and negative reverse rows are retired too.
@@ -964,8 +1101,14 @@ impl MountResources {
                     Invalidation::Object(_) => {},
                 }
             }
+            for path in &removed_paths {
+                reconciled_paths.extend(remove_subtree_facts(tx, facts, path, &mut removals)?);
+                if let Some(parent) = remove_from_parent_listing(tx, facts, path)? {
+                    reconciled_paths.insert(parent);
+                }
+            }
             for key in removals {
-                tx.remove(facts, key);
+                delete(tx, facts, key)?;
             }
             Ok(reconciled_paths)
         })?;
@@ -1092,11 +1235,11 @@ impl MountResources {
         self.memory.mem_invalidate(&Key::with_aux(path, kind, aux));
     }
 
-    pub(crate) fn memory_invalidate_entries_if<P>(&self, predicate: P)
+    pub(crate) fn memory_invalidate_paths_if<P>(&self, predicate: P)
     where
-        P: Fn(&Key, &Arc<Record>) -> bool + Send + Sync + 'static,
+        P: Fn(&Path) -> bool + Send + Sync + 'static,
     {
-        self.memory.mem_invalidate_entries_if(predicate);
+        self.memory.mem_invalidate_paths_if(predicate);
     }
     // --- Canonical object cache -----------------------------------------------
 
@@ -1191,13 +1334,67 @@ impl MountResources {
         let Some(bytes) = self.projection.get(&git_key(path))? else {
             return Ok(None);
         };
-        let DurableFact::Git { id, relative_path } = postcard::from_bytes(&bytes)? else {
+        let DurableFact::Git {
+            id,
+            relative_path,
+            commit,
+        } = postcard::from_bytes(&bytes)?
+        else {
             return Err(ProjectionError::Inconsistent(
                 "Git fact key contains a non-Git fact".into(),
             ));
         };
         validate_git_relative(&relative_path)?;
-        Ok(Some(GitFact { id, relative_path }))
+        Ok(Some(GitFact {
+            id,
+            relative_path,
+            commit,
+        }))
+    }
+
+    /// The state of the feed of the object `id`.
+    pub(crate) fn feed_state(&self, id: &[u8]) -> Result<Option<FeedState>, ProjectionError> {
+        self.projection
+            .get(&feed_key(id))?
+            .map(|bytes| postcard::from_bytes(&bytes).map_err(ProjectionError::from))
+            .transpose()
+    }
+
+    /// Whether the facts of `path` are fed: they come from feeds alone.
+    pub(crate) fn is_fed(&self, path: &Path) -> Result<bool, ProjectionError> {
+        Ok(self.projection.get(&fed_key(path))?.is_some())
+    }
+
+    /// Whether the feed of the object `id` has kept parts of a later answer.
+    pub(crate) fn has_kept_parts(&self, id: &[u8]) -> Result<bool, ProjectionError> {
+        Ok(!self.projection.read_prefix(&kept_prefix(id))?.is_empty())
+    }
+
+    /// The kept parts of the later answer of the feed of the object `id`, in
+    /// their order.
+    pub(crate) fn kept_parts(&self, id: &[u8]) -> Result<Vec<Vec<u8>>, ProjectionError> {
+        let mut keys = self.projection.read_prefix(&kept_prefix(id))?;
+        keys.sort();
+        keys.iter()
+            .map(|key| {
+                self.projection.get(key)?.ok_or_else(|| {
+                    ProjectionError::Inconsistent("a kept part left during its read".into())
+                })
+            })
+            .collect()
+    }
+
+    /// The anchor of the claim of the object whose anchor of another facet is
+    /// `path`.
+    pub(crate) fn facet_anchor(&self, path: &Path) -> Result<Option<Path>, ProjectionError> {
+        self.projection
+            .get(&anchor_key(path))?
+            .map(|bytes| {
+                let anchor: String = postcard::from_bytes(&bytes)?;
+                Path::parse(&anchor)
+                    .map_err(|error| ProjectionError::Inconsistent(error.to_string()))
+            })
+            .transpose()
     }
 
     /// Whether the indexed view leaf has reached its freshness deadline.
@@ -1251,6 +1448,32 @@ impl MountResources {
         }
         Ok(true)
     }
+}
+
+/// Write `value` at `key` unless the projection has it there, so that a
+/// publication without a change commits nothing.
+fn put(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    key: impl AsRef<[u8]>,
+    value: impl AsRef<[u8]>,
+) -> Result<(), ProjectionError> {
+    if tx.get(facts, key.as_ref())?.as_deref() != Some(value.as_ref()) {
+        tx.insert(facts, key.as_ref(), value.as_ref());
+    }
+    Ok(())
+}
+
+/// Remove `key` unless the projection lacks it, as [`put`] writes.
+fn delete(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    key: impl AsRef<[u8]>,
+) -> Result<(), ProjectionError> {
+    if tx.get(facts, key.as_ref())?.is_some() {
+        tx.remove(facts, key.as_ref());
+    }
+    Ok(())
 }
 
 fn fact_key(path: &str, kind: RecordKind, aux: Option<&str>) -> Vec<u8> {
@@ -1323,6 +1546,15 @@ fn normalize_attr(value: &AttrPayload, body: &BodyStore) -> Result<AttrPayload, 
     })
 }
 
+/// The inline bytes of the file of `meta`, which its publication stores as a
+/// body.
+fn inline_bytes(meta: &EntryMeta) -> Option<&[u8]> {
+    let EntryMeta::File { attrs: Some(attrs) } = meta else {
+        return None;
+    };
+    attrs.inline_bytes()
+}
+
 fn normalize_meta(meta: &EntryMeta, body: &BodyStore) -> Result<EntryMeta, ProjectionError> {
     let EntryMeta::File { attrs: Some(attrs) } = meta else {
         return Ok(meta.clone());
@@ -1350,6 +1582,204 @@ fn normalize_meta(meta: &EntryMeta, body: &BodyStore) -> Result<EntryMeta, Proje
         attrs.clone()
     };
     Ok(EntryMeta::file(attrs))
+}
+
+fn feed_key(id: &[u8]) -> Vec<u8> {
+    let mut key = b"e:".to_vec();
+    key.extend_from_slice(hex::encode(id).as_bytes());
+    key
+}
+
+fn fed_key(path: &Path) -> Vec<u8> {
+    let mut key = b"f:".to_vec();
+    key.extend_from_slice(path.as_str().as_bytes());
+    key
+}
+
+/// The key of the anchor of the claim of the object whose anchor of another
+/// facet is `path`.
+fn anchor_key(path: &Path) -> Vec<u8> {
+    let mut key = b"a:".to_vec();
+    key.extend_from_slice(path.as_str().as_bytes());
+    key
+}
+
+/// The prefix of the keys of the kept parts of the feed of the object `id`.
+fn kept_prefix(id: &[u8]) -> Vec<u8> {
+    let mut key = b"k:".to_vec();
+    key.extend_from_slice(hex::encode(id).as_bytes());
+    key.push(b':');
+    key
+}
+
+/// The key of the kept part `index` of the feed of the object `id`, which
+/// sorts in the order of the parts.
+fn kept_key(id: &[u8], index: usize) -> Vec<u8> {
+    let mut key = kept_prefix(id);
+    key.extend_from_slice(format!("{index:08x}").as_bytes());
+    key
+}
+
+fn write_feed_states(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    feed: &FeedWrite,
+) -> Result<(), ProjectionError> {
+    let key = feed_key(&feed.object);
+    let previous = tx
+        .get(facts, &key)?
+        .map(|bytes| postcard::from_bytes::<FeedState>(&bytes))
+        .transpose()?;
+    let state = match (&feed.part, previous) {
+        (Some(part), previous) => FeedState {
+            token: part.token.clone(),
+            ended: previous.is_some_and(|state| state.ended) || !part.more,
+            deadline: feed.deadline,
+        },
+        (None, Some(previous)) => FeedState {
+            deadline: feed.deadline,
+            ..previous
+        },
+        (None, None) => {
+            return Err(ProjectionError::Inconsistent(
+                "unchanged answer for a feed without a state".into(),
+            ));
+        },
+    };
+    put(tx, facts, key, postcard::to_allocvec(&state)?)?;
+    if feed.part.is_some() {
+        let prefix = kept_prefix(&feed.object);
+        let kept = tx
+            .prefix(facts, prefix.as_slice())
+            .map(|guard| Ok(guard.key()?.to_vec()))
+            .collect::<Result<Vec<_>, ProjectionError>>()?;
+        for key in kept {
+            delete(tx, facts, key)?;
+        }
+    }
+    for (path, anchor) in &feed.anchors {
+        put(
+            tx,
+            facts,
+            anchor_key(path),
+            postcard::to_allocvec(anchor.as_str())?,
+        )?;
+    }
+    for (id, token) in &feed.inner {
+        put(
+            tx,
+            facts,
+            feed_key(id),
+            postcard::to_allocvec(&FeedState {
+                token: token.clone(),
+                ended: true,
+                deadline: feed.deadline,
+            })?,
+        )?;
+    }
+    Ok(())
+}
+
+/// A listing mutation of a transition other than a feed answer, with the
+/// entries of fed children carrying their fed facts.
+fn with_fed_entries(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    mutation: &DirentsMutation,
+) -> Result<DirentsMutation, ProjectionError> {
+    let mut mutation = mutation.clone();
+    let parent = mutation.path().clone();
+    let entries: Vec<&mut crate::view::DirentRecord> = match &mut mutation {
+        DirentsMutation::Replace { value, .. } => value
+            .pages
+            .iter_mut()
+            .flat_map(|page| page.entries.iter_mut())
+            .collect(),
+        DirentsMutation::MergeHints { entries, .. } => entries.iter_mut().collect(),
+        DirentsMutation::AppendPage { page, .. } | DirentsMutation::ReplacePage { page, .. } => {
+            page.entries.iter_mut().collect()
+        },
+        DirentsMutation::RenewPage { .. } => Vec::new(),
+    };
+    for entry in entries {
+        let child = parent
+            .join(&entry.name)
+            .map_err(|error| ProjectionError::Inconsistent(error.to_string()))?;
+        if tx.get(facts, fed_key(&child))?.is_none() {
+            continue;
+        }
+        if let Some(bytes) = tx.get(facts, fact_key(child.as_str(), RecordKind::Lookup, None))?
+            && let DurableFact::Lookup(LookupPayload::Positive(meta)) =
+                postcard::from_bytes(&bytes)?
+        {
+            entry.meta = meta;
+        }
+    }
+    Ok(mutation)
+}
+
+/// Remove the facts of `root` and of every path beneath it, returning the
+/// paths whose facts left.
+fn remove_subtree_facts(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    root: &Path,
+    removals: &mut Vec<Vec<u8>>,
+) -> Result<HashSet<Path>, ProjectionError> {
+    let mut paths = HashSet::new();
+    for kind in RecordKind::ALL {
+        let prefix = fact_key(root.as_str(), kind, None);
+        for guard in tx.prefix(facts, prefix.as_slice()) {
+            let key = guard.key()?.to_vec();
+            let (path, _, _) = decode_fact_key(&key)?;
+            if path.has_prefix(root) {
+                paths.insert(path);
+            }
+        }
+    }
+    let git_prefix = git_key(root);
+    for guard in tx.prefix(facts, git_prefix.as_slice()) {
+        let key = guard.key()?.to_vec();
+        let path = Path::parse(
+            std::str::from_utf8(&key[2..])
+                .map_err(|_| ProjectionError::Inconsistent("Git fact path is not UTF-8".into()))?,
+        )
+        .map_err(|error| ProjectionError::Inconsistent(error.to_string()))?;
+        if path.has_prefix(root) {
+            paths.insert(path);
+        }
+    }
+    for path in &paths {
+        remove_path_facts(tx, facts, path, removals)?;
+    }
+    Ok(paths)
+}
+
+/// Remove `path` from its parent listing, which stays as complete as it was.
+fn remove_from_parent_listing(
+    tx: &mut fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    path: &Path,
+) -> Result<Option<Path>, ProjectionError> {
+    let Some((parent, name)) = path.parent_and_name() else {
+        return Ok(None);
+    };
+    let Some(mut listing) = read_dirents_fact(tx, facts, &parent)? else {
+        return Ok(None);
+    };
+    if !listing.entries().any(|entry| entry.name == name) {
+        return Ok(None);
+    }
+    listing.remove_entry(name);
+    apply_dirents(
+        tx,
+        facts,
+        &DirentsMutation::Replace {
+            path: parent.clone(),
+            value: listing,
+        },
+    )?;
+    Ok(Some(parent))
 }
 
 fn index_key(path: &Path) -> Vec<u8> {
@@ -1407,11 +1837,12 @@ fn insert_alias(
     facts: &fjall::OptimisticTxKeyspace,
     id: &[u8],
     path: &Path,
-) {
-    tx.insert(facts, index_key(path), id.to_vec());
+) -> Result<(), ProjectionError> {
+    put(tx, facts, index_key(path), id)?;
     let mut alias = alias_prefix(id);
     alias.extend_from_slice(path.as_str().as_bytes());
-    tx.insert(facts, alias, []);
+    put(tx, facts, alias, [])?;
+    Ok(())
 }
 
 fn validate_claim(
@@ -1507,7 +1938,7 @@ fn remove_negative_for_path(
         ));
     };
     if let LookupPayload::Negative { id: Some(id) } = lookup {
-        tx.remove(facts, negative_key(&id, path));
+        delete(tx, facts, negative_key(&id, path))?;
     }
     Ok(())
 }
@@ -1533,6 +1964,8 @@ fn remove_path_facts(
     expiry.extend_from_slice(path.as_str().as_bytes());
     removals.push(expiry);
     removals.push(git_key(path));
+    removals.push(fed_key(path));
+    removals.push(anchor_key(path));
     Ok(())
 }
 
@@ -1580,22 +2013,24 @@ fn invalidate_parent_listing(
     let Some((parent, name)) = path.parent_and_name() else {
         return Ok(None);
     };
-    let Some(mut listing) = read_dirents_fact(tx, facts, &parent)? else {
+    let Some(listing) = read_dirents_fact(tx, facts, &parent)? else {
         return Ok(None);
     };
-    listing.entries.retain(|entry| entry.name != name);
     // An exact child invalidation makes the parent's prior completeness claim,
-    // and cursor stale. The next ordinary browse refetches the parent;
-    // rate-limited serve-stale may retain unaffected siblings.
-    listing.exhaustive = false;
-    listing.paginated = false;
-    listing.next_cursor = None;
+    // cursor, and page validators stale: the remaining entries collapse into
+    // one first page without a validator. The next ordinary browse refetches
+    // the parent; rate-limited serve-stale may retain unaffected siblings.
+    let entries = listing
+        .entries()
+        .filter(|entry| entry.name != name)
+        .cloned()
+        .collect();
     apply_dirents(
         tx,
         facts,
         &DirentsMutation::Replace {
             path: parent.clone(),
-            value: listing,
+            value: DirentsPayload::single_page(entries, false, None),
         },
     )?;
     Ok(Some(parent))
@@ -1607,7 +2042,7 @@ fn invalidate_parent_listing(
 fn reconcile_listing_relations(
     tx: &mut fjall::OptimisticWriteTx,
     facts: &fjall::OptimisticTxKeyspace,
-    records: &[PreparedRecord],
+    records: &[&PreparedRecord],
     dirents: &[DirentsMutation],
     removals: &mut Vec<Vec<u8>>,
 ) -> Result<HashSet<Path>, ProjectionError> {
@@ -1635,7 +2070,7 @@ fn reconcile_listing_relations(
                         meta: meta.clone(),
                     },
                 );
-                listing = DirentsPayload::merged(Some(listing), entries, false);
+                listing = DirentsPayload::merged(Some(listing), entries, ListingWrite::Partial);
                 apply_dirents(
                     tx,
                     facts,
@@ -1646,10 +2081,8 @@ fn reconcile_listing_relations(
                 )?;
                 mutated.insert(parent);
             },
-            LookupPayload::Negative { .. }
-                if listing.entries.iter().any(|entry| entry.name == name) =>
-            {
-                listing.entries.retain(|entry| entry.name != name);
+            LookupPayload::Negative { .. } if listing.entries().any(|entry| entry.name == name) => {
+                listing.remove_entry(name);
                 apply_dirents(
                     tx,
                     facts,
@@ -1669,11 +2102,7 @@ fn reconcile_listing_relations(
     // transaction. Object index rows remain independently owned.
     let touched: HashSet<Path> = dirents
         .iter()
-        .map(|mutation| match mutation {
-            DirentsMutation::Replace { path, .. }
-            | DirentsMutation::MergeHints { path, .. }
-            | DirentsMutation::AppendPage { path, .. } => path.clone(),
-        })
+        .map(|mutation| mutation.path().clone())
         .collect();
     for parent in touched {
         let Some(listing) = read_dirents_fact(tx, facts, &parent)? else {
@@ -1682,32 +2111,11 @@ fn reconcile_listing_relations(
         if !listing.is_complete_offline() {
             continue;
         }
-        let names: HashSet<&str> = listing
-            .entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect();
+        let names: HashSet<&str> = listing.entries().map(|entry| entry.name.as_str()).collect();
         let mut contradictions = Vec::new();
-        for guard in tx.prefix(facts, b"r:L:") {
-            let (key, value) = guard.into_inner()?;
-            let key = key.to_vec();
-            let (path, kind, aux) = decode_fact_key(&key)?;
-            if kind != RecordKind::Lookup || aux.is_some() {
-                return Err(ProjectionError::Inconsistent(
-                    "lookup prefix contained a noncanonical fact key".into(),
-                ));
-            }
-            let Some((candidate_parent, name)) = path.parent_and_name() else {
+        for (path, lookup) in child_lookups(tx, facts, &parent)? {
+            let Some((_, name)) = path.parent_and_name() else {
                 continue;
-            };
-            if candidate_parent != parent {
-                continue;
-            }
-            let fact: DurableFact = postcard::from_bytes(&value)?;
-            let DurableFact::Lookup(lookup) = fact else {
-                return Err(ProjectionError::Inconsistent(
-                    "lookup key contains a non-lookup fact".into(),
-                ));
             };
             let contradicts = match lookup {
                 LookupPayload::Positive(_) => !names.contains(name),
@@ -1723,6 +2131,53 @@ fn reconcile_listing_relations(
         }
     }
     Ok(mutated)
+}
+
+/// The lookup facts of the direct children of `parent`. The keys of the
+/// lookup facts are in the order of their paths, so the facts below a child
+/// follow its own: each read starts after the facts below the child before
+/// it, and the reads are as many as the children, whatever is below them.
+fn child_lookups(
+    tx: &fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    parent: &Path,
+) -> Result<Vec<(Path, LookupPayload)>, ProjectionError> {
+    let mut prefix = fact_key(parent.as_str(), RecordKind::Lookup, None);
+    if !parent.is_root() {
+        prefix.push(b'/');
+    }
+    // The first key after every key with the prefix: `/` + 1 is `0`.
+    let mut end = prefix.clone();
+    end.pop();
+    end.push(b'0');
+    let mut start = prefix.clone();
+    let mut children = Vec::new();
+    while let Some(guard) = tx.range(facts, start.as_slice()..end.as_slice()).next() {
+        let (key, value) = guard.into_inner()?;
+        let name = &key[prefix.len()..];
+        if let Some(length) = name.iter().position(|byte| *byte == b'/') {
+            // A fact below a child: the next read starts after all of them.
+            start.truncate(prefix.len());
+            start.extend_from_slice(&name[..length]);
+            start.push(b'0');
+            continue;
+        }
+        let (path, kind, aux) = decode_fact_key(&key)?;
+        if kind != RecordKind::Lookup || aux.is_some() {
+            return Err(ProjectionError::Inconsistent(
+                "lookup prefix contained a noncanonical fact key".into(),
+            ));
+        }
+        let DurableFact::Lookup(lookup) = postcard::from_bytes(&value)? else {
+            return Err(ProjectionError::Inconsistent(
+                "lookup key contains a non-lookup fact".into(),
+            ));
+        };
+        children.push((path, lookup));
+        start = key.to_vec();
+        start.push(0);
+    }
+    Ok(children)
 }
 
 fn decode_fact_key(key: &[u8]) -> Result<(Path, RecordKind, Option<String>), ProjectionError> {
@@ -1783,7 +2238,7 @@ fn apply_dirents(
         DirentsMutation::MergeHints {
             path,
             entries,
-            exhaustive,
+            write,
         } => {
             let current = read_dirents_fact(tx, facts, path)?;
             let map = entries
@@ -1791,35 +2246,89 @@ fn apply_dirents(
                 .cloned()
                 .map(|entry| (entry.name.clone(), entry))
                 .collect();
-            (path, DirentsPayload::merged(current, map, *exhaustive))
+            (path, DirentsPayload::merged(current, map, *write))
         },
         DirentsMutation::AppendPage {
             path,
-            expected_cursor,
-            entries,
+            page,
             next_cursor,
             exhaustive,
         } => {
-            let current = read_dirents_fact(tx, facts, path)?.ok_or_else(|| {
+            let mut current = read_dirents_fact(tx, facts, path)?.ok_or_else(|| {
                 ProjectionError::Inconsistent("missing accumulated listing".into())
             })?;
-            if current.next_cursor.as_ref() != Some(expected_cursor) {
+            if current.next_cursor.is_none() || current.next_cursor != page.cursor {
                 return Err(ProjectionError::Inconsistent(
                     "listing cursor changed".into(),
                 ));
             }
-            let mut merged = current;
-            merged.entries.extend(entries.iter().cloned());
-            merged.next_cursor.clone_from(next_cursor);
-            merged.exhaustive = *exhaustive;
-            (path, merged)
+            current.pages.push(page.clone());
+            current.next_cursor.clone_from(next_cursor);
+            current.exhaustive = *exhaustive;
+            (path, current)
+        },
+        DirentsMutation::ReplacePage {
+            path,
+            page,
+            next_cursor,
+            exhaustive,
+        } => {
+            let mut current = read_dirents_fact(tx, facts, path)?.ok_or_else(|| {
+                ProjectionError::Inconsistent("missing revalidated listing".into())
+            })?;
+            let index = current
+                .pages
+                .iter()
+                .position(|cached| cached.cursor == page.cursor)
+                .ok_or_else(|| {
+                    ProjectionError::Inconsistent("revalidated listing page is not cached".into())
+                })?;
+            let following = current
+                .pages
+                .get(index + 1)
+                .map_or_else(|| current.next_cursor.clone(), |later| later.cursor.clone());
+            current.pages[index] = page.clone();
+            if following != *next_cursor {
+                current.pages.truncate(index + 1);
+                current.next_cursor.clone_from(next_cursor);
+            }
+            if index + 1 == current.pages.len() {
+                current.exhaustive = *exhaustive;
+            }
+            (path, current)
+        },
+        DirentsMutation::RenewPage {
+            path,
+            cursor,
+            token,
+            interval,
+            now_millis,
+        } => {
+            let mut current = read_dirents_fact(tx, facts, path)?.ok_or_else(|| {
+                ProjectionError::Inconsistent("missing revalidated listing".into())
+            })?;
+            let validator = current
+                .pages
+                .iter_mut()
+                .find(|page| page.cursor == *cursor)
+                .and_then(|page| page.validator.as_mut())
+                .ok_or_else(|| {
+                    ProjectionError::Inconsistent(
+                        "unchanged answer for a page without a cached validator".into(),
+                    )
+                })?;
+            validator.token.clone_from(token);
+            validator.interval = *interval;
+            validator.deadline = crate::clock::page_deadline(*interval, *now_millis);
+            (path, current)
         },
     };
-    tx.insert(
+    put(
+        tx,
         facts,
         fact_key(path.as_str(), RecordKind::Dirents, None),
         postcard::to_allocvec(&DurableFact::Dirents(value))?,
-    );
+    )?;
     Ok(())
 }
 
@@ -1844,16 +2353,15 @@ fn read_dirents_fact(
 mod tests {
     use super::*;
 
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
     fn open_store(mount: &str) -> (tempfile::TempDir, Arc<Caches>, Arc<MountResources>) {
         let dir = tempfile::tempdir().unwrap();
         let caches = Caches::open(dir.path()).unwrap();
         let name = MountName::new(mount).unwrap();
         let source = mount.as_bytes();
-        let provider_id = ProviderId::from_wasm_bytes(source);
-        let projection_id = ProjectionId::new(source, provider_id);
-        let store = caches
-            .mount(&name, projection_id, provider_id, source)
-            .unwrap();
+        let projection_id = ProjectionId::new(source);
+        let store = caches.mount(&name, projection_id, source).unwrap();
         (dir, caches, store)
     }
 
@@ -1911,11 +2419,8 @@ mod tests {
         let (_dir, caches, first) = open_store("m");
         let name = MountName::new("m").unwrap();
         let source = b"m";
-        let provider_id = ProviderId::from_wasm_bytes(source);
-        let projection_id = ProjectionId::new(source, provider_id);
-        let successor = caches
-            .prepare_mount(&name, projection_id, provider_id, source)
-            .unwrap();
+        let projection_id = ProjectionId::new(source);
+        let successor = caches.prepare_mount(&name, projection_id, source).unwrap();
 
         let old_path = p("/old");
         assert!(matches!(
@@ -1988,14 +2493,8 @@ mod tests {
 
         let name_b = MountName::new("b").unwrap();
         let source = b"b";
-        let provider_id = ProviderId::from_wasm_bytes(source);
         let store_b = caches
-            .mount(
-                &name_b,
-                ProjectionId::new(source, provider_id),
-                provider_id,
-                source,
-            )
+            .mount(&name_b, ProjectionId::new(source), source)
             .unwrap();
         publish_object(&store_b, OBJ_ID, b"from-b", std::slice::from_ref(&alias));
         assert_eq!(
@@ -2071,6 +2570,7 @@ mod tests {
                         path: leaf.clone(),
                         id: GitId::new("m", "https://example.test/repo.git", None),
                         relative_path: "tree".into(),
+                        commit: COMMIT.into(),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2087,12 +2587,7 @@ mod tests {
                 ProjectionTransition {
                     dirents: vec![DirentsMutation::Replace {
                         path: dir.clone(),
-                        value: DirentsPayload {
-                            entries: Vec::new(),
-                            exhaustive: true,
-                            next_cursor: None,
-                            paginated: false,
-                        },
+                        value: DirentsPayload::single_page(Vec::new(), true, None),
                     }],
                     invalidations: vec![Invalidation::ListingPrefix(dir.clone())],
                     ..ProjectionTransition::default()
@@ -2217,6 +2712,7 @@ mod tests {
                         path: invalidated,
                         id: GitId::new("m", "https://example.test/repo.git", None),
                         relative_path: "tree".into(),
+                        commit: COMMIT.into(),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2256,12 +2752,7 @@ mod tests {
                 ProjectionTransition {
                     dirents: vec![DirentsMutation::Replace {
                         path: parent.clone(),
-                        value: DirentsPayload {
-                            entries: Vec::new(),
-                            exhaustive: true,
-                            next_cursor: None,
-                            paginated: false,
-                        },
+                        value: DirentsPayload::single_page(Vec::new(), true, None),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2293,7 +2784,7 @@ mod tests {
                 .payload,
         )
         .unwrap();
-        assert_eq!(listing.entries[0].name, "child");
+        assert_eq!(listing.pages[0].entries[0].name, "child");
         assert!(!listing.is_complete_offline());
         store
             .publish(
@@ -2311,14 +2802,14 @@ mod tests {
             )
             .unwrap();
         assert!(
-            store.dirents_payload(&parent).unwrap().unwrap().entries[0]
+            store.dirents_payload(&parent).unwrap().unwrap().pages[0].entries[0]
                 .meta
                 .is_file()
         );
 
         publish_negative(&store, &child, Some(OBJ_ID.to_vec()), 30_000);
         let listing = store.dirents_payload(&parent).unwrap().unwrap();
-        assert!(listing.entries.is_empty());
+        assert!(listing.entries().next().is_none());
         assert!(store.negative_for_checked(&child, 1_000).unwrap());
 
         let invalidated_parent = p("/invalidated");
@@ -2333,15 +2824,14 @@ mod tests {
                     }],
                     dirents: vec![DirentsMutation::Replace {
                         path: invalidated_parent.clone(),
-                        value: DirentsPayload {
-                            entries: vec![crate::view::DirentRecord {
+                        value: DirentsPayload::single_page(
+                            vec![crate::view::DirentRecord {
                                 name: "child".into(),
                                 meta: EntryMeta::directory(),
                             }],
-                            exhaustive: true,
-                            next_cursor: None,
-                            paginated: false,
-                        },
+                            true,
+                            None,
+                        ),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2358,7 +2848,7 @@ mod tests {
             )
             .unwrap();
         let listing = store.dirents_payload(&invalidated_parent).unwrap().unwrap();
-        assert!(listing.entries.is_empty());
+        assert!(listing.entries().next().is_none());
         assert!(!listing.is_complete_offline());
 
         let partial_parent = p("/partial");
@@ -2368,15 +2858,14 @@ mod tests {
                 ProjectionTransition {
                     dirents: vec![DirentsMutation::Replace {
                         path: partial_parent.clone(),
-                        value: DirentsPayload {
-                            entries: vec![crate::view::DirentRecord {
+                        value: DirentsPayload::single_page(
+                            vec![crate::view::DirentRecord {
                                 name: "sibling".into(),
                                 meta: EntryMeta::directory(),
                             }],
-                            exhaustive: false,
-                            next_cursor: Some(crate::view::CachedCursor::Opaque("cursor".into())),
-                            paginated: true,
-                        },
+                            false,
+                            Some(crate::view::CachedCursor::Opaque("cursor".into())),
+                        ),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2393,10 +2882,11 @@ mod tests {
             )
             .unwrap();
         let listing = store.dirents_payload(&partial_parent).unwrap().unwrap();
-        assert_eq!(listing.entries.len(), 1);
-        assert_eq!(listing.entries[0].name, "sibling");
+        assert_eq!(listing.pages.len(), 1);
+        assert_eq!(listing.pages[0].entries.len(), 1);
+        assert_eq!(listing.pages[0].entries[0].name, "sibling");
         assert!(listing.next_cursor.is_none());
-        assert!(!listing.paginated);
+        assert!(!listing.is_authoritative_listing());
         assert!(!listing.is_complete_offline());
 
         let stale = p("/dir/stale");
@@ -2428,15 +2918,14 @@ mod tests {
                 ProjectionTransition {
                     dirents: vec![DirentsMutation::Replace {
                         path: parent,
-                        value: DirentsPayload {
-                            entries: vec![crate::view::DirentRecord {
+                        value: DirentsPayload::single_page(
+                            vec![crate::view::DirentRecord {
                                 name: "reverse".into(),
                                 meta: EntryMeta::directory(),
                             }],
-                            exhaustive: true,
-                            next_cursor: None,
-                            paginated: false,
-                        },
+                            true,
+                            None,
+                        ),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2478,6 +2967,7 @@ mod tests {
                         path: stale_git.clone(),
                         id: GitId::new("m", "https://example.test/repo.git", None),
                         relative_path: String::new(),
+                        commit: COMMIT.into(),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2513,6 +3003,7 @@ mod tests {
                         path: stale_git.clone(),
                         id: GitId::new("m", "https://example.test/repo.git", None),
                         relative_path: String::new(),
+                        commit: COMMIT.into(),
                     }],
                     ..ProjectionTransition::default()
                 },
@@ -2521,6 +3012,234 @@ mod tests {
             .unwrap();
         publish_negative(&store, &stale_git, None, 40_000);
         assert!(store.git_for_path(&stale_git).unwrap().is_none());
+    }
+
+    fn fed_dir(path: &Path, children: &[&str], write: ListingWrite) -> ProjectionTransition {
+        let mut records = vec![RecordWrite {
+            path: path.clone(),
+            aux: None,
+            fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+        }];
+        let entries = children
+            .iter()
+            .map(|name| {
+                records.push(RecordWrite {
+                    path: path.join(name).unwrap(),
+                    aux: None,
+                    fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+                });
+                crate::view::DirentRecord {
+                    name: (*name).to_string(),
+                    meta: EntryMeta::directory(),
+                }
+            })
+            .collect();
+        ProjectionTransition {
+            records,
+            dirents: vec![DirentsMutation::MergeHints {
+                path: path.clone(),
+                entries,
+                write,
+            }],
+            feed: Some(FeedWrite {
+                object: b"feed".to_vec(),
+                part: Some(FeedPartWrite {
+                    token: "token".into(),
+                    more: false,
+                }),
+                inner: Vec::new(),
+                anchors: Vec::new(),
+                deadline: 1_000,
+            }),
+            ..ProjectionTransition::default()
+        }
+    }
+
+    #[test]
+    fn a_publication_without_a_change_commits_nothing() {
+        let (_dir, _caches, store) = open_store("unchanged");
+        let transition = || ProjectionTransition {
+            records: vec![RecordWrite {
+                path: p("/dir/child"),
+                aux: None,
+                fact: FactPayload::Lookup(LookupPayload::Positive(EntryMeta::directory())),
+            }],
+            dirents: vec![DirentsMutation::MergeHints {
+                path: p("/dir"),
+                entries: vec![crate::view::DirentRecord {
+                    name: "child".into(),
+                    meta: EntryMeta::directory(),
+                }],
+                write: ListingWrite::Exhaustive,
+            }],
+            freshness: vec![Freshness {
+                path: p("/dir/child"),
+                expires_at: Some(1_000),
+            }],
+            ..ProjectionTransition::default()
+        };
+        store.publish(transition(), store.current_epoch()).unwrap();
+        let committed = store.projection.seqno();
+        store.publish(transition(), store.current_epoch()).unwrap();
+        assert_eq!(store.projection.seqno(), committed);
+
+        let mut changed = transition();
+        changed.freshness[0].expires_at = Some(2_000);
+        store.publish(changed, store.current_epoch()).unwrap();
+        assert_ne!(store.projection.seqno(), committed);
+    }
+
+    #[test]
+    fn a_complete_listing_retires_only_the_lookups_of_its_own_children() {
+        let (_dir, _caches, store) = open_store("children");
+        let lookups = [
+            "/dir/a",
+            "/dir/a/x",
+            "/dir/a/x/y",
+            "/dir/a-b",
+            "/dir/a-b/x",
+            "/dir/a0",
+            "/dir/b",
+            "/dir2/a-b",
+            "/dira",
+            "/other/z",
+        ];
+        store
+            .publish(
+                ProjectionTransition {
+                    records: lookups
+                        .iter()
+                        .map(|path| RecordWrite {
+                            path: p(path),
+                            aux: None,
+                            fact: FactPayload::Lookup(LookupPayload::Positive(
+                                EntryMeta::directory(),
+                            )),
+                        })
+                        .collect(),
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        store
+            .publish(
+                ProjectionTransition {
+                    dirents: vec![DirentsMutation::Replace {
+                        path: p("/dir"),
+                        value: DirentsPayload::single_page(
+                            vec![crate::view::DirentRecord {
+                                name: "a".into(),
+                                meta: EntryMeta::directory(),
+                            }],
+                            true,
+                            None,
+                        ),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        let kept: Vec<&str> = lookups
+            .into_iter()
+            .filter(|path| store.lookup_payload(&p(path)).unwrap().is_some())
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                "/dir/a",
+                "/dir/a/x",
+                "/dir/a/x/y",
+                "/dir/a-b/x",
+                "/dir2/a-b",
+                "/dira",
+                "/other/z"
+            ]
+        );
+    }
+
+    #[test]
+    fn fed_listings_stay_complete_through_reconciliation_and_removals() {
+        let (_dir, _caches, store) = open_store("m");
+        let books = p("/shelf/books");
+
+        // A partial part, then a complete one whose child joins the listing
+        // and whose lookup reconciliation keeps it complete.
+        store
+            .publish(
+                fed_dir(&books, &["1"], ListingWrite::Partial),
+                store.current_epoch(),
+            )
+            .unwrap();
+        assert!(!store.dirents_payload(&books).unwrap().unwrap().exhaustive);
+        store
+            .publish(
+                fed_dir(&books, &["2"], ListingWrite::Complete),
+                store.current_epoch(),
+            )
+            .unwrap();
+        let listing = store.dirents_payload(&books).unwrap().unwrap();
+        assert!(listing.is_complete_offline());
+        assert_eq!(listing.entries().count(), 2);
+        assert!(store.is_fed(&books).unwrap());
+        assert_eq!(
+            store.feed_state(b"feed").unwrap(),
+            Some(FeedState {
+                token: "token".into(),
+                ended: true,
+                deadline: 1_000,
+            })
+        );
+
+        // A removal retracts the child and its subtree and leaves the
+        // listing as complete as it was.
+        store
+            .publish(
+                ProjectionTransition {
+                    removals: vec![p("/shelf/books/1")],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        let listing = store.dirents_payload(&books).unwrap().unwrap();
+        assert!(listing.is_complete_offline());
+        assert_eq!(
+            listing
+                .entries()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["2"]
+        );
+        assert!(
+            store
+                .lookup_payload(&p("/shelf/books/1"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(!store.is_fed(&p("/shelf/books/1")).unwrap());
+
+        // Another terminal leaves the fed facts of a path to its feeds.
+        store
+            .publish(
+                ProjectionTransition {
+                    records: vec![RecordWrite {
+                        path: p("/shelf/books/2"),
+                        aux: None,
+                        fact: FactPayload::Lookup(LookupPayload::Positive(
+                            EntryMeta::file_without_attrs(),
+                        )),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.lookup_payload(&p("/shelf/books/2")).unwrap(),
+            Some(LookupPayload::Positive(meta)) if meta.is_directory()
+        ));
     }
 
     #[test]

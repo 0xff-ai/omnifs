@@ -25,11 +25,11 @@ mod serve;
 mod spec;
 
 pub(super) use spec::AnchorShape;
-pub use spec::{DirFace, FileFace, ObjectBlock, ObjectHandle, object};
+pub use spec::{DirFace, FeedFace, FileFace, ObjectBlock, ObjectHandle, object};
 
 pub(super) use dispatch::{
-    AnchorCollection, CollectionTopology, FacetExpansion, ObjectReadTarget, ObjectRouteEntry,
-    SourceLeafAttrs, mount_object,
+    AnchorCollection, ClaimSpec, CollectionTopology, FacetExpansion, LeafKind, ObjectListing,
+    ObjectReadTarget, ObjectRouteEntry, SourceLeafAttrs, mount_object,
 };
 pub(crate) use dispatch::{EntryView, ResolvedChildView};
 pub(super) use spec::{CollectionHandler, file_object};
