@@ -2048,26 +2048,9 @@ fn reconcile_listing_relations(
         }
         let names: HashSet<&str> = listing.entries().map(|entry| entry.name.as_str()).collect();
         let mut contradictions = Vec::new();
-        for guard in tx.prefix(facts, b"r:L:") {
-            let (key, value) = guard.into_inner()?;
-            let key = key.to_vec();
-            let (path, kind, aux) = decode_fact_key(&key)?;
-            if kind != RecordKind::Lookup || aux.is_some() {
-                return Err(ProjectionError::Inconsistent(
-                    "lookup prefix contained a noncanonical fact key".into(),
-                ));
-            }
-            let Some((candidate_parent, name)) = path.parent_and_name() else {
+        for (path, lookup) in child_lookups(tx, facts, &parent)? {
+            let Some((_, name)) = path.parent_and_name() else {
                 continue;
-            };
-            if candidate_parent != parent {
-                continue;
-            }
-            let fact: DurableFact = postcard::from_bytes(&value)?;
-            let DurableFact::Lookup(lookup) = fact else {
-                return Err(ProjectionError::Inconsistent(
-                    "lookup key contains a non-lookup fact".into(),
-                ));
             };
             let contradicts = match lookup {
                 LookupPayload::Positive(_) => !names.contains(name),
@@ -2083,6 +2066,53 @@ fn reconcile_listing_relations(
         }
     }
     Ok(mutated)
+}
+
+/// The lookup facts of the direct children of `parent`. The keys of the
+/// lookup facts are in the order of their paths, so the facts below a child
+/// follow its own: each read starts after the facts below the child before
+/// it, and the reads are as many as the children, whatever is below them.
+fn child_lookups(
+    tx: &fjall::OptimisticWriteTx,
+    facts: &fjall::OptimisticTxKeyspace,
+    parent: &Path,
+) -> Result<Vec<(Path, LookupPayload)>, ProjectionError> {
+    let mut prefix = fact_key(parent.as_str(), RecordKind::Lookup, None);
+    if !parent.is_root() {
+        prefix.push(b'/');
+    }
+    // The first key after every key with the prefix: `/` + 1 is `0`.
+    let mut end = prefix.clone();
+    end.pop();
+    end.push(b'0');
+    let mut start = prefix.clone();
+    let mut children = Vec::new();
+    while let Some(guard) = tx.range(facts, start.as_slice()..end.as_slice()).next() {
+        let (key, value) = guard.into_inner()?;
+        let name = &key[prefix.len()..];
+        if let Some(length) = name.iter().position(|byte| *byte == b'/') {
+            // A fact below a child: the next read starts after all of them.
+            start.truncate(prefix.len());
+            start.extend_from_slice(&name[..length]);
+            start.push(b'0');
+            continue;
+        }
+        let (path, kind, aux) = decode_fact_key(&key)?;
+        if kind != RecordKind::Lookup || aux.is_some() {
+            return Err(ProjectionError::Inconsistent(
+                "lookup prefix contained a noncanonical fact key".into(),
+            ));
+        }
+        let DurableFact::Lookup(lookup) = postcard::from_bytes(&value)? else {
+            return Err(ProjectionError::Inconsistent(
+                "lookup key contains a non-lookup fact".into(),
+            ));
+        };
+        children.push((path, lookup));
+        start = key.to_vec();
+        start.push(0);
+    }
+    Ok(children)
 }
 
 fn decode_fact_key(key: &[u8]) -> Result<(Path, RecordKind, Option<String>), ProjectionError> {
@@ -2957,6 +2987,76 @@ mod tests {
             }),
             ..ProjectionTransition::default()
         }
+    }
+
+    #[test]
+    fn a_complete_listing_retires_only_the_lookups_of_its_own_children() {
+        let (_dir, _caches, store) = open_store("children");
+        let lookups = [
+            "/dir/a",
+            "/dir/a/x",
+            "/dir/a/x/y",
+            "/dir/a-b",
+            "/dir/a-b/x",
+            "/dir/a0",
+            "/dir/b",
+            "/dir2/a-b",
+            "/dira",
+            "/other/z",
+        ];
+        store
+            .publish(
+                ProjectionTransition {
+                    records: lookups
+                        .iter()
+                        .map(|path| RecordWrite {
+                            path: p(path),
+                            aux: None,
+                            fact: FactPayload::Lookup(LookupPayload::Positive(
+                                EntryMeta::directory(),
+                            )),
+                        })
+                        .collect(),
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        store
+            .publish(
+                ProjectionTransition {
+                    dirents: vec![DirentsMutation::Replace {
+                        path: p("/dir"),
+                        value: DirentsPayload::single_page(
+                            vec![crate::view::DirentRecord {
+                                name: "a".into(),
+                                meta: EntryMeta::directory(),
+                            }],
+                            true,
+                            None,
+                        ),
+                    }],
+                    ..ProjectionTransition::default()
+                },
+                store.current_epoch(),
+            )
+            .unwrap();
+        let kept: Vec<&str> = lookups
+            .into_iter()
+            .filter(|path| store.lookup_payload(&p(path)).unwrap().is_some())
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                "/dir/a",
+                "/dir/a/x",
+                "/dir/a/x/y",
+                "/dir/a-b/x",
+                "/dir2/a-b",
+                "/dira",
+                "/other/z"
+            ]
+        );
     }
 
     #[test]
