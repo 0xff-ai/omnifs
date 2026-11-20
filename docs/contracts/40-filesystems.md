@@ -67,16 +67,13 @@ The libkrun guest's ssh access is keyed, not passworded: launch generates a per-
 
 macOS host-native integration uses read-only NFSv4.0 loopback. NFS is a filesystem protocol boundary, not a provider protocol.
 
-The macOS NFS mount is excluded from Spotlight as part of filesystem startup. The
-mount requests `nobrowse`, and the NFS export exposes a synthetic,
+The macOS NFS mount is excluded from Spotlight by the mount and the export
+alone: the mount requests `nobrowse`, and the NFS export exposes a synthetic,
 lookup-only `/.metadata_never_index` marker at its root without adding that
-entry to provider listings. The runner also invokes the host `mdutil` control
-when available; macOS may return a non-zero status for an NFS export with no
-local metadata store even while reporting that indexing and searching are
-disabled, which is an accepted success state. This policy prevents a host
-indexer from recursively traversing provider-backed paths and holding the
-mount during teardown; it does not special-case Spotlight in namespace or
-provider semantics.
+entry to provider listings. The runner runs no `mdutil`, at the start or at the
+restart of a mount. This policy prevents a host indexer from recursively
+traversing provider-backed paths and holding the mount during teardown; it does
+not special-case Spotlight in namespace or provider semantics.
 
 Keep NFS filehandles, stateids, leases, and NFS protocol errors in `omnifs-nfs`. Preserve read-only behavior for mutation operations. Keep macOS mount readiness and teardown behavior in the NFS/CLI path.
 

@@ -7,6 +7,7 @@
 //!   use keeps reading, and a fresh open reads.
 //! - A host instance outlives `omnifs down --keep-filesystems` and reconnects
 //!   to the next daemon.
+//! - A runner runs no `mdutil` at the start or at the restart of its mount.
 //!
 //! Gated on `OMNIFS_ACCEPTANCE_LIVE`. Holds the cross-process NFS
 //! serialization lock for the whole run and force-unmounts on teardown, so a
@@ -39,10 +40,12 @@ fn acceptance_gated() -> bool {
 }
 
 /// A profile with a daemon and the filesystem `live`, a host NFS mount of the
-/// test provider, attached through the CLI.
+/// test provider, attached through the CLI. Its commands have first in their
+/// `PATH` an `mdutil` that records each of its runs.
 struct Profile {
     home: PathBuf,
     mount_point: PathBuf,
+    path: std::ffi::OsString,
     daemon: Option<Child>,
     _dir: tempfile::TempDir,
     _lock: TcpListener,
@@ -60,9 +63,11 @@ impl Profile {
         let home = dir.path().to_path_buf();
         let mount_point = home.join("mnt");
         std::fs::create_dir_all(&mount_point).expect("mount point");
+        let path = recording_mdutil(&home);
         let mut profile = Self {
             home,
             mount_point,
+            path,
             daemon: None,
             _dir: dir,
             _lock: lock,
@@ -90,6 +95,7 @@ impl Profile {
         let daemon = Command::new(live::omnifs_bin())
             .arg("daemon")
             .env("OMNIFS_HOME", &self.home)
+            .env("PATH", &self.path)
             .env("RUST_LOG", "warn")
             .spawn()
             .expect("spawn omnifs daemon");
@@ -106,6 +112,7 @@ impl Profile {
         Command::new(live::omnifs_bin())
             .args(args)
             .env("OMNIFS_HOME", &self.home)
+            .env("PATH", &self.path)
             .env("NO_COLOR", "1")
             .env("RUST_LOG", "warn")
             .output()
@@ -131,6 +138,15 @@ impl Profile {
         serde_json::from_slice::<serde_json::Value>(&output.stdout)
             .expect("status --output json must produce JSON")["result"]
             .clone()
+    }
+
+    /// The runs of the `mdutil` of the profile, a line each.
+    fn mdutil_runs(&self) -> String {
+        match std::fs::read_to_string(self.home.join("mdutil-runs")) {
+            Ok(runs) => runs,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => panic!("read the runs of mdutil: {error}"),
+        }
     }
 
     /// The record of the host instance of `live`.
@@ -164,6 +180,31 @@ impl Drop for Profile {
             let _ = daemon.wait();
         }
     }
+}
+
+/// An `mdutil` under `home` that records each of its runs in
+/// `{home}/mdutil-runs`, and the `PATH` that has it first.
+fn recording_mdutil(home: &Path) -> std::ffi::OsString {
+    use std::os::unix::fs::PermissionsExt as _;
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).expect("bin folder");
+    let mdutil = bin.join("mdutil");
+    std::fs::write(
+        &mdutil,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\n",
+            home.join("mdutil-runs").display()
+        ),
+    )
+    .expect("write mdutil");
+    std::fs::set_permissions(&mdutil, std::fs::Permissions::from_mode(0o755))
+        .expect("make mdutil executable");
+    let mut path = bin.into_os_string();
+    if let Some(inherited) = std::env::var_os("PATH") {
+        path.push(":");
+        path.push(inherited);
+    }
+    path
 }
 
 /// Force-unmount `mount_point`: a forced unmount breaks a read parked on a
@@ -265,6 +306,28 @@ fn a_host_instance_restarts_in_place_under_a_file_in_use() {
     );
     assert_eq!(status["filesystems"][0]["state"], "attached", "{status}");
     drop(held);
+    profile.finish();
+}
+
+/// A runner runs no `mdutil` at the start or at the restart of its mount: the
+/// `mdutil` of the profile records no run, and the mount serves after each.
+#[test]
+fn a_runner_runs_no_mdutil_at_the_start_or_at_the_restart_of_its_mount() {
+    if !acceptance_gated() {
+        return;
+    }
+    let profile = Profile::attached();
+    let message = profile.mount_point.join("test/hello/message");
+    let baseline = read_path(&message);
+    assert!(!baseline.is_empty(), "the mount serves after its start");
+
+    profile.succeed(&["fs", "restart", "--name", "live"]);
+    assert_eq!(
+        read_path(&message),
+        baseline,
+        "the mount serves after its restart"
+    );
+    assert_eq!(profile.mdutil_runs(), "", "the runner runs no mdutil");
     profile.finish();
 }
 

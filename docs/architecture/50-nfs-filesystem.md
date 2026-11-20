@@ -62,11 +62,11 @@ Mitigated by mount options today:
 - **Host metadata traversal.** macOS Spotlight can recursively walk a mounted
   NFS namespace and retain directory references after the serving process dies,
   which makes a dead loopback mount harder to tear down. The macOS mount uses
-  `nobrowse`, the export serves a synthetic lookup-only
-  `/.metadata_never_index` marker, and the runner asks `mdutil` to disable
-  indexing and searching. The marker is filesystem-owned and omitted from
-  provider listings; the `mdutil` command is best effort because macOS can
-  report a disabled NFS volume as having no manageable metadata store.
+  `nobrowse`, and the export serves a synthetic lookup-only
+  `/.metadata_never_index` marker; these two alone exclude the mount from
+  Spotlight. The marker is filesystem-owned and omitted from provider
+  listings. The runner runs no `mdutil`: an `mdutil` that hung in `open()` on
+  the mount kept the thread that waits for a release from taking `Restart`.
 
 Deferred by the read-only contract (these arrive with any write path and must be designed for, not discovered):
 

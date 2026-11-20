@@ -197,8 +197,6 @@ pub fn mount_blocking_cancellable(
         ));
     }
 
-    disable_spotlight(mount_point);
-
     tracing::info!(
         mount = %mount_point.display(),
         addr = %server.addr(),
@@ -448,56 +446,6 @@ impl MountOptions {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SpotlightCommand {
-    program: &'static str,
-    args: Vec<OsString>,
-    failure_context: &'static str,
-}
-
-#[cfg(any(target_os = "macos", test))]
-impl SpotlightCommand {
-    fn macos(mount_point: &Path, runner: MacosRunner) -> Self {
-        let (program, mut args) = runner.invocation("mdutil");
-        args.extend([
-            OsString::from("-d"),
-            OsString::from("-i"),
-            OsString::from("off"),
-            mount_point.as_os_str().to_owned(),
-        ]);
-        Self {
-            program,
-            args,
-            failure_context: match runner {
-                MacosRunner::User => "mdutil Spotlight exclusion",
-                MacosRunner::Sudo => "mdutil Spotlight exclusion via `sudo -n`",
-            },
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn run(&self) -> Result<(), NfsFilesystemError> {
-        let output = Command::new(self.program)
-            .args(&self.args)
-            .output()
-            .map_err(|error| NfsFilesystemError::Mount(error.to_string()))?;
-        let details = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        if output.status.success() || details.contains("Indexing and searching disabled.") {
-            Ok(())
-        } else {
-            Err(NfsFilesystemError::Mount(format!(
-                "{} exited with {}",
-                self.failure_context, output.status
-            )))
-        }
-    }
-}
-
 /// Who runs a macOS mount helper: the current user when they own the mount
 /// point, as macOS lets a user mount onto a directory they own, and `sudo -n`
 /// otherwise, such as for a mount point in `/Volumes`.
@@ -535,29 +483,6 @@ impl MacosRunner {
 #[allow(unsafe_code)]
 fn current_euid() -> u32 {
     unsafe { libc::geteuid() }
-}
-
-fn disable_spotlight(mount_point: &Path) {
-    // Once mounted, the owner of `mount_point` is the one the export reports, so
-    // it no longer tells who mounted: try as the current user, then `sudo -n`.
-    #[cfg(target_os = "macos")]
-    match SpotlightCommand::macos(mount_point, MacosRunner::User)
-        .run()
-        .or_else(|_| SpotlightCommand::macos(mount_point, MacosRunner::Sudo).run())
-    {
-        Ok(()) => tracing::info!(
-            mount = %mount_point.display(),
-            "disabled Spotlight activity and indexing"
-        ),
-        Err(error) => tracing::warn!(
-            mount = %mount_point.display(),
-            %error,
-            "could not disable Spotlight activity and indexing"
-        ),
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    let _ = mount_point;
 }
 
 fn export_source() -> String {
@@ -738,7 +663,7 @@ fn ensure_private_state_dir(state_dir: &Path) -> Result<(), NfsFilesystemError> 
 mod tests {
     use super::{
         MacosRunner, MountCommand, MountOptions, MountTableEntry, NfsMountOptions,
-        SpotlightCommand, mount_is_active_checked, mount_table_contains, parse_macos_mounts,
+        mount_is_active_checked, mount_table_contains, parse_macos_mounts,
     };
     use omnifs_mtab::StateFile;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -787,21 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn macos_spotlight_command_disables_search_and_indexing() {
-        let command = SpotlightCommand::macos(Path::new("/Volumes/omnifs"), MacosRunner::Sudo);
-        assert_eq!(command.program, "sudo");
-        assert_eq!(
-            command
-                .args
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
-            vec!["-n", "mdutil", "-d", "-i", "off", "/Volumes/omnifs",]
-        );
-    }
-
-    #[test]
-    fn macos_commands_run_directly_on_an_owned_mount_point() {
+    fn macos_mount_command_runs_directly_on_an_owned_mount_point() {
         let mount = MountCommand::macos(Path::new("/Users/me/omnifs"), 2050, MacosRunner::User);
         assert_eq!(mount.program, "mount_nfs");
         assert_eq!(
@@ -812,16 +723,6 @@ mod tests {
                 "127.0.0.1:/omnifs",
                 "/Users/me/omnifs",
             ]
-        );
-        let spotlight = SpotlightCommand::macos(Path::new("/Users/me/omnifs"), MacosRunner::User);
-        assert_eq!(spotlight.program, "mdutil");
-        assert_eq!(
-            spotlight
-                .args
-                .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect::<Vec<_>>(),
-            vec!["-d", "-i", "off", "/Users/me/omnifs"]
         );
     }
 
